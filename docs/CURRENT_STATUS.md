@@ -4,6 +4,10 @@
 **Current Phase:** Phase 6 - Reliability & Feedback
 
 ## Completed
+- 2026-04-23: Frontend parse regression on Cloudflare page fixed (`frontend/src/pages/Cloudflare.tsx` ternary branch parenthesis balance `))}` -> `)))}`), Vite Babel parse error removed.
+- 2026-04-23: Environment baseline aligned with backend `Settings` requirements:
+  - root `.env` now includes `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `ENCRYPTION_KEY`, `SECRET_KEY`, `BACKEND_CORS_ORIGINS`, `API_V1_PREFIX`, `VITE_API_URL`
+  - `.env.example` replaced to mirror current runtime contract (`SUPABASE_*` + Redis/Celery/security keys), obsolete `POSTGRES_*` / `DATABASE_URL` removed
 - 2026-04-23: Incident **“domains disappeared”** — documented root cause: migrations (e.g. `002_domain_purchase_and_notifications`) were not guaranteed on container start; operators had to remember `docker compose run --rm backend alembic upgrade head`. Fix: backend `entrypoint.sh` runs `alembic upgrade head` before uvicorn; startup lifespan asserts `alembic_version` head; see `task2.md` §B1.1. **Workaround before pull:** run `alembic upgrade head` manually after each pull / first boot if not yet on this revision.
 - Domain renewal notification system delivered end-to-end:
   - `domains.purchase_date` added
@@ -40,9 +44,15 @@
 - UI state clarity delivered:
   - Domains, Servers, Cloudflare, and Registrars now render explicit `loading/error/empty` states
   - schema/backend failures are no longer visually indistinguishable from valid empty datasets
+- 2026-04-23: Supabase + Docker runbook and pooler/asyncpg notes captured in [`SUPABASE_DOCKER.md`](SUPABASE_DOCKER.md); backend uses `ASYNCPG_CONNECT_ARGS` + `NullPool` when `SUPABASE_DB_URL` points at `pooler.supabase.com` (`backend/app/core/config.py`, `database.py`, `alembic/env.py`, `entrypoint.sh`).
+- 2026-04-23 (**task9**): **Startup resilience for Supabase pooler**
+  - `backend/entrypoint.sh`: **wait-for-db** before `alembic upgrade head` — up to **12 × 5 s** (~60 s) of `asyncpg` + `SELECT 1` against `SUPABASE_DB_URL` (with `statement_cache_size=0`), so short pooler/upstream outages do not instantly kill the container.
+  - `backend/app/main.py`: **lifespan** `alembic_version` check retries transient connection errors (**10 × 2 s**); empty table or revision mismatch still fails fast (no retry).
+  - `.env.example`: pooler URL shape with `postgres.<project_ref>`, region note, and **commented direct** `db.<project_ref>.supabase.co:5432` fallback for local incidents.
+  - Git: `Wire backend to Supabase transaction pooler (asyncpg connect args + NullPool).` (pooler wiring + entrypoint/env) and `Retry alembic_version check during API startup for transient DB errors.` (lifespan).
 
 ## In Progress / Next
-1. Run and document full E2E verification checklist in Docker runtime.
+1. Run and document full E2E verification checklist in Docker runtime (including healthy pooler or **direct** DSN when pooler circuit-breakers).
 2. Add tests for renewal task + notifications API.
 3. Expand global toast/notification UX consistency across all pages.
 
@@ -63,4 +73,4 @@ Notes:
 - If host Python misses backend dependencies (e.g. `asyncpg`), install backend requirements first: `pip install -r backend/requirements.txt`.
 
 ## Blockers
-- None at the code level; pending runtime verification in active Docker session.
+- See [`SUPABASE_DOCKER.md`](SUPABASE_DOCKER.md) for the full error catalog and verification steps. Typical remaining issues are **wrong DSN** (host/port/user/password) or **pooler upstream** unavailable (`Circuit breaker open: Unable to establish connection to upstream database` — check Supabase project/database status in Dashboard, wait for retries in logs, or temporarily switch to **direct** URL in `.env` per `.env.example`). MCP can still reach the DB while Docker pooler fails; compare hosts and credentials.

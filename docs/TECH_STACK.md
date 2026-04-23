@@ -3,7 +3,7 @@
 ## Backend
 - Python 3.12
 - FastAPI + Uvicorn
-- SQLAlchemy Async + asyncpg
+- SQLAlchemy Async + asyncpg (Supabase **transaction pooler** when using `*.pooler.supabase.com:6543`; `NullPool` + tuned `connect_args` — see `docs/SUPABASE_DOCKER.md`)
 - Alembic (migration-driven schema updates)
 - Celery 5 + Redis (worker + beat)
 - Paramiko (SSH automation)

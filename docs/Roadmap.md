@@ -17,6 +17,11 @@
 - [x] Remove unused compose `db` service to eliminate `POSTGRES_*` warnings
 - [x] Add migration safety hardening (`backend` entrypoint migration + startup `alembic_version` guard)
 - [x] Add baseline settings config API and wire Settings page edit flow
+- [x] Fix Cloudflare page parse error (unbalanced ternary parentheses in `Cloudflare.tsx`)
+- [x] Align `.env` and `.env.example` with current backend `Settings` contract (`SUPABASE_*`, Redis/Celery, security keys)
+- [x] Document Supabase pooler + Docker + MCP troubleshooting in `docs/SUPABASE_DOCKER.md`
+- [x] Wire backend to Supabase **transaction pooler** (`6543`): `ASYNCPG_CONNECT_ARGS`, `NullPool` when host contains `pooler.supabase.com`, Alembic async engine aligned (`task9` / commits on 2026-04-23)
+- [x] Add **wait-for-db** in `backend/entrypoint.sh` and **lifespan retries** for `alembic_version` reads to tolerate brief pooler/upstream flaps
 - [ ] Complete full E2E runtime verification and attach runbook notes
 - [ ] Add focused tests (notification service + renewal task)
 

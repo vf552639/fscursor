@@ -34,9 +34,12 @@ SDMP is an internal panel for centralized management of servers and domains with
 ## Runtime Profile
 - Compose runtime currently uses `redis`, `backend`, `worker`, `beat`, `frontend`, `nginx`.
 - Local postgres compose service was intentionally removed; backend DB connection is driven by `SUPABASE_DB_URL`.
-- Backend container startup now applies migrations automatically via `backend/entrypoint.sh` (`alembic upgrade head` before app start).
-- API startup validates `alembic_version` against expected head revision to fail fast on schema drift.
+- Backend DSN is expected in async form (`postgresql+asyncpg://...`) to match SQLAlchemy async engine setup.
+- Backend container startup applies migrations automatically via `backend/entrypoint.sh`: optional `alembic_version` column widen, **wait-for-db** (asyncpg ping, ~60 s max), then `alembic upgrade head` before app start.
+- API startup validates `alembic_version` against expected head revision; **transient** DB read failures are retried in lifespan before failing (revision mismatch still fails immediately).
 - `worker` and `beat` containers run with overridden empty entrypoint so migrations are executed only by `backend`.
+- Runtime requires env contract parity with backend settings (`SUPABASE_*`, Redis/Celery URLs, encryption/secret keys, CORS/API prefix).
+- Operational details for Supabase URLs, pooler ports, Docker checks, and MCP vs app connectivity: [`SUPABASE_DOCKER.md`](SUPABASE_DOCKER.md).
 
 ## UX Reliability
 - Resource pages now distinguish three list states:

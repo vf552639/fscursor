@@ -15,12 +15,13 @@ Current compose stack:
 Notes:
 - Local `db` service was removed from compose to avoid misleading `POSTGRES_*` interpolation warnings.
 - Runtime DB is currently `SUPABASE_DB_URL` from `.env`.
-- Migration ownership is centralized in `backend` startup (`/app/entrypoint.sh` -> `alembic upgrade head`).
+- **Supabase pooler, asyncpg, Docker verification, health URL, and MCP vs app DB** are documented in [`SUPABASE_DOCKER.md`](SUPABASE_DOCKER.md).
+- Migration ownership is centralized in `backend` startup (`/app/entrypoint.sh` -> wait-for-db loop -> `alembic upgrade head`).
 - `worker` and `beat` use `entrypoint: []` in compose to avoid parallel migration execution.
 
 ## Backend Architecture
 - **App entry:** `backend/app/main.py`
-- **Startup guard:** lifespan check ensures `alembic_version` equals expected head revision (`002_domain_purchase_and_notifications`)
+- **Startup guard:** lifespan checks `alembic_version` equals expected head revision (`002_domain_purchase_and_notifications`); transient DB connection errors are retried before failing (see `SUPABASE_DOCKER.md` § Startup resilience).
 - **Routers:** `servers`, `domains`, `cloudflare`, `registrars`, `tasks`, `notifications`, `settings`
 - **DB layer:** SQLAlchemy async sessions + Alembic migrations
 - **Background tasks:** Celery + Redis

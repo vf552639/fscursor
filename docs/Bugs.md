@@ -34,6 +34,13 @@
    - *Impact*: `DELETE /domains/{id}` and bulk assign endpoints do not write structured ActivityLog entries (who, when, what). When someone reports “domains disappeared”, intentional deletion cannot be ruled in or out from logs.
    - *Next*: Extend ActivityLog; optional Dashboard “Recent deletions” summary.
 
+7. **Backend startup blocked by invalid Supabase DSN/credentials or prolonged pooler outage**
+   - *Severity*: High
+   - *Impact*: Wrong DSN still fails after retries; a **long** pooler circuit-breaker (> ~60 s before migrations, or sustained outage after API start) still prevents a healthy backend.
+   - *Observed*: `(ENOTFOUND) tenant/user ... not found`; `Circuit breaker open: Unable to establish connection to upstream database`
+   - *Mitigation (2026-04-23)*: `entrypoint.sh` **wait-for-db** (~60 s) and lifespan **retries** for reading `alembic_version`; `.env.example` documents **direct** fallback.
+   - *Next*: Follow [`SUPABASE_DOCKER.md`](SUPABASE_DOCKER.md): verify `postgresql+asyncpg://...` (pooler region vs `postgres.<ref>`, ports `6543`/`5432`), or use direct `db.<ref>.supabase.co` temporarily; restart `backend/worker/beat` and verify `GET /health` (not `/api/health`).
+
 ## Resolved Recently
 
 1. **Compose warnings for missing `POSTGRES_*` variables**
@@ -45,3 +52,18 @@
    - *Status*: Resolved (A1-A10)
    - *Fix*: Added `RowActions`, wired edit/delete handlers, enabled notification-to-domain navigation, and added server/dashboard domain routing paths.
    - *Result*: Core table actions and key navigation transitions are now clickable and functional.
+
+3. **Cloudflare page parse error in ternary render branch**
+   - *Status*: Resolved
+   - *Fix*: Corrected parenthesis balance in `frontend/src/pages/Cloudflare.tsx` (`))}` -> `)))}`) for accounts list ternary branch.
+   - *Result*: Vite/Babel parse error removed; page renders empty/list branches correctly.
+
+4. **Missing required env keys in root `.env` caused Pydantic `Settings` validation failure**
+   - *Status*: Resolved
+   - *Fix*: Added missing runtime keys (`REDIS_URL`, Celery URLs, `ENCRYPTION_KEY`, `SECRET_KEY`, CORS/API/Vite vars) and updated `.env.example` to current `SUPABASE_*`-based contract.
+   - *Result*: Startup no longer fails with the prior "5 validation errors for Settings" class of crash.
+
+5. **Single pooler blip killed backend before migrations / API read of `alembic_version`**
+   - *Status*: Mitigated (2026-04-23, task9)
+   - *Fix*: `entrypoint.sh` runs asyncpg `SELECT 1` in a retry loop before `alembic upgrade head`; `app/main.py` lifespan retries transient errors when loading `alembic_version`.
+   - *Result*: Short upstream/pooler outages are absorbed; wrong DSN or extended outages still require operator action (see `SUPABASE_DOCKER.md`).
