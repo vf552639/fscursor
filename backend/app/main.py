@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,27 +10,47 @@ from app.api.routes import api_router
 from app.core.config import settings
 from app.core.database import engine
 
+logger = logging.getLogger(__name__)
+
 EXPECTED_ALEMBIC_HEAD = "002_domain_purchase_and_notifications"
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    async with engine.connect() as conn:
+    last_exc: BaseException | None = None
+    for attempt in range(1, 11):
         try:
-            result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            async with engine.connect() as conn:
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                row = result.fetchone()
+            if not row:
+                raise RuntimeError(
+                    "alembic_version is empty; run alembic upgrade head before starting the API."
+                )
+            if row[0] != EXPECTED_ALEMBIC_HEAD:
+                raise RuntimeError(
+                    f"Database migration mismatch: alembic_version={row[0]!r}, "
+                    f"expected {EXPECTED_ALEMBIC_HEAD!r}. Run: alembic upgrade head"
+                )
+            if attempt > 1:
+                logger.info("alembic_version check succeeded on attempt %s", attempt)
+            break
+        except RuntimeError:
+            raise
         except Exception as exc:
-            raise RuntimeError(
-                "Cannot read alembic_version (migrations missing?). "
-                "Check: docker compose logs backend | grep -i alembic"
-            ) from exc
-        row = result.fetchone()
-        if not row:
-            raise RuntimeError("alembic_version is empty; run alembic upgrade head before starting the API.")
-        if row[0] != EXPECTED_ALEMBIC_HEAD:
-            raise RuntimeError(
-                f"Database migration mismatch: alembic_version={row[0]!r}, "
-                f"expected {EXPECTED_ALEMBIC_HEAD!r}. Run: alembic upgrade head"
+            last_exc = exc
+            logger.warning(
+                "alembic_version check attempt %s/10 failed: %s",
+                attempt,
+                exc,
             )
+            if attempt == 10:
+                raise RuntimeError(
+                    "Cannot read alembic_version after retries (DB unreachable?). "
+                    "Check: docker compose logs backend | grep -i alembic; "
+                    "verify SUPABASE_DB_URL / pooler upstream."
+                ) from last_exc
+            await asyncio.sleep(2)
     yield
 
 
