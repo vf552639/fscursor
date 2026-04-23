@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,3 +23,17 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _asyncpg_prepared_statement_name() -> str:
+    return f"__asyncpg_{uuid.uuid4().hex}__"
+
+
+# asyncpg + Supabase pooler (transaction mode / port 6543): PgBouncer may swap backends
+# per transaction; disable statement caches and use unique prepared statement names.
+ASYNCPG_CONNECT_ARGS: dict[str, object] = {
+    "server_settings": {"statement_timeout": "60000"},
+    "statement_cache_size": 0,
+    "prepared_statement_cache_size": 0,
+    "prepared_statement_name_func": _asyncpg_prepared_statement_name,
+}
