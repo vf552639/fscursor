@@ -1,22 +1,5 @@
 name: fs-cursor
 services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    ports:
-      - "5532:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    networks: [app-net]
-
   redis:
     image: redis:7
     volumes:
@@ -34,32 +17,36 @@ services:
     ports:
       - "8100:8000"
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_started
     networks: [app-net]
 
   worker:
     build: ./backend
+    entrypoint: []
     command: celery -A app.core.celery_app.celery_app worker --loglevel=info
     env_file: .env
     volumes:
       - ./backend:/app
     depends_on:
-      - redis
-      - db
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
     networks: [app-net]
 
   beat:
     build: ./backend
+    entrypoint: []
     command: celery -A app.core.celery_app.celery_app beat --loglevel=info
     env_file: .env
     volumes:
       - ./backend:/app
     depends_on:
-      - redis
-      - db
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
     networks: [app-net]
 
   frontend:
@@ -85,7 +72,6 @@ services:
     networks: [app-net]
 
 volumes:
-  pg_data:
   redis_data:
 
 networks:

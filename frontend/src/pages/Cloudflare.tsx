@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions } from "../components/ui/Primitives";
+import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
 import { 
   useCloudflareAccounts, 
   useCreateCloudflareAccount, 
@@ -43,7 +43,7 @@ function AccountCard({ acc, onZoneSelect, onEdit, onDelete }: { acc: any, onZone
 }
 
 export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) => void }){
-  const { data: cfAccountsData, isLoading } = useCloudflareAccounts();
+  const { data: cfAccountsData, isPending, isError } = useCloudflareAccounts();
   const createAcc = useCreateCloudflareAccount();
   const deleteAcc = useDeleteCloudflareAccount();
   const cfAccounts = cfAccountsData || [];
@@ -87,7 +87,23 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
     return <CloudflareZoneView sel={sel} onBack={()=>setSel(null)} dnsTypes={dnsTypes} showDns={showDns} setShowDns={setShowDns} />;
   }
 
-  if (isLoading) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading Cloudflare accounts...</div>;
+  if (isError) {
+    return (
+      <div style={{ padding: "8px 0" }}>
+        <div style={{ marginBottom: 20 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 2 }}>Cloudflare</h1>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>Accounts and zones</div>
+        </div>
+        <ErrorState
+          title="Backend unavailable or database schema is out of date"
+          message="Cloudflare accounts could not be loaded."
+          hint="docker compose logs backend | grep -i alembic"
+        />
+      </div>
+    );
+  }
+
+  if (isPending) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading Cloudflare accounts...</div>;
 
   return <>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
@@ -100,7 +116,17 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         ["Active",cfAccounts.filter((c: any)=>c.is_active).length,"#16a34a"],
       ].map(([l,v,c])=><StatCard key={l as string} label={l} value={v} color={c}/>)}
     </div>
-    {cfAccounts.map((acc: any)=>(
+    {cfAccounts.length === 0 ? (
+      <Card>
+        <EmptyState
+          title="No Cloudflare accounts yet"
+          description="Connect an account to manage DNS and zones from this panel."
+        >
+          <Btn variant="primary" onClick={() => setShowAcc(true)}>+ Add Account</Btn>
+        </EmptyState>
+      </Card>
+    ) : (
+      cfAccounts.map((acc: any)=>(
       <AccountCard
         key={acc.id}
         acc={acc}

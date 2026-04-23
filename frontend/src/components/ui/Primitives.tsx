@@ -32,6 +32,81 @@ export function Badge({children, variant="gray", style}: {children: React.ReactN
   return <span style={{display:"inline-flex",alignItems:"center",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:600,letterSpacing:"0.3px",background:s.bg,color:s.c,...style}}>{children}</span>;
 }
 
+export function ErrorState({
+  title = "Unable to load data",
+  message,
+  hint,
+  style,
+}: {
+  title?: string;
+  message: string;
+  hint?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      role="alert"
+      style={{
+        background: "#fef2f2",
+        border: "1px solid #fecaca",
+        borderRadius: 12,
+        padding: "18px 20px",
+        marginBottom: 16,
+        ...style,
+      }}
+    >
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#991b1b", marginBottom: 8 }}>{title}</div>
+      <div style={{ fontSize: 13, color: "#b91c1c", marginBottom: hint ? 8 : 0, lineHeight: 1.45 }}>{message}</div>
+      {hint ? (
+        <div style={{ fontSize: 12, color: "#7f1d1d", fontFamily: "ui-monospace, monospace", wordBreak: "break-word" }}>
+          {hint}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function EmptyState({
+  title,
+  description,
+  children,
+  style,
+}: {
+  title: string;
+  description?: string;
+  children?: React.ReactNode;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      style={{
+        padding: "40px 24px",
+        textAlign: "center",
+        color: "#6b7280",
+        ...style,
+      }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 600, color: "#111827", marginBottom: description ? 8 : 16 }}>{title}</div>
+      {description ? (
+        <div
+          style={{
+            fontSize: 13,
+            color: "#6b7280",
+            marginBottom: 20,
+            maxWidth: 440,
+            marginLeft: "auto",
+            marginRight: "auto",
+            lineHeight: 1.5,
+          }}
+        >
+          {description}
+        </div>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
 export function Card({children, style}: {children: React.ReactNode, style?: React.CSSProperties}){
   return <div style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,...style}}>{children}</div>;
 }

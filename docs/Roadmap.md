@@ -12,6 +12,11 @@
 - [x] Add deduplication per `(domain_id, purchase_date)`
 - [x] Add Celery Beat service and daily scheduled renewal checks
 - [x] Add unread badge in topbar and notifications page actions
+- [x] Complete task2 plan A UI transition fixes (A1-A10)
+- [x] Add A11-style explicit list states (`loading/error/empty`) for Domains, Servers, Cloudflare, Registrars
+- [x] Remove unused compose `db` service to eliminate `POSTGRES_*` warnings
+- [x] Add migration safety hardening (`backend` entrypoint migration + startup `alembic_version` guard)
+- [x] Add baseline settings config API and wire Settings page edit flow
 - [ ] Complete full E2E runtime verification and attach runbook notes
 - [ ] Add focused tests (notification service + renewal task)
 

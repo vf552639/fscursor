@@ -3,7 +3,7 @@ import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDat
 import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 
-export default function ServerDetail({server, onBack}: {server?: any, onBack: (p: string)=>void}){
+export default function ServerDetail({server, onBack, onNav}: {server?: any, onBack: (p: string)=>void, onNav?: (p: string, ctx?: any)=>void}){
   const [tab,setTab]=useState("overview");
   const [domSearch,setDS]=useState("");
   const [showPass,setShowPass]=useState(false);
@@ -73,6 +73,7 @@ export default function ServerDetail({server, onBack}: {server?: any, onBack: (p
       <div>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={displayStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1><Badge variant="gray">{(s.os||"Unknown").toUpperCase()}</Badge>{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
         <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · - · Added {fmtDate(s.created_at)}</div>
+        <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8}}>
         {s.has_ssh && <Btn variant="secondary" onClick={()=>testSsh.mutate()} disabled={testSsh.isPending}>{testSsh.isPending ? "Testing..." : "SSH Test"}</Btn>}

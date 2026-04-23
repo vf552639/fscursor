@@ -1,12 +1,15 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, CBo, StatCard, Badge, Btn, Modal, Inp } from "../components/ui/Primitives";
+import { Card, CHd, CTi, CBo, StatCard, Badge, Btn, Modal, Inp, EmptyState, ErrorState } from "../components/ui/Primitives";
 import { useRegistrarAccounts, useCreateRegistrarAccount, useTestRegistrarConnection, useUpdateRegistrarAccount, useDeleteRegistrarAccount, RegistrarProvider } from "../api/registrars";
+import { useSystemConfig, useUpdateSystemConfig } from "../api/settings";
 
 export default function Settings(){
-  const { data: registrarsData, isLoading } = useRegistrarAccounts();
+  const { data: registrarsData, isPending, isError } = useRegistrarAccounts();
   const createReg = useCreateRegistrarAccount();
   const testReg = useTestRegistrarConnection();
   const deleteReg = useDeleteRegistrarAccount();
+  const { data: systemConfigData } = useSystemConfig();
+  const updateSystemConfig = useUpdateSystemConfig();
   
   const registrars = registrarsData || [];
   
@@ -20,6 +23,17 @@ export default function Settings(){
   const [testing,setTest]=useState<any>({}); const [testRes,setRes]=useState<any>({});
   const [editingRegistrar, setEditingRegistrar] = useState<any | null>(null);
   const [editingSystem, setEditingSystem] = useState<{ key: string; value: string } | null>(null);
+  const systemConfig = systemConfigData || [
+    { key: "API Base URL", value: "http://localhost:8100/api", editable: false },
+    { key: "Frontend URL", value: "http://localhost:3100", editable: false },
+    { key: "Backend Port", value: "8100", editable: true },
+    { key: "Postgres Port", value: "5532", editable: false },
+    { key: "Redis Port", value: "6479", editable: false },
+    { key: "Celery Workers", value: "2", editable: true },
+    { key: "Task Time Limit", value: "60 min", editable: true },
+    { key: "FastPanel Poll", value: "3 seconds", editable: true },
+  ];
+
   
   const handleTest=(id: number)=>{
     setTest((p: any)=>({...p,[id]:true}));
@@ -68,7 +82,24 @@ export default function Settings(){
           ["Active",registrars.filter((r: any)=>r.is_active).length,"#16a34a"]
         ].map(([l,v,c])=><StatCard key={l as string} label={l} value={v} color={c}/>)}
       </div>
-      {isLoading ? <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading registrars...</div> : registrars.map((r: any)=>{
+      {isError ? (
+        <ErrorState
+          title="Backend unavailable or database schema is out of date"
+          message="Registrar accounts could not be loaded."
+          hint="docker compose logs backend | grep -i alembic"
+        />
+      ) : isPending ? (
+        <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading registrars...</div>
+      ) : registrars.length === 0 ? (
+        <Card>
+          <EmptyState
+            title="No registrar accounts yet"
+            description="Add Hostiq or Namecheap credentials to assign domains to registrars."
+          >
+            <Btn variant="primary" onClick={() => setSA(true)}>+ Add Registrar</Btn>
+          </EmptyState>
+        </Card>
+      ) : registrars.map((r: any)=>{
         const plMap: any={hostiq:{bg:"#fff7ed",c:"#ea580c",icon:"H"},namecheap:{bg:"#fef2f2",c:"#dc2626",icon:"N"}};
         const pl=plMap[r.provider]||{bg:"#f3f4f6",c:"#374151",icon:"?"};
         return <Card key={r.id} style={{marginBottom:12}}>
@@ -123,19 +154,10 @@ export default function Settings(){
     {tab==="system"&&<Card>
       <CHd><CTi>⚙ System Configuration</CTi></CHd>
       <CBo style={{padding:"6px 20px 14px"}}>
-        {[
-          ["API Base URL","http://localhost:8100/api",false],
-          ["Frontend URL","http://localhost:3100",false],
-          ["Backend Port","8100",true],
-          ["Postgres Port","5532",false],
-          ["Redis Port","6479",false],
-          ["Celery Workers","2",true],
-          ["Task Time Limit","60 min",true],
-          ["FastPanel Poll","3 seconds",true]
-        ].map(([k,v,ed])=>(
-          <div key={k as string} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"11px 0",borderBottom:"1px solid #f3f4f6"}}>
-            <div style={{fontSize:13,color:"#6b7280",fontWeight:500}}>{k as string}</div>
-            <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:13,fontFamily:"monospace",fontWeight:600,color:"#111"}}>{v as string}</span>{ed&&<Btn size="sm" variant="ghost" onClick={() => setEditingSystem({ key: String(k), value: String(v) })} style={{color:"#2563eb",padding:"4px 8px"}}>Edit</Btn>}</div>
+        {systemConfig.map((item)=>(
+          <div key={item.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"11px 0",borderBottom:"1px solid #f3f4f6"}}>
+            <div style={{fontSize:13,color:"#6b7280",fontWeight:500}}>{item.key}</div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:13,fontFamily:"monospace",fontWeight:600,color:"#111"}}>{item.value}</span>{item.editable&&<Btn size="sm" variant="ghost" onClick={() => setEditingSystem({ key: item.key, value: item.value })} style={{color:"#2563eb",padding:"4px 8px"}}>Edit</Btn>}</div>
           </div>
         ))}
       </CBo>
@@ -165,10 +187,12 @@ export default function Settings(){
     {editingSystem && <Modal title={`Edit ${editingSystem.key}`} onClose={() => setEditingSystem(null)} width={420}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Value</label><Inp value={editingSystem.value} onChange={e=>setEditingSystem((p)=>p?({...p, value:(e.target as any).value}):p)} /></div>
-        <div style={{fontSize:12,color:"#6b7280"}}>Settings API route is not available yet in current backend build, so this action is staged as UI-only.</div>
       </div>
       <div style={{display:"flex",gap:8,marginTop:20}}>
-        <Btn variant="primary" style={{flex:1,justifyContent:"center"}} onClick={() => setEditingSystem(null)}>Save</Btn>
+        <Btn variant="primary" style={{flex:1,justifyContent:"center"}} disabled={updateSystemConfig.isPending} onClick={() => {
+          if (!editingSystem) return;
+          updateSystemConfig.mutate({ key: editingSystem.key, value: editingSystem.value }, { onSuccess: () => setEditingSystem(null) });
+        }}>{updateSystemConfig.isPending ? "Saving..." : "Save"}</Btn>
         <Btn variant="secondary" style={{flex:1,justifyContent:"center"}} onClick={() => setEditingSystem(null)}>Cancel</Btn>
       </div>
     </Modal>}

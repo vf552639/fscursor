@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor } from "../components/ui/Primitives";
+import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState } from "../components/ui/Primitives";
 import { useServers, useCreateServer } from "../api/servers";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
@@ -167,7 +167,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
   const [search,setSearch]=useState("");
   const [showAdd,setShowAdd]=useState(false);
 
-  const { data, isLoading } = useServers();
+  const { data, isPending, isError } = useServers();
   
   // Transform backend models to UI models mapping missing metrics to 0
   const servers = (data?.items || []).map((s: any) => ({
@@ -190,7 +190,20 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
   const filtered=servers.filter(s=>(filter==="All"||s.status===filter)&&(s.name.toLowerCase().includes(search.toLowerCase())||s.ip.includes(search)));
   const Th=({children}: any)=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}>{children}</th>;
   
-  if (isLoading) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading servers...</div>;
+  if (isError) {
+    return (
+      <div style={{ padding: "8px 0" }}>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 16 }}>Servers</h1>
+        <ErrorState
+          title="Backend unavailable or database schema is out of date"
+          message="The servers list could not be loaded."
+          hint="docker compose logs backend | grep -i alembic"
+        />
+      </div>
+    );
+  }
+
+  if (isPending) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading servers...</div>;
 
   return <>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:24}}>
@@ -206,6 +219,18 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     </div>
     {view==="grid"
       ? <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
+          {servers.length === 0 ? (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <Card>
+                <EmptyState
+                  title="No servers yet"
+                  description="Connect or provision a server to see it here."
+                >
+                  <Btn variant="primary" onClick={() => setShowAdd(true)}>+ Add Server</Btn>
+                </EmptyState>
+              </Card>
+            </div>
+          ) : null}
           {filtered.map(s=>{
             const cpuData=genBars(s.cpu); const pct=(s.ssd_used/s.ssd_total)*100; const cc=cpuColor(s.cpu);
             return <div key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,padding:"16px 18px",cursor:"pointer",transition:"box-shadow 0.15s"}} onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"} onMouseLeave={e=>e.currentTarget.style.boxShadow="none"}>
@@ -228,13 +253,27 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
               </div>
             </div>;
           })}
-          {filtered.length===0&&<div style={{gridColumn:"1/-1",textAlign:"center",padding:40,color:"#9ca3af"}}>No servers found</div>}
+          {servers.length > 0 && filtered.length === 0 ? (
+            <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: 40, color: "#9ca3af" }}>No servers match filters</div>
+          ) : null}
         </div>
       : <Card>
           <div style={{overflowX:"auto"}}>
+            {servers.length === 0 ? (
+              <EmptyState title="No servers yet" description="Add a server to populate this table.">
+                <Btn variant="primary" onClick={() => setShowAdd(true)}>+ Add Server</Btn>
+              </EmptyState>
+            ) : (
             <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead><tr>{["Name","IP","OS","CPU","RAM","SSD","Uptime","FastPanel","Status"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
               <tbody>
+                {filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                      No servers match the current filters.
+                    </td>
+                  </tr>
+                ) : null}
                 {filtered.map(s=><tr key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
                   <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
                   <td style={{padding:"12px 16px",fontFamily:"monospace",fontSize:13}}>{s.ip}</td>
@@ -248,6 +287,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                 </tr>)}
               </tbody>
             </table>
+            )}
           </div>
         </Card>}
     {showAdd&&<AddServerModal onClose={()=>setShowAdd(false)}/>}

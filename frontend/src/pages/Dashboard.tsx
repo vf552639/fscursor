@@ -52,7 +52,9 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
         <StatCard label="Total Servers" value={servers.length} sub={`${healthy} healthy · ${critical} critical`} color="#2563eb" chartData={[3,5,6,6,7,7,8,8]}/>
-        <StatCard label="Total Domains" value={domains.length} sub={`${domains.filter((d: any)=>d.ns_status==="ok").length} NS configured`} color="#7c3aed" chartData={[4,6,8,9,10,11,12,12]}/>
+        <div onClick={() => onNav("domains")} style={{cursor:"pointer"}}>
+          <StatCard label="Total Domains" value={domains.length} sub={`${domains.filter((d: any)=>d.ns_status==="ok").length} NS configured`} color="#7c3aed" chartData={[4,6,8,9,10,11,12,12]}/>
+        </div>
         <StatCard label="CF Accounts" value={cfAccounts.filter((c: any)=>c.is_active).length} sub={`of ${cfAccounts.length} accounts`} color="#059669" chartData={[1,1,2,2,2,3,3,3]}/>
         <StatCard label="Registrars" value={registrars.filter((r: any)=>r.is_active).length} sub={`of ${registrars.length} accounts`} color="#d97706" chartData={[1,1,1,2,2,2,2,2]}/>
       </div>

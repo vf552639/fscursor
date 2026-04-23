@@ -1,5 +1,5 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
-import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions } from "../components/ui/Primitives";
+import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
 import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, Domain } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
@@ -105,15 +105,15 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
 }
 
 export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any) => void; ctx?: any }){
-  const { data: qDomains, isLoading: l1 } = useDomains();
-  const { data: qServers, isLoading: l2 } = useServers();
-  const { data: qRegs, isLoading: l3 } = useRegistrarAccounts();
-  const { data: qCFs, isLoading: l4 } = useCloudflareAccounts();
+  const domainsQ = useDomains();
+  const serversQ = useServers();
+  const registrarsQ = useRegistrarAccounts();
+  const cfAccountsQ = useCloudflareAccounts();
 
-  const domainsData = qDomains || [];
-  const servers = qServers?.items || [];
-  const registrars = qRegs || [];
-  const cfAccounts = qCFs || [];
+  const domainsData = domainsQ.data ?? [];
+  const servers = serversQ.data?.items || [];
+  const registrars = registrarsQ.data || [];
+  const cfAccounts = cfAccountsQ.data || [];
 
   const domains = useMemo((): DomainUI[] => domainsData.map((d: Domain) => ({
     id: d.id,
@@ -141,6 +141,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const [showAssignCF, setShowAssignCF] = useState(false);
   const [assignServerId, setAssignServerId] = useState("");
   const [assignCFId, setAssignCFId] = useState("");
+  const [focusDomainId, setFocusDomainId] = useState<number | null>(null);
 
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
@@ -152,7 +153,8 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
       setFS(String(ctx.serverId));
     }
     if (ctx?.domainId) {
-      setSearch(String(ctx.domainId));
+      setFocusDomainId(Number(ctx.domainId));
+      setSearch("");
     }
   }, [ctx]);
 
@@ -161,8 +163,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     (!fSrv || d.server_id === Number(fSrv)) &&
     (!fReg || d.registrar_id === Number(fReg)) &&
     (!fCF || d.cf_id === Number(fCF)) &&
-    (!fNS || d.ns_status === fNS)
-  ), [search, fSrv, fReg, fCF, fNS, domains]);
+    (!fNS || d.ns_status === fNS) &&
+    (!focusDomainId || d.id === focusDomainId)
+  ), [search, fSrv, fReg, fCF, fNS, focusDomainId, domains]);
   
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
   const Th=({c,children}: {c?: string, children: React.ReactNode})=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap",...(c?{color:c}:{})}}>{children}</th>;
@@ -265,7 +268,25 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
       .then(() => setSel(new Set()));
   };
 
-  if (l1 || l2 || l3 || l4) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading domains data...</div>;
+  if (domainsQ.isError) {
+    return (
+      <div style={{ padding: "8px 0" }}>
+        <div style={{ marginBottom: 20 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 2 }}>Domains</h1>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>Domain inventory</div>
+        </div>
+        <ErrorState
+          title="Backend unavailable or database schema is out of date"
+          message="The domains list could not be loaded. If the API returned an error, the database may be missing migrations or the backend is down."
+          hint="docker compose logs backend | grep -i alembic"
+        />
+      </div>
+    );
+  }
+
+  if (domainsQ.isPending || serversQ.isPending || registrarsQ.isPending || cfAccountsQ.isPending) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#6b7280" }}>Loading domains data...</div>;
+  }
 
   return <>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
@@ -305,15 +326,38 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     </div>}
     <Card>
       <div style={{overflowX:"auto"}}>
+        {domainsData.length === 0 ? (
+          <EmptyState
+            title="No domains yet"
+            description="Add a domain or import many at once. An empty list means there are no rows in the database — not a failed request."
+          >
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <Btn variant="secondary" onClick={() => setSB(true)}>
+                ⊕ Bulk import
+              </Btn>
+              <Btn variant="primary" onClick={() => setSA(true)}>
+                + Add Domain
+              </Btn>
+            </div>
+          </EmptyState>
+        ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===filtered.length&&filtered.length>0} onChange={()=>setSel(sel.size===filtered.length?new Set():new Set(filtered.map((d: any)=>d.id)))} style={{cursor:"pointer"}}/></th>
             {["Domain","Purchase","Server","Registrar","Cloudflare","NS","SSL","PHP","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
           </tr></thead>
           <tbody>
+            {filtered.length === 0 && domainsData.length > 0 ? (
+              <tr>
+                <td colSpan={11} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                  No domains match the current filters.
+                </td>
+              </tr>
+            ) : null}
             {filtered.map((d: DomainUI)=>{
               const srv=servers.find((s: Server)=>s.id===d.server_id); const reg=registrars.find((r: RegistrarAccount)=>r.id===d.registrar_id); const cf=cfAccounts.find((c: CloudflareAccount)=>c.id===d.cf_id);
               const displayStatus = srv?.status === "active" ? "healthy" : (srv?.status || "warning") as any;
-              return <tr key={d.id} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>e.currentTarget.style.background=""}>
+              const isFocused = focusDomainId === d.id;
+              return <tr key={d.id} style={isFocused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background=""; }}>
                 <td style={{padding:"11px 16px"}}><input type="checkbox" checked={sel.has(d.id)} onChange={()=>toggle(d.id)} style={{cursor:"pointer"}}/></td>
                 <td style={{padding:"11px 16px"}}><div style={{fontWeight:600,fontSize:13.5,color:"#111"}}>{d.domain}</div><div style={{fontSize:11.5,color:"#9ca3af"}}>{d.type}</div></td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#6b7280"}}>{fmtDate(d.purchase_date || "")}</td>
@@ -334,6 +378,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
             })}
           </tbody>
         </table>
+        )}
       </div>
     </Card>
 

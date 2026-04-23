@@ -143,7 +143,7 @@ export default function App() {
         {page === "notifications" && <Notifications onNav={nav} />}
         {page === "activity" && <Activity />}
         {page === "settings" && <Settings />}
-        {page === "server-detail" && <ServerDetail server={srvCtx} onBack={(pg: string) => nav(pg || "servers")} />}
+        {page === "server-detail" && <ServerDetail server={srvCtx} onBack={(pg: string) => nav(pg || "servers")} onNav={nav} />}
       </main>
 
       {/* Toast */}
