@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.models.server import Server
 from app.models.task_log import TaskLog
 from app.schemas.server import (
     FastpanelStatusResponse,
@@ -79,7 +80,19 @@ async def install_fastpanel_endpoint(
     if not server:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
 
-    server.fastpanel_status = "pending"
+    result = await db.execute(
+        update(Server)
+        .where(
+            Server.id == server_id,
+            Server.fastpanel_status.notin_(["pending", "installing", "updating"]),
+        )
+        .values(fastpanel_status="pending")
+    )
+    if (result.rowcount or 0) == 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "FastPanel installation already in progress",
+        )
     await db.commit()
 
     async_result = install_fastpanel.delay(server_id)

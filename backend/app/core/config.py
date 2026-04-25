@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str
     ENCRYPTION_KEY: str
     SECRET_KEY: str
-    BACKEND_CORS_ORIGINS: str = ""
+    BACKEND_CORS_ORIGINS: str = "http://localhost:3100,http://localhost:8080"
     API_V1_PREFIX: str = "/api"
 
     @property

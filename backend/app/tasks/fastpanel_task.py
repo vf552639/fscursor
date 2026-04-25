@@ -120,13 +120,16 @@ async def _install(server_id: int, task_log_id: int) -> None:
             await _set_status(session, server, "installing")
             await _append_log(session, task_log, "FastPanel installation started\n")
             code, out = _run_remote(client, INSTALL_CMD)
-            await _append_log(session, task_log, out)
+            url, user, fp_password = _parse_credentials(out)
+            masked_out = out
+            if fp_password:
+                masked_out = out.replace(fp_password, "********")
+            await _append_log(session, task_log, masked_out)
             if code != 0:
                 await _set_status(session, server, "failed")
                 await _append_log(session, task_log, f"Installer failed (exit {code})\n", "failed")
                 return
 
-            url, user, fp_password = _parse_credentials(out)
             server.fastpanel_url = url
             server.fastpanel_user = user
             if fp_password:
@@ -156,8 +159,12 @@ async def _create_task_log(server_id: int) -> int:
         return tl.id
 
 
+async def _main(server_id: int) -> dict:
+    task_log_id = await _create_task_log(server_id)
+    await _install(server_id, task_log_id)
+    return {"server_id": server_id, "task_log_id": task_log_id}
+
+
 @celery_app.task(name="app.tasks.fastpanel.install_fastpanel")
 def install_fastpanel(server_id: int) -> dict:
-    task_log_id = asyncio.run(_create_task_log(server_id))
-    asyncio.run(_install(server_id, task_log_id))
-    return {"server_id": server_id, "task_log_id": task_log_id}
+    return asyncio.run(_main(server_id))

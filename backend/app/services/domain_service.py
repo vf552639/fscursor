@@ -53,6 +53,15 @@ async def get_by_name(db: AsyncSession, name: str) -> Optional[Domain]:
     ).scalar_one_or_none()
 
 
+async def _get_existing_domain_names(db: AsyncSession, names: list[str]) -> set[str]:
+    if not names:
+        return set()
+    result = await db.execute(
+        select(Domain.domain_name).where(Domain.domain_name.in_(names))
+    )
+    return set(result.scalars().all())
+
+
 async def create(db: AsyncSession, data: DomainCreate) -> Domain:
     payload = data.model_dump()
     payload["domain_name"] = _normalize(payload["domain_name"])
@@ -100,12 +109,12 @@ async def bulk_create(
 
     created: list[Domain] = []
     skipped: list[str] = []
+    existing_names = await _get_existing_domain_names(db, names)
     for name in names:
         if not DOMAIN_RE.match(name):
             skipped.append(name)
             continue
-        existing = await get_by_name(db, name)
-        if existing:
+        if name in existing_names:
             skipped.append(name)
             continue
         domain = Domain(domain_name=name, registrar_id=registrar_id)
@@ -137,6 +146,8 @@ async def bulk_create_structured(
 
     created: list[Domain] = []
     skipped: list[str] = []
+    normalized_names = [_normalize(item.domain_name) for item in items]
+    existing_names = await _get_existing_domain_names(db, normalized_names)
 
     for item in items:
         name = _normalize(item.domain_name)
@@ -144,8 +155,7 @@ async def bulk_create_structured(
             skipped.append(item.domain_name)
             continue
 
-        existing = await get_by_name(db, name)
-        if existing:
+        if name in existing_names:
             skipped.append(item.domain_name)
             continue
 
