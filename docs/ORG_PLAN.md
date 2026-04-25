@@ -14,7 +14,7 @@
 - Backend: FastAPI + SQLAlchemy async + Alembic, Celery + Beat, Redis.
 - Frontend: React 18 + Vite + TS + TanStack Query + Zustand.
 - Docker Compose (dev): `redis`, `backend`, `worker`, `beat`, `frontend`, `nginx`.
-- Alembic через `entrypoint.sh` (`alembic upgrade head` до старта API) и startup-guard в `main.py`.
+- Alembic через `entrypoint.sh` (`alembic upgrade head` до старта API) и startup-guard в `main.py` (константа `EXPECTED_ALEMBIC_HEAD` должна совпадать с head ревизии; сейчас head — `004_indexes` после миграций `003_system_config` / `004_indexes`).
 - Шифрование секретов в БД (`encryption_service`, `ENCRYPTION_KEY`).
 - Домены с модулем renewal-уведомлений.
 - Docs: `PROJECT_OVERVIEW`, `ARCHITECTURE`, `TECH_STACK`, `CURRENT_STATUS`, `Roadmap`, `Bugs`, `SUPABASE_DOCKER` (pooler runbook + startup retries as of 2026-04-23).
