@@ -5,7 +5,7 @@ import {
   useCreateCloudflareAccount, 
   useUpdateCloudflareAccount,
   useDeleteCloudflareAccount,
-  useCloudflareZones, 
+  useTestCloudflareAccount,
   useDnsRecords,
   usePurgeCache,
   useCreateDnsRecord,
@@ -14,9 +14,19 @@ import {
   useZoneNameservers,
 } from "../api/cloudflare";
 
-function AccountCard({ acc, onZoneSelect, onEdit, onDelete }: { acc: any, onZoneSelect: (z: any) => void; onEdit: () => void; onDelete: () => void }) {
-  const { data: zs } = useCloudflareZones(acc.id);
-  const zones = zs || [];
+function AccountCard({
+  acc,
+  onEdit,
+  onDelete,
+  onTest,
+  testStatus,
+}: {
+  acc: any;
+  onEdit: () => void;
+  onDelete: () => void;
+  onTest: () => void;
+  testStatus?: { state: "idle" | "loading" | "success" | "error"; message?: string };
+}) {
 
   return (
     <Card style={{marginBottom:16}}>
@@ -26,18 +36,24 @@ function AccountCard({ acc, onZoneSelect, onEdit, onDelete }: { acc: any, onZone
           <div><div style={{fontSize:14,fontWeight:700,color:"#111"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
           <Badge variant={acc.is_active?"green":"gray"}>{acc.is_active?"Active":"Inactive"}</Badge>
         </div>
-        <div style={{display:"flex",gap:8}}><Btn size="sm" variant="secondary" onClick={onEdit}>✎ Edit</Btn><Btn size="sm" variant="danger" onClick={onDelete}>✕</Btn></div>
+        <div style={{display:"flex",gap:8}}>
+          <Btn size="sm" variant="secondary" onClick={onTest} disabled={testStatus?.state === "loading"}>
+            {testStatus?.state === "loading" ? "Testing..." : "Test connection"}
+          </Btn>
+          <Btn size="sm" variant="secondary" onClick={onEdit}>✎ Edit</Btn>
+          <Btn size="sm" variant="danger" onClick={onDelete}>✕</Btn>
+        </div>
       </CHd>
-      <div>
-        <div style={{padding:"8px 20px",fontSize:12,fontWeight:600,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.4px"}}>Zones ({zones.length})</div>
-        {zones.map(z=>(
-          <div key={z.id} onClick={()=>onZoneSelect(z)} style={{display:"flex",alignItems:"center",padding:"10px 20px",cursor:"pointer",borderTop:"1px solid #f3f4f6",gap:12,transition:"background 0.12s"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
-            <div style={{flex:1}}><div style={{fontSize:13.5,fontWeight:600,color:"#111"}}>{z.name}</div><div style={{fontSize:11.5,color:"#9ca3af"}}>{z.status}</div></div>
-            <Badge variant={z.status==="active"?"green":"gray"}>{z.status}</Badge>
-            <span style={{color:"#9ca3af",fontSize:12}}>→</span>
-          </div>
-        ))}
-      </div>
+      {testStatus?.state === "success" && (
+        <div style={{padding:"10px 20px", borderTop:"1px solid #f3f4f6", color:"#16a34a", fontSize:12.5}}>
+          ✓ {testStatus.message || "Token verified"}
+        </div>
+      )}
+      {testStatus?.state === "error" && (
+        <div style={{padding:"10px 20px", borderTop:"1px solid #f3f4f6", color:"#dc2626", fontSize:12.5}}>
+          {testStatus.message || "Connection test failed"}
+        </div>
+      )}
     </Card>
   );
 }
@@ -46,9 +62,9 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const { data: cfAccountsData, isPending, isError, error } = useCloudflareAccounts();
   const createAcc = useCreateCloudflareAccount();
   const deleteAcc = useDeleteCloudflareAccount();
+  const testAcc = useTestCloudflareAccount();
   const cfAccounts = cfAccountsData || [];
   
-  const [sel,setSel]=useState<any>(null);
   const [showAddAcc,setShowAcc]=useState(false);
   const [showDns,setShowDns]=useState(false);
   const dnsTypes: Record<string, string>={A:"#2563eb",AAAA:"#7c3aed",CNAME:"#059669",MX:"#d97706",TXT:"#6b7280",NS:"#dc2626"};
@@ -58,6 +74,8 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [accToken, setAccToken] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [editingAcc, setEditingAcc] = useState<any | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{ kind: "success" | "warning"; text: string } | null>(null);
+  const [testState, setTestState] = useState<Record<number, { state: "idle" | "loading" | "success" | "error"; message?: string }>>({});
 
   const validate = () => {
     const newErrors: Record<string, string> = {};
@@ -75,24 +93,51 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       account_id: accId,
       api_token: accToken
     }, {
-      onSuccess: () => {
+      onSuccess: (created) => {
         setShowAcc(false);
         setAccName(""); setAccId(""); setAccToken("");
         setErrors({});
+        if (created.sync_result) {
+          setStatusMessage({
+            kind: "success",
+            text: `Linked Cloudflare to ${created.sync_result.updated} existing domains. ${created.sync_result.skipped} zones had no matching domain in the service.`,
+          });
+        } else {
+          setStatusMessage({
+            kind: "warning",
+            text: created.sync_warning || "Account created, but zone sync did not complete.",
+          });
+        }
       }
     })
   };
-
-  if(sel){
-    return <CloudflareZoneView sel={sel} onBack={()=>setSel(null)} dnsTypes={dnsTypes} showDns={showDns} setShowDns={setShowDns} />;
-  }
+  const handleTest = (accountId: number) => {
+    setTestState((prev) => ({ ...prev, [accountId]: { state: "loading" } }));
+    testAcc.mutate(accountId, {
+      onSuccess: (res) => {
+        const nextState = res.success ? "success" : "error";
+        setTestState((prev) => ({ ...prev, [accountId]: { state: nextState, message: res.message } }));
+        if (res.success) {
+          setTimeout(() => {
+            setTestState((prev) => ({ ...prev, [accountId]: { state: "idle" } }));
+          }, 3000);
+        }
+      },
+      onError: (err: any) => {
+        setTestState((prev) => ({
+          ...prev,
+          [accountId]: { state: "error", message: String(err?.message || "Connection test failed") },
+        }));
+      },
+    });
+  };
 
   if (isError) {
     return (
       <div style={{ padding: "8px 0" }}>
         <div style={{ marginBottom: 20 }}>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 2 }}>Cloudflare</h1>
-          <div style={{ fontSize: 13, color: "#6b7280" }}>Accounts and zones</div>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>Accounts</div>
         </div>
         <ErrorState
           title="Не удалось загрузить Cloudflare-аккаунты"
@@ -110,6 +155,13 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       <div><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Cloudflare</h1><div style={{fontSize:13,color:"#6b7280"}}>{cfAccounts.length} accounts connected</div></div>
       <Btn variant="primary" onClick={()=>setShowAcc(true)}>+ Add Account</Btn>
     </div>
+    {statusMessage && (
+      <Card style={{marginBottom:14}}>
+        <div style={{padding:"12px 16px",fontSize:13,color:statusMessage.kind === "success" ? "#166534" : "#92400e",background:statusMessage.kind === "success" ? "#f0fdf4" : "#fffbeb",borderRadius:10}}>
+          {statusMessage.text}
+        </div>
+      </Card>
+    )}
     <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:20}}>
       {[
         ["Total Accounts",cfAccounts.length,"#2563eb"],
@@ -130,9 +182,10 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       <AccountCard
         key={acc.id}
         acc={acc}
-        onZoneSelect={(z) => setSel({ acc, zone: z })}
         onEdit={() => setEditingAcc(acc)}
         onDelete={() => { if (!confirm(`Delete account ${acc.name}?`)) return; deleteAcc.mutate(acc.id); }}
+        onTest={() => handleTest(acc.id)}
+        testStatus={testState[acc.id]}
       />
     )))}
 
@@ -270,15 +323,17 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
 
 function EditCfAccountModal({ account, onClose }: { account: any; onClose: () => void }) {
   const [name, setName] = useState(account.name || "");
+  const [accountId, setAccountId] = useState(account.account_id || "");
   const [token, setToken] = useState("");
   const update = useUpdateCloudflareAccount(account.id);
   return <Modal title={`Edit ${account.name}`} onClose={onClose} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Label</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token (optional)</label><Inp type="password" value={token} onChange={e=>setToken((e.target as any).value)} placeholder="Leave empty to keep current token" /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label><Inp value={accountId} onChange={e=>setAccountId((e.target as any).value)} placeholder="Cloudflare account id" /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token (optional)</label><Inp type="password" value={token} onChange={e=>setToken((e.target as any).value)} placeholder={account.api_token_masked ?? "Leave empty to keep current"} /></div>
     </div>
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      <Btn variant="primary" disabled={update.isPending || !name.trim()} onClick={() => update.mutate({ name: name.trim(), ...(token.trim() ? { api_token: token.trim() } : {}) }, { onSuccess: onClose })} style={{flex:1,justifyContent:"center"}}>{update.isPending ? "Saving..." : "Save"}</Btn>
+      <Btn variant="primary" disabled={update.isPending || !name.trim()} onClick={() => update.mutate({ name: name.trim(), account_id: accountId.trim() || null, ...(token.trim() ? { api_token: token.trim() } : {}) }, { onSuccess: onClose })} style={{flex:1,justifyContent:"center"}}>{update.isPending ? "Saving..." : "Save"}</Btn>
       <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;

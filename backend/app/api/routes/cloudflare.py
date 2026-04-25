@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -5,6 +7,7 @@ from app.core.database import get_db
 from app.schemas.cloudflare import (
     CloudflareAccountCreate,
     CloudflareAccountResponse,
+    CloudflareTestResponse,
     CloudflareAccountUpdate,
     DnsRecordCreate,
     DnsRecordResponse,
@@ -17,6 +20,7 @@ from app.services import cloudflare_service
 from app.services.cloudflare_service import CloudflareError
 
 router = APIRouter(prefix="/cloudflare", tags=["cloudflare"])
+logger = logging.getLogger(__name__)
 
 
 def _dns_record(data: dict) -> DnsRecordResponse:
@@ -45,7 +49,7 @@ def _zone(data: dict) -> ZoneResponse:
 @router.get("/accounts", response_model=list[CloudflareAccountResponse])
 async def list_accounts(db: AsyncSession = Depends(get_db)):
     items = await cloudflare_service.list_accounts(db)
-    return [CloudflareAccountResponse.model_validate(a) for a in items]
+    return [cloudflare_service.build_account_response(a) for a in items]
 
 
 @router.post(
@@ -57,7 +61,17 @@ async def create_account(
     data: CloudflareAccountCreate, db: AsyncSession = Depends(get_db)
 ):
     account = await cloudflare_service.create_account(db, data)
-    return CloudflareAccountResponse.model_validate(account)
+    sync_result = None
+    sync_warning = None
+    try:
+        sync_result = await cloudflare_service.sync_zones_to_domains(db, account)
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Cloudflare zone sync failed for account_id=%s", account.id)
+        sync_warning = str(exc)
+    return cloudflare_service.build_account_response(
+        account, sync_result=sync_result, sync_warning=sync_warning
+    )
 
 
 @router.put("/accounts/{account_id}", response_model=CloudflareAccountResponse)
@@ -69,7 +83,7 @@ async def update_account(
     account = await cloudflare_service.update_account(db, account_id, data)
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
-    return CloudflareAccountResponse.model_validate(account)
+    return cloudflare_service.build_account_response(account)
 
 
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -77,6 +91,29 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     ok = await cloudflare_service.delete_account(db, account_id)
     if not ok:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+
+
+@router.post("/accounts/{account_id}/test", response_model=CloudflareTestResponse)
+async def test_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    account = await cloudflare_service.get_account(db, account_id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    try:
+        verify = await cloudflare_service.verify_token(account)
+        token_info = verify.get("result") or {}
+        status_value = token_info.get("status")
+        if status_value and status_value != "active":
+            return CloudflareTestResponse(
+                success=False,
+                message=f"Token status is {status_value}",
+            )
+        return CloudflareTestResponse(
+            success=True,
+            message="Token verified",
+            account_email=token_info.get("account", {}).get("email"),
+        )
+    except CloudflareError as exc:
+        return CloudflareTestResponse(success=False, message=str(exc))
 
 
 @router.get(

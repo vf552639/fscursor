@@ -8,8 +8,23 @@ export interface CloudflareAccount {
   name: string;
   account_id: string | null;
   is_active: boolean;
+  api_token_masked?: string | null;
+  sync_result?: CloudflareSyncResult | null;
+  sync_warning?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CloudflareSyncResult {
+  updated: number;
+  skipped: number;
+  total_zones: number;
+}
+
+export interface CloudflareTestResponse {
+  success: boolean;
+  message: string;
+  account_email?: string | null;
 }
 
 export interface CloudflareAccountCreate {
@@ -103,6 +118,13 @@ export function useDeleteCloudflareAccount() {
   return useMutation({
     mutationFn: (id: number) => apiDelete(`/cloudflare/accounts/${id}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: cloudflareKeys.accounts }),
+  });
+}
+
+export function useTestCloudflareAccount() {
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiPost<CloudflareTestResponse>(`/cloudflare/accounts/${id}/test`),
   });
 }
 

@@ -185,3 +185,17 @@ async def bulk_assign_cloudflare(
     )
     await db.commit()
     return result.rowcount or 0
+
+
+async def attach_cloudflare_to_existing(
+    db: AsyncSession, domain_name: str, cf_account_id: int, zone_id: str
+) -> Optional[Domain]:
+    normalized = _normalize(domain_name)
+    existing = await get_by_name(db, normalized)
+    if not existing:
+        return None
+    existing.cloudflare_account_id = cf_account_id
+    existing.cloudflare_zone_id = zone_id
+    existing.cloudflare_enabled = True
+    await db.flush()
+    return existing

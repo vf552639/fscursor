@@ -1,9 +1,9 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, Domain } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, Domain } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
-import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
+import { useCloudflareAccounts, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
 
 interface AddDomainModalProps {
   onClose: () => void;
@@ -20,8 +20,7 @@ interface DomainUI {
   cf_id: number | null;
   cf_zone_id: string | null;
   ns_status: string;
-  ssl: string;
-  php: string;
+  ns_updated_at: string | null;
   created: string;
 }
 
@@ -66,6 +65,9 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
   const [name, setName] = useState(domain.domain);
   const [serverId, setServerId] = useState(domain.server_id ? String(domain.server_id) : "");
   const [cfZoneId, setCfZoneId] = useState(domain.cf_zone_id || "");
+  const setNameservers = useSetNameservers(domain.id);
+  const { data: nameserversData, isLoading: isNameserversLoading, isError: isNameserversError } =
+    useZoneNameservers(domain.cf_id, domain.cf_zone_id);
   const update = useUpdateDomain(domain.id);
 
   const handleSave = () => {
@@ -84,6 +86,47 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: ChangeEvent<HTMLInputElement>)=>setName(e.target.value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Server</label><Sel value={serverId} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={cfZoneId} onChange={(e: ChangeEvent<HTMLInputElement>)=>setCfZoneId(e.target.value)} placeholder={cfAccounts.length ? "Zone ID from Cloudflare" : "No CF accounts connected"} /></div>
+      <div style={{border:"1px solid #e5e7eb", borderRadius:8, padding:12, background:"#fafafa"}}>
+        <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:8}}>Nameservers (CF zone)</div>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+          <span style={{fontSize:12,color:"#6b7280"}}>Status:</span>
+          <Badge variant={(domain.ns_status==="ok"?"green":domain.ns_status==="error"?"red":"yellow") as any}>
+            {domain.ns_status==="ok"?"OK":domain.ns_status==="error"?"Error":"Pending"}
+          </Badge>
+        </div>
+        <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>
+          Updated: {domain.ns_updated_at ? fmtDate(domain.ns_updated_at) : "—"}
+        </div>
+        {!domain.cf_id || !domain.cf_zone_id ? (
+          <div style={{fontSize:12.5,color:"#6b7280"}}>Nameservers - assign Cloudflare account first.</div>
+        ) : (
+          <>
+            {isNameserversLoading ? (
+              <div style={{fontSize:12.5,color:"#6b7280"}}>Loading nameservers...</div>
+            ) : isNameserversError ? (
+              <div style={{fontSize:12.5,color:"#dc2626"}}>Failed to load nameservers from Cloudflare.</div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
+                {(nameserversData?.name_servers || []).length > 0 ? (
+                  (nameserversData?.name_servers || []).map((ns) => (
+                    <div key={ns} style={{fontSize:12.5,fontFamily:"monospace",color:"#374151"}}>• {ns}</div>
+                  ))
+                ) : (
+                  <div style={{fontSize:12.5,color:"#6b7280"}}>No nameservers returned for this zone.</div>
+                )}
+              </div>
+            )}
+            <Btn
+              size="sm"
+              variant="secondary"
+              onClick={() => setNameservers.mutate()}
+              disabled={setNameservers.isPending}
+            >
+              {setNameservers.isPending ? "Setting NS..." : "↺ Set NS"}
+            </Btn>
+          </>
+        )}
+      </div>
     </div>
     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
       <Btn variant="primary" onClick={handleSave} disabled={update.isPending||!name.trim()} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{update.isPending ? "Saving..." : "Save"}</Btn>
@@ -111,12 +154,11 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     cf_id: d.cloudflare_account_id,
     cf_zone_id: d.cloudflare_zone_id,
     ns_status: d.ns_status || "pending",
-    ssl: "—", // No real SSL checking yet
-    php: "8.1",
+    ns_updated_at: d.ns_updated_at,
     created: d.created_at,
   })), [domainsData]);
 
-  const [search,setSearch]=useState(""); const [fSrv,setFS]=useState(""); const [fReg,setFR]=useState(""); const [fCF,setFCF]=useState(""); const [fNS,setFNS]=useState("");
+  const [search,setSearch]=useState(""); const [fSrv,setFS]=useState(""); const [fReg,setFR]=useState(""); const [fCF,setFCF]=useState("");
   const [sel,setSel]=useState<Set<number>>(new Set()); 
   const [showBulk,setSB]=useState(false);
   const [showAdd,setSA]=useState(false);
@@ -148,9 +190,8 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     (!fSrv || d.server_id === Number(fSrv)) &&
     (!fReg || d.registrar_id === Number(fReg)) &&
     (!fCF || d.cf_id === Number(fCF)) &&
-    (!fNS || d.ns_status === fNS) &&
     (!focusDomainId || d.id === focusDomainId)
-  ), [search, fSrv, fReg, fCF, fNS, focusDomainId, domains]);
+  ), [search, fSrv, fReg, fCF, focusDomainId, domains]);
   
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
   const Th=({c,children}: {c?: string, children: React.ReactNode})=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap",...(c?{color:c}:{})}}>{children}</th>;
@@ -297,7 +338,6 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
         <Sel value={fSrv} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFS(e.target.value)}><option value="">All Servers</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel>
         <Sel value={fReg} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFR(e.target.value)}><option value="">All Registrars</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel>
         <Sel value={fCF} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFCF(e.target.value)}><option value="">All CF</option>{cfAccounts.map((c: CloudflareAccount)=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel>
-        <Sel value={fNS} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFNS(e.target.value)}><option value="">All NS</option><option value="ok">NS OK</option><option value="pending">Pending</option><option value="error">Error</option></Sel>
       </div>
     </Card>
     {sel.size>0&&<div style={{background:"#eff4ff",border:"1px solid #bfdbfe",borderRadius:10,padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
@@ -328,12 +368,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
         ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===filtered.length&&filtered.length>0} onChange={()=>setSel(sel.size===filtered.length?new Set():new Set(filtered.map((d: any)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {["Domain","Server","Registrar","Cloudflare","NS","SSL","PHP","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
+            {["Domain","Server","Registrar","Cloudflare","SSL","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
           </tr></thead>
           <tbody>
             {filtered.length === 0 && domainsData.length > 0 ? (
               <tr>
-                <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                <td colSpan={8} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
                   No domains match the current filters.
                 </td>
               </tr>
@@ -348,9 +388,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                 <td style={{padding:"11px 16px",fontSize:13}}>{srv?<span style={{display:"flex",alignItems:"center",gap:5}}><StatusDot status={displayStatus} size={7}/>{srv.name}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
-                <td style={{padding:"11px 16px"}}><Badge variant={(d.ns_status==="ok"?"green":d.ns_status==="error"?"red":"yellow") as any}>{d.ns_status==="ok"?"✓ OK":d.ns_status==="pending"?"⏳ Pending":"✕ Error"}</Badge></td>
-                <td style={{padding:"11px 16px"}}><Badge variant={(d.ssl==="valid"?"green":d.ssl==="expiring"?"yellow":"gray") as any}>{d.ssl==="valid"?"🔒 Valid":d.ssl==="expiring"?"⚠ Exp":"— No SSL"}</Badge></td>
-                <td style={{padding:"11px 16px",fontFamily:"monospace",fontSize:12,color:"#374151"}}>PHP {d.php}</td>
+                <td style={{padding:"11px 16px"}}><Badge variant="gray">— No SSL</Badge></td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
                 <td style={{padding:"11px 16px"}}>
                   <RowActions actions={[

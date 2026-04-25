@@ -24,6 +24,8 @@
 - [x] Add **wait-for-db** in `backend/entrypoint.sh` and **lifespan retries** for `alembic_version` reads to tolerate brief pooler/upstream flaps
 - [x] Prevent Cloudflare accounts list 500 on legacy empty names by splitting input/output validation in schemas and by keeping strict non-empty `name` validation for create/update
 - [x] Replace Cloudflare page hardcoded Alembic/schema error hint with neutral backend error messaging (`error.message` + logs tail hint)
+- [x] Change Cloudflare auto-sync policy to **attach existing domains only** (no new domain inserts from CF zones; report `updated/skipped/total_zones`)
+- [x] Remove hardcoded `PHP`/`NS` columns from Domains table and move NS visibility/actions into Domain edit modal
 - [ ] Complete full E2E runtime verification and attach runbook notes
 - [ ] Add focused tests (notification service + renewal task)
 

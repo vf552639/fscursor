@@ -22,10 +22,25 @@ class CloudflareAccountUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class CloudflareTestResponse(BaseModel):
+    success: bool
+    message: str
+    account_email: Optional[str] = None
+
+
+class CloudflareSyncResponse(BaseModel):
+    updated: int
+    skipped: int
+    total_zones: int
+
+
 class CloudflareAccountResponse(CloudflareAccountBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    api_token_masked: Optional[str] = None
+    sync_result: Optional[CloudflareSyncResponse] = None
+    sync_warning: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

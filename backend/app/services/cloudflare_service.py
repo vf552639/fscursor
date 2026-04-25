@@ -7,10 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.cloudflare_account import CloudflareAccount
 from app.schemas.cloudflare import (
     CloudflareAccountCreate,
+    CloudflareAccountResponse,
+    CloudflareSyncResponse,
     CloudflareAccountUpdate,
     DnsRecordCreate,
     DnsRecordUpdate,
 )
+from app.services import domain_service
 from app.services.encryption_service import decrypt, encrypt
 
 CF_API = "https://api.cloudflare.com/client/v4"
@@ -18,6 +21,37 @@ CF_API = "https://api.cloudflare.com/client/v4"
 
 class CloudflareError(Exception):
     pass
+
+
+def mask_token(plain: str) -> str:
+    if len(plain) < 5:
+        return "••••"
+    return ("•" * 8) + plain[-4:]
+
+
+def _masked_token_from_account(account: CloudflareAccount) -> Optional[str]:
+    if not account.api_token_encrypted:
+        return None
+    try:
+        token = decrypt(account.api_token_encrypted)
+    except Exception:
+        return None
+    if not token:
+        return None
+    return mask_token(token)
+
+
+def build_account_response(
+    account: CloudflareAccount,
+    *,
+    sync_result: Optional[CloudflareSyncResponse] = None,
+    sync_warning: Optional[str] = None,
+) -> CloudflareAccountResponse:
+    payload = CloudflareAccountResponse.model_validate(account).model_dump()
+    payload["api_token_masked"] = _masked_token_from_account(account)
+    payload["sync_result"] = sync_result
+    payload["sync_warning"] = sync_warning
+    return CloudflareAccountResponse(**payload)
 
 
 async def _get_account(db: AsyncSession, account_id: int) -> Optional[CloudflareAccount]:
@@ -106,8 +140,47 @@ async def list_zones(db: AsyncSession, account_id: int) -> list[dict]:
     account = await _get_account(db, account_id)
     if not account:
         raise CloudflareError("Account not found")
-    data = await _call(account, "GET", "/zones", params={"per_page": 50})
-    return data.get("result") or []
+    per_page = 50
+    page = 1
+    zones: list[dict] = []
+    while True:
+        data = await _call(
+            account, "GET", "/zones", params={"per_page": per_page, "page": page}
+        )
+        zones.extend(data.get("result") or [])
+        total_pages = (data.get("result_info") or {}).get("total_pages") or 1
+        if page >= total_pages:
+            break
+        page += 1
+    return zones
+
+
+async def verify_token(account: CloudflareAccount) -> dict[str, Any]:
+    return await _call(account, "GET", "/user/tokens/verify")
+
+
+async def sync_zones_to_domains(
+    db: AsyncSession, account: CloudflareAccount
+) -> CloudflareSyncResponse:
+    zones = await list_zones(db, account.id)
+    updated = 0
+    skipped = 0
+    for zone in zones:
+        name = (zone.get("name") or "").strip()
+        zone_id = (zone.get("id") or "").strip()
+        if not name or not zone_id:
+            skipped += 1
+            continue
+        linked = await domain_service.attach_cloudflare_to_existing(
+            db=db, domain_name=name, cf_account_id=account.id, zone_id=zone_id
+        )
+        if linked is not None:
+            updated += 1
+        else:
+            skipped += 1
+
+    await db.commit()
+    return CloudflareSyncResponse(updated=updated, skipped=skipped, total_zones=len(zones))
 
 
 async def get_zone(db: AsyncSession, account_id: int, zone_id: str) -> dict:

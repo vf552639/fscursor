@@ -72,3 +72,8 @@
    - *Status*: Resolved (2026-04-25, task12)
    - *Fix*: `CloudflareAccountBase.name` no longer enforces `min_length=1` (response path), while strict validation is enforced on input models (`CloudflareAccountCreate.name` and `CloudflareAccountUpdate.name` use `min_length=1`).
    - *Result*: One invalid stored row no longer breaks the whole list endpoint; create/update still reject empty names with `422`. Cloudflare frontend error banner now shows neutral backend/log guidance instead of a hardcoded Alembic hint.
+
+7. **Cloudflare sync created unintended new domain rows for zones absent in SDMP**
+   - *Status*: Resolved (2026-04-25, task14)
+   - *Fix*: Sync strategy changed from upsert-with-insert to attach-only: Cloudflare sync now updates CF linkage only for existing `domains.domain_name` matches and skips unmatched zones.
+   - *Result*: Recreating a Cloudflare account no longer creates new rows with empty `server_id`/`registrar_id`; response/reporting now uses `updated/skipped/total_zones`.

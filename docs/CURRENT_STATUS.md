@@ -4,6 +4,11 @@
 **Current Phase:** Phase 6 - Reliability & Feedback
 
 ## Completed
+- 2026-04-25 (**task14**): Cloudflare sync switched to **attach-only** for existing domains.
+  - Backend sync no longer inserts new `domains` rows from Cloudflare zones; it now links only existing domain names (`updated/skipped/total_zones` counters).
+  - Frontend Cloudflare create feedback now explains partial linking: zones without matching domains are reported as skipped.
+  - Domains table cleanup: removed hardcoded `PHP` and `NS` columns from the main grid.
+  - Domain edit modal now contains a read-only nameserver block (CF nameservers fetch + status + `Set NS` action) so NS operations stay available without a dedicated table column.
 - 2026-04-25 (**task12**): Cloudflare accounts endpoint no longer fails on legacy rows with empty `name`.
   - Backend schemas were split by intent: response model accepts stored data as-is, while input models keep strict validation (`CloudflareAccountCreate.name` and `CloudflareAccountUpdate.name` require min length 1).
   - Result: `GET /api/cloudflare/accounts` returns `200` even if old rows contain `name=''`; `POST/PUT` with empty `name` now return `422`.
