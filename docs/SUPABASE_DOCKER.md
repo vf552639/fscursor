@@ -75,7 +75,7 @@ Cold starts or brief Supavisor **circuit breaker** windows used to fail the cont
 
 1. **`backend/entrypoint.sh`** (before `alembic upgrade head`): **wait-for-db** — inline Python uses **asyncpg** with the same DSN rewrite as the smoke test (`postgresql+asyncpg://` → `postgresql://`), `statement_cache_size=0`, up to **12 attempts** with **5 s** sleep (~60 s total), `SELECT 1` each time. Logs: `wait-for-db: attempt N/12 failed: ...` then `wait-for-db: ok on attempt N` or a final `RuntimeError` with a pointer to `.env.example` direct fallback.
 
-2. **`backend/app/main.py` lifespan**: reading `alembic_version` retries on generic connection errors (**10 attempts**, **2 s** sleep). **No retry** for an empty row or a revision mismatch (`RuntimeError` immediately).
+2. **`backend/app/main.py` lifespan**: reading `alembic_version` retries on generic connection errors (**10 attempts**, **2 s** sleep). **No retry** for an empty row or a revision mismatch (`RuntimeError` immediately). The checked head revision must match `EXPECTED_ALEMBIC_HEAD` in code (currently `004_indexes` after migrations `003_system_config` / `004_indexes`).
 
 **`/health` stays non-DB-dependent** so orchestration can mark “process up” even while migrations are still running (port may not answer until uvicorn binds after Alembic).
 

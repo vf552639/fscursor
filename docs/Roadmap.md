@@ -16,6 +16,7 @@
 - [x] Add A11-style explicit list states (`loading/error/empty`) for Domains, Servers, Cloudflare, Registrars
 - [x] Remove unused compose `db` service to eliminate `POSTGRES_*` warnings
 - [x] Add migration safety hardening (`backend` entrypoint migration + startup `alembic_version` guard)
+- [x] Keep lifespan `EXPECTED_ALEMBIC_HEAD` in `main.py` aligned with latest Alembic revision (`004_indexes`; task16)
 - [x] Add baseline settings config API and wire Settings page edit flow
 - [x] Fix Cloudflare page parse error (unbalanced ternary parentheses in `Cloudflare.tsx`)
 - [x] Align `.env` and `.env.example` with current backend `Settings` contract (`SUPABASE_*`, Redis/Celery, security keys)

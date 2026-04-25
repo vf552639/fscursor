@@ -4,6 +4,8 @@
 **Current Phase:** Phase 6 - Reliability & Feedback
 
 ## Completed
+- 2026-04-25 (**task16**): Lifespan migration guard aligned with current Alembic head.
+  - `backend/app/main.py`: `EXPECTED_ALEMBIC_HEAD` updated from `002_domain_purchase_and_notifications` to `004_indexes` so a DB already at `004_indexes` no longer fails startup with `Database migration mismatch`.
 - 2026-04-25 (**task14**): Cloudflare sync switched to **attach-only** for existing domains.
   - Backend sync no longer inserts new `domains` rows from Cloudflare zones; it now links only existing domain names (`updated/skipped/total_zones` counters).
   - Frontend Cloudflare create feedback now explains partial linking: zones without matching domains are reported as skipped.

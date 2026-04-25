@@ -12,7 +12,7 @@ from app.core.database import engine
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "002_domain_purchase_and_notifications"
+EXPECTED_ALEMBIC_HEAD = "004_indexes"
 
 
 @asynccontextmanager

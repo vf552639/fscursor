@@ -21,7 +21,7 @@ Notes:
 
 ## Backend Architecture
 - **App entry:** `backend/app/main.py`
-- **Startup guard:** lifespan checks `alembic_version` equals expected head revision (`002_domain_purchase_and_notifications`); transient DB connection errors are retried before failing (see `SUPABASE_DOCKER.md` § Startup resilience).
+- **Startup guard:** lifespan checks `alembic_version` equals expected head revision (`004_indexes`); transient DB connection errors are retried before failing (see `SUPABASE_DOCKER.md` § Startup resilience).
 - **Routers:** `servers`, `domains`, `cloudflare`, `registrars`, `tasks`, `notifications`, `settings`
 - **DB layer:** SQLAlchemy async sessions + Alembic migrations
 - **Background tasks:** Celery + Redis
