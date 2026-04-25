@@ -15,22 +15,18 @@ interface AddDomainModalProps {
 interface DomainUI {
   id: number;
   domain: string;
-  purchase_date: string | null;
   server_id: number | null;
   registrar_id: number | null;
   cf_id: number | null;
   cf_zone_id: string | null;
-  expiry_date: string | null;
   ns_status: string;
   ssl: string;
-  type: string;
   php: string;
   created: string;
 }
 
 export function AddDomainModal({onClose, servers, registrars, cfAccounts}: AddDomainModalProps){
   const [name, setName]=useState(""); 
-  const [pDate, setPDate]=useState("");
   const [sid, setSid]=useState(""); 
   const [rid, setRid]=useState(""); 
   const [cfid, setCfid]=useState("");
@@ -39,7 +35,6 @@ export function AddDomainModal({onClose, servers, registrars, cfAccounts}: AddDo
   const handleAdd = () => {
     create.mutate({
       domain_name: name,
-      purchase_date: pDate || null,
       server_id: sid ? Number(sid) : null,
       registrar_id: rid ? Number(rid) : null,
       cloudflare_account_id: cfid ? Number(cfid) : null
@@ -49,7 +44,6 @@ export function AddDomainModal({onClose, servers, registrars, cfAccounts}: AddDo
   return <Modal title="Add Domain" onClose={onClose} width={450}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: ChangeEvent<HTMLInputElement>)=>setName(e.target.value)} placeholder="e.g., example.com"/></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Purchase Date</label><Inp type="date" value={pDate} onChange={(e: ChangeEvent<HTMLInputElement>)=>setPDate(e.target.value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Server</label><Sel value={sid} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setSid(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Registrar</label><Sel value={rid} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setRid(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Cloudflare Account</label><Sel value={cfid} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setCfid(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{cfAccounts.map((c: CloudflareAccount)=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel></div>
@@ -70,8 +64,6 @@ interface EditDomainModalProps {
 
 function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainModalProps) {
   const [name, setName] = useState(domain.domain);
-  const [purchaseDate, setPurchaseDate] = useState(domain.purchase_date || "");
-  const [expiryDate, setExpiryDate] = useState(domain.expiry_date || "");
   const [serverId, setServerId] = useState(domain.server_id ? String(domain.server_id) : "");
   const [cfZoneId, setCfZoneId] = useState(domain.cf_zone_id || "");
   const update = useUpdateDomain(domain.id);
@@ -80,8 +72,6 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
     update.mutate(
       {
         domain_name: name.trim(),
-        purchase_date: purchaseDate || null,
-        expiry_date: expiryDate || null,
         server_id: serverId ? Number(serverId) : null,
         cloudflare_zone_id: cfZoneId || null,
       },
@@ -92,8 +82,6 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
   return <Modal title={`Edit ${domain.domain}`} onClose={onClose} width={450}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: ChangeEvent<HTMLInputElement>)=>setName(e.target.value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Purchase Date</label><Inp type="date" value={purchaseDate} onChange={(e: ChangeEvent<HTMLInputElement>)=>setPurchaseDate(e.target.value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Expiry Date</label><Inp type="date" value={expiryDate} onChange={(e: ChangeEvent<HTMLInputElement>)=>setExpiryDate(e.target.value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Server</label><Sel value={serverId} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={cfZoneId} onChange={(e: ChangeEvent<HTMLInputElement>)=>setCfZoneId(e.target.value)} placeholder={cfAccounts.length ? "Zone ID from Cloudflare" : "No CF accounts connected"} /></div>
     </div>
@@ -118,15 +106,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const domains = useMemo((): DomainUI[] => domainsData.map((d: Domain) => ({
     id: d.id,
     domain: d.domain_name,
-    purchase_date: d.purchase_date,
     server_id: d.server_id,
     registrar_id: d.registrar_id,
     cf_id: d.cloudflare_account_id,
     cf_zone_id: d.cloudflare_zone_id,
-    expiry_date: d.expiry_date,
     ns_status: d.ns_status || "pending",
     ssl: "—", // No real SSL checking yet
-    type: "Primary",
     php: "8.1",
     created: d.created_at,
   })), [domainsData]);
@@ -343,12 +328,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
         ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===filtered.length&&filtered.length>0} onChange={()=>setSel(sel.size===filtered.length?new Set():new Set(filtered.map((d: any)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {["Domain","Purchase","Server","Registrar","Cloudflare","NS","SSL","PHP","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
+            {["Domain","Server","Registrar","Cloudflare","NS","SSL","PHP","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
           </tr></thead>
           <tbody>
             {filtered.length === 0 && domainsData.length > 0 ? (
               <tr>
-                <td colSpan={11} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
                   No domains match the current filters.
                 </td>
               </tr>
@@ -359,10 +344,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
               const isFocused = focusDomainId === d.id;
               return <tr key={d.id} style={isFocused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background=""; }}>
                 <td style={{padding:"11px 16px"}}><input type="checkbox" checked={sel.has(d.id)} onChange={()=>toggle(d.id)} style={{cursor:"pointer"}}/></td>
-                <td style={{padding:"11px 16px"}}><div style={{fontWeight:600,fontSize:13.5,color:"#111"}}>{d.domain}</div><div style={{fontSize:11.5,color:"#9ca3af"}}>{d.type}</div></td>
-                <td style={{padding:"11px 16px",fontSize:12,color:"#6b7280"}}>{fmtDate(d.purchase_date || "")}</td>
+                <td style={{padding:"11px 16px"}}><div style={{fontWeight:600,fontSize:13.5,color:"#111"}}>{d.domain}</div></td>
                 <td style={{padding:"11px 16px",fontSize:13}}>{srv?<span style={{display:"flex",alignItems:"center",gap:5}}><StatusDot status={displayStatus} size={7}/>{srv.name}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
-                <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.name||"—"}</td>
+                <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
                 <td style={{padding:"11px 16px"}}><Badge variant={(d.ns_status==="ok"?"green":d.ns_status==="error"?"red":"yellow") as any}>{d.ns_status==="ok"?"✓ OK":d.ns_status==="pending"?"⏳ Pending":"✕ Error"}</Badge></td>
                 <td style={{padding:"11px 16px"}}><Badge variant={(d.ssl==="valid"?"green":d.ssl==="expiring"?"yellow":"gray") as any}>{d.ssl==="valid"?"🔒 Valid":d.ssl==="expiring"?"⚠ Exp":"— No SSL"}</Badge></td>

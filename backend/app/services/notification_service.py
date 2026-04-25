@@ -61,11 +61,8 @@ async def delete_notification(db: AsyncSession, notification_id: int) -> bool:
 
 
 async def upsert_renewal_notification(db: AsyncSession, domain: Domain) -> bool:
-    if domain.purchase_date is None:
-        return False
-
-    dedup_key = f"domain_renewal:{domain.id}:{domain.purchase_date.isoformat()}"
-    message = f"Domain {domain.domain_name} reached renewal threshold (purchase date + 9 months)."
+    dedup_key = f"domain_renewal:{domain.id}:{domain.created_at.date().isoformat()}"
+    message = f"Domain {domain.domain_name} added 9+ months ago — time to renew."
 
     stmt = (
         insert(Notification)

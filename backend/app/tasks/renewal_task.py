@@ -2,7 +2,7 @@ import asyncio
 from datetime import date
 
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
@@ -22,8 +22,7 @@ async def _check_renewals() -> dict[str, int]:
         domains = (
             await session.execute(
                 select(Domain).where(
-                    Domain.purchase_date.is_not(None),
-                    Domain.purchase_date <= threshold,
+                    func.date(Domain.created_at) <= threshold,
                 )
             )
         ).scalars().all()
