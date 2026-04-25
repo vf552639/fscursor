@@ -1,9 +1,13 @@
 # CURRENT STATUS
 
-**Last Updated:** 2026-04-23  
+**Last Updated:** 2026-04-25  
 **Current Phase:** Phase 6 - Reliability & Feedback
 
 ## Completed
+- 2026-04-25 (**task12**): Cloudflare accounts endpoint no longer fails on legacy rows with empty `name`.
+  - Backend schemas were split by intent: response model accepts stored data as-is, while input models keep strict validation (`CloudflareAccountCreate.name` and `CloudflareAccountUpdate.name` require min length 1).
+  - Result: `GET /api/cloudflare/accounts` returns `200` even if old rows contain `name=''`; `POST/PUT` with empty `name` now return `422`.
+  - Frontend Cloudflare error state is now neutral and operational (`error.message` + `docker compose logs backend --tail 100`) instead of always suggesting Alembic/schema drift.
 - 2026-04-23: Frontend parse regression on Cloudflare page fixed (`frontend/src/pages/Cloudflare.tsx` ternary branch parenthesis balance `))}` -> `)))}`), Vite Babel parse error removed.
 - 2026-04-23: Environment baseline aligned with backend `Settings` requirements:
   - root `.env` now includes `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `ENCRYPTION_KEY`, `SECRET_KEY`, `BACKEND_CORS_ORIGINS`, `API_V1_PREFIX`, `VITE_API_URL`

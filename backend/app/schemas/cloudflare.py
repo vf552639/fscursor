@@ -5,17 +5,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class CloudflareAccountBase(BaseModel):
-    name: str = Field(min_length=1)
+    name: str
     account_id: Optional[str] = None
     is_active: bool = True
 
 
 class CloudflareAccountCreate(CloudflareAccountBase):
+    name: str = Field(min_length=1)
     api_token: str = Field(repr=False, min_length=1)
 
 
 class CloudflareAccountUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1)
     account_id: Optional[str] = None
     api_token: Optional[str] = Field(default=None, repr=False)
     is_active: Optional[bool] = None

@@ -67,3 +67,8 @@
    - *Status*: Mitigated (2026-04-23, task9)
    - *Fix*: `entrypoint.sh` runs asyncpg `SELECT 1` in a retry loop before `alembic upgrade head`; `app/main.py` lifespan retries transient errors when loading `alembic_version`.
    - *Result*: Short upstream/pooler outages are absorbed; wrong DSN or extended outages still require operator action (see `SUPABASE_DOCKER.md`).
+
+6. **`GET /api/cloudflare/accounts` failed with HTTP 500 on legacy rows where `name=''`**
+   - *Status*: Resolved (2026-04-25, task12)
+   - *Fix*: `CloudflareAccountBase.name` no longer enforces `min_length=1` (response path), while strict validation is enforced on input models (`CloudflareAccountCreate.name` and `CloudflareAccountUpdate.name` use `min_length=1`).
+   - *Result*: One invalid stored row no longer breaks the whole list endpoint; create/update still reject empty names with `422`. Cloudflare frontend error banner now shows neutral backend/log guidance instead of a hardcoded Alembic hint.

@@ -43,7 +43,7 @@ function AccountCard({ acc, onZoneSelect, onEdit, onDelete }: { acc: any, onZone
 }
 
 export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) => void }){
-  const { data: cfAccountsData, isPending, isError } = useCloudflareAccounts();
+  const { data: cfAccountsData, isPending, isError, error } = useCloudflareAccounts();
   const createAcc = useCreateCloudflareAccount();
   const deleteAcc = useDeleteCloudflareAccount();
   const cfAccounts = cfAccountsData || [];
@@ -95,9 +95,9 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
           <div style={{ fontSize: 13, color: "#6b7280" }}>Accounts and zones</div>
         </div>
         <ErrorState
-          title="Backend unavailable or database schema is out of date"
-          message="Cloudflare accounts could not be loaded."
-          hint="docker compose logs backend | grep -i alembic"
+          title="Не удалось загрузить Cloudflare-аккаунты"
+          message={String((error as any)?.message ?? "Backend вернул ошибку.")}
+          hint="docker compose logs backend --tail 100"
         />
       </div>
     );
@@ -134,7 +134,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onEdit={() => setEditingAcc(acc)}
         onDelete={() => { if (!confirm(`Delete account ${acc.name}?`)) return; deleteAcc.mutate(acc.id); }}
       />
-    ))}
+    )))}
 
     {showAddAcc&&<Modal title="Add Cloudflare Account" onClose={()=>setShowAcc(false)} width={460}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>

@@ -22,6 +22,8 @@
 - [x] Document Supabase pooler + Docker + MCP troubleshooting in `docs/SUPABASE_DOCKER.md`
 - [x] Wire backend to Supabase **transaction pooler** (`6543`): `ASYNCPG_CONNECT_ARGS`, `NullPool` when host contains `pooler.supabase.com`, Alembic async engine aligned (`task9` / commits on 2026-04-23)
 - [x] Add **wait-for-db** in `backend/entrypoint.sh` and **lifespan retries** for `alembic_version` reads to tolerate brief pooler/upstream flaps
+- [x] Prevent Cloudflare accounts list 500 on legacy empty names by splitting input/output validation in schemas and by keeping strict non-empty `name` validation for create/update
+- [x] Replace Cloudflare page hardcoded Alembic/schema error hint with neutral backend error messaging (`error.message` + logs tail hint)
 - [ ] Complete full E2E runtime verification and attach runbook notes
 - [ ] Add focused tests (notification service + renewal task)
 
