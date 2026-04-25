@@ -128,6 +128,18 @@ async def list_zones(account_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get(
+    "/accounts/{account_id}/zones/{zone_id}",
+    response_model=ZoneResponse,
+)
+async def get_zone(account_id: int, zone_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        zone = await cloudflare_service.get_zone(db, account_id, zone_id)
+    except CloudflareError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    return _zone(zone)
+
+
+@router.get(
     "/accounts/{account_id}/zones/{zone_id}/dns",
     response_model=list[DnsRecordResponse],
 )

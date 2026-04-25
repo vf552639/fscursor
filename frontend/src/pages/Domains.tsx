@@ -3,7 +3,7 @@ import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, Empt
 import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, Domain } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
-import { useCloudflareAccounts, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
+import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
 
 interface AddDomainModalProps {
   onClose: () => void;
@@ -58,16 +58,20 @@ interface EditDomainModalProps {
   domain: DomainUI;
   onClose: () => void;
   servers: Server[];
+  registrars: RegistrarAccount[];
   cfAccounts: CloudflareAccount[];
 }
 
-function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainModalProps) {
+function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: EditDomainModalProps) {
   const [name, setName] = useState(domain.domain);
   const [serverId, setServerId] = useState(domain.server_id ? String(domain.server_id) : "");
+  const [registrarId, setRegistrarId] = useState(domain.registrar_id ? String(domain.registrar_id) : "");
   const [cfZoneId, setCfZoneId] = useState(domain.cf_zone_id || "");
   const setNameservers = useSetNameservers(domain.id);
   const { data: nameserversData, isLoading: isNameserversLoading, isError: isNameserversError } =
     useZoneNameservers(domain.cf_id, domain.cf_zone_id);
+  const { data: zoneDetails, isLoading: isZoneLoading, isError: isZoneError } =
+    useZoneDetails(domain.cf_id, domain.cf_zone_id);
   const update = useUpdateDomain(domain.id);
 
   const handleSave = () => {
@@ -75,6 +79,7 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
       {
         domain_name: name.trim(),
         server_id: serverId ? Number(serverId) : null,
+        registrar_id: registrarId ? Number(registrarId) : null,
         cloudflare_zone_id: cfZoneId || null,
       },
       { onSuccess: () => onClose() }
@@ -85,11 +90,41 @@ function EditDomainModal({ domain, onClose, servers, cfAccounts }: EditDomainMod
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: ChangeEvent<HTMLInputElement>)=>setName(e.target.value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Server</label><Sel value={serverId} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Registrar</label><Sel value={registrarId} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setRegistrarId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={cfZoneId} onChange={(e: ChangeEvent<HTMLInputElement>)=>setCfZoneId(e.target.value)} placeholder={cfAccounts.length ? "Zone ID from Cloudflare" : "No CF accounts connected"} /></div>
       <div style={{border:"1px solid #e5e7eb", borderRadius:8, padding:12, background:"#fafafa"}}>
         <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:8}}>Nameservers (CF zone)</div>
+        <div style={{fontSize:11.5,color:"#6b7280",marginBottom:8}}>
+          CF zone status - статус делегирования у Cloudflare. NS push - статус применения NS у регистратора.
+        </div>
+        {!domain.cf_id || !domain.cf_zone_id ? null : (
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+            <span style={{fontSize:12,color:"#6b7280"}}>CF Zone Status:</span>
+            {isZoneLoading ? (
+              <Badge variant="gray">Loading...</Badge>
+            ) : isZoneError ? (
+              <Badge variant="red">Failed to load zone status</Badge>
+            ) : (
+              <Badge
+                variant={
+                  zoneDetails?.status === "active"
+                    ? "green"
+                    : zoneDetails?.status === "pending"
+                    ? "yellow"
+                    : "gray"
+                }
+              >
+                {zoneDetails?.status === "active"
+                  ? "Active"
+                  : zoneDetails?.status === "pending"
+                  ? "Pending (NS не делегированы на CF)"
+                  : zoneDetails?.status || "Unknown"}
+              </Badge>
+            )}
+          </div>
+        )}
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-          <span style={{fontSize:12,color:"#6b7280"}}>Status:</span>
+          <span style={{fontSize:12,color:"#6b7280"}}>NS push to registrar:</span>
           <Badge variant={(domain.ns_status==="ok"?"green":domain.ns_status==="error"?"red":"yellow") as any}>
             {domain.ns_status==="ok"?"OK":domain.ns_status==="error"?"Error":"Pending"}
           </Badge>
@@ -405,7 +440,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     </Card>
 
     {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />}
-    {editingDomain && <EditDomainModal domain={editingDomain} servers={servers} cfAccounts={cfAccounts} onClose={() => setEditingDomain(null)} />}
+    {editingDomain && <EditDomainModal domain={editingDomain} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onClose={() => setEditingDomain(null)} />}
 
     {showBulk&&<Modal title="Bulk Add Domains" onClose={()=>setSB(false)} width={520}>
       <div style={{display:"flex",background:"#f3f4f6",borderRadius:8,padding:3,marginBottom:20}}>

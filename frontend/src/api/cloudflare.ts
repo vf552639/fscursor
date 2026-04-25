@@ -86,6 +86,8 @@ export interface Nameservers {
 export const cloudflareKeys = {
   accounts: ["cloudflare", "accounts"] as const,
   zones: (accountId: number) => ["cloudflare", accountId, "zones"] as const,
+  zone: (accountId: number, zoneId: string) =>
+    ["cloudflare", accountId, "zones", zoneId] as const,
   dns: (accountId: number, zoneId: string) => ["cloudflare", accountId, "zones", zoneId, "dns"] as const,
   nameservers: (accountId: number, zoneId: string) =>
     ["cloudflare", accountId, "zones", zoneId, "nameservers"] as const,
@@ -133,6 +135,20 @@ export function useCloudflareZones(accountId: number | null | undefined) {
     queryKey: accountId ? cloudflareKeys.zones(accountId) : ["cloudflare", "zones", "disabled"],
     queryFn: () => apiGet<Zone[]>(`/cloudflare/accounts/${accountId}/zones`),
     enabled: !!accountId,
+  });
+}
+
+export function useZoneDetails(
+  accountId: number | null | undefined,
+  zoneId: string | null | undefined
+) {
+  return useQuery({
+    queryKey:
+      accountId && zoneId
+        ? cloudflareKeys.zone(accountId, zoneId)
+        : ["cloudflare", "zone", "disabled"],
+    queryFn: () => apiGet<Zone>(`/cloudflare/accounts/${accountId}/zones/${zoneId}`),
+    enabled: !!accountId && !!zoneId,
   });
 }
 
