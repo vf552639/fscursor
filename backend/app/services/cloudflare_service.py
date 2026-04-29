@@ -136,6 +136,46 @@ async def delete_account(db: AsyncSession, account_id: int) -> bool:
     return True
 
 
+async def _get_zone_by_name(account: CloudflareAccount, zone_name: str) -> Optional[dict]:
+    name = zone_name.strip()
+    if not name:
+        return None
+    data = await _call(account, "GET", "/zones", params={"name": name, "per_page": 50, "page": 1})
+    for z in data.get("result") or []:
+        if (z.get("name") or "").strip().lower() == name.lower():
+            return z
+    return None
+
+
+async def create_zone(
+    db: AsyncSession, account_id: int, *, zone_name: str
+) -> tuple[dict, bool]:
+    """Create a Cloudflare zone or return an existing zone if the API reports a duplicate.
+
+    Returns ``(zone_dict, was_created)``. ``was_created`` is False when the zone
+    already existed and was resolved via the zones list API.
+    """
+    account = await _get_account(db, account_id)
+    if not account:
+        raise CloudflareError("Account not found")
+    body: dict[str, Any] = {"name": zone_name.strip()}
+    if account.account_id:
+        body["account"] = {"id": account.account_id}
+    try:
+        data = await _call(account, "POST", "/zones", json=body)
+        return (data.get("result") or {}, True)
+    except CloudflareError as exc:
+        err_text = str(exc).lower()
+        if any(
+            token in err_text
+            for token in ("1061", "already exists", "duplicate", "already been added")
+        ):
+            existing = await _get_zone_by_name(account, zone_name)
+            if existing:
+                return (existing, False)
+        raise
+
+
 async def list_zones(db: AsyncSession, account_id: int) -> list[dict]:
     account = await _get_account(db, account_id)
     if not account:

@@ -1,5 +1,8 @@
 from enum import StrEnum
 
+# Months after domain purchase_date before renewal reminder (see renewal_task / notifications).
+RENEWAL_NOTICE_MONTHS = 9
+
 
 class ServerStatus(StrEnum):
     NEW = "new"
