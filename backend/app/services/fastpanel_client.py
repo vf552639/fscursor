@@ -1,5 +1,6 @@
 import secrets
 import shlex
+import socket
 import string
 import time
 
@@ -148,3 +149,61 @@ def issue_ssl_certificate(
     if not cert_exists(client, domain):
         return {"success": False, "error": "SSL certificate file check failed"}
     return {"success": True, "error": None, "output": out}
+
+
+def detect_firewall(client: paramiko.SSHClient) -> str | None:
+    for fw in ("ufw", "firewall-cmd"):
+        code, _ = run_remote(client, f"command -v {shlex.quote(fw)}")
+        if code == 0:
+            return "ufw" if fw == "ufw" else "firewalld"
+    return None
+
+
+def ensure_ports_open(client: paramiko.SSHClient, ports: tuple[int, ...] = (80, 443)) -> dict:
+    firewall = detect_firewall(client)
+    if firewall is None:
+        return {"success": True, "firewall": None, "output": "no firewall detected"}
+    if firewall == "ufw":
+        outputs: list[str] = []
+        for port in ports:
+            code, out = run_remote(client, f"ufw allow {int(port)}/tcp")
+            outputs.append(out if out else f"ufw allow {port}/tcp -> {code}")
+            if code != 0:
+                return {"success": False, "firewall": firewall, "error": "".join(outputs)}
+        return {"success": True, "firewall": firewall, "output": "\n".join(outputs)}
+    outputs = []
+    for port in ports:
+        code, out = run_remote(
+            client,
+            f"firewall-cmd --permanent --add-port={int(port)}/tcp",
+        )
+        outputs.append(out if out else f"firewalld add-port {port}/tcp -> {code}")
+        if code != 0 and "ALREADY_ENABLED" not in out:
+            return {"success": False, "firewall": firewall, "error": "".join(outputs)}
+    run_remote(client, "firewall-cmd --reload")
+    return {"success": True, "firewall": firewall, "output": "\n".join(outputs)}
+
+
+def dns_resolves_to(
+    domain: str, expected_ip: str, attempts: int = 10, delay: int = 15
+) -> bool:
+    expected = expected_ip.strip()
+    for idx in range(attempts):
+        try:
+            infos = socket.getaddrinfo(domain, None)
+            ips = {info[4][0] for info in infos}
+            if expected in ips:
+                return True
+        except Exception:
+            pass
+        if idx < attempts - 1:
+            time.sleep(delay)
+    return False
+
+
+def http_check(domain: str, port: int = 80, timeout: int = 5) -> bool:
+    try:
+        with socket.create_connection((domain, port), timeout=timeout):
+            return True
+    except Exception:
+        return False

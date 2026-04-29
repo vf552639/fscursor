@@ -2,6 +2,7 @@ import asyncio
 
 from sqlalchemy import select
 
+from app.core.constants import DomainStatus, SslStatus, TaskLogStatus
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
 from app.models.domain import Domain
@@ -13,11 +14,14 @@ from app.services.fastpanel_client import (
     cert_exists,
     create_ftp_account,
     create_site,
+    dns_resolves_to,
+    ensure_ports_open,
     get_fastpanel_path,
     issue_ssl_certificate,
     open_ssh,
     site_exists,
 )
+from app.services.notification_service import create_notification
 from app.services.ssl_email_service import mark_used, pick_email
 
 
@@ -34,7 +38,7 @@ async def _create_task_log(domain_id: int) -> int:
             entity_type="domain",
             entity_id=domain_id,
             task_type="provision_domain",
-            status="pending",
+            status=TaskLogStatus.PENDING.value,
             log_text="",
         )
         session.add(tl)
@@ -62,12 +66,15 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
             await session.execute(select(Domain).where(Domain.id == domain_id))
         ).scalar_one_or_none()
         if domain is None:
-            await _append_log(session, task_log, "Domain not found\n", "failed")
+            await _append_log(session, task_log, "Domain not found\n", TaskLogStatus.FAILED.value)
             return {"domain_id": domain_id, "task_log_id": task_log_id}
         if not domain.server_id:
-            domain.status = "failed"
+            domain.status = DomainStatus.FAILED.value
+            domain.last_provision_error = "Domain has no assigned server"
             await session.commit()
-            await _append_log(session, task_log, "Domain has no assigned server\n", "failed")
+            await _append_log(
+                session, task_log, "Domain has no assigned server\n", TaskLogStatus.FAILED.value
+            )
             return {"domain_id": domain_id, "task_log_id": task_log_id}
 
         server = await session.get(Server, domain.server_id)
@@ -77,13 +84,14 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
             )
         ).scalar_one_or_none()
         if server is None or secret is None or not secret.ssh_password_encrypted:
-            domain.status = "failed"
+            domain.status = DomainStatus.FAILED.value
+            domain.last_provision_error = "Server or SSH secret is missing"
             await session.commit()
             await _append_log(
                 session,
                 task_log,
                 "Server or SSH secret is missing\n",
-                "failed",
+                TaskLogStatus.FAILED.value,
             )
             return {"domain_id": domain_id, "task_log_id": task_log_id}
 
@@ -96,7 +104,7 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
                 session,
                 task_log,
                 f"Connecting to {server.ip_address}:{server.ssh_port}\n",
-                "running",
+                TaskLogStatus.RUNNING.value,
             )
             client = await asyncio.to_thread(
                 open_ssh,
@@ -107,34 +115,60 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
             )
             fp_path = await asyncio.to_thread(get_fastpanel_path, client, None)
             if not fp_path:
-                domain.status = "failed"
+                domain.status = DomainStatus.FAILED.value
+                domain.last_provision_error = "FastPanel binary not found"
                 await session.commit()
-                await _append_log(session, task_log, "FastPanel binary not found\n", "failed")
+                await _append_log(
+                    session, task_log, "FastPanel binary not found\n", TaskLogStatus.FAILED.value
+                )
                 return {"domain_id": domain_id, "task_log_id": task_log_id}
+
+            ports_result = await asyncio.to_thread(ensure_ports_open, client, (80, 443))
+            if ports_result.get("success"):
+                await _append_log(session, task_log, "Ports 80/443 preflight completed\n")
+            else:
+                await _append_log(
+                    session,
+                    task_log,
+                    f"Warning: firewall preflight failed: {ports_result.get('error')}\n",
+                )
 
             if domain.site_user and await asyncio.to_thread(
                 site_exists, client, domain.site_user, domain.domain_name
             ):
                 site_ok = True
                 await _append_log(session, task_log, "Site already exists, skipping\n")
+                domain.status = DomainStatus.SITE_CREATED.value
+                await session.commit()
             else:
                 site_result = await asyncio.to_thread(
                     create_site, client, fp_path, domain.domain_name, php_version
                 )
                 if not site_result["success"]:
-                    domain.status = "failed"
+                    domain.status = DomainStatus.FAILED.value
+                    domain.last_provision_error = f"Site create failed: {site_result['error']}"
                     await session.commit()
                     await _append_log(
                         session,
                         task_log,
                         f"Site create failed: {site_result['error']}\n",
-                        "failed",
+                        TaskLogStatus.FAILED.value,
+                    )
+                    await create_notification(
+                        session,
+                        type="domain_provision_failed",
+                        entity_type="domain",
+                        entity_id=domain.id,
+                        title=f"Provision failed for {domain.domain_name}",
+                        message=domain.last_provision_error,
+                        dedup_key=f"domain_provision_failed:{domain.id}:site",
                     )
                     return {"domain_id": domain_id, "task_log_id": task_log_id}
                 domain.site_user = site_result["site_user"]
                 domain.site_path = site_result["site_path"]
                 domain.php_version = php_version
-                domain.status = "provisioning"
+                domain.status = DomainStatus.SITE_CREATED.value
+                domain.last_provision_error = None
                 await session.commit()
                 await _append_log(session, task_log, "Site created\n")
                 site_ok = True
@@ -158,22 +192,62 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
                     await _append_log(session, task_log, "FTP account created\n")
 
             ssl_active = (
-                domain.ssl_status == "active"
+                domain.ssl_status == SslStatus.ACTIVE.value
                 and await asyncio.to_thread(cert_exists, client, domain.domain_name)
             )
             if ssl_active:
                 await _append_log(session, task_log, "SSL already active, skipping\n")
             else:
+                await _append_log(session, task_log, "Running DNS pre-check\n")
+                dns_ok = await asyncio.to_thread(
+                    dns_resolves_to, domain.domain_name, server.ip_address, 10, 15
+                )
+                if not dns_ok:
+                    domain.ssl_status = SslStatus.ERROR.value
+                    domain.last_provision_error = "DNS not pointing to server"
+                    await session.commit()
+                    await _append_log(
+                        session,
+                        task_log,
+                        "DNS pre-check failed, skipping SSL\n",
+                    )
+                    await create_notification(
+                        session,
+                        type="domain_provision_failed",
+                        entity_type="domain",
+                        entity_id=domain.id,
+                        title=f"SSL step failed for {domain.domain_name}",
+                        message=domain.last_provision_error,
+                        dedup_key=f"domain_provision_failed:{domain.id}:dns",
+                    )
+                    domain.status = DomainStatus.ACTIVE.value if site_ok else DomainStatus.FAILED.value
+                    await session.commit()
+                    await _append_log(session, task_log, "Provisioning finished\n", TaskLogStatus.SUCCESS.value)
+                    return {"domain_id": domain_id, "task_log_id": task_log_id}
+
                 ssl_email = await pick_email(session)
                 if ssl_email is None:
-                    domain.ssl_status = "error"
+                    domain.ssl_status = SslStatus.ERROR.value
+                    domain.last_provision_error = "SSL email pool exhausted"
                     await session.commit()
                     await _append_log(
                         session,
                         task_log,
                         "SSL email pool exhausted\n",
                     )
+                    await create_notification(
+                        session,
+                        type="ssl_pool_exhausted",
+                        entity_type="domain",
+                        entity_id=domain.id,
+                        title="SSL email pool exhausted",
+                        message="Add a new SSL email and re-run provisioning.",
+                        dedup_key="ssl_pool_exhausted:provision",
+                    )
                 else:
+                    domain.ssl_status = SslStatus.PENDING.value
+                    domain.status = DomainStatus.SSL_PENDING.value
+                    await session.commit()
                     ssl_result = await asyncio.to_thread(
                         issue_ssl_certificate,
                         client,
@@ -182,31 +256,52 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
                         ssl_email.email,
                     )
                     if ssl_result["success"]:
-                        domain.ssl_status = "active"
+                        domain.ssl_status = SslStatus.ACTIVE.value
                         domain.ssl_email_used = ssl_email.email
+                        domain.last_provision_error = None
                         await session.commit()
                         await mark_used(session, ssl_email.id)
                         await _append_log(session, task_log, "SSL certificate issued\n")
+                        await create_notification(
+                            session,
+                            type="domain_provision_success",
+                            entity_type="domain",
+                            entity_id=domain.id,
+                            title=f"Provision completed for {domain.domain_name}",
+                            message="Site, FTP, and SSL were provisioned successfully.",
+                            dedup_key=f"domain_provision_success:{domain.id}",
+                        )
                     else:
-                        domain.ssl_status = "error"
+                        domain.ssl_status = SslStatus.ERROR.value
+                        domain.last_provision_error = str(ssl_result["error"])
                         await session.commit()
                         await _append_log(
                             session,
                             task_log,
                             f"SSL issue failed: {ssl_result['error']}\n",
                         )
+                        await create_notification(
+                            session,
+                            type="domain_provision_failed",
+                            entity_type="domain",
+                            entity_id=domain.id,
+                            title=f"SSL step failed for {domain.domain_name}",
+                            message=domain.last_provision_error,
+                            dedup_key=f"domain_provision_failed:{domain.id}:ssl",
+                        )
 
-            domain.status = "active" if site_ok else "failed"
+            domain.status = DomainStatus.ACTIVE.value if site_ok else DomainStatus.FAILED.value
             await session.commit()
-            await _append_log(session, task_log, "Provisioning finished\n", "success")
+            await _append_log(session, task_log, "Provisioning finished\n", TaskLogStatus.SUCCESS.value)
         except Exception as exc:
-            domain.status = "failed"
+            domain.status = DomainStatus.FAILED.value
+            domain.last_provision_error = f"{type(exc).__name__}: {exc}"
             await session.commit()
             await _append_log(
                 session,
                 task_log,
                 f"Error: {type(exc).__name__}: {exc}\n",
-                "failed",
+                TaskLogStatus.FAILED.value,
             )
         finally:
             if client is not None:

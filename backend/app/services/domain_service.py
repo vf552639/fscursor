@@ -1,20 +1,16 @@
-import re
 from typing import Optional
 
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.validators import is_valid_domain, normalize_domain
 from app.models.domain import Domain
 from app.models.registrar_account import RegistrarAccount
 from app.schemas.domain import DomainCreate, DomainUpdate, DomainBulkCreateItem
 
-DOMAIN_RE = re.compile(
-    r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$", re.I
-)
-
 
 def _normalize(name: str) -> str:
-    return name.strip().lower().rstrip(".")
+    return normalize_domain(name)
 
 
 async def get_all(
@@ -111,7 +107,7 @@ async def bulk_create(
     skipped: list[str] = []
     existing_names = await _get_existing_domain_names(db, names)
     for name in names:
-        if not DOMAIN_RE.match(name):
+        if not is_valid_domain(name):
             skipped.append(name)
             continue
         if name in existing_names:
@@ -151,7 +147,7 @@ async def bulk_create_structured(
 
     for item in items:
         name = _normalize(item.domain_name)
-        if not name or not DOMAIN_RE.match(name):
+        if not name or not is_valid_domain(name):
             skipped.append(item.domain_name)
             continue
 

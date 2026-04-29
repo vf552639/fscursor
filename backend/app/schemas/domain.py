@@ -45,6 +45,7 @@ class DomainResponse(DomainBase):
     ssl_status: Optional[str] = None
     ssl_email_used: Optional[str] = None
     php_version: Optional[str] = None
+    last_provision_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

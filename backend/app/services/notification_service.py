@@ -83,3 +83,34 @@ async def upsert_renewal_notification(db: AsyncSession, domain: Domain) -> bool:
     if created:
         await db.commit()
     return created
+
+
+async def create_notification(
+    db: AsyncSession,
+    *,
+    type: str,
+    entity_type: str,
+    entity_id: int,
+    title: str,
+    message: str,
+    dedup_key: str,
+) -> bool:
+    stmt = (
+        insert(Notification)
+        .values(
+            type=type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            title=title,
+            message=message,
+            dedup_key=dedup_key,
+            is_read=False,
+        )
+        .on_conflict_do_nothing(index_elements=[Notification.dedup_key])
+        .returning(Notification.id)
+    )
+    result = await db.execute(stmt)
+    created = result.scalar_one_or_none() is not None
+    if created:
+        await db.commit()
+    return created

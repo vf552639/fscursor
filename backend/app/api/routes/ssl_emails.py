@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.ssl_email import SslEmail
 from app.schemas.ssl_email import SslEmailCreate, SslEmailResponse, SslEmailUpdate
 from app.services import ssl_email_service
 
@@ -19,7 +18,10 @@ async def list_ssl_emails(db: AsyncSession = Depends(get_db)) -> list[SslEmailRe
 async def create_ssl_email(
     data: SslEmailCreate, db: AsyncSession = Depends(get_db)
 ) -> SslEmailResponse:
-    item = await ssl_email_service.add_email(db, data.email, data.usage_cap)
+    try:
+        item = await ssl_email_service.add_email(db, data.email, data.usage_cap)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     return SslEmailResponse.model_validate(item)
 
 
@@ -27,21 +29,16 @@ async def create_ssl_email(
 async def patch_ssl_email(
     email_id: int, data: SslEmailUpdate, db: AsyncSession = Depends(get_db)
 ) -> SslEmailResponse:
-    item = await db.get(SslEmail, email_id)
+    item = await ssl_email_service.update_email(
+        db, email_id, is_active=data.is_active, usage_cap=data.usage_cap
+    )
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSL email not found")
-    patch = data.model_dump(exclude_unset=True)
-    for key, value in patch.items():
-        setattr(item, key, value)
-    await db.commit()
-    await db.refresh(item)
     return SslEmailResponse.model_validate(item)
 
 
 @router.delete("/{email_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_ssl_email(email_id: int, db: AsyncSession = Depends(get_db)) -> None:
-    item = await db.get(SslEmail, email_id)
-    if item is None:
+    deleted = await ssl_email_service.delete_email(db, email_id)
+    if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSL email not found")
-    await db.delete(item)
-    await db.commit()

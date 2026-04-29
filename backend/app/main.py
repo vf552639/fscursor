@@ -9,10 +9,11 @@ from sqlalchemy import text
 from app.api.routes import api_router
 from app.core.config import settings
 from app.core.database import engine
+from app.core.logging import add_loguru_intercept_handler, configure_logging
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "006_provisioning_and_ssl_pool"
+EXPECTED_ALEMBIC_HEAD = "007_domain_provision_error"
 
 
 @asynccontextmanager
@@ -55,6 +56,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Server & Domain Management Panel", lifespan=lifespan)
+configure_logging()
+add_loguru_intercept_handler()
 
 app.add_middleware(
     CORSMiddleware,

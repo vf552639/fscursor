@@ -1,9 +1,15 @@
+import csv
+import io
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.constants import DomainStatus
+from app.models.domain import Domain
 from app.models.task_log import TaskLog
 from app.schemas.domain import (
     BulkSetNSRequest,
@@ -226,4 +232,32 @@ async def get_ftp_credentials(
         domain_id=domain.id,
         ftp_user=domain.ftp_user,
         ftp_password=ftp_password,
+    )
+
+
+@router.get("/failed-export.csv")
+async def export_failed_domains_csv(db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+    result = await db.execute(
+        select(Domain)
+        .where(Domain.status == DomainStatus.FAILED.value)
+        .order_by(Domain.updated_at.desc())
+    )
+    rows = result.scalars().all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["domain_name", "status", "last_provision_error", "updated_at"])
+    for row in rows:
+        writer.writerow(
+            [
+                row.domain_name,
+                row.status,
+                row.last_provision_error or "",
+                row.updated_at.isoformat(),
+            ]
+        )
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=failed_domains.csv"},
     )

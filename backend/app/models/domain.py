@@ -36,6 +36,7 @@ class Domain(Base, TimestampMixin):
     ssl_status: Mapped[Optional[str]] = mapped_column(String(16), default="none")
     ssl_email_used: Mapped[Optional[str]] = mapped_column(String(255))
     php_version: Mapped[Optional[str]] = mapped_column(String(8))
+    last_provision_error: Mapped[Optional[str]] = mapped_column(Text)
 
     registrar: Mapped[Optional["RegistrarAccount"]] = relationship(back_populates="domains")
     server: Mapped[Optional["Server"]] = relationship(back_populates="domains")
