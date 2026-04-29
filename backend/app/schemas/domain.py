@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DomainBase(BaseModel):
@@ -115,3 +115,21 @@ class BulkProvisionRequest(BaseModel):
 
 class BulkProvisionResponse(BaseModel):
     task_ids: list[str]
+
+
+class DomainBulkImportError(BaseModel):
+    row: int
+    domain: str
+    reason: str
+
+
+class DomainBulkImportResponse(BaseModel):
+    created: int
+    skipped: int
+    errors: list[DomainBulkImportError]
+    errors_csv_url: Optional[str] = None
+
+
+class DomainBulkImportRequest(BaseModel):
+    has_header: bool = Field(default=True)
+    default_registrar_id: Optional[int] = None

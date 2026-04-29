@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Card, StatCard, Badge, Btn, Sel, fmtDT } from "../components/ui/Primitives";
 import { useTaskLogs } from "../api/tasks";
 import { useServers } from "../api/servers";
+import TaskProgressModal from "../components/TaskProgressModal";
 
 export default function Activity(){
   const { data: qTasks, isLoading: l1 } = useTaskLogs();
@@ -21,7 +22,7 @@ export default function Activity(){
   const servers = qServers?.items || [];
   const activityLogs: any[] = []; // No activity log backend yet
 
-  const [tab,setTab]=useState("tasks"); const [fType,setFT]=useState(""); const [fStat,setFS]=useState(""); const [openLog,setOpen]=useState<any>(null);
+  const [tab,setTab]=useState("tasks"); const [fType,setFT]=useState(""); const [fStat,setFS]=useState(""); const [openTaskId,setOpenTaskId]=useState<number | null>(null);
   const stMap: Record<string, string[]>={installed:["green","✓ Installed"],ok:["green","✓ OK"],success:["green","✓ Success"],failed:["red","✕ Failed"],error:["red","✕ Error"],pending:["yellow","⏳ Pending"],running:["blue","⚙ Running"]};
   const tMap: Record<string, string>={install_fastpanel:"⚡ FastPanel Install",set_nameservers:"🔗 Set Nameservers"};
   const aLabel: Record<string, string>={create:"Created",delete:"Deleted",update:"Updated",fastpanel_install:"FP Install",ns_update:"NS Updated",bulk_create:"Bulk Created",reboot:"Rebooted"};
@@ -67,7 +68,7 @@ export default function Activity(){
                 <td style={{padding:"11px 16px"}}><Badge variant={sv}>{sl}</Badge></td>
                 <td style={{padding:"11px 16px",fontSize:12.5,color:"#6b7280",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.log}</td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af",whiteSpace:"nowrap"}}>{fmtDT(t.created)}</td>
-                <td style={{padding:"11px 16px"}}><Btn size="sm" variant="secondary" onClick={()=>setOpen(t)}>View Log</Btn></td>
+                <td style={{padding:"11px 16px"}}><Btn size="sm" variant="secondary" onClick={()=>setOpenTaskId(t.id)}>View Log</Btn></td>
               </tr>;
             })}
             {filtTasks.length===0&&<tr><td colSpan={7} style={{textAlign:"center",padding:40,color:"#6b7280"}}>No task logs found.</td></tr>}
@@ -90,29 +91,6 @@ export default function Activity(){
         </tbody>
       </table>}
     </Card>
-    {openLog&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.3)",zIndex:100,display:"flex",justifyContent:"flex-end"}} onClick={e=>{if(e.target===e.currentTarget)setOpen(null);}}>
-      <div style={{width:500,background:"#fff",height:"100%",overflowY:"auto",boxShadow:"-4px 0 24px rgba(0,0,0,0.12)",display:"flex",flexDirection:"column"}}>
-        <div style={{padding:"20px 24px",borderBottom:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div><div style={{fontSize:15,fontWeight:700,color:"#111",marginBottom:6}}>{tMap[openLog.type]||openLog.type}</div><Badge variant={(stMap[openLog.status]||["gray"])[0]}>{(stMap[openLog.status]||["","?"])[1]}</Badge></div>
-          <button onClick={()=>setOpen(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#9ca3af"}}>✕</button>
-        </div>
-        <div style={{padding:"16px 24px",borderBottom:"1px solid #e5e7eb"}}>
-          {[
-            ["Task ID",`#${openLog.id}`],
-            ["Status",(stMap[openLog.status]||["","?"])[1]],
-            ["Created",fmtDT(openLog.created)],
-            ["Server",openLog.server_id?servers.find((s:any)=>s.id===openLog.server_id)?.name||`#${openLog.server_id}`:"—"]
-          ].map(([k,v])=>(
-            <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #f3f4f6"}}><div style={{fontSize:12.5,color:"#6b7280"}}>{k}</div><div style={{fontSize:13,fontWeight:600,color:"#111"}}>{v as string}</div></div>
-          ))}
-        </div>
-        <div style={{padding:"20px 24px",flex:1}}>
-          <div style={{fontSize:12,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:10}}>Log Output</div>
-          <div style={{background:"#111",borderRadius:8,padding:"14px 16px",fontFamily:"monospace",fontSize:12.5,color:"#86efac",lineHeight:1.8,whiteSpace:"pre-wrap"}}>
-            {openLog.log}
-          </div>
-        </div>
-      </div>
-    </div>}
+    {openTaskId !== null && <TaskProgressModal taskId={openTaskId} onClose={() => setOpenTaskId(null)} />}
   </>;
 }

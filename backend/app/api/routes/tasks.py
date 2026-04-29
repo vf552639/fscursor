@@ -1,10 +1,13 @@
+import asyncio
+import json
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.models.task_log import TaskLog
 from app.schemas.task import TaskLogResponse
 
@@ -23,3 +26,30 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@router.get("/{task_id}/stream")
+async def stream_task(task_id: int) -> StreamingResponse:
+    async def events():
+        last_log = ""
+        while True:
+            async with AsyncSessionLocal() as session:
+                task = await session.get(TaskLog, task_id)
+            if not task:
+                yield "event: error\ndata: {\"message\":\"Task not found\"}\n\n"
+                break
+            payload = {
+                "id": task.id,
+                "status": task.status,
+                "log_text": task.log_text or "",
+                "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+            }
+            current_log = payload["log_text"]
+            if current_log != last_log:
+                last_log = current_log
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            if task.status in {"success", "failed"}:
+                break
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(events(), media_type="text/event-stream")

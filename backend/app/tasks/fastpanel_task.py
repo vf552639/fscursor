@@ -10,6 +10,7 @@ from app.core.database import AsyncSessionLocal
 from app.models.server import Server, ServerSecret
 from app.models.task_log import TaskLog
 from app.services.encryption_service import decrypt, encrypt
+from app.services.notification_service import create_notification
 
 INSTALL_CMD = (
     "wget https://repo.fastpanel.direct/install_fastpanel.sh -O - | bash -"
@@ -90,6 +91,15 @@ async def _install(server_id: int, task_log_id: int) -> None:
         if not secret or not secret.ssh_password_encrypted:
             await _set_status(session, server, "failed")
             await _append_log(session, task_log, "SSH password is not set\n", "failed")
+            await create_notification(
+                session,
+                type="fastpanel_install_failed",
+                entity_type="server",
+                entity_id=server.id,
+                title=f"FastPanel install failed on {server.name}",
+                message="SSH password is not set.",
+                dedup_key=f"fastpanel_install_failed:{server.id}:ssh",
+            )
             return
 
         password = decrypt(secret.ssh_password_encrypted)
@@ -115,6 +125,15 @@ async def _install(server_id: int, task_log_id: int) -> None:
             if code != 0:
                 await _set_status(session, server, "failed")
                 await _append_log(session, task_log, f"Update failed (exit {code})\n", "failed")
+                await create_notification(
+                    session,
+                    type="fastpanel_install_failed",
+                    entity_type="server",
+                    entity_id=server.id,
+                    title=f"FastPanel install failed on {server.name}",
+                    message=f"System update failed (exit {code}).",
+                    dedup_key=f"fastpanel_install_failed:{server.id}:update",
+                )
                 return
 
             await _set_status(session, server, "installing")
@@ -128,6 +147,15 @@ async def _install(server_id: int, task_log_id: int) -> None:
             if code != 0:
                 await _set_status(session, server, "failed")
                 await _append_log(session, task_log, f"Installer failed (exit {code})\n", "failed")
+                await create_notification(
+                    session,
+                    type="fastpanel_install_failed",
+                    entity_type="server",
+                    entity_id=server.id,
+                    title=f"FastPanel install failed on {server.name}",
+                    message=f"Installer failed (exit {code}).",
+                    dedup_key=f"fastpanel_install_failed:{server.id}:installer",
+                )
                 return
 
             server.fastpanel_url = url
@@ -137,9 +165,27 @@ async def _install(server_id: int, task_log_id: int) -> None:
             server.status = "active"
             await _set_status(session, server, "installed")
             await _append_log(session, task_log, "FastPanel installed\n", "success")
+            await create_notification(
+                session,
+                type="fastpanel_install_success",
+                entity_type="server",
+                entity_id=server.id,
+                title=f"FastPanel installed on {server.name}",
+                message="Server is ready for domain provisioning.",
+                dedup_key=f"fastpanel_install_success:{server.id}",
+            )
         except Exception as e:
             await _set_status(session, server, "failed")
             await _append_log(session, task_log, f"Error: {type(e).__name__}: {e}\n", "failed")
+            await create_notification(
+                session,
+                type="fastpanel_install_failed",
+                entity_type="server",
+                entity_id=server.id,
+                title=f"FastPanel install failed on {server.name}",
+                message=f"Unhandled error: {type(e).__name__}: {e}",
+                dedup_key=f"fastpanel_install_failed:{server.id}:exception",
+            )
         finally:
             client.close()
 

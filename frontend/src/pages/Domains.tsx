@@ -1,9 +1,13 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, Domain } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, Domain } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
+import StatusBadge from "../components/StatusBadge";
+import TaskProgressModal from "../components/TaskProgressModal";
+import BulkActionToolbar from "../components/BulkActionToolbar";
+import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 
 interface AddDomainModalProps {
   onClose: () => void;
@@ -21,6 +25,9 @@ interface DomainUI {
   cf_zone_id: string | null;
   ns_status: string;
   ns_updated_at: string | null;
+  status: string;
+  ssl_status?: string | null;
+  last_provision_error?: string | null;
   created: string;
 }
 
@@ -190,10 +197,16 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     cf_zone_id: d.cloudflare_zone_id,
     ns_status: d.ns_status || "pending",
     ns_updated_at: d.ns_updated_at,
+    status: d.status,
+    ssl_status: d.ssl_status,
+    last_provision_error: d.last_provision_error,
     created: d.created_at,
   })), [domainsData]);
 
-  const [search,setSearch]=useState(""); const [fSrv,setFS]=useState(""); const [fReg,setFR]=useState(""); const [fCF,setFCF]=useState("");
+  const initialStatusFilter = useMemo(() => {
+    return new URLSearchParams(window.location.search).get("status") ?? "";
+  }, []);
+  const [search,setSearch]=useState(""); const [fSrv,setFS]=useState(""); const [fReg,setFR]=useState(""); const [fCF,setFCF]=useState(""); const [fStatus, setFStatus] = useState(initialStatusFilter);
   const [sel,setSel]=useState<Set<number>>(new Set()); 
   const [showBulk,setSB]=useState(false);
   const [showAdd,setSA]=useState(false);
@@ -208,7 +221,11 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
   const bulkSetNs = useBulkSetNameservers();
+  const bulkProvision = useBulkProvisionDomains();
+  const singleProvision = useProvisionDomain();
   const deleteDomain = useDeleteDomain();
+  const [progressTaskId, setProgressTaskId] = useState<number | null>(null);
+  const [showFileImport, setShowFileImport] = useState(false);
 
   useEffect(() => {
     if (ctx?.serverId) {
@@ -220,13 +237,31 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     }
   }, [ctx]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (fStatus) params.set("status", fStatus);
+    else params.delete("status");
+    const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`;
+    window.history.replaceState({}, "", next);
+  }, [fStatus]);
+
   const filtered = useMemo(() => domains.filter((d: DomainUI) => 
     (!search || d.domain.toLowerCase().includes(search.toLowerCase()) || String(d.id) === search) &&
     (!fSrv || d.server_id === Number(fSrv)) &&
     (!fReg || d.registrar_id === Number(fReg)) &&
     (!fCF || d.cf_id === Number(fCF)) &&
+    (!fStatus || d.status === fStatus) &&
     (!focusDomainId || d.id === focusDomainId)
-  ), [search, fSrv, fReg, fCF, focusDomainId, domains]);
+  ), [search, fSrv, fReg, fCF, fStatus, focusDomainId, domains]);
+  const failedAtSslCount = useMemo(
+    () =>
+      domains.filter(
+        (d) =>
+          d.status === "failed" &&
+          (d.last_provision_error || "").toLowerCase().includes("ssl")
+      ).length,
+    [domains]
+  );
   
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
   const Th=({c,children}: {c?: string, children: React.ReactNode})=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap",...(c?{color:c}:{})}}>{children}</th>;
@@ -323,6 +358,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     });
   };
 
+  const handleBulkProvision = () => {
+    bulkProvision.mutate(Array.from(sel), {
+      onSuccess: () => setSel(new Set())
+    });
+  };
+
   const handleBulkDelete = () => {
     if (!confirm(`Удалить ${sel.size} доменов?`)) return;
     Promise.all(Array.from(sel).map(id => deleteDomain.mutateAsync(id)))
@@ -351,8 +392,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
 
   return <>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-      <div><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Domains</h1><div style={{fontSize:13,color:"#6b7280"}}>{domains.length} domains total</div></div>
+      <div>
+        <h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Domains</h1>
+        <div style={{fontSize:13,color:"#6b7280"}}>{domains.length} domains total</div>
+      </div>
       <div style={{display:"flex",gap:8}}>
+        <Btn variant="secondary" onClick={()=>setShowFileImport(true)}>⇪ File Import</Btn>
         <Btn variant="secondary" onClick={()=>setSB(true)}>⊕ Bulk Add</Btn>
         <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Domain</Btn>
       </div>
@@ -367,23 +412,38 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
         <div key={l as string} style={{background:bg as string,border:"1px solid",borderColor:bg as string,borderRadius:10,padding:"14px 18px"}}><div style={{fontSize:22,fontWeight:700,color:c as string}}>{v as number}</div><div style={{fontSize:12,color:c as string,opacity:0.8}}>{l as string}</div></div>
       ))}
     </div>
+    {failedAtSslCount > 0 ? (
+      <div style={{ marginBottom: 12 }}>
+        <Badge variant="red">Failed at SSL: {failedAtSslCount}</Badge>
+      </div>
+    ) : null}
     <Card style={{marginBottom:16}}>
       <div style={{padding:"12px 16px",display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
         <div style={{position:"relative",flex:1,minWidth:180}}><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#9ca3af",fontSize:13}}>⌕</span><input value={search} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setSearch(e.target.value)} placeholder="Search domains…" style={{width:"100%",padding:"7px 12px 7px 30px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,outline:"none",background:"#f9fafb",boxSizing:"border-box",fontFamily:"inherit"}}/></div>
         <Sel value={fSrv} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFS(e.target.value)}><option value="">All Servers</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel>
         <Sel value={fReg} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFR(e.target.value)}><option value="">All Registrars</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel>
         <Sel value={fCF} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFCF(e.target.value)}><option value="">All CF</option>{cfAccounts.map((c: CloudflareAccount)=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel>
+        <Sel value={fStatus} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFStatus(e.target.value)}>
+          <option value="">All Statuses</option>
+          <option value="new">NEW</option>
+          <option value="ns_pending">NS_PENDING</option>
+          <option value="provisioning">PROVISIONING</option>
+          <option value="site_created">SITE_CREATED</option>
+          <option value="ssl_pending">SSL_PENDING</option>
+          <option value="active">ACTIVE</option>
+          <option value="failed">FAILED</option>
+        </Sel>
       </div>
     </Card>
-    {sel.size>0&&<div style={{background:"#eff4ff",border:"1px solid #bfdbfe",borderRadius:10,padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      <span style={{fontSize:13,fontWeight:600,color:"#2563eb"}}>{sel.size} selected</span>
-      <Btn size="sm" variant="secondary" onClick={() => setShowAssignServer(true)}>Assign Server</Btn>
-      <Btn size="sm" variant="secondary" onClick={() => setShowAssignCF(true)}>Assign CF</Btn>
-      <Btn size="sm" variant="secondary" onClick={handleSetNs} disabled={bulkSetNs.isPending}>
-        {bulkSetNs.isPending ? "Setting NS..." : "↺ Set NS"}
-      </Btn>
-      <Btn size="sm" variant="danger" style={{marginLeft:"auto"}} onClick={handleBulkDelete}>✕ Delete</Btn>
-    </div>}
+    <BulkActionToolbar
+      selectedCount={sel.size}
+      onAssignServer={() => setShowAssignServer(true)}
+      onAssignCF={() => setShowAssignCF(true)}
+      onSetNs={handleSetNs}
+      onProvision={handleBulkProvision}
+      onDelete={handleBulkDelete}
+      pending={bulkSetNs.isPending || bulkProvision.isPending}
+    />
     <Card>
       <div style={{overflowX:"auto"}}>
         {domainsData.length === 0 ? (
@@ -392,6 +452,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
             description="Add a domain or import many at once. An empty list means there are no rows in the database — not a failed request."
           >
             <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <Btn variant="secondary" onClick={() => setShowFileImport(true)}>
+                ⇪ File import
+              </Btn>
               <Btn variant="secondary" onClick={() => setSB(true)}>
                 ⊕ Bulk import
               </Btn>
@@ -403,12 +466,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
         ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===filtered.length&&filtered.length>0} onChange={()=>setSel(sel.size===filtered.length?new Set():new Set(filtered.map((d: any)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {["Domain","Server","Registrar","Cloudflare","SSL","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
+            {["Domain","Server","Registrar","Cloudflare","Status","SSL","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
           </tr></thead>
           <tbody>
             {filtered.length === 0 && domainsData.length > 0 ? (
               <tr>
-                <td colSpan={8} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                <td colSpan={9} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
                   No domains match the current filters.
                 </td>
               </tr>
@@ -423,11 +486,13 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                 <td style={{padding:"11px 16px",fontSize:13}}>{srv?<span style={{display:"flex",alignItems:"center",gap:5}}><StatusDot status={displayStatus} size={7}/>{srv.name}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
-                <td style={{padding:"11px 16px"}}><Badge variant="gray">— No SSL</Badge></td>
+                <td style={{padding:"11px 16px"}}><StatusBadge status={d.status} title={d.last_provision_error || undefined} /></td>
+                <td style={{padding:"11px 16px"}}><Badge variant={d.ssl_status === "active" ? "green" : "gray"}>{d.ssl_status === "active" ? "SSL active" : "— No SSL"}</Badge></td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
                 <td style={{padding:"11px 16px"}}>
                   <RowActions actions={[
                     { icon: "✎", title: "Edit domain", onClick: () => setEditingDomain(d) },
+                    { icon: "⚙", title: "Provision domain", onClick: () => singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) }) },
                     { icon: "✕", title: "Delete domain", variant: "danger", onClick: () => { if (!confirm(`Delete ${d.domain}?`)) return; deleteDomain.mutate(d.id); } },
                   ]} />
                 </td>
@@ -496,6 +561,20 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
           <Btn variant="secondary" onClick={() => setShowAssignCF(false)}>Cancel</Btn>
         </div>
       </Modal>
+    )}
+    {showFileImport && (
+      <DomainBulkImportDialog
+        onClose={() => setShowFileImport(false)}
+        registrars={registrars}
+        onImported={(result) => {
+          if (result.errors_csv_url) {
+            window.open(`/api${result.errors_csv_url}`, "_blank");
+          }
+        }}
+      />
+    )}
+    {progressTaskId !== null && (
+      <TaskProgressModal taskId={progressTaskId} onClose={() => setProgressTaskId(null)} />
     )}
   </>;
 }

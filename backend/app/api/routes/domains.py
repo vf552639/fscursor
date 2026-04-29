@@ -2,7 +2,7 @@ import csv
 import io
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.schemas.domain import (
     DomainBulkAssignServer,
     DomainBulkCreate,
     DomainBulkCreateResponse,
+    DomainBulkImportResponse,
     DomainBulkStructuredCreate,
     DomainCreate,
     DomainResponse,
@@ -31,6 +32,7 @@ from app.schemas.domain import (
 )
 from app.services.encryption_service import decrypt
 from app.services import domain_service
+from app.services.bulk_import_service import get_errors_csv, process_bulk_import
 from app.tasks.ns_task import set_nameservers
 from app.tasks.provision_task import provision_domain
 
@@ -260,4 +262,36 @@ async def export_failed_domains_csv(db: AsyncSession = Depends(get_db)) -> Strea
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=failed_domains.csv"},
+    )
+
+
+@router.post("/bulk-import", response_model=DomainBulkImportResponse)
+async def bulk_import_domains(
+    file: UploadFile = File(...),
+    has_header: bool = Form(True),
+    default_registrar_id: Optional[int] = Form(None),
+    db: AsyncSession = Depends(get_db),
+) -> DomainBulkImportResponse:
+    raw = await file.read()
+    created, skipped, errors, csv_url = await process_bulk_import(
+        db,
+        filename=file.filename or "domains.csv",
+        content=raw,
+        has_header=has_header,
+        default_registrar_id=default_registrar_id,
+    )
+    return DomainBulkImportResponse(
+        created=created, skipped=skipped, errors=errors, errors_csv_url=csv_url
+    )
+
+
+@router.get("/bulk-import-errors/{token}")
+async def bulk_import_errors_csv(token: str) -> StreamingResponse:
+    csv_text = get_errors_csv(token)
+    if csv_text is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Errors CSV not found")
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=bulk_import_errors.csv"},
     )

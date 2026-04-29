@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiGet } from "./client";
+import { API_BASE_URL, apiGet } from "./client";
 
 export type TaskStatus = "pending" | "running" | "success" | "failed";
 
@@ -40,4 +40,9 @@ export function useTaskLog(id: number | null | undefined) {
     queryFn: () => apiGet<TaskLog>(`/tasks/${id}`),
     enabled: !!id,
   });
+}
+
+export function taskStreamUrl(taskId: number): string {
+  const base = API_BASE_URL.replace(/\/$/, "");
+  return `${base}/tasks/${taskId}/stream`;
 }

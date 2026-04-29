@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
-import { apiDelete, apiGet, apiPost, apiPut } from "./client";
+import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { queryClient } from "./queryClient";
 
 export interface Domain {
@@ -16,6 +16,13 @@ export interface Domain {
   purchase_date: string | null;
   ns_status: string | null;
   ns_updated_at: string | null;
+  site_user?: string | null;
+  site_path?: string | null;
+  ftp_user?: string | null;
+  ssl_status?: string | null;
+  ssl_email_used?: string | null;
+  php_version?: string | null;
+  last_provision_error?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +100,29 @@ export interface SetNsResponse {
 
 export interface BulkSetNsResponse {
   task_ids: string[];
+}
+
+export interface ProvisionResponse {
+  task_id: string;
+  task_log_id: number;
+  domain_id: number;
+}
+
+export interface BulkProvisionResponse {
+  task_ids: string[];
+}
+
+export interface BulkImportError {
+  row: number;
+  domain: string;
+  reason: string;
+}
+
+export interface BulkImportResponse {
+  created: number;
+  skipped: number;
+  errors: BulkImportError[];
+  errors_csv_url?: string | null;
 }
 
 export const domainsKeys = {
@@ -188,4 +218,43 @@ export function useBulkSetNameservers() {
       apiPost<BulkSetNsResponse>("/domains/bulk-set-ns", { domain_ids }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
   });
+}
+
+export function useProvisionDomain() {
+  return useMutation({
+    mutationFn: (domainId: number) =>
+      apiPost<ProvisionResponse>(`/domains/${domainId}/provision`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useBulkProvisionDomains() {
+  return useMutation({
+    mutationFn: (domain_ids: number[]) =>
+      apiPost<BulkProvisionResponse>("/domains/bulk-provision", { domain_ids }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export async function bulkImportDomains(params: {
+  file: File;
+  hasHeader: boolean;
+  defaultRegistrarId?: number | null;
+  onProgress?: (percent: number) => void;
+}): Promise<BulkImportResponse> {
+  const form = new FormData();
+  form.append("file", params.file);
+  form.append("has_header", String(params.hasHeader));
+  if (params.defaultRegistrarId != null) {
+    form.append("default_registrar_id", String(params.defaultRegistrarId));
+  }
+  const r = await http.post<BulkImportResponse>("/domains/bulk-import", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (evt) => {
+      if (!evt.total || !params.onProgress) return;
+      const percent = Math.round((evt.loaded / evt.total) * 100);
+      params.onProgress(percent);
+    },
+  });
+  return r.data;
 }
