@@ -212,6 +212,22 @@ def http_check(domain: str, port: int = 80, timeout: int = 5) -> bool:
         return False
 
 
+def _coerce_str(value: object, max_len: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped[:max_len]
+
+
+def _first_non_empty_str(*candidates: object) -> str | None:
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 def _normalize_site_row(raw: dict) -> dict | None:
     domain = (
         raw.get("domain_name")
@@ -222,14 +238,40 @@ def _normalize_site_row(raw: dict) -> dict | None:
     )
     if not domain:
         return None
-    site_user = raw.get("site_user") or raw.get("owner") or raw.get("user")
-    site_path = raw.get("site_path") or raw.get("path") or raw.get("www_path")
-    php_version = _coerce_php_version(raw.get("php_version") or raw.get("php"))
+    domain_str = str(domain).strip()
+    if not domain_str:
+        return None
+
+    owner = raw.get("owner")
+    owner_dict: dict = owner if isinstance(owner, dict) else {}
+
+    raw_site_user = _first_non_empty_str(raw.get("site_user"), raw.get("user"))
+    if not raw_site_user:
+        raw_site_user = _first_non_empty_str(
+            owner_dict.get("username"),
+            owner_dict.get("login"),
+            owner_dict.get("name"),
+            owner if isinstance(owner, str) else None,
+        )
+
+    raw_site_path = _first_non_empty_str(
+        raw.get("site_path"),
+        raw.get("path"),
+        raw.get("www_path"),
+    )
+    if not raw_site_path:
+        home_dir = owner_dict.get("home_dir")
+        if isinstance(home_dir, str) and home_dir.strip():
+            raw_site_path = f"{home_dir.rstrip('/')}/www/{domain_str}"
+
+    php_raw = _coerce_php_version(raw.get("php_version") or raw.get("php"))
+    php_version = _coerce_str(php_raw, 16) if php_raw else None
+
     return {
-        "domain_name": str(domain).strip(),
-        "site_user": str(site_user).strip() if site_user else None,
-        "site_path": str(site_path).strip() if site_path else None,
-        "php_version": str(php_version).strip() if php_version else None,
+        "domain_name": domain_str[:255],
+        "site_user": _coerce_str(raw_site_user, 64),
+        "site_path": _coerce_str(raw_site_path, 255),
+        "php_version": php_version,
     }
 
 
@@ -256,12 +298,13 @@ def _parse_sites_from_text_table(output: str) -> list[dict]:
         domain = chunks[0]
         if "." not in domain:
             continue
-        site_user = chunks[1] if len(chunks) > 1 else None
-        site_path = chunks[2] if len(chunks) > 2 else None
-        php_version = _coerce_php_version(chunks[3] if len(chunks) > 3 else None)
+        site_user = _coerce_str(chunks[1], 64) if len(chunks) > 1 else None
+        site_path = _coerce_str(chunks[2], 255) if len(chunks) > 2 else None
+        php_raw = _coerce_php_version(chunks[3] if len(chunks) > 3 else None)
+        php_version = _coerce_str(php_raw, 16) if php_raw else None
         sites.append(
             {
-                "domain_name": domain,
+                "domain_name": domain[:255],
                 "site_user": site_user,
                 "site_path": site_path,
                 "php_version": php_version,
