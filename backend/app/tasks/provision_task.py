@@ -23,6 +23,8 @@ from app.services.fastpanel_client import (
 )
 from app.services.notification_service import create_notification
 from app.services.ssl_email_service import mark_used, pick_email
+from app.services.temp_mail_service import get_temp_email
+from app.services import ssl_email_service
 
 
 async def _append_log(session, task_log: TaskLog, chunk: str, status_value: str | None = None) -> None:
@@ -52,6 +54,13 @@ async def _default_php_version(session) -> str:
     if cfg and cfg.value.strip():
         return cfg.value.strip()
     return "7.4"
+
+
+async def _is_auto_temp_mail_enabled(session) -> bool:
+    cfg = await session.get(SystemConfig, "Auto Temp Mail Enabled")
+    if cfg is None:
+        return False
+    return cfg.value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
@@ -227,24 +236,38 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
 
                 ssl_email = await pick_email(session)
                 if ssl_email is None:
-                    domain.ssl_status = SslStatus.ERROR.value
-                    domain.last_provision_error = "SSL email pool exhausted"
-                    await session.commit()
-                    await _append_log(
-                        session,
-                        task_log,
-                        "SSL email pool exhausted\n",
-                    )
-                    await create_notification(
-                        session,
-                        type="ssl_pool_exhausted",
-                        entity_type="domain",
-                        entity_id=domain.id,
-                        title="SSL email pool exhausted",
-                        message="Add a new SSL email and re-run provisioning.",
-                        dedup_key="ssl_pool_exhausted:provision",
-                    )
-                else:
+                    if await _is_auto_temp_mail_enabled(session):
+                        temp_email = await get_temp_email()
+                        if temp_email:
+                            try:
+                                await ssl_email_service.add_email(session, temp_email, cap=100)
+                                ssl_email = await pick_email(session)
+                                await _append_log(
+                                    session,
+                                    task_log,
+                                    f"Added temporary SSL email: {temp_email}\n",
+                                )
+                            except Exception:
+                                ssl_email = None
+                    if ssl_email is None:
+                        domain.ssl_status = SslStatus.ERROR.value
+                        domain.last_provision_error = "SSL email pool exhausted"
+                        await session.commit()
+                        await _append_log(
+                            session,
+                            task_log,
+                            "SSL email pool exhausted\n",
+                        )
+                        await create_notification(
+                            session,
+                            type="ssl_pool_exhausted",
+                            entity_type="domain",
+                            entity_id=domain.id,
+                            title="SSL email pool exhausted",
+                            message="Add a new SSL email and re-run provisioning.",
+                            dedup_key="ssl_pool_exhausted:provision",
+                        )
+                if ssl_email is not None:
                     domain.ssl_status = SslStatus.PENDING.value
                     domain.status = DomainStatus.SSL_PENDING.value
                     await session.commit()

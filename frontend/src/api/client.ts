@@ -55,6 +55,11 @@ export async function apiPut<T>(url: string, body?: unknown, config?: AxiosReque
   return r.data;
 }
 
+export async function apiPatch<T>(url: string, body?: unknown, config?: AxiosRequestConfig): Promise<T> {
+  const r = await http.patch<T>(url, body, config);
+  return r.data;
+}
+
 export async function apiDelete<T = void>(url: string, config?: AxiosRequestConfig): Promise<T> {
   const r = await http.delete<T>(url, config);
   return r.data;

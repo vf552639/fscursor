@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.domain import Domain
 from app.models.notification import Notification
+from app.services.notification_providers import dispatch_notification
 
 
 def _base_list_stmt(is_read: Optional[bool], limit: int) -> Select[tuple[Notification]]:
@@ -113,4 +114,15 @@ async def create_notification(
     created = result.scalar_one_or_none() is not None
     if created:
         await db.commit()
+        await dispatch_notification(
+            db,
+            {
+                "type": type,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "title": title,
+                "message": message,
+                "dedup_key": dedup_key,
+            },
+        )
     return created

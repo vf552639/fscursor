@@ -14,6 +14,11 @@ EDITABLE_KEYS: set[str] = {
     "Celery Workers",
     "Task Time Limit",
     "FastPanel Poll",
+    "Webhook Enabled",
+    "Webhook URL",
+    "Webhook Secret",
+    "Telegram Enabled",
+    "Auto Temp Mail Enabled",
 }
 
 DEFAULT_SYSTEM_CONFIG: Mapping[str, str] = {
@@ -25,6 +30,11 @@ DEFAULT_SYSTEM_CONFIG: Mapping[str, str] = {
     "Celery Workers": "2",
     "Task Time Limit": "60 min",
     "FastPanel Poll": "3 seconds",
+    "Webhook Enabled": "false",
+    "Webhook URL": "",
+    "Webhook Secret": "",
+    "Telegram Enabled": "false",
+    "Auto Temp Mail Enabled": "false",
 }
 
 

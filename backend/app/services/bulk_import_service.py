@@ -1,6 +1,7 @@
 import csv
 import io
 import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 from openpyxl import load_workbook
@@ -8,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.validators import is_valid_domain, normalize_domain
 from app.schemas.domain import DomainBulkCreateItem, DomainBulkImportError
+from app.schemas.server import ServerBulkImportError
 from app.services import domain_service
+from app.services import server_service
+from app.schemas.server import ServerCreate
 
 _ERROR_EXPORTS: dict[str, str] = {}
 
@@ -64,6 +68,17 @@ def get_errors_csv(token: str) -> Optional[str]:
     return _ERROR_EXPORTS.get(token)
 
 
+@dataclass
+class ServerImportRow:
+    row: int
+    name: str
+    ip: str
+    ssh_user: str
+    ssh_password: str
+    ssh_port: int
+    notes: Optional[str]
+
+
 async def process_bulk_import(
     db: AsyncSession,
     *,
@@ -110,3 +125,118 @@ async def process_bulk_import(
         csv_url = f"/domains/bulk-import-errors/{token}"
 
     return len(created_list), len(skipped), errors, csv_url
+
+
+def _parse_server_row(row: list[str], idx: int) -> Optional[ServerImportRow]:
+    if not row:
+        return None
+    name = str(row[0] or "").strip()
+    ip = str(row[1] or "").strip() if len(row) > 1 else ""
+    ssh_user = str(row[2] or "").strip() if len(row) > 2 else "root"
+    ssh_password = str(row[3] or "").strip() if len(row) > 3 else ""
+    raw_port = str(row[4] or "").strip() if len(row) > 4 else "22"
+    notes = str(row[5] or "").strip() if len(row) > 5 and row[5] is not None else None
+    try:
+        ssh_port = int(raw_port or "22")
+    except ValueError:
+        ssh_port = -1
+    return ServerImportRow(
+        row=idx,
+        name=name,
+        ip=ip,
+        ssh_user=ssh_user or "root",
+        ssh_password=ssh_password,
+        ssh_port=ssh_port,
+        notes=notes or None,
+    )
+
+
+def _parse_servers_csv(raw: bytes, has_header: bool) -> list[ServerImportRow]:
+    text = raw.decode("utf-8", errors="ignore")
+    reader = csv.reader(io.StringIO(text))
+    rows: list[ServerImportRow] = []
+    for idx, row in enumerate(reader, start=1):
+        if has_header and idx == 1:
+            continue
+        parsed = _parse_server_row(row, idx)
+        if parsed:
+            rows.append(parsed)
+    return rows
+
+
+def _parse_servers_xlsx(raw: bytes, has_header: bool) -> list[ServerImportRow]:
+    wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    ws = wb.active
+    rows: list[ServerImportRow] = []
+    for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if has_header and idx == 1:
+            continue
+        normalized = ["" if cell is None else str(cell) for cell in row]
+        parsed = _parse_server_row(normalized, idx)
+        if parsed:
+            rows.append(parsed)
+    return rows
+
+
+def build_server_errors_csv(errors: list[ServerBulkImportError]) -> str:
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["row", "server", "reason"])
+    for err in errors:
+        writer.writerow([err.row, err.server, err.reason])
+    return out.getvalue()
+
+
+async def process_server_bulk_import(
+    db: AsyncSession,
+    *,
+    filename: str,
+    content: bytes,
+    has_header: bool,
+) -> tuple[int, int, list[ServerBulkImportError], Optional[str]]:
+    name = filename.lower()
+    rows = _parse_servers_xlsx(content, has_header) if name.endswith(".xlsx") else _parse_servers_csv(content, has_header)
+
+    existing = await server_service.get_all(db)
+    existing_ips = {srv.ip_address for srv in existing[0]}
+
+    created = 0
+    skipped = 0
+    errors: list[ServerBulkImportError] = []
+
+    for item in rows:
+        if not item.name:
+            skipped += 1
+            errors.append(ServerBulkImportError(row=item.row, server=item.ip or "-", reason="Missing server name"))
+            continue
+        if item.ssh_port <= 0 or item.ssh_port > 65535:
+            skipped += 1
+            errors.append(ServerBulkImportError(row=item.row, server=item.name, reason="Invalid SSH port"))
+            continue
+        if item.ip in existing_ips:
+            skipped += 1
+            errors.append(ServerBulkImportError(row=item.row, server=item.name, reason="IP already exists"))
+            continue
+
+        payload = ServerCreate(
+            name=item.name,
+            ip_address=item.ip,
+            ssh_user=item.ssh_user,
+            ssh_password=item.ssh_password or None,
+            ssh_port=item.ssh_port,
+            notes=item.notes,
+        )
+        try:
+            await server_service.create(db, payload)
+            existing_ips.add(item.ip)
+            created += 1
+        except Exception as exc:
+            skipped += 1
+            errors.append(ServerBulkImportError(row=item.row, server=item.name, reason=f"{type(exc).__name__}: {exc}"))
+
+    csv_url = None
+    if errors:
+        token = store_errors_csv(build_server_errors_csv(errors))
+        csv_url = f"/servers/bulk-import-errors/{token}"
+
+    return created, skipped, errors, csv_url

@@ -77,8 +77,12 @@ class NamecheapService(BaseRegistrarService):
 
     async def set_nameservers(self, domain: str, ns_list: list[str]) -> bool:
         sld, tld = _split(domain)
-        await self._call(
+        root = await self._call(
             "namecheap.domains.dns.setCustom",
             {"SLD": sld, "TLD": tld, "Nameservers": ",".join(ns_list)},
         )
+        cmd = root.find(f".//{{{NS_XMLNS}}}CommandResponse")
+        if cmd is not None and cmd.attrib.get("Status", "").lower() != "ok":
+            errors = [e.text or "" for e in root.iter() if _strip_ns(e.tag) == "Error"]
+            raise RegistrarError(f"Namecheap setCustom failed: {'; '.join(errors) or 'unknown error'}")
         return True

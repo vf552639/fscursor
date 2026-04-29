@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState, formatUptime } from "../components/ui/Primitives";
 import { useServers, useCreateServer } from "../api/servers";
+import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
   const [tab,setTab]=useState("install");
@@ -166,8 +167,9 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
   const [filter,setFilter]=useState("All");
   const [search,setSearch]=useState("");
   const [showAdd,setShowAdd]=useState(false);
+  const [showBulkImport, setShowBulkImport] = useState(false);
 
-  const { data, isPending, isError } = useServers();
+  const { data, isPending, isError, refetch } = useServers();
   
   // Transform backend models to UI models mapping missing metrics to 0
   const servers = (data?.items || []).map((s: any) => ({
@@ -221,6 +223,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
         </div>
         <Sel value={filter} onChange={(e: any)=>setFilter(e.target.value)}>{["All","healthy","warning","critical"].map(s=><option key={s} value={s}>Status: {s}</option>)}</Sel>
         <div style={{position:"relative"}}><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#9ca3af",fontSize:13}}>⌕</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{padding:"8px 12px 8px 30px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,outline:"none",width:170,background:"#f9fafb",fontFamily:"inherit"}}/></div>
+        <Btn variant="secondary" onClick={() => setShowBulkImport(true)}>⇪ Import</Btn>
         <Btn variant="primary" onClick={()=>setShowAdd(true)}>+ Add Server</Btn>
       </div>
     </div>
@@ -298,5 +301,17 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
           </div>
         </Card>}
     {showAdd&&<AddServerModal onClose={()=>setShowAdd(false)}/>}
+    {showBulkImport && (
+      <ServerBulkImportDialog
+        onClose={() => setShowBulkImport(false)}
+        onImported={(result) => {
+          if (result.errors_csv_url) {
+            window.open(`/api${result.errors_csv_url}`, "_blank");
+          }
+          refetch();
+          setShowBulkImport(false);
+        }}
+      />
+    )}
   </>;
 }

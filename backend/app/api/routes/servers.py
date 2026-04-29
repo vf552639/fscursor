@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,12 +10,14 @@ from app.schemas.server import (
     FastpanelStatusResponse,
     InstallFastpanelResponse,
     ServerCreate,
+    ServerBulkImportResponse,
     ServerListResponse,
     ServerResponse,
     ServerUpdate,
     SSHTestResponse,
 )
 from app.services import server_service
+from app.services.bulk_import_service import get_errors_csv, process_server_bulk_import
 from app.tasks.fastpanel_task import install_fastpanel
 
 router = APIRouter(prefix="/servers", tags=["servers"])
@@ -136,4 +139,37 @@ async def fastpanel_status(
         fastpanel_url=server.fastpanel_url,
         fastpanel_user=server.fastpanel_user,
         log_tail=tail,
+    )
+
+
+@router.post("/bulk-import", response_model=ServerBulkImportResponse)
+async def bulk_import_servers(
+    file: UploadFile = File(...),
+    has_header: bool = Form(True),
+    db: AsyncSession = Depends(get_db),
+) -> ServerBulkImportResponse:
+    raw = await file.read()
+    created, skipped, errors, csv_url = await process_server_bulk_import(
+        db,
+        filename=file.filename or "servers.csv",
+        content=raw,
+        has_header=has_header,
+    )
+    return ServerBulkImportResponse(
+        created=created,
+        skipped=skipped,
+        errors=errors,
+        errors_csv_url=csv_url,
+    )
+
+
+@router.get("/bulk-import-errors/{token}")
+async def bulk_import_servers_errors_csv(token: str) -> StreamingResponse:
+    csv_text = get_errors_csv(token)
+    if csv_text is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Errors CSV not found")
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=servers_bulk_import_errors.csv"},
     )

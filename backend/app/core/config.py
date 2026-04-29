@@ -1,4 +1,6 @@
 import uuid
+from pathlib import Path
+from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,6 +18,16 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     BACKEND_CORS_ORIGINS: str = "http://localhost:3100,http://localhost:8080"
     API_V1_PREFIX: str = "/api"
+    LOG_LEVEL: str = "INFO"
+    LOG_DIR: Path = Path("logs")
+    SSH_CONNECT_TIMEOUT: int = 20
+    SSL_DEFAULT_EMAIL_CAP: int = 100
+    DNS_PRECHECK_ATTEMPTS: int = 10
+    DNS_PRECHECK_DELAY: int = 15
+    DEFAULT_PHP_VERSION: str = "7.4"
+    RAPIDAPI_KEY: Optional[str] = None
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
 
     @property
     def cors_origins_list(self) -> list[str]:

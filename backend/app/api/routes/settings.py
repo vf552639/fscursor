@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.services.notification_providers.dispatcher import deliver_to_channels
 from app.services import system_config_service
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -16,6 +17,16 @@ class ConfigItem(BaseModel):
     key: str
     value: str
     editable: bool = True
+
+
+class NotificationTestRequest(BaseModel):
+    title: str = "SDMP test notification"
+    message: str = "This is a test delivery from Settings."
+
+
+class NotificationTestResponse(BaseModel):
+    webhook: str
+    telegram: str
 
 
 @router.get("/config", response_model=list[ConfigItem])
@@ -42,3 +53,25 @@ async def update_config(
         )
     item = await system_config_service.upsert(db, key, payload.value)
     return ConfigItem(key=item.key, value=item.value, editable=True)
+
+
+@router.post("/notifications/test", response_model=NotificationTestResponse)
+async def test_notification_delivery(
+    payload: NotificationTestRequest,
+    db: AsyncSession = Depends(get_db),
+) -> NotificationTestResponse:
+    result = await deliver_to_channels(
+        db,
+        {
+            "type": "settings_test",
+            "entity_type": "settings",
+            "entity_id": 0,
+            "title": payload.title,
+            "message": payload.message,
+            "dedup_key": "settings_test_delivery",
+        },
+    )
+    return NotificationTestResponse(
+        webhook=result.get("webhook", "disabled"),
+        telegram=result.get("telegram", "disabled"),
+    )

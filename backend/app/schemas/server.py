@@ -78,3 +78,16 @@ class FastpanelStatusResponse(BaseModel):
     fastpanel_url: Optional[str] = None
     fastpanel_user: Optional[str] = None
     log_tail: list[str]
+
+
+class ServerBulkImportError(BaseModel):
+    row: int
+    server: str
+    reason: str
+
+
+class ServerBulkImportResponse(BaseModel):
+    created: int
+    skipped: int
+    errors: list[ServerBulkImportError]
+    errors_csv_url: Optional[str] = None

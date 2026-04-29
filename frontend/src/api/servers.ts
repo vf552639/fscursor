@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
-import { apiDelete, apiGet, apiPost, apiPut } from "./client";
+import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { queryClient } from "./queryClient";
 
 export interface Server {
@@ -84,6 +84,19 @@ export interface FastPanelStatus {
   log_tail: TaskLogLine[];
 }
 
+export interface ServerBulkImportError {
+  row: number;
+  server: string;
+  reason: string;
+}
+
+export interface ServerBulkImportResponse {
+  created: number;
+  skipped: number;
+  errors: ServerBulkImportError[];
+  errors_csv_url?: string | null;
+}
+
 export const serversKeys = {
   all: ["servers"] as const,
   detail: (id: number) => ["servers", id] as const,
@@ -164,4 +177,22 @@ export function useFastPanelStatus(id: number | null | undefined, enabled: boole
     enabled: !!id && enabled,
     refetchInterval: enabled ? 3000 : false,
   });
+}
+
+export async function bulkImportServers(params: {
+  file: File;
+  hasHeader: boolean;
+  onProgress?: (percent: number) => void;
+}): Promise<ServerBulkImportResponse> {
+  const form = new FormData();
+  form.append("file", params.file);
+  form.append("has_header", String(params.hasHeader));
+  const r = await http.post<ServerBulkImportResponse>("/servers/bulk-import", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (evt) => {
+      if (!evt.total || !params.onProgress) return;
+      params.onProgress(Math.round((evt.loaded / evt.total) * 100));
+    },
+  });
+  return r.data;
 }

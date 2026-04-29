@@ -210,6 +210,23 @@ async def create_dns_record(
     if not account:
         raise CloudflareError("Account not found")
     payload = record.model_dump(exclude_none=True)
+    existing_data = await _call(
+        account,
+        "GET",
+        f"/zones/{zone_id}/dns_records",
+        params={"type": record.type, "name": record.name, "per_page": 1},
+    )
+    existing = (existing_data.get("result") or [])
+    if existing:
+        record_id = existing[0].get("id")
+        if record_id:
+            data = await _call(
+                account,
+                "PATCH",
+                f"/zones/{zone_id}/dns_records/{record_id}",
+                json=payload,
+            )
+            return data.get("result") or {}
     data = await _call(account, "POST", f"/zones/{zone_id}/dns_records", json=payload)
     return data.get("result") or {}
 
