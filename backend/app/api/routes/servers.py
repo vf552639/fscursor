@@ -13,6 +13,7 @@ from app.schemas.server import (
     ServerBulkImportResponse,
     ServerListResponse,
     ServerResponse,
+    SyncDomainsResponse,
     ServerUpdate,
     SSHTestResponse,
 )
@@ -71,12 +72,29 @@ async def test_ssh(server_id: int, db: AsyncSession = Depends(get_db)) -> SSHTes
     return SSHTestResponse(success=ok, message=msg)
 
 
-@router.post("/{server_id}/refresh-uptime", response_model=ServerResponse)
-async def refresh_uptime(server_id: int, db: AsyncSession = Depends(get_db)) -> ServerResponse:
-    server = await server_service.fetch_and_persist_uptime(db, server_id)
+@router.post("/{server_id}/refresh-metrics", response_model=ServerResponse)
+async def refresh_metrics(server_id: int, db: AsyncSession = Depends(get_db)) -> ServerResponse:
+    server = await server_service.fetch_and_persist_metrics(db, server_id)
     if not server:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
     return ServerResponse.model_validate(server)
+
+
+@router.post("/{server_id}/refresh-uptime", response_model=ServerResponse)
+async def refresh_uptime_compat(server_id: int, db: AsyncSession = Depends(get_db)) -> ServerResponse:
+    server = await server_service.fetch_and_persist_metrics(db, server_id)
+    if not server:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    return ServerResponse.model_validate(server)
+
+
+@router.post("/{server_id}/sync-domains", response_model=SyncDomainsResponse)
+async def sync_domains(server_id: int, db: AsyncSession = Depends(get_db)) -> SyncDomainsResponse:
+    server = await server_service.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    result = await server_service.fetch_and_persist_domains(db, server_id)
+    return SyncDomainsResponse(**result)
 
 
 @router.post(

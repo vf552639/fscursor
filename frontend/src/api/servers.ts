@@ -21,6 +21,19 @@ export interface Server {
   updated_at: string;
   has_ssh: boolean;
   uptime_seconds: number | null;
+  cpu_usage_pct: number | null;
+  cpu_count: number | null;
+  ram_used_mb: number | null;
+  ram_total_mb: number | null;
+  disk_used_gb: number | null;
+  disk_total_gb: number | null;
+  net_in_kbps: number | null;
+  net_out_kbps: number | null;
+  os_pretty: string | null;
+  kernel: string | null;
+  fastpanel_version: string | null;
+  fastpanel_port: number | null;
+  metrics_collected_at: string | null;
   last_check_at: string | null;
   last_check_ok: boolean | null;
   last_check_error: string | null;
@@ -97,6 +110,13 @@ export interface ServerBulkImportResponse {
   errors_csv_url?: string | null;
 }
 
+export interface SyncDomainsResponse {
+  created: number;
+  linked: number;
+  total: number;
+  error: string | null;
+}
+
 export const serversKeys = {
   all: ["servers"] as const,
   detail: (id: number) => ["servers", id] as const,
@@ -150,9 +170,9 @@ export function useTestSsh(id: number) {
   });
 }
 
-export function useRefreshUptime(id: number) {
+export function useRefreshMetrics(id: number) {
   return useMutation({
-    mutationFn: () => apiPost<Server>(`/servers/${id}/refresh-uptime`),
+    mutationFn: () => apiPost<Server>(`/servers/${id}/refresh-metrics`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
       queryClient.invalidateQueries({ queryKey: serversKeys.all });
@@ -166,6 +186,17 @@ export function useInstallFastPanel(id: number) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: serversKeys.fastpanel(id) });
       queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
+    },
+  });
+}
+
+export function useSyncServerDomains(id: number) {
+  return useMutation({
+    mutationFn: () => apiPost<SyncDomainsResponse>(`/servers/${id}/sync-domains`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["domains"] });
+      queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: serversKeys.all });
     },
   });
 }

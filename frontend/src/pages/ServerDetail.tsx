@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
-import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer, useRefreshUptime } from "../api/servers";
+import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 
 export default function ServerDetail({server, onBack, onNav}: {server?: any, onBack: (p: string)=>void, onNav?: (p: string, ctx?: any)=>void}){
@@ -28,7 +28,8 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
   const delSrv = useDeleteServer();
   const testSsh = useTestSsh(server?.id || 0);
   const installFp = useInstallFastPanel(server?.id || 0);
-  const refreshUptime = useRefreshUptime(server?.id || 0);
+  const refreshMetrics = useRefreshMetrics(server?.id || 0);
+  const syncDomains = useSyncServerDomains(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
   const deleteDomain = useDeleteDomain();
   const updateDomain = useUpdateDomain(editingDomain?.id || 0);
@@ -51,19 +52,44 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
 
   if (!s) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading server details...</div>;
 
+  const uiStatus = s.last_check_ok === false || s.status === "error"
+    ? "error"
+    : s.status === "active"
+    ? "active"
+    : s.status === "provisioned"
+    ? "provisioned"
+    : "new";
+
+  const statusBadgeVariant = uiStatus === "error" ? "red" : uiStatus === "new" ? "gray" : "green";
+  const osLabel = s.os_pretty || s.os || null;
+  const hasAnyMetrics = [
+    s.cpu_usage_pct,
+    s.ram_used_mb,
+    s.ram_total_mb,
+    s.disk_used_gb,
+    s.disk_total_gb,
+    s.net_in_kbps,
+    s.net_out_kbps,
+  ].some((v) => v !== null && v !== undefined);
+
   const fp = {
     url: s.fastpanel_url || `https://${s.ip_address}:8888`,
     login: s.fastpanel_user || "fastuser",
     password: "encrypted (hidden)", // Actual password not sent via API 
-    version: "Unknown",
-    port: 8888
+    version: s.fastpanel_version ?? "—",
+    port: s.fastpanel_port ?? 8888
   };
   
   const filtered = domains.filter((d: any)=>d.domain_name.toLowerCase().includes(domSearch.toLowerCase()));
   
-  // Mocks for metrics since backend doesn't track live metrics yet
-  const cpuD=genBars(0); const ramD=genBars(0); const ssdD=genBars(0); const netD=genBars(0);
-  const displayStatus = s.status === "active" ? "healthy" : s.status;
+  const cpuValue = s.cpu_usage_pct ?? 0;
+  const cpuD = s.cpu_usage_pct != null ? genBars(cpuValue) : undefined;
+  const ramPct = s.ram_used_mb != null && s.ram_total_mb ? Math.round((s.ram_used_mb / s.ram_total_mb) * 100) : undefined;
+  const ramD = s.ram_used_mb != null ? genBars(ramPct ?? 0) : undefined;
+  const diskPct = s.disk_used_gb != null && s.disk_total_gb ? Math.round((s.disk_used_gb / s.disk_total_gb) * 100) : undefined;
+  const ssdD = s.disk_used_gb != null ? genBars(diskPct ?? 0) : undefined;
+  const netValue = s.net_in_kbps != null ? Math.round(s.net_in_kbps / 1000) : 0;
+  const netD = s.net_in_kbps != null ? genBars(netValue) : undefined;
 
   return <>
     <div style={{display:"flex",alignItems:"center",gap:6,fontSize:13,color:"#9ca3af",marginBottom:20}}>
@@ -72,13 +98,14 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
     </div>
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:24}}>
       <div>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={displayStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1><Badge variant="gray">{(s.os||"Unknown").toUpperCase()}</Badge>{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={uiStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1>{osLabel ? <Badge variant="gray">{osLabel}</Badge> : null}{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
         <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · Uptime: {formatUptime(s.uptime_seconds)} · Added {fmtDate(s.created_at)}</div>
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8}}>
         {s.has_ssh && <Btn variant="secondary" onClick={()=>testSsh.mutate()} disabled={testSsh.isPending}>{testSsh.isPending ? "Testing..." : "SSH Test"}</Btn>}
-        {s.has_ssh && <Btn variant="secondary" onClick={()=>refreshUptime.mutate()} disabled={refreshUptime.isPending}>{refreshUptime.isPending ? "Refreshing..." : "Refresh Uptime"}</Btn>}
+        {s.has_ssh && <Btn variant="secondary" onClick={()=>refreshMetrics.mutate()} disabled={refreshMetrics.isPending}>{refreshMetrics.isPending ? "Refreshing..." : "Refresh"}</Btn>}
+        {s.has_ssh && isFPInstalled && <Btn variant="secondary" onClick={()=>syncDomains.mutate()} disabled={syncDomains.isPending}>{syncDomains.isPending ? "Syncing..." : "Sync Domains"}</Btn>}
         <Btn variant="danger" onClick={handleDelete} disabled={delSrv.isPending}>✕ Delete</Btn>
       </div>
     </div>
@@ -94,18 +121,31 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
     )}
 
     {testSsh.data && <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: testSsh.data.success ? "#dcfce7" : "#fee2e2", color: testSsh.data.success ? "#166534" : "#991b1b", fontSize: 13}}>SSH Test: {testSsh.data.message}</div>}
+    {syncDomains.data && (
+      <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: syncDomains.data.error ? "#fee2e2" : "#dcfce7", color: syncDomains.data.error ? "#991b1b" : "#166534", fontSize: 13}}>
+        {syncDomains.data.error
+          ? `Sync failed: ${syncDomains.data.error}`
+          : `Synced ${syncDomains.data.total} domains (${syncDomains.data.created} new, ${syncDomains.data.linked} linked).`}
+      </div>
+    )}
     {s.last_check_ok === false && s.last_check_error && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
         Uptime check failed: {s.last_check_error}
       </div>
     )}
 
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
-      <StatCard label="CPU Usage" value={`0%`} sub={`Normal · ? vCPU`} pct={0} color={cpuColor(0)} chartData={cpuD}/>
-      <StatCard label="RAM Usage" value={`0 GB`} sub={`of 4 GB`} pct={0} color="#7c3aed" chartData={ramD}/>
-      <StatCard label="SSD Usage" value={`0 GB`} sub={`of 20 GB`} pct={0} color="#0891b2" chartData={ssdD}/>
-      <StatCard label="Network In" value="0 MB/s" sub="Out: 0 MB/s" pct={0} color="#059669" chartData={netD}/>
-    </div>
+    {hasAnyMetrics ? (
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+        <StatCard label="CPU Usage" value={s.cpu_usage_pct != null ? `${s.cpu_usage_pct}%` : "—"} sub={s.cpu_count != null ? `Normal · ${s.cpu_count} vCPU` : "—"} pct={s.cpu_usage_pct ?? 0} color={cpuColor(cpuValue)} chartData={cpuD}/>
+        <StatCard label="RAM Usage" value={s.ram_used_mb != null ? `${Math.round(s.ram_used_mb / 1024)} GB` : "—"} sub={s.ram_total_mb != null ? `of ${Math.round(s.ram_total_mb / 1024)} GB` : "—"} pct={ramPct} color="#7c3aed" chartData={ramD}/>
+        <StatCard label="SSD Usage" value={s.disk_used_gb != null ? `${s.disk_used_gb} GB` : "—"} sub={s.disk_total_gb != null ? `of ${s.disk_total_gb} GB` : "—"} pct={diskPct} color="#0891b2" chartData={ssdD}/>
+        <StatCard label="Network In" value={s.net_in_kbps != null ? `${(s.net_in_kbps / 1000).toFixed(2)} Mb/s` : "—"} sub={s.net_out_kbps != null ? `Out: ${(s.net_out_kbps / 1000).toFixed(2)} Mb/s` : "—"} pct={undefined} color="#059669" chartData={netD}/>
+      </div>
+    ) : (
+      <Card style={{marginBottom:20}}>
+        <div style={{padding:"18px 20px", fontSize:13, color:"#6b7280"}}>Метрики недоступны — нажмите Refresh.</div>
+      </Card>
+    )}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
       <div>
         {isFPInstalled && <Card style={{marginBottom:16}}>
@@ -154,9 +194,9 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
             {[
               ["Name",s.name],
               ["IP",s.ip_address],
-              ["OS",s.os || "Unknown"],
+              ["OS",osLabel || "—"],
               ["Uptime", formatUptime(s.uptime_seconds)],
-              ["Status",<Badge key="status" variant={displayStatus==="healthy"?"green":displayStatus==="warning"?"yellow":"red"}>{s.status}</Badge>],
+              ["Status",<Badge key="status" variant={statusBadgeVariant}>{uiStatus}</Badge>],
               ["Added",fmtDate(s.created_at)]
             ].map(([k,v], i)=><InfoRow key={i} k={k} v={v}/>)}
           </CBo>
@@ -186,7 +226,7 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
                   { icon: "✕", title: "Delete domain", variant: "danger", onClick: () => { if (!confirm(`Delete ${d.domain_name}?`)) return; deleteDomain.mutate(d.id); } },
                 ]}/></td>
               </tr>)}
-              {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found</td></tr>}
+              {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found{s.has_ssh && isFPInstalled ? '. Click "Sync Domains" to pull sites from FastPanel.' : ""}</td></tr>}
             </tbody>
           </table>
         </div>

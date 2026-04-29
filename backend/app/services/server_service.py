@@ -6,9 +6,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.constants import FastPanelStatus, ServerStatus
+from app.core.validators import is_valid_domain, normalize_domain
+from app.models.domain import Domain
 from app.models.server import Server, ServerSecret
 from app.schemas.server import ServerCreate, ServerUpdate
+from app.services import domain_service
 from app.services.encryption_service import decrypt, encrypt
+from app.services.fastpanel_client import get_fastpanel_path, list_sites
 
 
 def _open_ssh_client(server: Server, password: str, timeout: int = 10) -> paramiko.SSHClient:
@@ -45,8 +50,8 @@ async def create(db: AsyncSession, data: ServerCreate) -> Server:
     server = Server(**payload)
     
     # Auto-activate if connecting to an already installed FastPanel
-    if data.fastpanel_status == "installed":
-        server.status = "active"
+    if data.fastpanel_status == FastPanelStatus.INSTALLED.value:
+        server.status = ServerStatus.ACTIVE.value
 
     if data.fastpanel_password:
         server.fastpanel_password_encrypted = encrypt(data.fastpanel_password)
@@ -67,9 +72,12 @@ async def create(db: AsyncSession, data: ServerCreate) -> Server:
     created = result.scalar_one()
 
     if data.ssh_password:
-        from app.tasks.server_health_task import check_server_uptime
+        from app.tasks.server_health_task import check_server_metrics
+        from app.tasks.server_health_task import sync_fastpanel_domains
 
-        check_server_uptime.delay(created.id)
+        check_server_metrics.delay(created.id)
+        if data.fastpanel_status == FastPanelStatus.INSTALLED.value:
+            sync_fastpanel_domains.delay(created.id)
 
     return created
 
@@ -131,6 +139,11 @@ async def test_ssh_connection(db: AsyncSession, server_id: int) -> tuple[bool, s
 
 
 async def fetch_and_persist_uptime(db: AsyncSession, server_id: int) -> Optional[Server]:
+    # Backward-compatible wrapper kept for older callers.
+    return await fetch_and_persist_metrics(db, server_id)
+
+
+async def fetch_and_persist_metrics(db: AsyncSession, server_id: int) -> Optional[Server]:
     server = await get_by_id(db, server_id)
     if not server:
         return None
@@ -138,18 +151,78 @@ async def fetch_and_persist_uptime(db: AsyncSession, server_id: int) -> Optional
         return server
 
     password = decrypt(server.secret.ssh_password_encrypted)
-    client: Optional[paramiko.SSHClient] = None
     try:
-        client = _open_ssh_client(server, password, timeout=10)
-        _, stdout, _ = client.exec_command("cat /proc/uptime", timeout=10)
-        first = stdout.read().decode("utf-8", errors="ignore").split()[0]
-        server.uptime_seconds = int(float(first))
-        server.last_check_ok = True
-        server.last_check_error = None
+        from app.services.server_metrics_service import collect_metrics
+
+        payload = collect_metrics(server, password, timeout=10)
+        for key, value in payload.items():
+            if hasattr(server, key):
+                setattr(server, key, value)
     except Exception as e:
-        server.uptime_seconds = None
         server.last_check_ok = False
         server.last_check_error = f"{type(e).__name__}: {e}"
+        server.status = ServerStatus.ERROR.value
+
+    server.last_check_at = datetime.now(timezone.utc)
+    if server.last_check_ok:
+        server.metrics_collected_at = server.last_check_at
+    await db.commit()
+    await db.refresh(server)
+    return server
+
+
+async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
+    server = await get_by_id(db, server_id)
+    if not server:
+        return {"created": 0, "linked": 0, "total": 0, "error": "Server not found"}
+    if not server.has_ssh or not server.secret or not server.secret.ssh_password_encrypted:
+        return {"created": 0, "linked": 0, "total": 0, "error": "SSH password is not set"}
+
+    password = decrypt(server.secret.ssh_password_encrypted)
+    client: Optional[paramiko.SSHClient] = None
+    created = 0
+    linked = 0
+    total = 0
+    error: Optional[str] = None
+    try:
+        client = _open_ssh_client(server, password, timeout=10)
+        fp_path = get_fastpanel_path(client)
+        sites = list_sites(client, fp_path)
+        total = len(sites)
+        for site in sites:
+            raw_name = str(site.get("domain_name") or "").strip()
+            if not raw_name:
+                continue
+            name = normalize_domain(raw_name)
+            if not is_valid_domain(name):
+                continue
+            existing = await domain_service.get_by_name(db, name)
+            if existing:
+                existing.server_id = server.id
+                existing.site_user = site.get("site_user")
+                existing.site_path = site.get("site_path")
+                if site.get("php_version"):
+                    existing.php_version = site.get("php_version")
+                linked += 1
+                continue
+            db.add(
+                Domain(
+                    domain_name=name,
+                    server_id=server.id,
+                    site_user=site.get("site_user"),
+                    site_path=site.get("site_path"),
+                    php_version=site.get("php_version"),
+                    status="active",
+                )
+            )
+            created += 1
+        server.last_check_ok = True
+        server.last_check_error = None
+    except Exception as exc:
+        server.last_check_ok = False
+        server.last_check_error = f"{type(exc).__name__}: {exc}"
+        server.status = ServerStatus.ERROR.value
+        error = str(exc)
     finally:
         if client:
             client.close()
@@ -157,4 +230,4 @@ async def fetch_and_persist_uptime(db: AsyncSession, server_id: int) -> Optional
     server.last_check_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(server)
-    return server
+    return {"created": created, "linked": linked, "total": total, "error": error}

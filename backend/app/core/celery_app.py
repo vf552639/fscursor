@@ -26,8 +26,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.renewal.check_domain_renewals",
         "schedule": crontab(hour=9, minute=0),
     },
-    "check-servers-uptime": {
-        "task": "app.tasks.server_health.check_all_servers_uptime",
-        "schedule": crontab(minute="*/15"),
+    "check-servers-metrics": {
+        "task": "app.tasks.server_health.check_all_servers_metrics",
+        "schedule": crontab(minute="*/5"),
     },
 }

@@ -52,6 +52,19 @@ class ServerResponse(ServerBase):
     updated_at: datetime
     has_ssh: bool = False
     uptime_seconds: Optional[int] = None
+    cpu_usage_pct: Optional[int] = None
+    cpu_count: Optional[int] = None
+    ram_used_mb: Optional[int] = None
+    ram_total_mb: Optional[int] = None
+    disk_used_gb: Optional[int] = None
+    disk_total_gb: Optional[int] = None
+    net_in_kbps: Optional[int] = None
+    net_out_kbps: Optional[int] = None
+    os_pretty: Optional[str] = None
+    kernel: Optional[str] = None
+    fastpanel_version: Optional[str] = None
+    fastpanel_port: Optional[int] = None
+    metrics_collected_at: Optional[datetime] = None
     last_check_at: Optional[datetime] = None
     last_check_ok: Optional[bool] = None
     last_check_error: Optional[str] = None
@@ -78,6 +91,13 @@ class FastpanelStatusResponse(BaseModel):
     fastpanel_url: Optional[str] = None
     fastpanel_user: Optional[str] = None
     log_tail: list[str]
+
+
+class SyncDomainsResponse(BaseModel):
+    created: int
+    linked: int
+    total: int
+    error: Optional[str] = None
 
 
 class ServerBulkImportError(BaseModel):

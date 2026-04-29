@@ -165,6 +165,9 @@ async def _install(server_id: int, task_log_id: int) -> None:
             server.status = "active"
             await _set_status(session, server, "installed")
             await _append_log(session, task_log, "FastPanel installed\n", "success")
+            from app.tasks.server_health_task import sync_fastpanel_domains
+
+            sync_fastpanel_domains.delay(server.id)
             await create_notification(
                 session,
                 type="fastpanel_install_success",

@@ -1,3 +1,5 @@
+import json
+import re
 import secrets
 import shlex
 import socket
@@ -207,3 +209,112 @@ def http_check(domain: str, port: int = 80, timeout: int = 5) -> bool:
             return True
     except Exception:
         return False
+
+
+def _normalize_site_row(raw: dict) -> dict | None:
+    domain = (
+        raw.get("domain_name")
+        or raw.get("domain")
+        or raw.get("server_name")
+        or raw.get("name")
+        or raw.get("site")
+    )
+    if not domain:
+        return None
+    site_user = raw.get("site_user") or raw.get("owner") or raw.get("user")
+    site_path = raw.get("site_path") or raw.get("path") or raw.get("www_path")
+    php_version = raw.get("php_version") or raw.get("php")
+    return {
+        "domain_name": str(domain).strip(),
+        "site_user": str(site_user).strip() if site_user else None,
+        "site_path": str(site_path).strip() if site_path else None,
+        "php_version": str(php_version).strip() if php_version else None,
+    }
+
+
+def _parse_sites_from_text_table(output: str) -> list[dict]:
+    sites: list[dict] = []
+    for ln in output.splitlines():
+        line = ln.strip()
+        if not line:
+            continue
+        if re.search(r"\b(domain|site|owner|php)\b", line, re.I):
+            continue
+        if set(line) <= {"-", "+", "|", " "}:
+            continue
+        chunks = [part.strip() for part in re.split(r"\s{2,}|\t+|\|", line) if part.strip()]
+        if not chunks:
+            continue
+        domain = chunks[0]
+        if "." not in domain:
+            continue
+        site_user = chunks[1] if len(chunks) > 1 else None
+        site_path = chunks[2] if len(chunks) > 2 else None
+        php_version = chunks[3] if len(chunks) > 3 else None
+        sites.append(
+            {
+                "domain_name": domain,
+                "site_user": site_user,
+                "site_path": site_path,
+                "php_version": php_version,
+            }
+        )
+    return sites
+
+
+def _parse_sites_from_paths(output: str) -> list[dict]:
+    rows: list[dict] = []
+    for ln in output.splitlines():
+        path = ln.strip()
+        if not path or "/data/www/" not in path:
+            continue
+        # Expected path: /var/www/{site_user}/data/www/{domain}
+        m = re.match(r"^/var/www/([^/]+)/data/www/([^/]+)$", path)
+        if not m:
+            continue
+        rows.append(
+            {
+                "domain_name": m.group(2),
+                "site_user": m.group(1),
+                "site_path": path,
+                "php_version": None,
+            }
+        )
+    return rows
+
+
+def list_sites(client: paramiko.SSHClient, fp_path: str | None) -> list[dict]:
+    if fp_path:
+        code, out = run_remote(client, f"{shlex.quote(fp_path)} sites list --json")
+        if code == 0 and out.strip():
+            try:
+                raw = json.loads(out)
+                if isinstance(raw, dict):
+                    raw = raw.get("result") or raw.get("sites") or []
+                if isinstance(raw, list):
+                    rows: list[dict] = []
+                    for item in raw:
+                        if not isinstance(item, dict):
+                            continue
+                        normalized = _normalize_site_row(item)
+                        if normalized:
+                            rows.append(normalized)
+                    if rows:
+                        return rows
+            except Exception:
+                pass
+
+        code, out = run_remote(client, f"{shlex.quote(fp_path)} sites list")
+        if code == 0 and out.strip():
+            rows = _parse_sites_from_text_table(out)
+            if rows:
+                return rows
+
+    # Filesystem fallback (works even when fastpanel binary is not resolvable).
+    code, out = run_remote(
+        client,
+        "python3 -c \"import glob; [print(p) for p in glob.glob('/var/www/*/data/www/*')]\"",
+    )
+    if code == 0 and out.strip():
+        return _parse_sites_from_paths(out)
+    return []

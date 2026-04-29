@@ -6,8 +6,9 @@ RENEWAL_NOTICE_MONTHS = 9
 
 class ServerStatus(StrEnum):
     NEW = "new"
+    PROVISIONED = "provisioned"
     ACTIVE = "active"
-    FAILED = "failed"
+    ERROR = "error"
 
 
 class FastPanelStatus(StrEnum):
