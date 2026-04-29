@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 
 import paramiko
@@ -8,6 +9,21 @@ from sqlalchemy.orm import selectinload
 from app.models.server import Server, ServerSecret
 from app.schemas.server import ServerCreate, ServerUpdate
 from app.services.encryption_service import decrypt, encrypt
+
+
+def _open_ssh_client(server: Server, password: str, timeout: int = 10) -> paramiko.SSHClient:
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=server.ip_address,
+        port=server.ssh_port,
+        username=server.ssh_user,
+        password=password,
+        timeout=timeout,
+        allow_agent=False,
+        look_for_keys=False,
+    )
+    return client
 
 
 async def get_all(db: AsyncSession) -> tuple[list[Server], int]:
@@ -48,7 +64,14 @@ async def create(db: AsyncSession, data: ServerCreate) -> Server:
     result = await db.execute(
         select(Server).options(selectinload(Server.secret)).where(Server.id == server.id)
     )
-    return result.scalar_one()
+    created = result.scalar_one()
+
+    if data.ssh_password:
+        from app.tasks.server_health_task import check_server_uptime
+
+        check_server_uptime.delay(created.id)
+
+    return created
 
 
 async def update(db: AsyncSession, server_id: int, data: ServerUpdate) -> Optional[Server]:
@@ -94,22 +117,44 @@ async def test_ssh_connection(db: AsyncSession, server_id: int) -> tuple[bool, s
         return False, "SSH password is not set"
 
     password = decrypt(server.secret.ssh_password_encrypted)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client: Optional[paramiko.SSHClient] = None
     try:
-        client.connect(
-            hostname=server.ip_address,
-            port=server.ssh_port,
-            username=server.ssh_user,
-            password=password,
-            timeout=10,
-            allow_agent=False,
-            look_for_keys=False,
-        )
+        client = _open_ssh_client(server, password, timeout=10)
         stdin, stdout, stderr = client.exec_command("uname -a", timeout=10)
         out = stdout.read().decode("utf-8", errors="ignore").strip()
         return True, out or "connected"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
     finally:
-        client.close()
+        if client:
+            client.close()
+
+
+async def fetch_and_persist_uptime(db: AsyncSession, server_id: int) -> Optional[Server]:
+    server = await get_by_id(db, server_id)
+    if not server:
+        return None
+    if not server.has_ssh or not server.secret or not server.secret.ssh_password_encrypted:
+        return server
+
+    password = decrypt(server.secret.ssh_password_encrypted)
+    client: Optional[paramiko.SSHClient] = None
+    try:
+        client = _open_ssh_client(server, password, timeout=10)
+        _, stdout, _ = client.exec_command("cat /proc/uptime", timeout=10)
+        first = stdout.read().decode("utf-8", errors="ignore").split()[0]
+        server.uptime_seconds = int(float(first))
+        server.last_check_ok = True
+        server.last_check_error = None
+    except Exception as e:
+        server.uptime_seconds = None
+        server.last_check_ok = False
+        server.last_check_error = f"{type(e).__name__}: {e}"
+    finally:
+        if client:
+            client.close()
+
+    server.last_check_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(server)
+    return server

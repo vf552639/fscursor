@@ -1,0 +1,32 @@
+# Node deps / build output
+node_modules/
+dist/
+build/
+.vite/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Caches
+.cache/
+.parcel-cache/
+.eslintcache
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Git / docker meta
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

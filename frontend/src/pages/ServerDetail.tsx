@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions } from "../components/ui/Primitives";
-import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer } from "../api/servers";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
+import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer, useRefreshUptime } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 
 export default function ServerDetail({server, onBack, onNav}: {server?: any, onBack: (p: string)=>void, onNav?: (p: string, ctx?: any)=>void}){
@@ -28,6 +28,7 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
   const delSrv = useDeleteServer();
   const testSsh = useTestSsh(server?.id || 0);
   const installFp = useInstallFastPanel(server?.id || 0);
+  const refreshUptime = useRefreshUptime(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
   const deleteDomain = useDeleteDomain();
   const updateDomain = useUpdateDomain(editingDomain?.id || 0);
@@ -72,11 +73,12 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:24}}>
       <div>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={displayStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1><Badge variant="gray">{(s.os||"Unknown").toUpperCase()}</Badge>{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
-        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · - · Added {fmtDate(s.created_at)}</div>
+        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · Uptime: {formatUptime(s.uptime_seconds)} · Added {fmtDate(s.created_at)}</div>
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8}}>
         {s.has_ssh && <Btn variant="secondary" onClick={()=>testSsh.mutate()} disabled={testSsh.isPending}>{testSsh.isPending ? "Testing..." : "SSH Test"}</Btn>}
+        {s.has_ssh && <Btn variant="secondary" onClick={()=>refreshUptime.mutate()} disabled={refreshUptime.isPending}>{refreshUptime.isPending ? "Refreshing..." : "Refresh Uptime"}</Btn>}
         <Btn variant="danger" onClick={handleDelete} disabled={delSrv.isPending}>✕ Delete</Btn>
       </div>
     </div>
@@ -92,6 +94,11 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
     )}
 
     {testSsh.data && <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: testSsh.data.success ? "#dcfce7" : "#fee2e2", color: testSsh.data.success ? "#166534" : "#991b1b", fontSize: 13}}>SSH Test: {testSsh.data.message}</div>}
+    {s.last_check_ok === false && s.last_check_error && (
+      <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
+        Uptime check failed: {s.last_check_error}
+      </div>
+    )}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
       <StatCard label="CPU Usage" value={`0%`} sub={`Normal · ? vCPU`} pct={0} color={cpuColor(0)} chartData={cpuD}/>
@@ -148,6 +155,7 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
               ["Name",s.name],
               ["IP",s.ip_address],
               ["OS",s.os || "Unknown"],
+              ["Uptime", formatUptime(s.uptime_seconds)],
               ["Status",<Badge key="status" variant={displayStatus==="healthy"?"green":displayStatus==="warning"?"yellow":"red"}>{s.status}</Badge>],
               ["Added",fmtDate(s.created_at)]
             ].map(([k,v], i)=><InfoRow key={i} k={k} v={v}/>)}

@@ -1,0 +1,41 @@
+# Python bytecode / packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.so
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Celery / runtime state
+celerybeat-schedule
+celerybeat.pid
+*.pid
+
+# Tests / coverage / caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Git / docker meta
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+
+# Logs
+*.log

@@ -1,7 +1,7 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Date, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -25,6 +25,10 @@ class Server(Base, TimestampMixin):
     fastpanel_user: Mapped[Optional[str]] = mapped_column(String(128))
     fastpanel_password_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    uptime_seconds: Mapped[Optional[int]] = mapped_column(BigInteger)
+    last_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_check_ok: Mapped[Optional[bool]] = mapped_column(Boolean)
+    last_check_error: Mapped[Optional[str]] = mapped_column(Text)
 
     secret: Mapped[Optional["ServerSecret"]] = relationship(
         back_populates="server", uselist=False, cascade="all, delete-orphan"

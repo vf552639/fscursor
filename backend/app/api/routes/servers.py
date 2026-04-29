@@ -68,6 +68,14 @@ async def test_ssh(server_id: int, db: AsyncSession = Depends(get_db)) -> SSHTes
     return SSHTestResponse(success=ok, message=msg)
 
 
+@router.post("/{server_id}/refresh-uptime", response_model=ServerResponse)
+async def refresh_uptime(server_id: int, db: AsyncSession = Depends(get_db)) -> ServerResponse:
+    server = await server_service.fetch_and_persist_uptime(db, server_id)
+    if not server:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    return ServerResponse.model_validate(server)
+
+
 @router.post(
     "/{server_id}/install-fastpanel",
     response_model=InstallFastpanelResponse,

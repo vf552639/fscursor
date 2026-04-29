@@ -19,6 +19,11 @@ export interface Server {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  has_ssh: boolean;
+  uptime_seconds: number | null;
+  last_check_at: string | null;
+  last_check_ok: boolean | null;
+  last_check_error: string | null;
 }
 
 export interface ServerListResponse {
@@ -129,6 +134,16 @@ export function useDeleteServer() {
 export function useTestSsh(id: number) {
   return useMutation({
     mutationFn: () => apiPost<SshTestResult>(`/servers/${id}/test-ssh`),
+  });
+}
+
+export function useRefreshUptime(id: number) {
+  return useMutation({
+    mutationFn: () => apiPost<Server>(`/servers/${id}/refresh-uptime`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: serversKeys.all });
+    },
   });
 }
 

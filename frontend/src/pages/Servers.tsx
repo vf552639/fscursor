@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState } from "../components/ui/Primitives";
+import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState, formatUptime } from "../components/ui/Primitives";
 import { useServers, useCreateServer } from "../api/servers";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
@@ -175,10 +175,17 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     name: s.name,
     ip: s.ip_address,
     os: s.os || "Unknown",
-    status: s.status === "active" ? "healthy" : s.status === "new" ? "new" : (s.status || "warning"),
+    status: s.last_check_ok === false
+      ? "warning"
+      : s.status === "active"
+      ? "healthy"
+      : s.status === "new"
+      ? "new"
+      : (s.status || "warning"),
     fastpanel: s.fastpanel_status === "installed",
     location: "-",
-    uptime: "0 days",
+    uptime: formatUptime(s.uptime_seconds),
+    last_check_error: s.last_check_error || null,
     cpu: 0,
     ram_used: 0,
     ram_total: 4,
@@ -235,7 +242,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
             const cpuData=genBars(s.cpu); const pct=(s.ssd_used/s.ssd_total)*100; const cc=cpuColor(s.cpu);
             return <div key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,padding:"16px 18px",cursor:"pointer",transition:"box-shadow 0.15s"}} onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"} onMouseLeave={e=>e.currentTarget.style.boxShadow="none"}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-                <div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status}/><span style={{fontSize:14,fontWeight:700,color:"#111"}}>{s.name}</span></div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status}/><span style={{fontSize:14,fontWeight:700,color:"#111"}} title={s.last_check_error || undefined}>{s.name}</span></div>
                 <span style={{fontSize:13,color:"#9ca3af"}}>⋯</span>
               </div>
               <div style={{fontSize:12,color:"#6b7280",marginBottom:10}}>{s.ip}</div>
@@ -275,7 +282,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                   </tr>
                 ) : null}
                 {filtered.map(s=><tr key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
-                  <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
+                  <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}} title={s.last_check_error || undefined}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
                   <td style={{padding:"12px 16px",fontFamily:"monospace",fontSize:13}}>{s.ip}</td>
                   <td style={{padding:"12px 16px"}}><Badge variant="gray">{s.os}</Badge></td>
                   <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:55,height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.cpu}%`,background:cpuColor(s.cpu)}}/></div><span style={{fontSize:12,color:"#6b7280"}}>{s.cpu}%</span></div></td>

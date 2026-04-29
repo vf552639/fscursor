@@ -51,6 +51,10 @@ class ServerResponse(ServerBase):
     created_at: datetime
     updated_at: datetime
     has_ssh: bool = False
+    uptime_seconds: Optional[int] = None
+    last_check_at: Optional[datetime] = None
+    last_check_ok: Optional[bool] = None
+    last_check_error: Optional[str] = None
 
 
 class ServerListResponse(BaseModel):

@@ -219,3 +219,16 @@ export function CopyBtn({value}: any){
 
 export const fmtDate = (iso: string) => iso ? new Date(iso).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—";
 export const fmtDT   = (iso: string) => iso ? new Date(iso).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
+export const formatUptime = (seconds: number | null | undefined) => {
+  if (seconds === null || seconds === undefined) return "—";
+  if (seconds < 60) return "<1m";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${h}h ${m}m`;
+  }
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  return `${d}d ${h}h`;
+};
