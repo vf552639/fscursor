@@ -17,7 +17,7 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
   // Queries
   const { data: s } = useServer(server?.id);
   const { data: domainsData } = useDomains({ server_id: server?.id });
-  const domains = domainsData?.items || [];
+  const domains = domainsData ?? [];
   
   // FastPanel setup
   const isFPInstalled = s?.fastpanel_status === "installed";

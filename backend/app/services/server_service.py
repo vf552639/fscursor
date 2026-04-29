@@ -208,6 +208,22 @@ async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
                 continue
             existing = await domain_service.get_by_name(db, name)
             if existing:
+                if existing.server_id is not None and existing.server_id != server.id:
+                    other = await get_by_id(db, existing.server_id)
+                    other_label = other.name if other else f"id={existing.server_id}"
+                    await db.rollback()
+                    if client:
+                        client.close()
+                        client = None
+                    return {
+                        "created": 0,
+                        "linked": 0,
+                        "total": total,
+                        "error": (
+                            f"Domain '{name}' is already linked to server '{other_label}' "
+                            f"(id={existing.server_id}). Sync stopped."
+                        ),
+                    }
                 existing.server_id = server.id
                 existing.site_user = site.get("site_user")
                 existing.site_path = site.get("site_path")
