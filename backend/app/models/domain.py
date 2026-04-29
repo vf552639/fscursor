@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -29,6 +29,13 @@ class Domain(Base, TimestampMixin):
     purchase_date: Mapped[Optional[date]] = mapped_column(Date)
     ns_status: Mapped[Optional[str]] = mapped_column(String(32))
     ns_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    site_user: Mapped[Optional[str]] = mapped_column(String(64))
+    site_path: Mapped[Optional[str]] = mapped_column(String(255))
+    ftp_user: Mapped[Optional[str]] = mapped_column(String(64))
+    ftp_password_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    ssl_status: Mapped[Optional[str]] = mapped_column(String(16), default="none")
+    ssl_email_used: Mapped[Optional[str]] = mapped_column(String(255))
+    php_version: Mapped[Optional[str]] = mapped_column(String(8))
 
     registrar: Mapped[Optional["RegistrarAccount"]] = relationship(back_populates="domains")
     server: Mapped[Optional["Server"]] = relationship(back_populates="domains")

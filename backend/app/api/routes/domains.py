@@ -4,9 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.models.task_log import TaskLog
 from app.schemas.domain import (
     BulkSetNSRequest,
     BulkSetNSResponse,
+    BulkProvisionRequest,
+    BulkProvisionResponse,
+    DomainFtpCredentials,
     DomainBulkAssignCloudflare,
     DomainBulkAssignResponse,
     DomainBulkAssignServer,
@@ -16,10 +20,13 @@ from app.schemas.domain import (
     DomainCreate,
     DomainResponse,
     DomainUpdate,
+    ProvisionResponse,
     SetNSResponse,
 )
+from app.services.encryption_service import decrypt
 from app.services import domain_service
 from app.tasks.ns_task import set_nameservers
+from app.tasks.provision_task import provision_domain
 
 router = APIRouter(prefix="/domains", tags=["domains"])
 
@@ -148,3 +155,75 @@ async def set_ns(domain_id: int, db: AsyncSession = Depends(get_db)) -> SetNSRes
 async def bulk_set_ns(data: BulkSetNSRequest) -> BulkSetNSResponse:
     task_ids = [set_nameservers.delay(did).id for did in data.domain_ids]
     return BulkSetNSResponse(task_ids=task_ids)
+
+
+@router.post(
+    "/{domain_id}/provision",
+    response_model=ProvisionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def provision_single(
+    domain_id: int, db: AsyncSession = Depends(get_db)
+) -> ProvisionResponse:
+    domain = await domain_service.get_by_id(db, domain_id)
+    if not domain:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Domain not found")
+    if not domain.server_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Domain has no assigned server")
+    task_log = TaskLog(
+        entity_type="domain",
+        entity_id=domain_id,
+        task_type="provision_domain",
+        status="pending",
+        log_text="",
+    )
+    db.add(task_log)
+    await db.commit()
+    await db.refresh(task_log)
+    async_result = provision_domain.delay(domain_id, task_log.id)
+    return ProvisionResponse(
+        task_id=async_result.id,
+        task_log_id=task_log.id,
+        domain_id=domain_id,
+    )
+
+
+@router.post(
+    "/bulk-provision",
+    response_model=BulkProvisionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def bulk_provision(
+    data: BulkProvisionRequest, db: AsyncSession = Depends(get_db)
+) -> BulkProvisionResponse:
+    task_ids: list[str] = []
+    for did in data.domain_ids:
+        task_log = TaskLog(
+            entity_type="domain",
+            entity_id=did,
+            task_type="provision_domain",
+            status="pending",
+            log_text="",
+        )
+        db.add(task_log)
+        await db.flush()
+        task_ids.append(provision_domain.delay(did, task_log.id).id)
+    await db.commit()
+    return BulkProvisionResponse(task_ids=task_ids)
+
+
+@router.get("/{domain_id}/ftp-credentials", response_model=DomainFtpCredentials)
+async def get_ftp_credentials(
+    domain_id: int, db: AsyncSession = Depends(get_db)
+) -> DomainFtpCredentials:
+    domain = await domain_service.get_by_id(db, domain_id)
+    if not domain:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Domain not found")
+    ftp_password = None
+    if domain.ftp_password_encrypted:
+        ftp_password = decrypt(domain.ftp_password_encrypted)
+    return DomainFtpCredentials(
+        domain_id=domain.id,
+        ftp_user=domain.ftp_user,
+        ftp_password=ftp_password,
+    )

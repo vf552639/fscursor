@@ -12,7 +12,7 @@ from app.core.database import engine
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "005_server_uptime"
+EXPECTED_ALEMBIC_HEAD = "006_provisioning_and_ssl_pool"
 
 
 @asynccontextmanager

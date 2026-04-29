@@ -39,6 +39,12 @@ class DomainResponse(DomainBase):
     status: str
     ns_status: Optional[str] = None
     ns_updated_at: Optional[datetime] = None
+    site_user: Optional[str] = None
+    site_path: Optional[str] = None
+    ftp_user: Optional[str] = None
+    ssl_status: Optional[str] = None
+    ssl_email_used: Optional[str] = None
+    php_version: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -87,4 +93,24 @@ class BulkSetNSRequest(BaseModel):
 
 
 class BulkSetNSResponse(BaseModel):
+    task_ids: list[str]
+
+
+class DomainFtpCredentials(BaseModel):
+    domain_id: int
+    ftp_user: Optional[str] = None
+    ftp_password: Optional[str] = None
+
+
+class ProvisionResponse(BaseModel):
+    task_id: str
+    task_log_id: int
+    domain_id: int
+
+
+class BulkProvisionRequest(BaseModel):
+    domain_ids: list[int]
+
+
+class BulkProvisionResponse(BaseModel):
     task_ids: list[str]
