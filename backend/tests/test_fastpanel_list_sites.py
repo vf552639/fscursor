@@ -2,7 +2,7 @@ import pytest
 
 pytest.importorskip("paramiko")
 
-from app.services.fastpanel_client import list_sites
+from app.services.fastpanel_client import _coerce_php_version, list_sites
 
 
 class _DummyClient:
@@ -61,3 +61,30 @@ def test_list_sites_filesystem_fallback(monkeypatch) -> None:
     monkeypatch.setattr("app.services.fastpanel_client.run_remote", _fake_run_remote)
     rows = list_sites(_DummyClient(), "/usr/local/fastpanel2/fastpanel")
     assert {r["domain_name"] for r in rows} == {"site1.com", "site2.net"}
+
+
+def test_list_sites_uses_timeout_and_no_pty(monkeypatch) -> None:
+    calls = []
+    responses = [
+        (1, "json not available"),
+        (1, "table not available"),
+        (0, "/var/www/u1/data/www/site1.com\n"),
+    ]
+
+    def _fake_run_remote(_client, cmd, timeout=None, pty=True):  # noqa: ARG001
+        calls.append((cmd, timeout, pty))
+        return responses.pop(0)
+
+    monkeypatch.setattr("app.services.fastpanel_client.run_remote", _fake_run_remote)
+    list_sites(_DummyClient(), "/usr/local/fastpanel2/fastpanel")
+
+    assert len(calls) == 3
+    for _cmd, timeout, pty in calls:
+        assert timeout == 15
+        assert pty is False
+
+
+def test_coerce_php_version() -> None:
+    assert _coerce_php_version("php-8.1-fpm") == "8.1"
+    assert _coerce_php_version("8.1.27") == "8.1.27"
+    assert _coerce_php_version("n/a") is None

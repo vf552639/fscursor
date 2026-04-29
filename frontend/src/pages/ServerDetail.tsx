@@ -128,6 +128,11 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
           : `Synced ${syncDomains.data.total} domains (${syncDomains.data.created} new, ${syncDomains.data.linked} linked).`}
       </div>
     )}
+    {syncDomains.isError && (
+      <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
+        Sync failed: {(syncDomains.error as any)?.message || "request error"}
+      </div>
+    )}
     {s.last_check_ok === false && s.last_check_error && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
         Uptime check failed: {s.last_check_error}

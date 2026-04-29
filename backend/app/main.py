@@ -13,7 +13,7 @@ from app.core.logging import add_loguru_intercept_handler, configure_logging
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "008_server_metrics"
+EXPECTED_ALEMBIC_HEAD = "009_phpversion_widen"
 
 
 @asynccontextmanager

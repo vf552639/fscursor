@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+import re
+import socket
 from typing import Optional
 
 import paramiko
 from sqlalchemy import func, select
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -29,6 +32,13 @@ def _open_ssh_client(server: Server, password: str, timeout: int = 10) -> parami
         look_for_keys=False,
     )
     return client
+
+
+def _normalize_php_version(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    match = re.search(r"\d+(?:\.\d+){0,2}", str(raw))
+    return match.group(0) if match else None
 
 
 async def get_all(db: AsyncSession) -> tuple[list[Server], int]:
@@ -201,24 +211,40 @@ async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
                 existing.server_id = server.id
                 existing.site_user = site.get("site_user")
                 existing.site_path = site.get("site_path")
-                if site.get("php_version"):
-                    existing.php_version = site.get("php_version")
+                normalized_php = _normalize_php_version(site.get("php_version"))
+                if normalized_php:
+                    existing.php_version = normalized_php
                 linked += 1
                 continue
+            normalized_php = _normalize_php_version(site.get("php_version"))
             db.add(
                 Domain(
                     domain_name=name,
                     server_id=server.id,
                     site_user=site.get("site_user"),
                     site_path=site.get("site_path"),
-                    php_version=site.get("php_version"),
+                    php_version=normalized_php,
                     status="active",
                 )
             )
             created += 1
         server.last_check_ok = True
         server.last_check_error = None
+    except (paramiko.SSHException, socket.timeout, TimeoutError) as exc:
+        await db.rollback()
+        server.last_check_ok = False
+        server.last_check_error = f"{type(exc).__name__}: {exc}"
+        server.status = ServerStatus.ERROR.value
+        error = f"SSH timeout: {exc}"
+    except (IntegrityError, DataError) as exc:
+        await db.rollback()
+        server.last_check_ok = False
+        server.last_check_error = f"{type(exc).__name__}: {exc}"
+        server.status = ServerStatus.ERROR.value
+        orig = getattr(exc, "orig", exc)
+        error = f"DB error: {orig}"
     except Exception as exc:
+        await db.rollback()
         server.last_check_ok = False
         server.last_check_error = f"{type(exc).__name__}: {exc}"
         server.status = ServerStatus.ERROR.value
@@ -228,6 +254,20 @@ async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
             client.close()
 
     server.last_check_at = datetime.now(timezone.utc)
-    await db.commit()
-    await db.refresh(server)
+    try:
+        await db.commit()
+        await db.refresh(server)
+    except (IntegrityError, DataError) as exc:
+        await db.rollback()
+        server.last_check_ok = False
+        server.last_check_error = f"{type(exc).__name__}: {exc}"
+        server.status = ServerStatus.ERROR.value
+        orig = getattr(exc, "orig", exc)
+        error = f"DB error: {orig}"
+    except Exception as exc:
+        await db.rollback()
+        server.last_check_ok = False
+        server.last_check_error = f"{type(exc).__name__}: {exc}"
+        server.status = ServerStatus.ERROR.value
+        error = f"{type(exc).__name__}: {exc}"
     return {"created": created, "linked": linked, "total": total, "error": error}

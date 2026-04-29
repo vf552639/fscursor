@@ -35,7 +35,7 @@ class Domain(Base, TimestampMixin):
     ftp_password_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     ssl_status: Mapped[Optional[str]] = mapped_column(String(16), default="none")
     ssl_email_used: Mapped[Optional[str]] = mapped_column(String(255))
-    php_version: Mapped[Optional[str]] = mapped_column(String(8))
+    php_version: Mapped[Optional[str]] = mapped_column(String(16))
     last_provision_error: Mapped[Optional[str]] = mapped_column(Text)
 
     registrar: Mapped[Optional["RegistrarAccount"]] = relationship(back_populates="domains")

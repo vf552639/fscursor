@@ -29,7 +29,7 @@ def open_ssh(
 
 
 def run_remote(
-    client: paramiko.SSHClient, cmd: str, timeout: int | None = None
+    client: paramiko.SSHClient, cmd: str, timeout: int | None = None, pty: bool = True
 ) -> tuple[int, str]:
     transport = client.get_transport()
     if transport is None:
@@ -37,7 +37,8 @@ def run_remote(
     chan = transport.open_session()
     if timeout is not None:
         chan.settimeout(timeout)
-    chan.get_pty()
+    if pty:
+        chan.get_pty()
     chan.exec_command(cmd)
     buf = b""
     while True:
@@ -223,13 +224,20 @@ def _normalize_site_row(raw: dict) -> dict | None:
         return None
     site_user = raw.get("site_user") or raw.get("owner") or raw.get("user")
     site_path = raw.get("site_path") or raw.get("path") or raw.get("www_path")
-    php_version = raw.get("php_version") or raw.get("php")
+    php_version = _coerce_php_version(raw.get("php_version") or raw.get("php"))
     return {
         "domain_name": str(domain).strip(),
         "site_user": str(site_user).strip() if site_user else None,
         "site_path": str(site_path).strip() if site_path else None,
         "php_version": str(php_version).strip() if php_version else None,
     }
+
+
+def _coerce_php_version(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    match = re.search(r"\d+(?:\.\d+){0,2}", str(raw))
+    return match.group(0) if match else None
 
 
 def _parse_sites_from_text_table(output: str) -> list[dict]:
@@ -250,7 +258,7 @@ def _parse_sites_from_text_table(output: str) -> list[dict]:
             continue
         site_user = chunks[1] if len(chunks) > 1 else None
         site_path = chunks[2] if len(chunks) > 2 else None
-        php_version = chunks[3] if len(chunks) > 3 else None
+        php_version = _coerce_php_version(chunks[3] if len(chunks) > 3 else None)
         sites.append(
             {
                 "domain_name": domain,
@@ -285,7 +293,12 @@ def _parse_sites_from_paths(output: str) -> list[dict]:
 
 def list_sites(client: paramiko.SSHClient, fp_path: str | None) -> list[dict]:
     if fp_path:
-        code, out = run_remote(client, f"{shlex.quote(fp_path)} sites list --json")
+        code, out = run_remote(
+            client,
+            f"{shlex.quote(fp_path)} sites list --json",
+            timeout=15,
+            pty=False,
+        )
         if code == 0 and out.strip():
             try:
                 raw = json.loads(out)
@@ -304,7 +317,12 @@ def list_sites(client: paramiko.SSHClient, fp_path: str | None) -> list[dict]:
             except Exception:
                 pass
 
-        code, out = run_remote(client, f"{shlex.quote(fp_path)} sites list")
+        code, out = run_remote(
+            client,
+            f"{shlex.quote(fp_path)} sites list",
+            timeout=15,
+            pty=False,
+        )
         if code == 0 and out.strip():
             rows = _parse_sites_from_text_table(out)
             if rows:
@@ -314,6 +332,8 @@ def list_sites(client: paramiko.SSHClient, fp_path: str | None) -> list[dict]:
     code, out = run_remote(
         client,
         "python3 -c \"import glob; [print(p) for p in glob.glob('/var/www/*/data/www/*')]\"",
+        timeout=15,
+        pty=False,
     )
     if code == 0 and out.strip():
         return _parse_sites_from_paths(out)
