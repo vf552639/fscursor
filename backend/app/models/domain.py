@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -35,7 +35,15 @@ class Domain(Base, TimestampMixin):
     ftp_password_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     ssl_status: Mapped[Optional[str]] = mapped_column(String(16), default="none")
     ssl_email_used: Mapped[Optional[str]] = mapped_column(String(255))
+    ssl_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    ssl_issuer: Mapped[Optional[str]] = mapped_column(String(64))
     php_version: Mapped[Optional[str]] = mapped_column(String(16))
+    db_name: Mapped[Optional[str]] = mapped_column(String(64))
+    db_user: Mapped[Optional[str]] = mapped_column(String(64))
+    db_password_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    ns_check_mode: Mapped[Optional[str]] = mapped_column(String(16), default="auto")
+    nginx_override: Mapped[Optional[str]] = mapped_column(Text)
+    nginx_presets: Mapped[Optional[dict]] = mapped_column(JSON)
     last_provision_error: Mapped[Optional[str]] = mapped_column(Text)
 
     registrar: Mapped[Optional["RegistrarAccount"]] = relationship(back_populates="domains")

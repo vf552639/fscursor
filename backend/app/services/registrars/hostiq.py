@@ -59,3 +59,10 @@ class HostiqService(BaseRegistrarService):
         payload = {"nameservers": ns_list}
         await self._call("PUT", f"/domains/{domain}/nameservers", json=payload)
         return True
+
+    async def get_nameservers(self, domain: str) -> list[str]:
+        data = await self._call("GET", f"/domains/{domain}")
+        nameservers = data.get("nameservers") if isinstance(data, dict) else None
+        if not isinstance(nameservers, list):
+            raise NotImplementedError("Hostiq response does not contain nameservers")
+        return [str(ns).strip().lower().rstrip(".") for ns in nameservers if str(ns).strip()]

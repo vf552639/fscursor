@@ -16,7 +16,7 @@ from app.models.server import Server, ServerSecret
 from app.schemas.server import ServerCreate, ServerUpdate
 from app.services import domain_service
 from app.services.encryption_service import decrypt, encrypt
-from app.services.fastpanel_client import get_fastpanel_path, list_sites
+from app.services.fastpanel_client import get_fastpanel_path, list_sites, read_ssl_info_via_ssh
 
 
 def _open_ssh_client(server: Server, password: str, timeout: int = 10) -> paramiko.SSHClient:
@@ -207,6 +207,14 @@ async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
             if not is_valid_domain(name):
                 continue
             existing = await domain_service.get_by_name(db, name)
+            try:
+                ssl_info = read_ssl_info_via_ssh(client, name)
+            except Exception:
+                ssl_info = {
+                    "has_certificate": False,
+                    "expires_at": None,
+                    "issuer": None,
+                }
             if existing:
                 if existing.server_id is not None and existing.server_id != server.id:
                     other = await get_by_id(db, existing.server_id)
@@ -230,6 +238,14 @@ async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
                 normalized_php = _normalize_php_version(site.get("php_version"))
                 if normalized_php:
                     existing.php_version = normalized_php
+                if ssl_info.get("has_certificate"):
+                    existing.ssl_status = "active"
+                    existing.ssl_expires_at = ssl_info.get("expires_at")
+                    existing.ssl_issuer = ssl_info.get("issuer")
+                else:
+                    existing.ssl_status = "none"
+                    existing.ssl_expires_at = None
+                    existing.ssl_issuer = None
                 linked += 1
                 continue
             normalized_php = _normalize_php_version(site.get("php_version"))
@@ -240,6 +256,9 @@ async def fetch_and_persist_domains(db: AsyncSession, server_id: int) -> dict:
                     site_user=site.get("site_user"),
                     site_path=site.get("site_path"),
                     php_version=normalized_php,
+                    ssl_status="active" if ssl_info.get("has_certificate") else "none",
+                    ssl_expires_at=ssl_info.get("expires_at"),
+                    ssl_issuer=ssl_info.get("issuer"),
                     status="active",
                 )
             )

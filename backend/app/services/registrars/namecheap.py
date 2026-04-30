@@ -86,3 +86,15 @@ class NamecheapService(BaseRegistrarService):
             errors = [e.text or "" for e in root.iter() if _strip_ns(e.tag) == "Error"]
             raise RegistrarError(f"Namecheap setCustom failed: {'; '.join(errors) or 'unknown error'}")
         return True
+
+    async def get_nameservers(self, domain: str) -> list[str]:
+        sld, tld = _split(domain)
+        root = await self._call(
+            "namecheap.domains.getInfo",
+            {"SLD": sld, "TLD": tld},
+        )
+        for el in root.iter():
+            if _strip_ns(el.tag) == "DomainDNSGetListResult":
+                raw = el.attrib.get("Nameservers", "")
+                return [n.strip().lower().rstrip(".") for n in raw.split(",") if n.strip()]
+        return []

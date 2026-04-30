@@ -111,6 +111,11 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       ))}
     </div>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{fontSize:12.5,color:"#6b7280",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8,padding:"10px 12px"}}>
+        {tab === "install"
+          ? "Install New Fastpanel: server is created, then FastPanel installation starts over SSH."
+          : "Connect Existing Fastpanel: server is created with existing panel credentials and initial sync/metrics checks."}
+      </div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Server Name</label>
         <Inp value={name} onChange={e=>{setName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., production-web-01" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>

@@ -24,3 +24,7 @@ class BaseRegistrarService(ABC):
     @abstractmethod
     async def set_nameservers(self, domain: str, ns_list: list[str]) -> bool:
         ...
+
+    @abstractmethod
+    async def get_nameservers(self, domain: str) -> list[str]:
+        ...

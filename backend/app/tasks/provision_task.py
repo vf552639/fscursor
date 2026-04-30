@@ -63,7 +63,7 @@ async def _is_auto_temp_mail_enabled(session) -> bool:
     return cfg.value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
-async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
+async def _main(domain_id: int, task_log_id: int | None = None, site_only: bool = False) -> dict:
     if task_log_id is None:
         task_log_id = await _create_task_log(domain_id)
     async with AsyncSessionLocal() as session:
@@ -182,29 +182,29 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
                 await _append_log(session, task_log, "Site created\n")
                 site_ok = True
 
-            if domain.ftp_user:
-                await _append_log(session, task_log, "FTP already exists, skipping\n")
-            else:
-                ftp_result = await asyncio.to_thread(
-                    create_ftp_account, client, fp_path, domain.domain_name
-                )
-                if not ftp_result["success"]:
-                    await _append_log(
-                        session,
-                        task_log,
-                        f"FTP create failed: {ftp_result['error']}\n",
-                    )
+            if not site_only:
+                if domain.ftp_user:
+                    await _append_log(session, task_log, "FTP already exists, skipping\n")
                 else:
-                    domain.ftp_user = ftp_result["ftp_user"]
-                    domain.ftp_password_encrypted = encrypt(ftp_result["ftp_password"])
-                    await session.commit()
-                    await _append_log(session, task_log, "FTP account created\n")
+                    ftp_result = await asyncio.to_thread(
+                        create_ftp_account, client, fp_path, domain.domain_name
+                    )
+                    if not ftp_result["success"]:
+                        await _append_log(
+                            session,
+                            task_log,
+                            f"FTP create failed: {ftp_result['error']}\n",
+                        )
+                    else:
+                        domain.ftp_user = ftp_result["ftp_user"]
+                        domain.ftp_password_encrypted = encrypt(ftp_result["ftp_password"])
+                        await session.commit()
+                        await _append_log(session, task_log, "FTP account created\n")
 
-            ssl_active = (
-                domain.ssl_status == SslStatus.ACTIVE.value
-                and await asyncio.to_thread(cert_exists, client, domain.domain_name)
-            )
-            if ssl_active:
+            ssl_active = (domain.ssl_status == SslStatus.ACTIVE.value and await asyncio.to_thread(cert_exists, client, domain.domain_name))
+            if site_only:
+                await _append_log(session, task_log, "Site-only mode: skip FTP/SSL steps\n")
+            elif ssl_active:
                 await _append_log(session, task_log, "SSL already active, skipping\n")
             else:
                 await _append_log(session, task_log, "Running DNS pre-check\n")
@@ -333,5 +333,5 @@ async def _main(domain_id: int, task_log_id: int | None = None) -> dict:
 
 
 @celery_app.task(name="app.tasks.provision.provision_domain")
-def provision_domain(domain_id: int, task_log_id: int | None = None) -> dict:
-    return asyncio.run(_main(domain_id, task_log_id))
+def provision_domain(domain_id: int, task_log_id: int | None = None, site_only: bool = False) -> dict:
+    return asyncio.run(_main(domain_id, task_log_id, site_only))

@@ -7,7 +7,11 @@ export default function BulkActionToolbar({
   onAssignServer,
   onAssignCF,
   onSetNs,
+  onCheckNs,
+  onMarkNsSet,
   onProvision,
+  onBulkRefreshSsl,
+  onFullSetup,
   onDelete,
   pending,
 }: {
@@ -15,7 +19,11 @@ export default function BulkActionToolbar({
   onAssignServer: () => void;
   onAssignCF: () => void;
   onSetNs: () => void;
+  onCheckNs?: () => void;
+  onMarkNsSet?: () => void;
   onProvision: () => void;
+  onBulkRefreshSsl?: () => void;
+  onFullSetup?: () => void;
   onDelete: () => void;
   pending?: boolean;
 }) {
@@ -46,6 +54,26 @@ export default function BulkActionToolbar({
       <Btn size="sm" variant="secondary" onClick={onSetNs} disabled={pending}>
         Set NS
       </Btn>
+      {onCheckNs ? (
+        <Btn size="sm" variant="secondary" onClick={onCheckNs} disabled={pending}>
+          Check NS
+        </Btn>
+      ) : null}
+      {onMarkNsSet ? (
+        <Btn size="sm" variant="secondary" onClick={onMarkNsSet} disabled={pending}>
+          Mark NS Set
+        </Btn>
+      ) : null}
+      {onBulkRefreshSsl ? (
+        <Btn size="sm" variant="secondary" onClick={onBulkRefreshSsl} disabled={pending}>
+          Refresh SSL
+        </Btn>
+      ) : null}
+      {onFullSetup ? (
+        <Btn size="sm" variant="primary" onClick={onFullSetup} disabled={pending}>
+          Full Setup
+        </Btn>
+      ) : null}
       <Btn size="sm" variant="secondary" onClick={onProvision} disabled={pending}>
         Provision
       </Btn>

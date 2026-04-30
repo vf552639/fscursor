@@ -5,6 +5,7 @@ import shlex
 import socket
 import string
 import time
+from datetime import datetime, timezone
 
 import paramiko
 
@@ -152,6 +153,197 @@ def issue_ssl_certificate(
     if not cert_exists(client, domain):
         return {"success": False, "error": "SSL certificate file check failed"}
     return {"success": True, "error": None, "output": out}
+
+
+def _safe_mysql_name(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", value).strip("_").lower()
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[:32]
+
+
+def create_database(
+    client: paramiko.SSHClient,
+    fp_path: str,
+    domain: str,
+    db_name: str | None = None,
+    db_user: str | None = None,
+) -> dict:
+    slug = domain.split(".", 1)[0]
+    database_name = _safe_mysql_name(db_name or f"{slug}_db", "site_db")
+    database_user = _safe_mysql_name(db_user or f"{slug}_usr", "site_usr")
+    database_password = generate_password(18)
+
+    fp_cmd = (
+        f"{shlex.quote(fp_path)} database create "
+        f"--name={shlex.quote(database_name)} "
+        f"--user={shlex.quote(database_user)} "
+        f"--password={shlex.quote(database_password)}"
+    )
+    code, out = run_remote(client, fp_cmd, timeout=60)
+    if code == 0:
+        return {
+            "success": True,
+            "error": None,
+            "db_name": database_name,
+            "db_user": database_user,
+            "db_password": database_password,
+            "output": out,
+        }
+
+    sql = (
+        f"CREATE DATABASE IF NOT EXISTS `{database_name}`;"
+        f"CREATE USER IF NOT EXISTS '{database_user}'@'localhost' IDENTIFIED BY '{database_password}';"
+        f"GRANT ALL PRIVILEGES ON `{database_name}`.* TO '{database_user}'@'localhost';"
+        "FLUSH PRIVILEGES;"
+    )
+    fallback_cmd = f"mysql -e {shlex.quote(sql)}"
+    fb_code, fb_out = run_remote(client, fallback_cmd, timeout=60)
+    if fb_code != 0:
+        return {
+            "success": False,
+            "error": f"{out}\n{fb_out}".strip() or "Create DB failed",
+        }
+    return {
+        "success": True,
+        "error": None,
+        "db_name": database_name,
+        "db_user": database_user,
+        "db_password": database_password,
+        "output": fb_out or out,
+    }
+
+
+def revoke_ssl_certificate(client: paramiko.SSHClient, fp_path: str, domain: str) -> dict:
+    rm_cmd = (
+        f"rm -rf /etc/letsencrypt/live/{shlex.quote(domain)} "
+        f"/etc/letsencrypt/archive/{shlex.quote(domain)} "
+        f"/etc/letsencrypt/renewal/{shlex.quote(domain)}.conf"
+    )
+    fp_cmd = (
+        f"{shlex.quote(fp_path)} certificates remove --server-name={shlex.quote(domain)} "
+        f"|| true"
+    )
+    reload_cmd = (
+        f"{shlex.quote(fp_path)} sites regenerate-config --server-name={shlex.quote(domain)} "
+        "|| (nginx -t && systemctl reload nginx)"
+    )
+    code1, out1 = run_remote(client, fp_cmd, timeout=120)
+    code2, out2 = run_remote(client, rm_cmd, timeout=60)
+    code3, out3 = run_remote(client, reload_cmd, timeout=120)
+    if code2 != 0 or code3 != 0:
+        return {"success": False, "error": f"{out1}\n{out2}\n{out3}".strip()}
+    return {"success": True, "error": None, "output": f"{out1}\n{out2}\n{out3}".strip(), "exit": code1}
+
+
+def read_ssl_info_via_ssh(client: paramiko.SSHClient, domain: str) -> dict:
+    if not cert_exists(client, domain):
+        return {
+            "has_certificate": False,
+            "expires_at": None,
+            "issuer": None,
+            "is_letsencrypt": False,
+        }
+    cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
+    cmd = f"openssl x509 -in {shlex.quote(cert_path)} -noout -enddate -issuer -subject"
+    code, out = run_remote(client, cmd, timeout=30)
+    if code != 0:
+        return {
+            "has_certificate": True,
+            "expires_at": None,
+            "issuer": None,
+            "is_letsencrypt": False,
+            "error": out or "openssl failed",
+        }
+
+    expires_at = None
+    issuer = None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("notAfter="):
+            raw = line.split("=", 1)[1].strip()
+            try:
+                expires_at = datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            except ValueError:
+                expires_at = None
+        elif line.startswith("issuer="):
+            issuer = line.split("=", 1)[1].strip()[:64]
+
+    return {
+        "has_certificate": True,
+        "expires_at": expires_at,
+        "issuer": issuer,
+        "is_letsencrypt": bool(issuer and "let's encrypt" in issuer.lower()),
+    }
+
+
+def _render_nginx_snippet(domain: str, snippet: str, presets: dict | None = None) -> str:
+    presets = presets or {}
+    blocks: list[str] = []
+    if presets.get("force_https"):
+        blocks.append(
+            f'if ($scheme = http) {{\n    return 301 https://{domain}$request_uri;\n}}'
+        )
+    if presets.get("www_redirect"):
+        blocks.append(
+            f'if ($host = "www.{domain}") {{\n    return 301 https://{domain}$request_uri;\n}}'
+        )
+    if presets.get("custom_404"):
+        blocks.append("error_page 404 /404.html;")
+    if presets.get("basic_auth"):
+        blocks.append('auth_basic "Restricted";\nauth_basic_user_file /etc/nginx/.htpasswd;')
+    if snippet.strip():
+        blocks.append(snippet.strip())
+    return "\n\n".join(blocks).strip() + "\n"
+
+
+def read_nginx_override(client: paramiko.SSHClient, site_user: str, domain: str) -> dict:
+    path = f"/var/www/{site_user}/data/nginx-includes/{domain}.conf"
+    code, out = run_remote(client, f"cat {shlex.quote(path)}")
+    if code != 0:
+        return {"success": False, "error": out or "Override not found", "snippet": ""}
+    return {"success": True, "error": None, "snippet": out}
+
+
+def apply_nginx_override(
+    client: paramiko.SSHClient,
+    fp_path: str,
+    domain: str,
+    site_user: str,
+    snippet: str,
+    presets: dict | None = None,
+) -> dict:
+    rendered = _render_nginx_snippet(domain, snippet, presets)
+    include_dir = f"/var/www/{site_user}/data/nginx-includes"
+    include_path = f"{include_dir}/{domain}.conf"
+    backup_path = f"{include_path}.bak"
+    escaped = rendered.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+    cmd = (
+        f"mkdir -p {shlex.quote(include_dir)} && "
+        f"cp {shlex.quote(include_path)} {shlex.quote(backup_path)} 2>/dev/null || true && "
+        f'printf "%s" "{escaped}" > {shlex.quote(include_path)} && '
+        "nginx -t"
+    )
+    code, out = run_remote(client, cmd, timeout=60)
+    if code != 0:
+        rollback_cmd = (
+            f"if [ -f {shlex.quote(backup_path)} ]; then "
+            f"mv {shlex.quote(backup_path)} {shlex.quote(include_path)}; "
+            "else rm -f "
+            f"{shlex.quote(include_path)}; fi"
+        )
+        run_remote(client, rollback_cmd, timeout=20)
+        return {"success": False, "error": out or "nginx config test failed"}
+
+    reload_cmd = (
+        f"{shlex.quote(fp_path)} sites regenerate-config --server-name={shlex.quote(domain)} "
+        "|| systemctl reload nginx"
+    )
+    rc, reload_out = run_remote(client, reload_cmd, timeout=60)
+    if rc != 0:
+        return {"success": False, "error": reload_out or "nginx reload failed"}
+
+    return {"success": True, "error": None, "snippet": rendered}
 
 
 def detect_firewall(client: paramiko.SSHClient) -> str | None:

@@ -30,6 +30,13 @@ class DomainUpdate(BaseModel):
     expiry_date: Optional[date] = None
     purchase_date: Optional[date] = None
     ns_status: Optional[str] = None
+    ns_check_mode: Optional[str] = None
+    ssl_expires_at: Optional[datetime] = None
+    ssl_issuer: Optional[str] = None
+    db_name: Optional[str] = None
+    db_user: Optional[str] = None
+    nginx_override: Optional[str] = None
+    nginx_presets: Optional[dict] = None
 
 
 class DomainResponse(DomainBase):
@@ -44,7 +51,14 @@ class DomainResponse(DomainBase):
     ftp_user: Optional[str] = None
     ssl_status: Optional[str] = None
     ssl_email_used: Optional[str] = None
+    ssl_expires_at: Optional[datetime] = None
+    ssl_issuer: Optional[str] = None
     php_version: Optional[str] = None
+    db_name: Optional[str] = None
+    db_user: Optional[str] = None
+    ns_check_mode: Optional[str] = None
+    nginx_override: Optional[str] = None
+    nginx_presets: Optional[dict] = None
     last_provision_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -103,6 +117,40 @@ class DomainFtpCredentials(BaseModel):
     ftp_password: Optional[str] = None
 
 
+class DomainDbCredentials(BaseModel):
+    domain_id: int
+    db_name: Optional[str] = None
+    db_user: Optional[str] = None
+    db_password: Optional[str] = None
+
+
+class CreateSiteRequest(BaseModel):
+    site_only: bool = False
+
+
+class NginxOverrideRequest(BaseModel):
+    snippet: str = ""
+    presets: dict = Field(default_factory=dict)
+
+
+class NginxOverrideResponse(BaseModel):
+    domain_id: int
+    snippet: str
+    presets: dict
+
+
+class MarkNsSetRequest(BaseModel):
+    set: bool = True
+
+
+class RefreshSslResponse(BaseModel):
+    domain_id: int
+    has_certificate: bool
+    expires_at: Optional[datetime] = None
+    issuer: Optional[str] = None
+    is_letsencrypt: bool = False
+
+
 class ProvisionResponse(BaseModel):
     task_id: str
     task_log_id: int
@@ -115,6 +163,18 @@ class BulkProvisionRequest(BaseModel):
 
 class BulkProvisionResponse(BaseModel):
     task_ids: list[str]
+
+
+class BulkFullSetupRequest(BaseModel):
+    domain_ids: list[int]
+    server_id: int
+    cloudflare_account_id: int
+    registrar_id: Optional[int] = None
+
+
+class BulkFullSetupResponse(BaseModel):
+    task_ids: list[str]
+    task_log_ids: list[int]
 
 
 class DomainBulkImportError(BaseModel):

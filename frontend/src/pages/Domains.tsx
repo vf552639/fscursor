@@ -1,6 +1,6 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, Domain } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useCheckNs, useMarkNsSet, useRefreshSsl, useBulkFullSetup, Domain } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
@@ -8,6 +8,9 @@ import StatusBadge from "../components/StatusBadge";
 import TaskProgressModal from "../components/TaskProgressModal";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
+import DomainDetailModal from "../components/DomainDetailModal";
+import BulkSetupWizard from "../components/BulkSetupWizard";
+import MultiTaskProgressModal from "../components/MultiTaskProgressModal";
 
 interface AddDomainModalProps {
   onClose: () => void;
@@ -211,6 +214,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const [showBulk,setSB]=useState(false);
   const [showAdd,setSA]=useState(false);
   const [editingDomain, setEditingDomain] = useState<DomainUI | null>(null);
+  const [detailDomain, setDetailDomain] = useState<Domain | null>(null);
 
   const [showAssignServer, setShowAssignServer] = useState(false);
   const [showAssignCF, setShowAssignCF] = useState(false);
@@ -222,10 +226,16 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const bulkAssignCF = useBulkAssignCloudflare();
   const bulkSetNs = useBulkSetNameservers();
   const bulkProvision = useBulkProvisionDomains();
+  const checkNs = useCheckNs();
+  const markNsSet = useMarkNsSet();
+  const refreshSsl = useRefreshSsl();
+  const bulkFullSetup = useBulkFullSetup();
   const singleProvision = useProvisionDomain();
   const deleteDomain = useDeleteDomain();
   const [progressTaskId, setProgressTaskId] = useState<number | null>(null);
+  const [progressTaskIds, setProgressTaskIds] = useState<number[]>([]);
   const [showFileImport, setShowFileImport] = useState(false);
+  const [showFullSetup, setShowFullSetup] = useState(false);
 
   useEffect(() => {
     if (ctx?.serverId) {
@@ -364,6 +374,24 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     });
   };
 
+  const handleBulkCheckNs = async () => {
+    const ids = Array.from(sel);
+    await Promise.all(ids.map((id) => checkNs.mutateAsync(id)));
+    setSel(new Set());
+  };
+
+  const handleBulkMarkNsSet = async () => {
+    const ids = Array.from(sel);
+    await Promise.all(ids.map((id) => markNsSet.mutateAsync({ domainId: id, set: true })));
+    setSel(new Set());
+  };
+
+  const handleBulkRefreshSsl = async () => {
+    const ids = Array.from(sel);
+    await Promise.all(ids.map((id) => refreshSsl.mutateAsync(id)));
+    setSel(new Set());
+  };
+
   const handleBulkDelete = () => {
     if (!confirm(`Удалить ${sel.size} доменов?`)) return;
     Promise.all(Array.from(sel).map(id => deleteDomain.mutateAsync(id)))
@@ -440,9 +468,13 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
       onAssignServer={() => setShowAssignServer(true)}
       onAssignCF={() => setShowAssignCF(true)}
       onSetNs={handleSetNs}
+      onCheckNs={handleBulkCheckNs}
+      onMarkNsSet={handleBulkMarkNsSet}
+      onBulkRefreshSsl={handleBulkRefreshSsl}
+      onFullSetup={() => setShowFullSetup(true)}
       onProvision={handleBulkProvision}
       onDelete={handleBulkDelete}
-      pending={bulkSetNs.isPending || bulkProvision.isPending}
+      pending={bulkSetNs.isPending || bulkProvision.isPending || checkNs.isPending || markNsSet.isPending || refreshSsl.isPending || bulkFullSetup.isPending}
     />
     <Card>
       <div style={{overflowX:"auto"}}>
@@ -482,16 +514,24 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
               const isFocused = focusDomainId === d.id;
               return <tr key={d.id} style={isFocused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background=""; }}>
                 <td style={{padding:"11px 16px"}}><input type="checkbox" checked={sel.has(d.id)} onChange={()=>toggle(d.id)} style={{cursor:"pointer"}}/></td>
-                <td style={{padding:"11px 16px"}}><div style={{fontWeight:600,fontSize:13.5,color:"#111"}}>{d.domain}</div></td>
+                <td style={{padding:"11px 16px"}}>
+                  <button onClick={() => setDetailDomain(domainsData.find((x) => x.id === d.id) || null)} style={{fontWeight:600,fontSize:13.5,color:"#111",background:"transparent",border:"none",padding:0,cursor:"pointer"}}>
+                    {d.domain}
+                  </button>
+                </td>
                 <td style={{padding:"11px 16px",fontSize:13}}>{srv?<span style={{display:"flex",alignItems:"center",gap:5}}><StatusDot status={displayStatus} size={7}/>{srv.name}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
                 <td style={{padding:"11px 16px"}}><StatusBadge status={d.status} title={d.last_provision_error || undefined} /></td>
-                <td style={{padding:"11px 16px"}}><Badge variant={d.ssl_status === "active" ? "green" : "gray"}>{d.ssl_status === "active" ? "SSL active" : "— No SSL"}</Badge></td>
+                <td style={{padding:"11px 16px"}}>
+                  <Badge variant={d.ssl_status === "active" ? "green" : d.ssl_status === "pending" ? "yellow" : d.ssl_status === "error" ? "red" : "gray"}>
+                    {d.ssl_status === "active" ? "SSL active" : d.ssl_status === "pending" ? "SSL pending" : d.ssl_status === "error" ? "SSL error" : "— No SSL"}
+                  </Badge>
+                </td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
                 <td style={{padding:"11px 16px"}}>
                   <RowActions actions={[
-                    { icon: "✎", title: "Edit domain", onClick: () => setEditingDomain(d) },
+                    { icon: "↗", title: "Open detail", onClick: () => setDetailDomain(domainsData.find((x) => x.id === d.id) || null) },
                     { icon: "⚙", title: "Provision domain", onClick: () => singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) }) },
                     { icon: "✕", title: "Delete domain", variant: "danger", onClick: () => { if (!confirm(`Delete ${d.domain}?`)) return; deleteDomain.mutate(d.id); } },
                   ]} />
@@ -506,6 +546,32 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
 
     {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />}
     {editingDomain && <EditDomainModal domain={editingDomain} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onClose={() => setEditingDomain(null)} />}
+    {detailDomain && <DomainDetailModal domain={detailDomain} onClose={() => setDetailDomain(null)} />}
+    {showFullSetup && (
+      <BulkSetupWizard
+        selectedCount={sel.size}
+        servers={servers}
+        cfAccounts={cfAccounts}
+        registrars={registrars}
+        isRunning={bulkFullSetup.isPending}
+        onClose={() => setShowFullSetup(false)}
+        onRun={(payload) => {
+          bulkFullSetup.mutate(
+            { domain_ids: Array.from(sel), ...payload },
+            {
+              onSuccess: (res) => {
+                if (res.task_log_ids.length > 0) {
+                  setProgressTaskId(res.task_log_ids[0]);
+                  setProgressTaskIds(res.task_log_ids);
+                }
+                setSel(new Set());
+                setShowFullSetup(false);
+              },
+            }
+          );
+        }}
+      />
+    )}
 
     {showBulk&&<Modal title="Bulk Add Domains" onClose={()=>setSB(false)} width={520}>
       <div style={{display:"flex",background:"#f3f4f6",borderRadius:8,padding:3,marginBottom:20}}>
@@ -575,6 +641,13 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     )}
     {progressTaskId !== null && (
       <TaskProgressModal taskId={progressTaskId} onClose={() => setProgressTaskId(null)} />
+    )}
+    {progressTaskIds.length > 1 && (
+      <MultiTaskProgressModal
+        taskIds={progressTaskIds}
+        onOpenTask={(taskId) => setProgressTaskId(taskId)}
+        onClose={() => setProgressTaskIds([])}
+      />
     )}
   </>;
 }

@@ -21,7 +21,14 @@ export interface Domain {
   ftp_user?: string | null;
   ssl_status?: string | null;
   ssl_email_used?: string | null;
+  ssl_expires_at?: string | null;
+  ssl_issuer?: string | null;
   php_version?: string | null;
+  db_name?: string | null;
+  db_user?: string | null;
+  ns_check_mode?: string | null;
+  nginx_override?: string | null;
+  nginx_presets?: Record<string, unknown> | null;
   last_provision_error?: string | null;
   created_at: string;
   updated_at: string;
@@ -108,8 +115,38 @@ export interface ProvisionResponse {
   domain_id: number;
 }
 
+export interface DomainDbCredentials {
+  domain_id: number;
+  db_name: string | null;
+  db_user: string | null;
+  db_password: string | null;
+}
+
+export interface NginxOverridePayload {
+  snippet: string;
+  presets: Record<string, unknown>;
+}
+
+export interface NginxOverrideResponse {
+  domain_id: number;
+  snippet: string;
+  presets: Record<string, unknown>;
+}
+
 export interface BulkProvisionResponse {
   task_ids: string[];
+}
+
+export interface BulkFullSetupPayload {
+  domain_ids: number[];
+  server_id: number;
+  cloudflare_account_id: number;
+  registrar_id?: number | null;
+}
+
+export interface BulkFullSetupResponse {
+  task_ids: string[];
+  task_log_ids: number[];
 }
 
 export interface BulkImportError {
@@ -232,6 +269,96 @@ export function useBulkProvisionDomains() {
   return useMutation({
     mutationFn: (domain_ids: number[]) =>
       apiPost<BulkProvisionResponse>("/domains/bulk-provision", { domain_ids }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useBulkFullSetup() {
+  return useMutation({
+    mutationFn: (payload: BulkFullSetupPayload) =>
+      apiPost<BulkFullSetupResponse>("/domains/bulk-full-setup", payload),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useCreateSite() {
+  return useMutation({
+    mutationFn: (payload: { domainId: number; site_only?: boolean }) =>
+      apiPost<ProvisionResponse>(`/domains/${payload.domainId}/create-site`, {
+        site_only: Boolean(payload.site_only),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useCreateDb() {
+  return useMutation({
+    mutationFn: (domainId: number) =>
+      apiPost<SetNsResponse>(`/domains/${domainId}/create-db`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useDbCredentials(domainId: number | null | undefined) {
+  return useQuery({
+    queryKey: ["domains", domainId, "db-credentials"],
+    queryFn: () => apiGet<DomainDbCredentials>(`/domains/${domainId}/db-credentials`),
+    enabled: !!domainId,
+  });
+}
+
+export function useRequestSsl() {
+  return useMutation({
+    mutationFn: (domainId: number) =>
+      apiPost<SetNsResponse>(`/domains/${domainId}/ssl-request`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useCancelSsl() {
+  return useMutation({
+    mutationFn: (domainId: number) =>
+      apiPost<SetNsResponse>(`/domains/${domainId}/ssl-cancel`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useRefreshSsl() {
+  return useMutation({
+    mutationFn: (domainId: number) =>
+      apiPost(`/domains/${domainId}/refresh-ssl`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useSetNginxOverride() {
+  return useMutation({
+    mutationFn: (payload: { domainId: number; data: NginxOverridePayload }) =>
+      apiPost<SetNsResponse>(`/domains/${payload.domainId}/nginx-override`, payload.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useGetNginxOverride(domainId: number | null | undefined) {
+  return useQuery({
+    queryKey: ["domains", domainId, "nginx-override"],
+    queryFn: () => apiGet<NginxOverrideResponse>(`/domains/${domainId}/nginx-override`),
+    enabled: !!domainId,
+  });
+}
+
+export function useMarkNsSet() {
+  return useMutation({
+    mutationFn: (payload: { domainId: number; set: boolean }) =>
+      apiPost<Domain>(`/domains/${payload.domainId}/mark-ns-set`, { set: payload.set }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+  });
+}
+
+export function useCheckNs() {
+  return useMutation({
+    mutationFn: (domainId: number) =>
+      apiPost<SetNsResponse>(`/domains/${domainId}/check-ns`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
   });
 }
