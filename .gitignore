@@ -17,6 +17,9 @@ build/
 
 *.log
 
+# Git worktrees (isolated checkouts; never commit)
+.worktrees/
+
 # Tauri / Rust
 desktop/src-tauri/target/
 desktop/src-tauri/Cargo.lock
