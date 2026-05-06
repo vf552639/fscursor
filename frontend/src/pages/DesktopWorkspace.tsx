@@ -9,9 +9,10 @@ import Activity from "./Activity";
 import Notifications from "./Notifications";
 import Settings from "./Settings";
 import { useUnreadCount } from "../api/notifications";
-import { useAuthStore } from "../store/auth";
+import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
+import { apiPost } from "../api/client";
 
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
@@ -22,7 +23,7 @@ const TWEAK_DEFAULTS = {
 
 export default function DesktopWorkspace() {
   const navigate = useNavigate();
-  const { userId, email, clear } = useAuthStore();
+  const { userId, email, clear, masterKey } = useAuthStore();
   const { data: unreadData } = useUnreadCount();
   const [page, setPage] = useState<string>(() => {
     try {
@@ -42,6 +43,13 @@ export default function DesktopWorkspace() {
       localStorage.setItem("sdmp_page", page);
     } catch {}
   }, [page]);
+
+  useEffect(() => {
+    if (!masterKey) return;
+    const onAct = () => bumpMasterKeyActivity();
+    window.addEventListener("pointerdown", onAct);
+    return () => window.removeEventListener("pointerdown", onAct);
+  }, [masterKey]);
 
   useEffect(() => {
     const h = (e: any) => {
@@ -101,9 +109,15 @@ export default function DesktopWorkspace() {
   }, []);
 
   const handleLogout = async () => {
-    if (userId) {
+    if (isTauri() && userId) {
       try {
         await invokeIfTauri("auth_logout", { user_id: userId });
+      } catch {
+        /* still clear local session */
+      }
+    } else {
+      try {
+        await apiPost("/auth/logout");
       } catch {
         /* still clear local session */
       }
@@ -117,6 +131,10 @@ export default function DesktopWorkspace() {
   };
 
   const handleLock = () => {
+    if (!isTauri()) {
+      useAuthStore.getState().clearMasterKey();
+      return;
+    }
     useAuthStore.getState().setUnlocked(false);
     navigate("/lock", { replace: true });
   };

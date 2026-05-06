@@ -39,6 +39,7 @@ class CloudflareAccountResponse(CloudflareAccountBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    api_token_blob_id: Optional[UUID] = None
     api_token_masked: Optional[str] = None
     sync_result: Optional[CloudflareSyncResponse] = None
     sync_warning: Optional[str] = None

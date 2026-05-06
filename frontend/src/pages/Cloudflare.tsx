@@ -1,8 +1,8 @@
 import React, { useState } from "react";
 import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { 
-  useCloudflareAccounts, 
-  useCreateCloudflareAccount, 
+import {
+  useCloudflareAccounts,
+  useCreateCloudflareAccount,
   useUpdateCloudflareAccount,
   useDeleteCloudflareAccount,
   useTestCloudflareAccount,
@@ -13,6 +13,8 @@ import {
   useDeleteDnsRecord,
   useZoneNameservers,
 } from "../api/cloudflare";
+import { RevealSecret } from "../components/RevealSecret";
+import { isTauri } from "../lib/runtime";
 
 function AccountCard({
   acc,
@@ -54,6 +56,23 @@ function AccountCard({
           {testStatus.message || "Connection test failed"}
         </div>
       )}
+      <div
+        style={{
+          padding: "12px 20px",
+          borderTop: "1px solid #e5e7eb",
+          fontSize: 12,
+          color: "#374151",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <span>Token: {acc.api_token_masked || "—"}</span>
+        {!isTauri() && acc.api_token_blob_id ? (
+          <RevealSecret blobId={acc.api_token_blob_id} label="Reveal API token" />
+        ) : null}
+      </div>
     </Card>
   );
 }

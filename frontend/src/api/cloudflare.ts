@@ -8,6 +8,7 @@ export interface CloudflareAccount {
   name: string;
   account_id: string | null;
   is_active: boolean;
+  api_token_blob_id?: string | null;
   api_token_masked?: string | null;
   sync_result?: CloudflareSyncResult | null;
   sync_warning?: string | null;

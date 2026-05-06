@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
 import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
+import { RevealSecret } from "../components/RevealSecret";
+import { isTauri } from "../lib/runtime";
 
 export default function ServerDetail({server, onBack, onNav}: {server?: any, onBack: (p: string)=>void, onNav?: (p: string, ctx?: any)=>void}){
   const [tab,setTab]=useState("overview");
@@ -166,10 +168,16 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
               ].map((f, i)=>(
                 <div key={i}>
                   <label style={{fontSize:11,fontWeight:600,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.5px",display:"block",marginBottom:6}}>{f.label}</label>
-                  <div style={{display:"flex",gap:6}}>
-                    <div style={{flex:1,padding:"8px 12px",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",fontWeight:500,letterSpacing:f.pw&&!showPass?"3px":"normal"}}>{f.pw?(showPass?f.val:"•".repeat(f.val.length)):f.val}</div>
-                    {f.pw&&<button onClick={()=>setShowPass(p=>!p)} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280"}}>{showPass?"🙈":"👁"}</button>}
-                    <CopyBtn value={f.val}/>
+                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    {f.pw && !isTauri() && s.fastpanel_password_blob_id ? (
+                      <RevealSecret blobId={s.fastpanel_password_blob_id} label="Show FastPanel password" />
+                    ) : (
+                      <>
+                        <div style={{flex:1,padding:"8px 12px",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",fontWeight:500,letterSpacing:f.pw&&!showPass?"3px":"normal"}}>{f.pw?(showPass?f.val:"•".repeat(f.val.length)):f.val}</div>
+                        {f.pw&&<button type="button" onClick={()=>setShowPass(p=>!p)} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280"}}>{showPass?"🙈":"👁"}</button>}
+                        <CopyBtn value={f.val}/>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}

@@ -69,6 +69,8 @@ class ServerResponse(ServerBase):
     last_check_at: Optional[datetime] = None
     last_check_ok: Optional[bool] = None
     last_check_error: Optional[str] = None
+    ssh_password_blob_id: Optional[UUID] = None
+    fastpanel_password_blob_id: Optional[UUID] = None
 
 
 class ServerListResponse(BaseModel):

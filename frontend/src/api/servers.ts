@@ -37,6 +37,8 @@ export interface Server {
   last_check_at: string | null;
   last_check_ok: boolean | null;
   last_check_error: string | null;
+  ssh_password_blob_id?: string | null;
+  fastpanel_password_blob_id?: string | null;
 }
 
 export interface ServerListResponse {

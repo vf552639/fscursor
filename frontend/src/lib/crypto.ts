@@ -81,8 +81,9 @@ export async function decryptBlob(framed: Uint8Array, key: Uint8Array): Promise<
 /** @internal Encrypt for tests / local roundtrip parity with desktop. */
 export async function encryptBlob(plaintext: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
   await ensureSodium();
+  const msg = new Uint8Array(plaintext);
   const nonce = sodium.randombytes_buf(NONCE_LEN);
-  const boxed = sodium.crypto_secretbox_easy(plaintext, nonce, key);
+  const boxed = sodium.crypto_secretbox_easy(msg, nonce, key);
   const framed = new Uint8Array(NONCE_LEN + boxed.length);
   framed.set(nonce, 0);
   framed.set(boxed, NONCE_LEN);

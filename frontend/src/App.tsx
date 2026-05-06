@@ -7,11 +7,12 @@ import RecoveryRestore from "./pages/RecoveryRestore";
 import Lock from "./pages/Lock";
 import DesktopWorkspace from "./pages/DesktopWorkspace";
 import { useAuthStore } from "./store/auth";
+import { isTauri } from "./lib/runtime";
 
 function RequireAuth({ children }: { children: React.ReactElement }) {
   const { userId, unlocked } = useAuthStore();
   if (!userId) return <Navigate to="/login" replace />;
-  if (!unlocked) return <Navigate to="/lock" replace />;
+  if (isTauri() && !unlocked) return <Navigate to="/lock" replace />;
   return children;
 }
 

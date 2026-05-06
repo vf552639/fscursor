@@ -12,4 +12,11 @@ describe("authStore", () => {
     useAuthStore.getState().clear();
     expect(useAuthStore.getState().userId).toBeNull();
   });
+
+  it("clears master key on setUnlocked(false)", () => {
+    useAuthStore.getState().setMasterKey(new Uint8Array([1, 2, 3]));
+    expect(useAuthStore.getState().masterKey).not.toBeNull();
+    useAuthStore.getState().setUnlocked(false);
+    expect(useAuthStore.getState().masterKey).toBeNull();
+  });
 });
