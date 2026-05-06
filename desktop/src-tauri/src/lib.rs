@@ -2,13 +2,14 @@ use std::sync::Mutex;
 
 use tracing_subscriber::EnvFilter;
 
+mod audit_redact;
 mod cloudflare;
 mod commands;
 mod crypto;
 mod keychain;
 mod provision;
 mod registrars;
-mod ssh;
+pub mod ssh;
 mod sync;
 
 use commands::sync_cmd::SyncHandle;
@@ -38,6 +39,11 @@ pub fn run() {
             commands::vault::vault_delete_blob,
             commands::sync_cmd::sync_init,
             commands::sync_cmd::sync_now,
+            commands::ssh::ssh_accept_host_key,
+            commands::ssh::ssh_exec,
+            commands::provision::provision_domain,
+            commands::provision::provision_bulk,
+            commands::provision::install_fastpanel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

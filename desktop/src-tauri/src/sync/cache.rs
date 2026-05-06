@@ -6,6 +6,8 @@ use zeroize::Zeroize;
 pub enum CacheError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }
 
 pub fn open(path: &Path, key: &[u8; 32]) -> Result<Connection, CacheError> {
@@ -47,6 +49,13 @@ fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL,
             deleted INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS bulk_runs (
+            idempotency_key TEXT PRIMARY KEY,
+            action TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            detail TEXT
+        );
     ",
     )?;
     Ok(())
@@ -58,6 +67,57 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<(
         params![key, value],
     )?;
     Ok(())
+}
+
+/// Latest non-deleted row fields for a synced entity (`domains`, `servers`, …).
+pub fn get_row_fields(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+) -> Result<Option<serde_json::Value>, CacheError> {
+    let mut stmt = conn.prepare(
+        "SELECT fields FROM rows WHERE table_name = ?1 AND id = ?2 AND deleted = 0",
+    )?;
+    let mut rows = stmt.query(params![table, id])?;
+    if let Some(row) = rows.next()? {
+        let s: String = row.get(0)?;
+        return Ok(Some(serde_json::from_str(&s)?));
+    }
+    Ok(None)
+}
+
+pub fn bulk_run_upsert_start(
+    conn: &Connection,
+    key: &str,
+    action: &str,
+    detail: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO bulk_runs(idempotency_key, action, status, created_at, detail) VALUES (?1, ?2, 'running', datetime('now'), ?3)",
+        params![key, action, detail],
+    )?;
+    Ok(())
+}
+
+pub fn bulk_run_complete(conn: &Connection, key: &str, detail: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE bulk_runs SET status = 'done', detail = ?2 WHERE idempotency_key = ?1",
+        params![key, detail],
+    )?;
+    Ok(())
+}
+
+pub fn bulk_run_status(conn: &Connection, key: &str) -> rusqlite::Result<Option<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT status, IFNULL(detail, '') FROM bulk_runs WHERE idempotency_key = ?1",
+    )?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        let st: String = row.get(0)?;
+        let d: String = row.get(1)?;
+        return Ok(Some((st, d)));
+    }
+    Ok(None)
 }
 
 pub fn get_meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

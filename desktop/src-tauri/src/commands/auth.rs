@@ -18,6 +18,14 @@ pub enum CommandError {
     Api(String),
     #[error("keychain: {0}")]
     Keychain(String),
+    #[error("ssh: {0}")]
+    Ssh(String),
+}
+
+impl From<crate::ssh::client::SshError> for CommandError {
+    fn from(e: crate::ssh::client::SshError) -> Self {
+        Self::Ssh(e.to_string())
+    }
 }
 
 impl From<kdf::KdfError> for CommandError {

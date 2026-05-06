@@ -359,6 +359,27 @@ impl ApiClient {
             .await?;
         self.expect_ok(resp).await
     }
+
+    /// Push a device-side audit entry (session cookie required). Never put secrets in `metadata`.
+    pub async fn audit_log(
+        &self,
+        action: &str,
+        target_type: Option<&str>,
+        target_id: Option<&str>,
+        device_id: Option<uuid::Uuid>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(), ApiError> {
+        let body = serde_json::json!({
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "device_id": device_id,
+            "metadata": metadata,
+        });
+        crate::audit_redact::redact_check_metadata(&body);
+        let resp = self.http.post(self.url("audit/log")).json(&body).send().await?;
+        self.expect_ok(resp).await
+    }
 }
 
 #[cfg(test)]

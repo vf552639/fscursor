@@ -1,4 +1,4 @@
-//! SSH — placeholder. Real implementation follows in later stage plans.
+//! SSH (russh) + FastPanel remote CLI helpers.
 
 pub mod client;
 pub mod fastpanel;

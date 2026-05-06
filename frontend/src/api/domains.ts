@@ -1,7 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
+import { invokeIfTauri } from "../lib/tauri-invoke";
+import { isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
+import { useAuthStore } from "../store/auth";
 
 export interface Domain {
   id: number;
@@ -259,8 +262,25 @@ export function useBulkSetNameservers() {
 
 export function useProvisionDomain() {
   return useMutation({
-    mutationFn: (domainId: number) =>
-      apiPost<ProvisionResponse>(`/domains/${domainId}/provision`),
+    mutationFn: async (domainId: number) => {
+      if (isTauri()) {
+        const userId = useAuthStore.getState().userId;
+        if (!userId) {
+          throw new Error("Desktop: unlock session (user id missing)");
+        }
+        await invokeIfTauri<unknown>("provision_domain", {
+          userId,
+          domainId: String(domainId),
+          siteOnly: false,
+        });
+        return {
+          task_id: "",
+          task_log_id: 0,
+          domain_id: domainId,
+        } satisfies ProvisionResponse;
+      }
+      return apiPost<ProvisionResponse>(`/domains/${domainId}/provision`);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
   });
 }

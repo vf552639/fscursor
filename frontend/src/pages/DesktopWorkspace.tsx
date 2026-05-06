@@ -11,6 +11,7 @@ import Settings from "./Settings";
 import { useUnreadCount } from "../api/notifications";
 import { useAuthStore } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
+import { isTauri } from "../lib/runtime";
 
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
@@ -72,6 +73,32 @@ export default function DesktopWorkspace() {
     setToast(message);
     setTimeout(() => setToast(null), 2200);
   };
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ host: string; port: number; fingerprint: string }>(
+        "ssh:host-key-prompt",
+        (event) => {
+          const { host, port, fingerprint } = event.payload;
+          const ok = window.confirm(
+            `Unknown SSH host key for ${host}:${port}\n\n${fingerprint}\n\nTrust this host and save the key?`,
+          );
+          if (ok) {
+            void invokeIfTauri("ssh_accept_host_key", { host, port, fingerprint }).catch(() => {
+              setToast("Could not save host key");
+              setTimeout(() => setToast(null), 2200);
+            });
+          }
+        },
+      );
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const handleLogout = async () => {
     if (userId) {
