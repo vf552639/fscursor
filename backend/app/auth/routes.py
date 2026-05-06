@@ -215,7 +215,7 @@ async def recovery_finish(
         ip=request.client.host if request.client else None,
     )
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "user_id": str(user.id)}
 
 
 @router.post("/password/change", status_code=status.HTTP_200_OK)

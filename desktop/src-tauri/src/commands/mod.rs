@@ -1,1 +1,3 @@
-//! Tauri commands — placeholder. Real implementation follows in later stage plans.
+pub mod auth;
+pub mod sync_cmd;
+pub mod vault;
