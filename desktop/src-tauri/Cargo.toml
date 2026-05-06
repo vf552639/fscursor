@@ -1,0 +1,37 @@
+[package]
+name = "sdmp-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "sdmp_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+# Crypto and storage (used in Stage 2; pin now to keep workspace consistent)
+dryoc = "0.6"
+keyring = "3"
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
+tiny-bip39 = "1"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# SSH and HTTP (used in Stage 3)
+russh = "0.45"
+russh-keys = "0.45"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+quick-xml = { version = "0.36", features = ["serialize"] }
+shell-escape = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

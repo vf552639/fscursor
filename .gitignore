@@ -16,3 +16,9 @@ build/
 .vscode/
 
 *.log
+
+# Tauri / Rust
+desktop/src-tauri/target/
+desktop/src-tauri/Cargo.lock
+desktop/node_modules/
+desktop/dist/
