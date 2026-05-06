@@ -1,5 +1,14 @@
 use tracing_subscriber::EnvFilter;
 
+mod cloudflare;
+mod commands;
+mod crypto;
+mod keychain;
+mod provision;
+mod registrars;
+mod ssh;
+mod sync;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
