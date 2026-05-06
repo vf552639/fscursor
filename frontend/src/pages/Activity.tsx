@@ -2,11 +2,13 @@ import React, { useState } from "react";
 import { Card, StatCard, Badge, Btn, Sel, fmtDT } from "../components/ui/Primitives";
 import { useTaskLogs } from "../api/tasks";
 import { useServers } from "../api/servers";
+import { useAuditLog } from "../api/audit";
 import TaskProgressModal from "../components/TaskProgressModal";
 
 export default function Activity(){
   const { data: qTasks, isLoading: l1 } = useTaskLogs();
   const { data: qServers, isLoading: l2 } = useServers();
+  const { data: auditRows, isLoading: auditLoading } = useAuditLog(100);
   
   const rawTasks = qTasks?.items || [];
   const taskLogs = rawTasks.map((t: any) => ({
@@ -20,13 +22,11 @@ export default function Activity(){
   }));
 
   const servers = qServers?.items || [];
-  const activityLogs: any[] = []; // No activity log backend yet
+  const activityLogs = auditRows ?? [];
 
   const [tab,setTab]=useState("tasks"); const [fType,setFT]=useState(""); const [fStat,setFS]=useState(""); const [openTaskId,setOpenTaskId]=useState<number | null>(null);
   const stMap: Record<string, string[]>={installed:["green","✓ Installed"],ok:["green","✓ OK"],success:["green","✓ Success"],failed:["red","✕ Failed"],error:["red","✕ Error"],pending:["yellow","⏳ Pending"],running:["blue","⚙ Running"]};
   const tMap: Record<string, string>={install_fastpanel:"⚡ FastPanel Install",set_nameservers:"🔗 Set Nameservers"};
-  const aLabel: Record<string, string>={create:"Created",delete:"Deleted",update:"Updated",fastpanel_install:"FP Install",ns_update:"NS Updated",bulk_create:"Bulk Created",reboot:"Rebooted"};
-  const eIcon: Record<string, string>={server:"🖥",domain:"◎",cloudflare:"☁",registrar:"📋"};
   const filtTasks=taskLogs.filter(l=>(!fType||l.type===fType)&&(!fStat||l.status===fStat));
   const Th=({children}: any)=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}>{children}</th>;
   
@@ -75,21 +75,31 @@ export default function Activity(){
           </tbody>
         </table>
       </>}
-      {tab==="activity"&&<table style={{width:"100%",borderCollapse:"collapse"}}>
-        <thead><tr>{["#","Entity","Action","Details","Date"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
-        <tbody>
-          {activityLogs.length===0&&<tr><td colSpan={5} style={{textAlign:"center",padding:40,color:"#6b7280"}}>No system activity found.</td></tr>}
-          {activityLogs.map(l=>(
-            <tr key={l.id} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
-              <td style={{padding:"11px 16px",fontSize:13,color:"#9ca3af",fontFamily:"monospace"}}>#{l.id}</td>
-              <td style={{padding:"11px 16px"}}><span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"2px 8px",background:"#f3f4f6",borderRadius:5,fontSize:12,fontWeight:500,color:"#374151"}}>{eIcon[l.entity]||"·"} {l.entity} #{l.entity_id}</span></td>
-              <td style={{padding:"11px 16px"}}><Badge variant="gray">{aLabel[l.action]||l.action}</Badge></td>
-              <td style={{padding:"11px 16px",fontSize:13,color:"#374151"}}>{l.details?.name||l.details?.domain||(l.details?.count?`${l.details.count} items`:l.details?.status||"—")}</td>
-              <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af",whiteSpace:"nowrap"}}>{fmtDT(l.created)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>}
+      {tab==="activity"&&(
+        auditLoading ? (
+          <div style={{ padding: 40, textAlign: "center", color: "#6b7280" }}>Loading audit log…</div>
+        ) : (
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <thead><tr>{["Time","Action","Target","ID","Device","IP"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
+            <tbody>
+              {activityLogs.length===0&&<tr><td colSpan={6} style={{textAlign:"center",padding:40,color:"#6b7280"}}>No audit entries yet.</td></tr>}
+              {activityLogs.map((r) => {
+                const dev = r.device_id ? `${String(r.device_id).slice(0, 8)}…` : "—";
+                return (
+                  <tr key={r.id} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
+                    <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af",whiteSpace:"nowrap"}}>{fmtDT(r.ts)}</td>
+                    <td style={{padding:"11px 16px"}}><Badge variant="gray">{r.action}</Badge></td>
+                    <td style={{padding:"11px 16px",fontSize:13,color:"#374151"}}>{r.target_type || "—"}</td>
+                    <td style={{padding:"11px 16px",fontSize:13,color:"#374151",fontFamily:"monospace"}}>{r.target_id || "—"}</td>
+                    <td style={{padding:"11px 16px",fontSize:12,color:"#6b7280",fontFamily:"monospace"}}>{dev}</td>
+                    <td style={{padding:"11px 16px",fontSize:12,color:"#6b7280"}}>{r.ip || "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )
+      )}
     </Card>
     {openTaskId !== null && <TaskProgressModal taskId={openTaskId} onClose={() => setOpenTaskId(null)} />}
   </>;
