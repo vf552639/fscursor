@@ -11,6 +11,8 @@ import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
 import BulkSetupWizard from "../components/BulkSetupWizard";
 import MultiTaskProgressModal from "../components/MultiTaskProgressModal";
+import { OpenInDesktop } from "../components/OpenInDesktop";
+import { isTauri } from "../lib/runtime";
 
 interface AddDomainModalProps {
   onClose: () => void;
@@ -465,6 +467,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     </Card>
     <BulkActionToolbar
       selectedCount={sel.size}
+      selectedDomainIds={Array.from(sel)}
       onAssignServer={() => setShowAssignServer(true)}
       onAssignCF={() => setShowAssignCF(true)}
       onSetNs={handleSetNs}
@@ -530,11 +533,42 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                 </td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
                 <td style={{padding:"11px 16px"}}>
-                  <RowActions actions={[
-                    { icon: "↗", title: "Open detail", onClick: () => setDetailDomain(domainsData.find((x) => x.id === d.id) || null) },
-                    { icon: "⚙", title: "Provision domain", onClick: () => singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) }) },
-                    { icon: "✕", title: "Delete domain", variant: "danger", onClick: () => { if (!confirm(`Delete ${d.domain}?`)) return; deleteDomain.mutate(d.id); } },
-                  ]} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <RowActions
+                      actions={[
+                        { icon: "↗", title: "Open detail", onClick: () => setDetailDomain(domainsData.find((x) => x.id === d.id) || null) },
+                        ...(isTauri()
+                          ? [
+                              {
+                                icon: "⚙",
+                                title: "Provision domain",
+                                onClick: () =>
+                                  singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) }),
+                              },
+                            ]
+                          : []),
+                        {
+                          icon: "✕",
+                          title: "Delete domain",
+                          variant: "danger" as const,
+                          onClick: () => {
+                            if (!confirm(`Delete ${d.domain}?`)) return;
+                            deleteDomain.mutate(d.id);
+                          },
+                        },
+                      ]}
+                    />
+                    {!isTauri() ? (
+                      <OpenInDesktop
+                        action={`provision?domainId=${d.id}`}
+                        label="Provision"
+                        size="sm"
+                        desktopOnClick={() =>
+                          singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) })
+                        }
+                      />
+                    ) : null}
+                  </div>
                 </td>
               </tr>;
             })}
@@ -550,6 +584,7 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     {showFullSetup && (
       <BulkSetupWizard
         selectedCount={sel.size}
+        selectedDomainIds={Array.from(sel)}
         servers={servers}
         cfAccounts={cfAccounts}
         registrars={registrars}

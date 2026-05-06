@@ -263,23 +263,23 @@ export function useBulkSetNameservers() {
 export function useProvisionDomain() {
   return useMutation({
     mutationFn: async (domainId: number) => {
-      if (isTauri()) {
-        const userId = useAuthStore.getState().userId;
-        if (!userId) {
-          throw new Error("Desktop: unlock session (user id missing)");
-        }
-        await invokeIfTauri<unknown>("provision_domain", {
-          userId,
-          domainId: String(domainId),
-          siteOnly: false,
-        });
-        return {
-          task_id: "",
-          task_log_id: 0,
-          domain_id: domainId,
-        } satisfies ProvisionResponse;
+      if (!isTauri()) {
+        throw new Error("Provisioning runs in the SDMP desktop app.");
       }
-      return apiPost<ProvisionResponse>(`/domains/${domainId}/provision`);
+      const userId = useAuthStore.getState().userId;
+      if (!userId) {
+        throw new Error("Desktop: unlock session (user id missing)");
+      }
+      await invokeIfTauri<unknown>("provision_domain", {
+        userId,
+        domainId: String(domainId),
+        siteOnly: false,
+      });
+      return {
+        task_id: "",
+        task_log_id: 0,
+        domain_id: domainId,
+      } satisfies ProvisionResponse;
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
   });

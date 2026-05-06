@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState, formatUptime } from "../components/ui/Primitives";
 import { useServers, useCreateServer } from "../api/servers";
 import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
+import { OpenInDesktop } from "../components/OpenInDesktop";
+import { isTauri } from "../lib/runtime";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
   const [tab,setTab]=useState("install");
@@ -171,7 +173,16 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       )}
     </div>
     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
-      <Btn variant="primary" onClick={handleAdd} disabled={create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
+      {isTauri() ? (
+        <Btn variant="primary" onClick={handleAdd} disabled={create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
+      ) : (
+        <OpenInDesktop
+          variant="primary"
+          action="add-server"
+          label={tab === "install" ? "Add server in desktop app" : "Connect server in desktop app"}
+          desktopOnClick={() => {}}
+        />
+      )}
       <Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;

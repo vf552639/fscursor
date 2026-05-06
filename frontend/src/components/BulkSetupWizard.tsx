@@ -5,9 +5,12 @@ import { BulkFullSetupPayload } from "../api/domains";
 import { RegistrarAccount } from "../api/registrars";
 import { Server } from "../api/servers";
 import { Btn, Modal, Sel } from "./ui/Primitives";
+import { OpenInDesktop } from "./OpenInDesktop";
+import { isTauri } from "../lib/runtime";
 
 export default function BulkSetupWizard({
   selectedCount,
+  selectedDomainIds = [],
   servers,
   cfAccounts,
   registrars,
@@ -16,6 +19,7 @@ export default function BulkSetupWizard({
   onRun,
 }: {
   selectedCount: number;
+  selectedDomainIds?: number[];
   servers: Server[];
   cfAccounts: CloudflareAccount[];
   registrars: RegistrarAccount[];
@@ -62,19 +66,35 @@ export default function BulkSetupWizard({
         </div>
       </div>
       <div style={{ marginTop: 18, display: "flex", gap: 8 }}>
-        <Btn
-          variant="primary"
-          onClick={() =>
-            onRun({
-              server_id: Number(serverId),
-              cloudflare_account_id: Number(cfId),
-              registrar_id: registrarId ? Number(registrarId) : null,
-            })
-          }
-          disabled={!serverId || !cfId || isRunning}
-        >
-          {isRunning ? "Running..." : "Run Full Setup"}
-        </Btn>
+        {isTauri() ? (
+          <Btn
+            variant="primary"
+            onClick={() =>
+              onRun({
+                server_id: Number(serverId),
+                cloudflare_account_id: Number(cfId),
+                registrar_id: registrarId ? Number(registrarId) : null,
+              })
+            }
+            disabled={!serverId || !cfId || isRunning}
+          >
+            {isRunning ? "Running..." : "Run Full Setup"}
+          </Btn>
+        ) : (
+          <OpenInDesktop
+            variant="primary"
+            action={`bulk-full-setup?ids=${selectedDomainIds.join(",")}`}
+            label={isRunning ? "Running..." : "Open full setup in desktop"}
+            desktopOnClick={() =>
+              onRun({
+                server_id: Number(serverId),
+                cloudflare_account_id: Number(cfId),
+                registrar_id: registrarId ? Number(registrarId) : null,
+              })
+            }
+            disabled={!serverId || !cfId || isRunning || selectedDomainIds.length === 0}
+          />
+        )}
         <Btn variant="secondary" onClick={onClose} disabled={isRunning}>
           Cancel
         </Btn>

@@ -1,9 +1,15 @@
 import React from "react";
 
-import { Btn } from "./ui/Primitives";
+import { OpenInDesktop } from "./OpenInDesktop";
+import { isTauri } from "../lib/runtime";
+
+function idsQuery(ids: number[]): string {
+  return ids.length ? `?ids=${ids.map((n) => String(n)).join(",")}` : "";
+}
 
 export default function BulkActionToolbar({
   selectedCount,
+  selectedDomainIds = [],
   onAssignServer,
   onAssignCF,
   onSetNs,
@@ -16,6 +22,8 @@ export default function BulkActionToolbar({
   pending,
 }: {
   selectedCount: number;
+  /** Selected domain IDs for `sdmp://…?ids=` deep links on web. */
+  selectedDomainIds?: number[];
   onAssignServer: () => void;
   onAssignCF: () => void;
   onSetNs: () => void;
@@ -28,6 +36,10 @@ export default function BulkActionToolbar({
   pending?: boolean;
 }) {
   if (selectedCount <= 0) return null;
+
+  const q = idsQuery(selectedDomainIds);
+  const webBulkDisabled = !isTauri() && selectedDomainIds.length === 0;
+
   return (
     <div
       style={{
@@ -42,44 +54,67 @@ export default function BulkActionToolbar({
         flexWrap: "wrap",
       }}
     >
-      <span style={{ fontSize: 13, fontWeight: 600, color: "#2563eb" }}>
-        {selectedCount} selected
-      </span>
-      <Btn size="sm" variant="secondary" onClick={onAssignServer}>
-        Assign Server
-      </Btn>
-      <Btn size="sm" variant="secondary" onClick={onAssignCF}>
-        Assign CF
-      </Btn>
-      <Btn size="sm" variant="secondary" onClick={onSetNs} disabled={pending}>
-        Set NS
-      </Btn>
+      <span style={{ fontSize: 13, fontWeight: 600, color: "#2563eb" }}>{selectedCount} selected</span>
+      <OpenInDesktop
+        action={`assign-server${q}`}
+        label="Assign Server"
+        desktopOnClick={onAssignServer}
+        disabled={Boolean(pending)}
+      />
+      <OpenInDesktop
+        action={`assign-cf${q}`}
+        label="Assign CF"
+        desktopOnClick={onAssignCF}
+        disabled={Boolean(pending)}
+      />
+      <OpenInDesktop
+        action={`set-ns${q}`}
+        label="Set NS"
+        desktopOnClick={onSetNs}
+        disabled={Boolean(pending)}
+      />
       {onCheckNs ? (
-        <Btn size="sm" variant="secondary" onClick={onCheckNs} disabled={pending}>
-          Check NS
-        </Btn>
+        <OpenInDesktop
+          action={`check-ns${q}`}
+          label="Check NS"
+          desktopOnClick={onCheckNs}
+          disabled={Boolean(pending)}
+        />
       ) : null}
       {onMarkNsSet ? (
-        <Btn size="sm" variant="secondary" onClick={onMarkNsSet} disabled={pending}>
-          Mark NS Set
-        </Btn>
+        <OpenInDesktop
+          action={`mark-ns-set${q}`}
+          label="Mark NS Set"
+          desktopOnClick={onMarkNsSet}
+          disabled={Boolean(pending)}
+        />
       ) : null}
       {onBulkRefreshSsl ? (
-        <Btn size="sm" variant="secondary" onClick={onBulkRefreshSsl} disabled={pending}>
-          Refresh SSL
-        </Btn>
+        <OpenInDesktop
+          action={`refresh-ssl${q}`}
+          label="Refresh SSL"
+          desktopOnClick={onBulkRefreshSsl}
+          disabled={Boolean(pending)}
+        />
       ) : null}
       {onFullSetup ? (
-        <Btn size="sm" variant="primary" onClick={onFullSetup} disabled={pending}>
-          Full Setup
-        </Btn>
+        <OpenInDesktop
+          action={`bulk-full-setup${q}`}
+          label="Full Setup"
+          variant="primary"
+          desktopOnClick={onFullSetup}
+          disabled={Boolean(pending) || webBulkDisabled}
+        />
       ) : null}
-      <Btn size="sm" variant="secondary" onClick={onProvision} disabled={pending}>
-        Provision
-      </Btn>
-      <Btn size="sm" variant="danger" style={{ marginLeft: "auto" }} onClick={onDelete}>
-        Delete
-      </Btn>
+      <OpenInDesktop
+        action={`bulk-provision${q}`}
+        label="Provision"
+        desktopOnClick={onProvision}
+        disabled={Boolean(pending) || webBulkDisabled}
+      />
+      <div style={{ marginLeft: "auto" }}>
+        <OpenInDesktop action={`bulk-delete${q}`} label="Delete" variant="danger" desktopOnClick={onDelete} />
+      </div>
     </div>
   );
 }

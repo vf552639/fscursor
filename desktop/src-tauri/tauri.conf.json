@@ -24,6 +24,13 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:8100 https://*.sdmp.app; img-src 'self' data:"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["sdmp"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["dmg", "nsis", "appimage"],

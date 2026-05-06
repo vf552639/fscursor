@@ -3,6 +3,7 @@ import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDat
 import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
+import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
 
 export default function ServerDetail({server, onBack, onNav}: {server?: any, onBack: (p: string)=>void, onNav?: (p: string, ctx?: any)=>void}){
@@ -104,11 +105,38 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
         <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · Uptime: {formatUptime(s.uptime_seconds)} · Added {fmtDate(s.created_at)}</div>
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
-      <div style={{display:"flex",gap:8}}>
-        {s.has_ssh && <Btn variant="secondary" onClick={()=>testSsh.mutate()} disabled={testSsh.isPending}>{testSsh.isPending ? "Testing..." : "SSH Test"}</Btn>}
-        {s.has_ssh && <Btn variant="secondary" onClick={()=>refreshMetrics.mutate()} disabled={refreshMetrics.isPending}>{refreshMetrics.isPending ? "Refreshing..." : "Refresh"}</Btn>}
-        {s.has_ssh && isFPInstalled && <Btn variant="secondary" onClick={()=>syncDomains.mutate()} disabled={syncDomains.isPending}>{syncDomains.isPending ? "Syncing..." : "Sync Domains"}</Btn>}
-        <Btn variant="danger" onClick={handleDelete} disabled={delSrv.isPending}>✕ Delete</Btn>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {s.has_ssh ? (
+          <OpenInDesktop
+            action={`ssh-test?serverId=${s.id}`}
+            label={testSsh.isPending ? "Testing..." : "SSH Test"}
+            desktopOnClick={() => testSsh.mutate()}
+            disabled={testSsh.isPending}
+          />
+        ) : null}
+        {s.has_ssh ? (
+          <OpenInDesktop
+            action={`refresh-metrics?serverId=${s.id}`}
+            label={refreshMetrics.isPending ? "Refreshing..." : "Refresh"}
+            desktopOnClick={() => refreshMetrics.mutate()}
+            disabled={refreshMetrics.isPending}
+          />
+        ) : null}
+        {s.has_ssh && isFPInstalled ? (
+          <OpenInDesktop
+            action={`sync-domains?serverId=${s.id}`}
+            label={syncDomains.isPending ? "Syncing..." : "Sync Domains"}
+            desktopOnClick={() => syncDomains.mutate()}
+            disabled={syncDomains.isPending}
+          />
+        ) : null}
+        <OpenInDesktop
+          variant="danger"
+          action={`delete-server?serverId=${s.id}`}
+          label="✕ Delete"
+          desktopOnClick={handleDelete}
+          disabled={delSrv.isPending}
+        />
       </div>
     </div>
 
@@ -194,9 +222,13 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
                 {fpStatus?.log_tail?.join("\n")}
               </div>
             ) : (
-              <Btn variant="primary" onClick={()=>installFp.mutate()} disabled={installFp.isPending}>
-                {installFp.isPending ? "Starting..." : "Install FastPanel"}
-              </Btn>
+              <OpenInDesktop
+                variant="primary"
+                action={`install-fastpanel?serverId=${s.id}`}
+                label={installFp.isPending ? "Starting..." : "Install FastPanel"}
+                desktopOnClick={() => installFp.mutate()}
+                disabled={installFp.isPending}
+              />
             )}
           </CBo>
         </Card>}

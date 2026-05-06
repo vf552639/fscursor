@@ -13,6 +13,7 @@ import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
 import { apiPost } from "../api/client";
+import { handleSdmpDeepLinkInTauri } from "../lib/deepLink";
 
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
@@ -81,6 +82,40 @@ export default function DesktopWorkspace() {
     setToast(message);
     setTimeout(() => setToast(null), 2200);
   };
+
+  useEffect(() => {
+    if (!isTauri() || !userId) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { onOpenUrl, getCurrent } = await import("@tauri-apps/plugin-deep-link");
+      const start = await getCurrent();
+      if (start?.length) {
+        for (const url of start) {
+          try {
+            const ran = await handleSdmpDeepLinkInTauri(url, userId);
+            if (!ran) showToast(`Deep link: ${url}`);
+          } catch (e) {
+            showToast(e instanceof Error ? e.message : String(e));
+          }
+        }
+      }
+      unlisten = await onOpenUrl((urls) => {
+        void (async () => {
+          for (const url of urls) {
+            try {
+              const ran = await handleSdmpDeepLinkInTauri(url, userId);
+              if (!ran) showToast(`Deep link: ${url}`);
+            } catch (e) {
+              showToast(e instanceof Error ? e.message : String(e));
+            }
+          }
+        })();
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (!isTauri()) return;

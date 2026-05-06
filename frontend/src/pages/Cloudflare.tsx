@@ -14,6 +14,7 @@ import {
   useZoneNameservers,
 } from "../api/cloudflare";
 import { RevealSecret } from "../components/RevealSecret";
+import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
 
 function AccountCard({
@@ -39,9 +40,13 @@ function AccountCard({
           <Badge variant={acc.is_active?"green":"gray"}>{acc.is_active?"Active":"Inactive"}</Badge>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <Btn size="sm" variant="secondary" onClick={onTest} disabled={testStatus?.state === "loading"}>
-            {testStatus?.state === "loading" ? "Testing..." : "Test connection"}
-          </Btn>
+          <OpenInDesktop
+            size="sm"
+            action={`test-cloudflare?accountId=${acc.id}`}
+            label={testStatus?.state === "loading" ? "Testing..." : "Test connection"}
+            desktopOnClick={onTest}
+            disabled={testStatus?.state === "loading"}
+          />
           <Btn size="sm" variant="secondary" onClick={onEdit}>✎ Edit</Btn>
           <Btn size="sm" variant="danger" onClick={onDelete}>✕</Btn>
         </div>
