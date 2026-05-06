@@ -88,4 +88,14 @@ mod tests {
         let r = derive_auth_key(b"x", &[0u8; 8]);
         assert!(matches!(r, Err(KdfError::Salt(8))));
     }
+
+    /// Hex(master key) for `hunter2` + zero salt; keep in sync with `frontend/src/lib/crypto.test.ts`.
+    #[test]
+    fn master_key_fixture_for_browser_tests() {
+        let k = derive_master_key(b"hunter2", &[0u8; SALT_LEN]).unwrap();
+        assert_eq!(
+            hex::encode(k.0),
+            "cf3489cf8dfa53ec6604068c99f63760b1c8faa9772c0862c2acd81fac43a7a4"
+        );
+    }
 }
