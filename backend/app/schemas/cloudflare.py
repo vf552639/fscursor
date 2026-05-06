@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,13 +13,13 @@ class CloudflareAccountBase(BaseModel):
 
 class CloudflareAccountCreate(CloudflareAccountBase):
     name: str = Field(min_length=1)
-    api_token: str = Field(repr=False, min_length=1)
+    api_token_blob_id: Optional[UUID] = None
 
 
 class CloudflareAccountUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1)
     account_id: Optional[str] = None
-    api_token: Optional[str] = Field(default=None, repr=False)
+    api_token_blob_id: Optional[UUID] = None
     is_active: Optional[bool] = None
 
 

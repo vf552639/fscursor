@@ -1,6 +1,6 @@
-from typing import Any, Optional
+from typing import Optional
+from uuid import UUID
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,103 +8,58 @@ from app.models.cloudflare_account import CloudflareAccount
 from app.schemas.cloudflare import (
     CloudflareAccountCreate,
     CloudflareAccountResponse,
-    CloudflareSyncResponse,
     CloudflareAccountUpdate,
-    DnsRecordCreate,
-    DnsRecordUpdate,
 )
-from app.services import domain_service
-from app.services.encryption_service import decrypt, encrypt
-
-CF_API = "https://api.cloudflare.com/client/v4"
+from app.sync.service import touch_entity_sync
 
 
-class CloudflareError(Exception):
-    pass
-
-
-def mask_token(plain: str) -> str:
-    if len(plain) < 5:
-        return "••••"
-    return ("•" * 8) + plain[-4:]
-
-
-def _masked_token_from_account(account: CloudflareAccount) -> Optional[str]:
-    if not account.api_token_encrypted:
-        return None
-    try:
-        token = decrypt(account.api_token_encrypted)
-    except Exception:
-        return None
-    if not token:
-        return None
-    return mask_token(token)
-
-
-def build_account_response(
-    account: CloudflareAccount,
-    *,
-    sync_result: Optional[CloudflareSyncResponse] = None,
-    sync_warning: Optional[str] = None,
-) -> CloudflareAccountResponse:
+def build_account_response(account: CloudflareAccount) -> CloudflareAccountResponse:
+    masked = None
+    if account.api_token_blob_id:
+        s = str(account.api_token_blob_id)
+        masked = "••••" + s[-4:]
     payload = CloudflareAccountResponse.model_validate(account).model_dump()
-    payload["api_token_masked"] = _masked_token_from_account(account)
-    payload["sync_result"] = sync_result
-    payload["sync_warning"] = sync_warning
+    payload["api_token_masked"] = masked
+    payload["sync_result"] = None
+    payload["sync_warning"] = None
     return CloudflareAccountResponse(**payload)
 
 
-async def _get_account(db: AsyncSession, account_id: int) -> Optional[CloudflareAccount]:
-    return (
-        await db.execute(
-            select(CloudflareAccount).where(CloudflareAccount.id == account_id)
-        )
-    ).scalar_one_or_none()
+async def _get_account(
+    db: AsyncSession, account_id: int, user_id: UUID
+) -> Optional[CloudflareAccount]:
+    acc = (await db.execute(select(CloudflareAccount).where(CloudflareAccount.id == account_id))).scalar_one_or_none()
+    if acc is None or acc.user_id != user_id:
+        return None
+    return acc
 
 
-async def _call(
-    account: CloudflareAccount,
-    method: str,
-    path: str,
-    *,
-    params: Optional[dict] = None,
-    json: Optional[dict] = None,
-) -> dict[str, Any]:
-    if not account.api_token_encrypted:
-        raise CloudflareError("API token is not set")
-    token = decrypt(account.api_token_encrypted)
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    try:
-        async with httpx.AsyncClient(base_url=CF_API, timeout=30.0) as client:
-            resp = await client.request(method, path, params=params, json=json, headers=headers)
-    finally:
-        token = None  # type: ignore[assignment]
-    data = resp.json() if resp.content else {}
-    if resp.status_code >= 400 or not data.get("success", True):
-        errors = data.get("errors") or [{"message": resp.text}]
-        raise CloudflareError(f"CF API error: {errors}")
-    return data
-
-
-async def list_accounts(db: AsyncSession) -> list[CloudflareAccount]:
-    result = await db.execute(select(CloudflareAccount).order_by(CloudflareAccount.id.desc()))
+async def list_accounts(db: AsyncSession, user_id: UUID) -> list[CloudflareAccount]:
+    result = await db.execute(
+        select(CloudflareAccount)
+        .where(CloudflareAccount.user_id == user_id)
+        .order_by(CloudflareAccount.id.desc())
+    )
     return list(result.scalars().all())
 
 
-async def get_account(db: AsyncSession, account_id: int) -> Optional[CloudflareAccount]:
-    return await _get_account(db, account_id)
+async def get_account(
+    db: AsyncSession, account_id: int, user_id: UUID
+) -> Optional[CloudflareAccount]:
+    return await _get_account(db, account_id, user_id)
 
 
-async def create_account(db: AsyncSession, data: CloudflareAccountCreate) -> CloudflareAccount:
+async def create_account(
+    db: AsyncSession, data: CloudflareAccountCreate, user_id: UUID
+) -> CloudflareAccount:
     account = CloudflareAccount(
         name=data.name,
         account_id=data.account_id,
-        api_token_encrypted=encrypt(data.api_token),
+        api_token_blob_id=data.api_token_blob_id,
         is_active=data.is_active,
+        user_id=user_id,
     )
+    await touch_entity_sync(db, user_id, account)
     db.add(account)
     await db.commit()
     await db.refresh(account)
@@ -112,205 +67,26 @@ async def create_account(db: AsyncSession, data: CloudflareAccountCreate) -> Clo
 
 
 async def update_account(
-    db: AsyncSession, account_id: int, data: CloudflareAccountUpdate
+    db: AsyncSession, account_id: int, data: CloudflareAccountUpdate, user_id: UUID
 ) -> Optional[CloudflareAccount]:
-    account = await _get_account(db, account_id)
+    account = await _get_account(db, account_id, user_id)
     if not account:
         return None
-    patch = data.model_dump(exclude_unset=True, exclude={"api_token"})
+    patch = data.model_dump(exclude_unset=True, exclude={"api_token_blob_id"})
     for k, v in patch.items():
         setattr(account, k, v)
-    if data.api_token is not None:
-        account.api_token_encrypted = encrypt(data.api_token)
+    if data.api_token_blob_id is not None:
+        account.api_token_blob_id = data.api_token_blob_id
+    await touch_entity_sync(db, user_id, account)
     await db.commit()
     await db.refresh(account)
     return account
 
 
-async def delete_account(db: AsyncSession, account_id: int) -> bool:
-    account = await _get_account(db, account_id)
+async def delete_account(db: AsyncSession, account_id: int, user_id: UUID) -> bool:
+    account = await _get_account(db, account_id, user_id)
     if not account:
         return False
     await db.delete(account)
     await db.commit()
     return True
-
-
-async def _get_zone_by_name(account: CloudflareAccount, zone_name: str) -> Optional[dict]:
-    name = zone_name.strip()
-    if not name:
-        return None
-    data = await _call(account, "GET", "/zones", params={"name": name, "per_page": 50, "page": 1})
-    for z in data.get("result") or []:
-        if (z.get("name") or "").strip().lower() == name.lower():
-            return z
-    return None
-
-
-async def create_zone(
-    db: AsyncSession, account_id: int, *, zone_name: str
-) -> tuple[dict, bool]:
-    """Create a Cloudflare zone or return an existing zone if the API reports a duplicate.
-
-    Returns ``(zone_dict, was_created)``. ``was_created`` is False when the zone
-    already existed and was resolved via the zones list API.
-    """
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    body: dict[str, Any] = {"name": zone_name.strip()}
-    if account.account_id:
-        body["account"] = {"id": account.account_id}
-    try:
-        data = await _call(account, "POST", "/zones", json=body)
-        return (data.get("result") or {}, True)
-    except CloudflareError as exc:
-        err_text = str(exc).lower()
-        if any(
-            token in err_text
-            for token in ("1061", "already exists", "duplicate", "already been added")
-        ):
-            existing = await _get_zone_by_name(account, zone_name)
-            if existing:
-                return (existing, False)
-        raise
-
-
-async def list_zones(db: AsyncSession, account_id: int) -> list[dict]:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    per_page = 50
-    page = 1
-    zones: list[dict] = []
-    while True:
-        data = await _call(
-            account, "GET", "/zones", params={"per_page": per_page, "page": page}
-        )
-        zones.extend(data.get("result") or [])
-        total_pages = (data.get("result_info") or {}).get("total_pages") or 1
-        if page >= total_pages:
-            break
-        page += 1
-    return zones
-
-
-async def verify_token(account: CloudflareAccount) -> dict[str, Any]:
-    return await _call(account, "GET", "/user/tokens/verify")
-
-
-async def sync_zones_to_domains(
-    db: AsyncSession, account: CloudflareAccount
-) -> CloudflareSyncResponse:
-    zones = await list_zones(db, account.id)
-    updated = 0
-    skipped = 0
-    for zone in zones:
-        name = (zone.get("name") or "").strip()
-        zone_id = (zone.get("id") or "").strip()
-        if not name or not zone_id:
-            skipped += 1
-            continue
-        linked = await domain_service.attach_cloudflare_to_existing(
-            db=db, domain_name=name, cf_account_id=account.id, zone_id=zone_id
-        )
-        if linked is not None:
-            updated += 1
-        else:
-            skipped += 1
-
-    await db.commit()
-    return CloudflareSyncResponse(updated=updated, skipped=skipped, total_zones=len(zones))
-
-
-async def get_zone(db: AsyncSession, account_id: int, zone_id: str) -> dict:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    data = await _call(account, "GET", f"/zones/{zone_id}")
-    return data.get("result") or {}
-
-
-async def list_dns_records(
-    db: AsyncSession, account_id: int, zone_id: str
-) -> list[dict]:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    data = await _call(
-        account, "GET", f"/zones/{zone_id}/dns_records", params={"per_page": 100}
-    )
-    return data.get("result") or []
-
-
-async def create_dns_record(
-    db: AsyncSession, account_id: int, zone_id: str, record: DnsRecordCreate
-) -> dict:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    payload = record.model_dump(exclude_none=True)
-    existing_data = await _call(
-        account,
-        "GET",
-        f"/zones/{zone_id}/dns_records",
-        params={"type": record.type, "name": record.name, "per_page": 1},
-    )
-    existing = (existing_data.get("result") or [])
-    if existing:
-        record_id = existing[0].get("id")
-        if record_id:
-            data = await _call(
-                account,
-                "PATCH",
-                f"/zones/{zone_id}/dns_records/{record_id}",
-                json=payload,
-            )
-            return data.get("result") or {}
-    data = await _call(account, "POST", f"/zones/{zone_id}/dns_records", json=payload)
-    return data.get("result") or {}
-
-
-async def update_dns_record(
-    db: AsyncSession,
-    account_id: int,
-    zone_id: str,
-    record_id: str,
-    record: DnsRecordUpdate,
-) -> dict:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    payload = record.model_dump(exclude_unset=True, exclude_none=True)
-    data = await _call(
-        account, "PATCH", f"/zones/{zone_id}/dns_records/{record_id}", json=payload
-    )
-    return data.get("result") or {}
-
-
-async def delete_dns_record(
-    db: AsyncSession, account_id: int, zone_id: str, record_id: str
-) -> bool:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    await _call(account, "DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
-    return True
-
-
-async def purge_cache(db: AsyncSession, account_id: int, zone_id: str) -> bool:
-    account = await _get_account(db, account_id)
-    if not account:
-        raise CloudflareError("Account not found")
-    await _call(
-        account,
-        "POST",
-        f"/zones/{zone_id}/purge_cache",
-        json={"purge_everything": True},
-    )
-    return True
-
-
-async def get_nameservers(db: AsyncSession, account_id: int, zone_id: str) -> list[str]:
-    zone = await get_zone(db, account_id, zone_id)
-    return zone.get("name_servers") or []

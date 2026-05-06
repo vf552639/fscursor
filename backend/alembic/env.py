@@ -10,6 +10,9 @@ from alembic import context
 from app.core.config import ASYNCPG_CONNECT_ARGS, settings
 from app.core.database import Base
 from app import models  # noqa: F401
+from app.auth import models as auth_models  # noqa: F401
+from app.audit import models as audit_models  # noqa: F401
+from app.blobs import models as blob_models  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.SUPABASE_DB_URL)

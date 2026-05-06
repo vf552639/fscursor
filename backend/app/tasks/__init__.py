@@ -1,13 +1,2 @@
 from app.core.celery_app import celery_app  # noqa: F401
-from app.tasks import fastpanel_task  # noqa: F401
-from app.tasks import ns_task  # noqa: F401
-from app.tasks import provision_task  # noqa: F401
-from app.tasks import create_db_task  # noqa: F401
-from app.tasks import revoke_ssl_task  # noqa: F401
-from app.tasks import ssl_request_task  # noqa: F401
-from app.tasks import nginx_override_task  # noqa: F401
-from app.tasks import check_ns_task  # noqa: F401
-from app.tasks import ssl_refresh_task  # noqa: F401
-from app.tasks import bulk_full_setup_task  # noqa: F401
 from app.tasks import renewal_task  # noqa: F401
-from app.tasks import server_health_task  # noqa: F401

@@ -3,6 +3,7 @@ import io
 import uuid
 from dataclasses import dataclass
 from typing import Optional
+from uuid import UUID
 
 from openpyxl import load_workbook
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,6 +83,7 @@ class ServerImportRow:
 async def process_bulk_import(
     db: AsyncSession,
     *,
+    user_id: UUID,
     filename: str,
     content: bytes,
     has_header: bool,
@@ -110,7 +112,9 @@ async def process_bulk_import(
             )
         )
 
-    created_list, skipped = await domain_service.bulk_create_structured(db, valid_items)
+    created_list, skipped = await domain_service.bulk_create_structured(
+        db, user_id, valid_items
+    )
     skipped_set = set(skipped)
     for row_num, domain, _ in rows:
         norm = normalize_domain(domain)
@@ -190,6 +194,7 @@ def build_server_errors_csv(errors: list[ServerBulkImportError]) -> str:
 async def process_server_bulk_import(
     db: AsyncSession,
     *,
+    user_id: UUID,
     filename: str,
     content: bytes,
     has_header: bool,
@@ -197,7 +202,7 @@ async def process_server_bulk_import(
     name = filename.lower()
     rows = _parse_servers_xlsx(content, has_header) if name.endswith(".xlsx") else _parse_servers_csv(content, has_header)
 
-    existing = await server_service.get_all(db)
+    existing = await server_service.get_all(db, user_id)
     existing_ips = {srv.ip_address for srv in existing[0]}
 
     created = 0
@@ -222,12 +227,11 @@ async def process_server_bulk_import(
             name=item.name,
             ip_address=item.ip,
             ssh_user=item.ssh_user,
-            ssh_password=item.ssh_password or None,
             ssh_port=item.ssh_port,
             notes=item.notes,
         )
         try:
-            await server_service.create(db, payload)
+            await server_service.create(db, payload, user_id)
             existing_ips.add(item.ip)
             created += 1
         except Exception as exc:

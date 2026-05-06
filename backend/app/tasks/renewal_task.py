@@ -21,6 +21,7 @@ async def _check_renewals() -> dict[str, int]:
         domains = (
             await session.execute(
                 select(Domain).where(
+                    Domain.user_id.isnot(None),
                     Domain.purchase_date.isnot(None),
                     Domain.purchase_date <= threshold,
                 )
@@ -40,6 +41,7 @@ async def _check_renewals() -> dict[str, int]:
                 task_type="renewal_check",
                 status="success",
                 log_text=f"created {created_count} reminders (checked {checked_count} domains)",
+                user_id=None,
             )
         )
         await session.commit()

@@ -1,5 +1,7 @@
 # Supabase, Postgres, and Docker runbook
 
+**Doc freshness:** reviewed with repo state as of **2026-05-06** (Alembic head `010_domain_extras`, startup guard + `backend/tests/test_lifespan.py`).
+
 This document captures how the SDMP backend talks to Supabase Postgres in Docker, which environment variables are required, how pooler modes differ, what we changed in code for **asyncpg + PgBouncer**, how to verify connectivity, and how that relates to **Supabase MCP**.
 
 ## Required environment (`.env`)
@@ -19,6 +21,16 @@ Backend `Settings` (`backend/app/core/config.py`) expects at least:
 | `BACKEND_CORS_ORIGINS` | Comma-separated origins (optional but typical in dev). |
 | `API_V1_PREFIX` | Default `/api`. |
 | `VITE_API_URL` | Frontend API base (used in frontend container). |
+
+### Optional variables (newer features)
+
+These are **not** required for core API startup; they enable optional behavior (defaults exist in `Settings`):
+
+| Variable | Role |
+|----------|------|
+| `RAPIDAPI_KEY` | RapidAPI key for disposable email generation when SSL pool auto temp-mail is enabled. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram outbound notifications when `Telegram Enabled` is true in `system_config`. |
+| `LOG_LEVEL`, `LOG_DIR`, `SSH_CONNECT_TIMEOUT`, `DNS_PRECHECK_ATTEMPTS`, `DNS_PRECHECK_DELAY`, `DEFAULT_PHP_VERSION`, `SSL_DEFAULT_EMAIL_CAP` | Operational tuning; see `backend/app/core/config.py`. |
 
 Compose loads these via `env_file: .env` (`docker-compose.yml`). After editing `.env`, recreate containers that read it (at minimum `backend`, also `worker` / `beat` / `frontend` as needed):
 
@@ -75,7 +87,7 @@ Cold starts or brief Supavisor **circuit breaker** windows used to fail the cont
 
 1. **`backend/entrypoint.sh`** (before `alembic upgrade head`): **wait-for-db** — inline Python uses **asyncpg** with the same DSN rewrite as the smoke test (`postgresql+asyncpg://` → `postgresql://`), `statement_cache_size=0`, up to **12 attempts** with **5 s** sleep (~60 s total), `SELECT 1` each time. Logs: `wait-for-db: attempt N/12 failed: ...` then `wait-for-db: ok on attempt N` or a final `RuntimeError` with a pointer to `.env.example` direct fallback.
 
-2. **`backend/app/main.py` lifespan**: reading `alembic_version` retries on generic connection errors (**10 attempts**, **2 s** sleep). **No retry** for an empty row or a revision mismatch (`RuntimeError` immediately). The checked head revision must match `EXPECTED_ALEMBIC_HEAD` in code (currently `004_indexes` after migrations `003_system_config` / `004_indexes`).
+2. **`backend/app/main.py` lifespan**: reading `alembic_version` retries on generic connection errors (**10 attempts**, **2 s** sleep). **No retry** for an empty row or a revision mismatch (`RuntimeError` immediately). The checked head revision must match `EXPECTED_ALEMBIC_HEAD` in code (currently `010_domain_extras`; keep in sync with `alembic heads` when adding revisions).
 
 **`/health` stays non-DB-dependent** so orchestration can mark “process up” even while migrations are still running (port may not answer until uvicorn binds after Alembic).
 

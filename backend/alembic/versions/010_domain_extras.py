@@ -5,7 +5,7 @@ Revises: 009_phpversion_widen
 Create Date: 2026-04-30
 """
 
-from collections.abc import Sequence
+from typing import Optional, Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
@@ -13,9 +13,9 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "010_domain_extras"
-down_revision: str | None = "009_phpversion_widen"
-branch_labels: str | Sequence[str] | None = None
-depends_on: str | Sequence[str] | None = None
+down_revision: Optional[str] = "009_phpversion_widen"
+branch_labels: Optional[Union[str, Sequence[str]]] = None
+depends_on: Optional[Union[str, Sequence[str]]] = None
 
 
 def upgrade() -> None:

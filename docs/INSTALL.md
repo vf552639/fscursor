@@ -1,5 +1,11 @@
 # Installing SDMP
 
+## Development (from source)
+
+To run the **desktop shell** against the existing Vite app: install [Rust](https://rustup.rs/) and Node.js, then from `desktop/` run `npm install` and `npm run tauri dev`. The Tauri config starts `frontend/` on port **1420** and expects the API (e.g. Docker backend) on **8100** — see `desktop/src-tauri/tauri.conf.json` (`devUrl`, CSP `connect-src`).
+
+---
+
 SDMP ships unsigned binaries during the MVP phase. macOS and Windows will warn you because the installer is not yet signed by Apple / Microsoft. This page shows how to bypass the warning safely.
 
 **Always verify the SHA256 checksum before running installers.** Each release publishes checksums on the website at `https://sdmp.app/releases/<version>/checksums.txt`.

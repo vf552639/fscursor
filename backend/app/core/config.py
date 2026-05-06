@@ -4,9 +4,15 @@ from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# backend/app/core/config.py -> repo root is parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(str(_REPO_ROOT / ".env"), str(_REPO_ROOT / "backend" / ".env")),
+        extra="ignore",
+    )
 
     SUPABASE_DB_URL: str
     SUPABASE_URL: str
@@ -14,18 +20,26 @@ class Settings(BaseSettings):
     REDIS_URL: str
     CELERY_BROKER_URL: str
     CELERY_RESULT_BACKEND: str
-    ENCRYPTION_KEY: str
+
     SECRET_KEY: str
-    BACKEND_CORS_ORIGINS: str = "http://localhost:3100,http://localhost:8080"
+    SESSION_COOKIE_NAME: str = "sdmp_session"
+    SESSION_TTL_SECONDS: int = 60 * 60 * 24 * 14
+    BCRYPT_ROUNDS: int = 12
+
+    RESEND_API_KEY: Optional[str] = None
+    EMAIL_FROM: str = "noreply@sdmp.app"
+    EMAIL_CONFIRM_BASE_URL: str = "http://localhost:3100"
+
+    BACKEND_CORS_ORIGINS: str = (
+        "http://localhost:3100,http://localhost:8080,tauri://localhost"
+    )
     API_V1_PREFIX: str = "/api"
     LOG_LEVEL: str = "INFO"
     LOG_DIR: Path = Path("logs")
-    SSH_CONNECT_TIMEOUT: int = 20
-    SSL_DEFAULT_EMAIL_CAP: int = 100
+
     DNS_PRECHECK_ATTEMPTS: int = 10
     DNS_PRECHECK_DELAY: int = 15
-    DEFAULT_PHP_VERSION: str = "7.4"
-    RAPIDAPI_KEY: Optional[str] = None
+
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
 
@@ -41,8 +55,6 @@ def _asyncpg_prepared_statement_name() -> str:
     return f"__asyncpg_{uuid.uuid4().hex}__"
 
 
-# asyncpg + Supabase pooler (transaction mode / port 6543): PgBouncer may swap backends
-# per transaction; disable statement caches and use unique prepared statement names.
 ASYNCPG_CONNECT_ARGS: dict[str, object] = {
     "server_settings": {"statement_timeout": "60000"},
     "statement_cache_size": 0,

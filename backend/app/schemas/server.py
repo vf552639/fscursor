@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,9 +17,9 @@ class ServerBase(BaseModel):
 
 
 class ServerCreate(ServerBase):
-    ssh_password: Optional[str] = Field(default=None, repr=False)
+    ssh_password_blob_id: Optional[UUID] = None
     fastpanel_user: Optional[str] = None
-    fastpanel_password: Optional[str] = Field(default=None, repr=False)
+    fastpanel_password_blob_id: Optional[UUID] = None
     fastpanel_url: Optional[str] = None
     fastpanel_status: Optional[str] = "not_installed"
 
@@ -33,9 +34,9 @@ class ServerUpdate(BaseModel):
     purchase_date: Optional[date] = None
     expiry_date: Optional[date] = None
     notes: Optional[str] = None
-    ssh_password: Optional[str] = Field(default=None, repr=False)
+    ssh_password_blob_id: Optional[UUID] = None
     fastpanel_user: Optional[str] = None
-    fastpanel_password: Optional[str] = Field(default=None, repr=False)
+    fastpanel_password_blob_id: Optional[UUID] = None
     fastpanel_url: Optional[str] = None
     fastpanel_status: Optional[str] = None
 

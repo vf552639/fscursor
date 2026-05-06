@@ -26,12 +26,4 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.renewal.check_domain_renewals",
         "schedule": crontab(hour=9, minute=0),
     },
-    "check-servers-metrics": {
-        "task": "app.tasks.server_health.check_all_servers_metrics",
-        "schedule": crontab(minute="*/5"),
-    },
-    "refresh-domains-ssl-daily": {
-        "task": "app.tasks.domain.refresh_ssl_all",
-        "schedule": crontab(hour=3, minute=0),
-    },
 }

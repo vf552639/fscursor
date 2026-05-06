@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import UUID
 
 from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -11,59 +12,75 @@ from app.models.notification import Notification
 from app.services.notification_providers import dispatch_notification
 
 
-def _base_list_stmt(is_read: Optional[bool], limit: int) -> Select[tuple[Notification]]:
-    stmt = select(Notification).order_by(Notification.created_at.desc()).limit(limit)
+def _base_list_stmt(user_id: UUID, is_read: Optional[bool], limit: int) -> Select[tuple[Notification]]:
+    stmt = (
+        select(Notification)
+        .where(Notification.user_id == user_id)
+        .order_by(Notification.created_at.desc())
+        .limit(limit)
+    )
     if is_read is not None:
         stmt = stmt.where(Notification.is_read == is_read)
     return stmt
 
 
 async def list_notifications(
-    db: AsyncSession, is_read: Optional[bool] = None, limit: int = 50
+    db: AsyncSession,
+    user_id: UUID,
+    is_read: Optional[bool] = None,
+    limit: int = 50,
 ) -> list[Notification]:
-    result = await db.execute(_base_list_stmt(is_read, limit))
+    result = await db.execute(_base_list_stmt(user_id, is_read, limit))
     return list(result.scalars().all())
 
 
-async def count_unread(db: AsyncSession) -> int:
+async def count_unread(db: AsyncSession, user_id: UUID) -> int:
     result = await db.execute(
-        select(func.count(Notification.id)).where(Notification.is_read.is_(False))
+        select(func.count(Notification.id)).where(
+            Notification.user_id == user_id, Notification.is_read.is_(False)
+        )
     )
     return int(result.scalar_one() or 0)
 
 
-async def mark_read(db: AsyncSession, ids: list[int]) -> int:
+async def mark_read(db: AsyncSession, user_id: UUID, ids: list[int]) -> int:
     if not ids:
         return 0
     result = await db.execute(
         update(Notification)
-        .where(Notification.id.in_(ids), Notification.is_read.is_(False))
+        .where(
+            Notification.id.in_(ids),
+            Notification.user_id == user_id,
+            Notification.is_read.is_(False),
+        )
         .values(is_read=True, read_at=datetime.now(timezone.utc))
     )
     await db.commit()
     return int(result.rowcount or 0)
 
 
-async def mark_all_read(db: AsyncSession) -> int:
+async def mark_all_read(db: AsyncSession, user_id: UUID) -> int:
     result = await db.execute(
         update(Notification)
-        .where(Notification.is_read.is_(False))
+        .where(Notification.user_id == user_id, Notification.is_read.is_(False))
         .values(is_read=True, read_at=datetime.now(timezone.utc))
     )
     await db.commit()
     return int(result.rowcount or 0)
 
 
-async def delete_notification(db: AsyncSession, notification_id: int) -> bool:
+async def delete_notification(db: AsyncSession, user_id: UUID, notification_id: int) -> bool:
     result = await db.execute(
-        delete(Notification).where(Notification.id == notification_id)
+        delete(Notification).where(
+            Notification.id == notification_id, Notification.user_id == user_id
+        )
     )
     await db.commit()
     return bool(result.rowcount)
 
 
 async def upsert_renewal_notification(db: AsyncSession, domain: Domain) -> bool:
-    if domain.purchase_date is None:
+    if domain.purchase_date is None or domain.user_id is None:
         return False
     purchase_key = domain.purchase_date.isoformat()
     dedup_key = f"domain_renewal:{domain.id}:{purchase_key}"
@@ -82,6 +99,7 @@ async def upsert_renewal_notification(db: AsyncSession, domain: Domain) -> bool:
             message=message,
             dedup_key=dedup_key,
             is_read=False,
+            user_id=domain.user_id,
         )
         .on_conflict_do_nothing(index_elements=[Notification.dedup_key])
         .returning(Notification.id)
@@ -96,6 +114,7 @@ async def upsert_renewal_notification(db: AsyncSession, domain: Domain) -> bool:
 async def create_notification(
     db: AsyncSession,
     *,
+    user_id: UUID,
     type: str,
     entity_type: str,
     entity_id: int,
@@ -113,6 +132,7 @@ async def create_notification(
             message=message,
             dedup_key=dedup_key,
             is_read=False,
+            user_id=user_id,
         )
         .on_conflict_do_nothing(index_elements=[Notification.dedup_key])
         .returning(Notification.id)
@@ -131,5 +151,6 @@ async def create_notification(
                 "message": message,
                 "dedup_key": dedup_key,
             },
+            user_id,
         )
     return created

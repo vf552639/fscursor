@@ -1,0 +1,1 @@
+"""Opaque ciphertext blob storage."""

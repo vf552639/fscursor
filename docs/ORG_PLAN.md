@@ -1,6 +1,6 @@
 # SDMP — План организации проекта и подготовки к проду
 
-**Дата:** 2026-04-23
+**Дата:** 2026-05-06 (актуализация: desktop/Tauri, Stage 0)
 **Контекст:** single-tenant, роли, JWT (email+пароль), VPS + Docker Compose, БД — Supabase.
 
 Цель документа: превратить текущую рабочую локальную сборку в чистый, расширяемый проект, в котором (а) можно безопасно добавить пользователей и авторизацию, (б) перенос на VPS сводится к `docker compose -f docker-compose.prod.yml up -d` без сюрпризов.
@@ -14,10 +14,12 @@
 - Backend: FastAPI + SQLAlchemy async + Alembic, Celery + Beat, Redis.
 - Frontend: React 18 + Vite + TS + TanStack Query + Zustand.
 - Docker Compose (dev): `redis`, `backend`, `worker`, `beat`, `frontend`, `nginx`.
-- Alembic через `entrypoint.sh` (`alembic upgrade head` до старта API) и startup-guard в `main.py` (константа `EXPECTED_ALEMBIC_HEAD` должна совпадать с head ревизии; сейчас head — `004_indexes` после миграций `003_system_config` / `004_indexes`).
+- Alembic через `entrypoint.sh` (`alembic upgrade head` до старта API) и startup-guard в `main.py` (константа `EXPECTED_ALEMBIC_HEAD` должна совпадать с head ревизии; **актуальный head см. `alembic heads` / `CURRENT_STATUS.md`** — сейчас `010_domain_extras` после расширения operational-полей домена; ранее `009_phpversion_widen`, `008_server_metrics`, `007_domain_provision_error`, `004_indexes`).
 - Шифрование секретов в БД (`encryption_service`, `ENCRYPTION_KEY`).
 - Домены с модулем renewal-уведомлений.
-- Docs: `PROJECT_OVERVIEW`, `ARCHITECTURE`, `TECH_STACK`, `CURRENT_STATUS`, `Roadmap`, `Bugs`, `SUPABASE_DOCKER` (pooler runbook + startup retries as of 2026-04-23).
+- Docs: `PROJECT_OVERVIEW`, `ARCHITECTURE`, `TECH_STACK`, `CURRENT_STATUS`, `Roadmap`, `Bugs`, `SUPABASE_DOCKER`, `INSTALL` (unsigned desktop installers), `PLAN_RBAC_AND_REFACTORING` (долгосрочный план).
+- Desktop (2026-05-06): каталог `desktop/` — Tauri 2 + Rust, в окне поднимается существующий `frontend/`; зависимости для будущего auth на бэкенде уже закреплены в `requirements.txt` (см. `TECH_STACK.md`).
+- Репозиторий: каталог `.worktrees/` в `.gitignore` для изолированных `git worktree`.
 
 Слабые места под рефактор:
 
@@ -124,6 +126,10 @@ FS_cursor/
 │       ├── components/
 │       └── App.tsx
 │
+├── desktop/                  ← НОВОЕ (2026-05-06): Tauri 2, грузит ../frontend
+│   ├── package.json          ← scripts: tauri dev / build
+│   └── src-tauri/            ← Rust, tauri.conf.json, capabilities/, icons/
+│
 ├── nginx/
 │   ├── nginx.dev.conf         ← текущий (проксирует на Vite :5173)
 │   └── nginx.prod.conf        ← отдаёт статику + /api → backend, TLS, security headers
@@ -145,8 +151,11 @@ FS_cursor/
 │   ├── Roadmap.md
 │   ├── Bugs.md
 │   ├── ORG_PLAN.md            ← этот файл
-│   ├── AUTH.md                ← как устроена аутентификация (§3)
-│   └── DEPLOY.md              ← prod runbook
+│   ├── INSTALL.md             ← установка unsigned desktop-сборок
+│   ├── SUPABASE_DOCKER.md
+│   ├── PLAN_RBAC_AND_REFACTORING.md
+│   ├── AUTH.md                ← как устроена аутентификация (§3) — план
+│   └── DEPLOY.md              ← prod runbook — план
 │
 └── .github/
     └── workflows/

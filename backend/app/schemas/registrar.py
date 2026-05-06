@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,8 +13,8 @@ class RegistrarAccountBase(BaseModel):
 
 
 class RegistrarAccountCreate(RegistrarAccountBase):
-    api_key: Optional[str] = Field(default=None, repr=False)
-    api_secret: Optional[str] = Field(default=None, repr=False)
+    api_key_blob_id: Optional[UUID] = None
+    api_secret_blob_id: Optional[UUID] = None
 
 
 class RegistrarAccountUpdate(BaseModel):
@@ -21,8 +22,8 @@ class RegistrarAccountUpdate(BaseModel):
     name: Optional[str] = None
     api_user: Optional[str] = None
     is_active: Optional[bool] = None
-    api_key: Optional[str] = Field(default=None, repr=False)
-    api_secret: Optional[str] = Field(default=None, repr=False)
+    api_key_blob_id: Optional[UUID] = None
+    api_secret_blob_id: Optional[UUID] = None
 
 
 class RegistrarAccountResponse(RegistrarAccountBase):

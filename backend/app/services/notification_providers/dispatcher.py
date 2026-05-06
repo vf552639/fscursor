@@ -1,4 +1,5 @@
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,25 +15,27 @@ def _is_enabled(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
-async def _get_config_value(db: AsyncSession, key: str) -> str | None:
-    item = await system_config_service.get(db, key)
+async def _get_config_value(db: AsyncSession, key: str, user_id: UUID) -> str | None:
+    item = await system_config_service.get(db, key, user_id)
     if item is None:
         return None
     return item.value
 
 
-async def deliver_to_channels(db: AsyncSession, payload: dict[str, Any]) -> dict[str, str]:
+async def deliver_to_channels(
+    db: AsyncSession, payload: dict[str, Any], user_id: UUID
+) -> dict[str, str]:
     result: dict[str, str] = {}
-    webhook_enabled = _is_enabled(await _get_config_value(db, "Webhook Enabled"))
-    webhook_url = await _get_config_value(db, "Webhook URL")
-    webhook_secret = await _get_config_value(db, "Webhook Secret")
+    webhook_enabled = _is_enabled(await _get_config_value(db, "Webhook Enabled", user_id))
+    webhook_url = await _get_config_value(db, "Webhook URL", user_id)
+    webhook_secret = await _get_config_value(db, "Webhook Secret", user_id)
     if webhook_enabled and webhook_url:
         ok, msg = await send_webhook(url=webhook_url, secret=webhook_secret, payload=payload)
         result["webhook"] = "ok" if ok else f"error: {msg}"
     else:
         result["webhook"] = "disabled"
 
-    telegram_enabled = _is_enabled(await _get_config_value(db, "Telegram Enabled"))
+    telegram_enabled = _is_enabled(await _get_config_value(db, "Telegram Enabled", user_id))
     if telegram_enabled and settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
         text = f"[{payload.get('type', 'notification')}] {payload.get('title', '')}\n{payload.get('message', '')}"
         ok, msg = await send_telegram_message(
@@ -46,5 +49,7 @@ async def deliver_to_channels(db: AsyncSession, payload: dict[str, Any]) -> dict
     return result
 
 
-async def dispatch_notification(db: AsyncSession, payload: dict[str, Any]) -> None:
-    await deliver_to_channels(db, payload)
+async def dispatch_notification(
+    db: AsyncSession, payload: dict[str, Any], user_id: UUID
+) -> None:
+    await deliver_to_channels(db, payload, user_id)

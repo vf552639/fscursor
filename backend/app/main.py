@@ -4,16 +4,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 
 from app.api.routes import api_router
 from app.core.config import settings
 from app.core.database import engine
 from app.core.logging import add_loguru_intercept_handler, configure_logging
+from app.core.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "010_domain_extras"
+EXPECTED_ALEMBIC_HEAD = "011_zero_knowledge_v1"
 
 
 @asynccontextmanager
@@ -56,6 +59,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Server & Domain Management Panel", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 configure_logging()
 add_loguru_intercept_handler()
 
@@ -63,8 +69,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
 
 

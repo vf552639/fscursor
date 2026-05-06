@@ -1,9 +1,104 @@
 # CURRENT STATUS
 
-**Last Updated:** 2026-04-25  
-**Current Phase:** Phase 6 - Reliability & Feedback
+**Last Updated:** 2026-05-06  
+**Current Phase:** Phase 6 — Reliability & Feedback (web); **Stage 0 foundation** (desktop shell + auth deps) landed 2026-05-06
 
 ## Completed
+- 2026-05-06 (**Stage 0 / foundation**): Desktop shell and backend prep for auth (no new API behavior yet).
+  - **Desktop:** new `desktop/` tree — Tauri 2 + Rust (`desktop/src-tauri/`) loading the existing Vite app from repo-root `frontend/` (`beforeDevCommand` / `frontendDist` use `../../frontend`). Stub modules for future crypto/sync/SSH/provision work. Run from `desktop/`: `npm install`, `npm run tauri dev` (requires local Rust toolchain + Node).
+  - **Backend:** `EXPECTED_ALEMBIC_HEAD` in `main.py` aligned with **`010_domain_extras`**; regression test `backend/tests/test_lifespan.py` asserts DB head matches the constant (needs `SUPABASE_DB_URL` / `.env` when run from `backend/`).
+  - **Dependencies (pinned in `requirements.txt`):** `argon2-cffi`, `bcrypt`, `itsdangerous`, `slowapi`, `pyotp`, `email-validator`, `resend` — staged for Stage 1 auth/email flows.
+  - **Docs / repo hygiene:** [`INSTALL.md`](INSTALL.md) documents unsigned `.dmg` / `.exe` / AppImage UX; `.gitignore` includes `.worktrees/` for isolated `git worktree` checkouts.
+- 2026-04-30 (**task33**): FastPanel domain operations + bulk full setup workflow delivered (stage 1 + key stage 2 UX).
+  - **DB / schema:** migration `010_domain_extras` adds domain operational fields: `db_*`, `ssl_expires_at`, `ssl_issuer`, `ns_check_mode`, `nginx_override`, `nginx_presets`.
+  - **FastPanel client (SSH/CLI):** added `create_database`, `revoke_ssl_certificate`, `read_ssl_info_via_ssh`, `read_nginx_override`, `apply_nginx_override`.
+  - **Domain APIs:** added endpoints for create-site (`site_only` mode), create-db, db-credentials, ssl-request/cancel/refresh, nginx override get/set, mark-ns-set, check-ns, and `bulk-full-setup`.
+  - **Celery tasks:** added `create_db`, `request_ssl`, `revoke_ssl`, `nginx_override`, `check_ns` (registrar API with DNS fallback), `refresh_ssl`/`refresh_ssl_all`, and `bulk_full_setup`.
+  - **Schedulers:** beat now includes daily SSL metadata refresh task (`03:00 UTC`) via `app.tasks.domain.refresh_ssl_all`.
+  - **Registrars:** `BaseRegistrarService` now includes `get_nameservers`; implemented for Namecheap (`domains.getInfo`) and Hostiq (`GET /domains/{domain}`).
+  - **Domains UI:** new `DomainDetailModal` tabs (Overview/DB/SSL/Nginx/NS), expanded bulk toolbar actions (Refresh SSL, Check NS, Mark NS Set), and `BulkSetupWizard` + multi-task progress modal for full setup runs.
+  - **Tests:** expanded `test_fastpanel_client.py` with new function coverage and added `test_bulk_full_setup_task.py`; sync regression tests remain green.
+- 2026-04-29 / 2026-04-30 (**task28–task31**, follow-up to FastPanel → DB sync): Hardening and UX fixes around **Sync Domains** and ServerDetail.
+  - **SSH / CLI:** `run_remote(..., pty=..., timeout=...)`; `list_sites()` uses `timeout=15` and `pty=False` on all three command paths to avoid pager hangs (`fastpanel_client.py`).
+  - **DB / schema:** migration `009_phpversion_widen` widens `domains.php_version` to `varchar(16)`; `EXPECTED_ALEMBIC_HEAD` in `main.py` is **`010_domain_extras`** (keep aligned with `alembic heads`).
+  - **Normalization:** `_coerce_php_version`, `_coerce_str`, nested **`owner`** dict → `username` / `login` / `name` and `home_dir` → `site_path`; string length caps for `site_user` / `site_path` / `php_version` (`fastpanel_client.py`).
+  - **Sync semantics:** `fetch_and_persist_domains()` wraps DB commit with rollback on `IntegrityError` / `DataError`; **conflict** when a FastPanel site matches a domain already linked to **another** server → rollback, clear error message, **`last_check_ok` not forced false** (logical conflict, not SSH failure) (`server_service.py`).
+  - **Frontend:** `ServerDetail` uses `useDomains` result as a **plain array** (`domainsData ?? []`), matching `GET /api/domains?server_id=`; sync mutation errors shown via **`syncDomains.isError`** banner (`ServerDetail.tsx`).
+  - **Tests:** extended `test_fastpanel_list_sites.py` and `test_server_service_domains_sync.py` (idempotent sync, orphan attach, conflict abort).
+- 2026-04-29 (**task26 + task27**): Servers telemetry refresh and FastPanel domains sync delivered.
+  - New migration: `008_server_metrics` (CPU/RAM/disk/network, OS/kernel, FastPanel version/port, metrics timestamp fields on `servers`).
+  - Backend:
+    - `server_metrics_service.collect_metrics()` reads system telemetry over SSH in one pass and persists health/error state.
+    - `POST /api/servers/{id}/refresh-metrics` added; `refresh-uptime` kept as compatibility alias to the same metrics path.
+    - Celery tasks switched to `check_server_metrics` / `check_all_servers_metrics`; Beat schedule now runs every 5 minutes.
+    - FastPanel domain sync path added: `list_sites()` (JSON/table/filesystem fallback), `fetch_and_persist_domains()`, and `POST /api/servers/{id}/sync-domains`.
+    - Auto-sync hooks:
+      - after successful FastPanel install task;
+      - after creating a server with `fastpanel_status=installed` when SSH credentials are provided.
+  - Frontend:
+    - Servers and ServerDetail now render real metrics (or explicit "no metrics" placeholders) instead of hardcoded mock values.
+    - Status mapping updated to `new` / `provisioned` / `active` / `error`; OS badge uses `os_pretty` fallback.
+    - `Refresh Uptime` action replaced by `Refresh`; new `Sync Domains` action and result banner on ServerDetail.
+    - Empty domains state on ServerDetail now hints to use sync for FastPanel-connected hosts.
+- 2026-04-29 (**PR-2 extension + PR-3**): Servers bulk import, outbound notification channels, Settings SSL pool UI, and provisioning safety nets.
+  - **Servers:** `POST /api/servers/bulk-import` (`csv`/`xlsx`, columns `name,ip,ssh_user,ssh_password,ssh_port,notes`), `GET /api/servers/bulk-import-errors/{token}`; frontend `ServerBulkImportDialog` + **⇪ Import** on `Servers.tsx`.
+  - **Cloudflare:** `create_dns_record` upserts when a record with the same `type` + `name` already exists (avoids duplicate-create failures on retries).
+  - **Namecheap:** `set_nameservers` validates `CommandResponse/@Status` and surfaces XML errors via `RegistrarError`.
+  - **Settings / `system_config`:** editable keys for `Webhook Enabled`, `Webhook URL`, `Webhook Secret`, `Telegram Enabled`, `Auto Temp Mail Enabled`; `POST /api/settings/notifications/test` returns `{ webhook, telegram }` status strings for smoke tests.
+  - **Notifications:** after a row is inserted via `create_notification`, optional webhook (HMAC `X-SDMP-Signature` when secret set) and Telegram sends run through `notification_providers/dispatcher.py`.
+  - **Provisioning:** if SSL pool is empty and `Auto Temp Mail Enabled` + `RAPIDAPI_KEY`, `provision_task` may fetch a disposable email (`temp_mail_service`) and add it to `ssl_email_pool` before SSL; `fastpanel_browser.py` holds a placeholder hook for future browser-based license activation.
+  - **`Settings` pydantic:** optional env fields (`LOG_LEVEL`, `LOG_DIR`, `SSH_CONNECT_TIMEOUT`, `SSL_DEFAULT_EMAIL_CAP`, `DNS_PRECHECK_*`, `DEFAULT_PHP_VERSION`, `RAPIDAPI_KEY`, `TELEGRAM_*`) — all optional with defaults so existing `.env` files keep working.
+  - **Frontend:** `apiPatch`, `frontend/src/api/sslEmails.ts`, Settings tab **SSL Pool** (list, usage bar, add/enable/disable/delete), System tab channel toggles + **Test delivery**; commit `aca2219` on `master` (local).
+- 2026-04-29 (**task24 / PR-1**): FastPanel domain provisioning core delivered.
+  - New migrations:
+    - `006_provisioning_and_ssl_pool` (domain provisioning fields + `ssl_email_pool` table with default email seed)
+    - `007_domain_provision_error` (`domains.last_provision_error`)
+  - Backend provisioning task `app.tasks.provision.provision_domain` now handles:
+    - firewall preflight (`80/443`) before provisioning steps
+    - idempotent site/FTP/SSL steps
+    - DNS pre-check before SSL issuance
+    - SSL email pool selection/usage + exhaustion handling
+    - `task_logs` step-by-step updates for live progress
+  - New APIs:
+    - `POST /api/domains/{id}/provision`
+    - `POST /api/domains/bulk-provision`
+    - `GET /api/domains/{id}/ftp-credentials`
+    - `GET /api/domains/failed-export.csv`
+    - SSL pool CRUD under `/api/ssl-emails`
+  - Shared core additions:
+    - `app/core/constants.py`, `validators.py`, `logging.py`
+  - `EXPECTED_ALEMBIC_HEAD` updated to `007_domain_provision_error` (later bumped to `008_server_metrics`, then `009_phpversion_widen`).
+- 2026-04-29 (**task25 / PR-2**): Realtime task UX + file bulk import delivered.
+  - Backend:
+    - `GET /api/tasks/{id}/stream` (SSE) for live task log updates
+    - `POST /api/domains/bulk-import` for `csv`/`xlsx` uploads
+    - `GET /api/domains/bulk-import-errors/{token}` for downloadable import errors CSV
+    - FastPanel install task now emits success/failure notifications
+  - Frontend:
+    - new shared UI components: `StatusBadge`, `TaskProgressModal`, `BulkActionToolbar`, `DomainBulkImportDialog`
+    - Domains page:
+      - status badges based on domain state machine
+      - bulk provision action in toolbar
+      - file import dialog with upload progress and errors CSV shortcut
+      - `status` filter synced to URL query (`?status=...`)
+      - "Failed at SSL" summary badge
+    - Activity page log drawer replaced with realtime task progress modal.
+- 2026-04-29 (**task21**): Real server uptime checks via SSH delivered (backend + frontend + scheduler), then expanded in task26 to full telemetry collection.
+  - Alembic migration `005_server_uptime` adds `servers.uptime_seconds`, `last_check_at`, `last_check_ok`, `last_check_error`.
+  - Backend `EXPECTED_ALEMBIC_HEAD` bumped to `005_server_uptime`.
+  - Initial uptime flow:
+    - `server_service.fetch_and_persist_uptime()` reads `/proc/uptime` over SSH and persists success/error state.
+    - auto-trigger on `POST /api/servers` when SSH password is provided.
+    - on-demand endpoint `POST /api/servers/{id}/refresh-uptime` (now routed to full metrics collector).
+    - Celery tasks `app.tasks.server_health.check_server_uptime` and `check_all_servers_uptime` (now superseded by `check_server_metrics` and `check_all_servers_metrics`).
+    - Beat schedule `check-servers-uptime` every 15 minutes (now `check-servers-metrics` every 5 minutes).
+  - Frontend:
+    - `Servers` page uses real `uptime_seconds` formatting (no more hardcoded `0 days`).
+    - `ServerDetail` shows uptime in header/info, adds `Refresh Uptime`, and renders a failure banner when `last_check_ok=false`.
+- 2026-04-29 (**task20**): Added per-service Docker ignore policies.
+  - New files: `backend/.dockerignore`, `frontend/.dockerignore`.
+  - Excludes env/secrets, local caches, runtime artifacts (`celerybeat-schedule`), and dev dependencies (`node_modules`) from Docker build contexts.
+  - Result: smaller/more stable build contexts and reduced risk of leaking local artifacts into images.
 - 2026-04-25 (**task16**): Lifespan migration guard aligned with current Alembic head.
   - `backend/app/main.py`: `EXPECTED_ALEMBIC_HEAD` updated from `002_domain_purchase_and_notifications` to `004_indexes` so a DB already at `004_indexes` no longer fails startup with `Database migration mismatch`.
 - 2026-04-25 (**task14**): Cloudflare sync switched to **attach-only** for existing domains.
@@ -63,8 +158,8 @@
   - Git: `Wire backend to Supabase transaction pooler (asyncpg connect args + NullPool).` (pooler wiring + entrypoint/env) and `Retry alembic_version check during API startup for transient DB errors.` (lifespan).
 
 ## In Progress / Next
-1. Run and document full E2E verification checklist in Docker runtime (including healthy pooler or **direct** DSN when pooler circuit-breakers).
-2. Add tests for renewal task + notifications API.
+1. Run and document full E2E verification checklist in Docker runtime (including provisioning, import, SSE streaming, and healthy pooler or **direct** DSN fallback).
+2. Add focused tests for renewal/notifications, server uptime, provisioning task, and import parser/service.
 3. Expand global toast/notification UX consistency across all pages.
 
 ## DB Migrations Quick Runbook
