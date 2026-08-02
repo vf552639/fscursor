@@ -31,6 +31,7 @@ pub fn run() {
         .manage(SyncHandle(Mutex::new(None)))
         .manage(api)
         .invoke_handler(tauri::generate_handler![
+            commands::api::api_request,
             commands::auth::auth_register,
             commands::auth::auth_login,
             commands::auth::auth_logout,

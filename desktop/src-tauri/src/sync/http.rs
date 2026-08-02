@@ -380,6 +380,38 @@ impl ApiClient {
         let resp = self.http.post(self.url("audit/log")).json(&body).send().await?;
         self.expect_ok(resp).await
     }
+
+    /// Generic authenticated proxy used by the desktop webview, which has no
+    /// session cookie of its own. Reuses this client's cookie jar and returns
+    /// the raw status + body so the frontend can preserve 401/403/etc.
+    pub async fn request_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(u16, String), ApiError> {
+        let url = self.url(path);
+        let mut req = match method.to_ascii_uppercase().as_str() {
+            "GET" => self.http.get(url),
+            "POST" => self.http.post(url),
+            "PUT" => self.http.put(url),
+            "PATCH" => self.http.patch(url),
+            "DELETE" => self.http.delete(url),
+            other => {
+                return Err(ApiError::Status {
+                    status: 405,
+                    body: format!("unsupported method {other}"),
+                })
+            }
+        };
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await?;
+        Ok((status, text))
+    }
 }
 
 #[cfg(test)]
@@ -441,5 +473,45 @@ mod tests {
         c.login_finish("a@b.c", &[9u8; 32], None).await.unwrap();
         let me = c.me().await.unwrap();
         assert_eq!(me.email, "a@b.c");
+    }
+
+    #[tokio::test]
+    async fn request_raw_reuses_session_cookie_and_passes_status() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/login/finish"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("Set-Cookie", "sdmp_session=tok; Path=/")
+                    .set_body_json(json!({"user_id": "u-1"})),
+            )
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/servers"))
+            .and(header_exists("cookie"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id": "s1"}])))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.login_finish("a@b.c", &[9u8; 32], None).await.unwrap();
+        let (status, body) = c.request_raw("GET", "/servers", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("s1"));
+    }
+
+    #[tokio::test]
+    async fn request_raw_passes_through_unauthenticated_401() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/servers"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({"detail": "missing session"})))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let (status, _body) = c.request_raw("GET", "/servers", None).await.unwrap();
+        assert_eq!(status, 401);
     }
 }
