@@ -1,5 +1,9 @@
 # CURRENT STATUS
 
+> ⚠️ **Замещено `docs/AUDIT_2026-08-02.md`.** Этот файл застрял на Stage 0 (обновлён 2026-05-06),
+> тогда как код прошёл Stage 4. Актуальное состояние готовности MVP, прогон тестов и список
+> пробелов — в `docs/AUDIT_2026-08-02.md`. Текущий план работ — `plans/`.
+
 **Last Updated:** 2026-05-06  
 **Current Phase:** Phase 6 — Reliability & Feedback (web); **Stage 0 foundation** (desktop shell + auth deps) landed 2026-05-06
 

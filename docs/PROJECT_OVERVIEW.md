@@ -1,3 +1,7 @@
+> ⚠️ **Устарело.** Документ описывает раннюю server-side модель. Проект развёрнут на
+> **zero-knowledge** архитектуру (секреты шифруются на клиенте, сервер хранит только блобы;
+> выполнение — в desktop). Актуально: `CLAUDE.md`, `plan.md`, `docs/AUDIT_2026-08-02.md`.
+
 # PROJECT OVERVIEW
 
 **Project Name:** SDMP (Server & Domain Management Panel)

@@ -1,3 +1,7 @@
+> ⚠️ **Устарело.** Описывает server-side архитектуру до разворота на zero-knowledge.
+> Целевая архитектура (desktop выполняет, web read-only, сервер «слепой») — в `plan.md`
+> и `docs/AUDIT_2026-08-02.md`.
+
 # ARCHITECTURE
 
 ## Docker Services
