@@ -260,26 +260,34 @@ export function useBulkSetNameservers() {
   });
 }
 
+export interface ProvisionDesktopResult {
+  domain_id: string;
+  site_user: string;
+  site_path: string;
+  ssl_issued?: boolean;
+  ssl_error?: string;
+  db?: { db_name: string; db_user: string; db_password: string };
+}
+
 export function useProvisionDomain() {
   return useMutation({
-    mutationFn: async (domainId: number) => {
+    mutationFn: async (arg: number | { domainId: number; withDb?: boolean }) => {
       if (!isTauri()) {
         throw new Error("Provisioning runs in the SDMP desktop app.");
       }
+      const domainId = typeof arg === "number" ? arg : arg.domainId;
+      const withDb = typeof arg === "number" ? false : Boolean(arg.withDb);
       const userId = useAuthStore.getState().userId;
       if (!userId) {
         throw new Error("Desktop: unlock session (user id missing)");
       }
-      await invokeIfTauri<unknown>("provision_domain", {
+      const result = await invokeIfTauri<ProvisionDesktopResult>("provision_domain", {
         userId,
         domainId: String(domainId),
         siteOnly: false,
+        withDb,
       });
-      return {
-        task_id: "",
-        task_log_id: 0,
-        domain_id: domainId,
-      } satisfies ProvisionResponse;
+      return result;
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
   });
