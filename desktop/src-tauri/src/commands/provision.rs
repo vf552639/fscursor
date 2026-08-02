@@ -12,9 +12,9 @@ use crate::commands::sync_cmd::SyncHandle;
 use crate::keychain;
 use crate::provision::bulk;
 use crate::provision::fastpanel_install::{
-    parse_fastpanel_credentials, update_command, INSTALL_CMD,
+    parse_fastpanel_credentials, update_command, FpCredentials, INSTALL_CMD,
 };
-use crate::ssh::client::SshSession;
+use crate::ssh::client::{SshError, SshSession};
 use crate::ssh::fastpanel::{self, CreateSiteResult};
 use crate::sync::cache;
 use crate::sync::http::ApiClient;
@@ -240,43 +240,88 @@ const FP_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 const FP_UPDATE_TIMEOUT: Duration = Duration::from_secs(900);
 /// Инсталлятор FastPanel тянет nginx/apache/mysql/php — закладываем 30 минут.
 const FP_INSTALL_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Сколько последних строк вывода апдейта прикладывать к тексту ошибки.
+const FP_UPDATE_TAIL_LINES: usize = 30;
 
-/// Шаги установки внутри уже открытой сессии. Возвращает вывод инсталлятора.
+/// Последние `n` строк вывода — хвост для диагностики упавшего шага.
+fn tail_lines(output: &str, n: usize) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Ошибка `exec` с контекстом шага.
 ///
-/// Вынесено отдельно, чтобы вызывающий гарантированно закрыл сессию ровно один
-/// раз на любом пути выхода (ошибка exec, ненулевой код, успех).
+/// `SshSession::exec` отдаёт таймаут как безликое `SshError::Session("exec
+/// timeout")` — ни шага, ни лимита. Подменяем текст, остальные ошибки
+/// пробрасываем как есть.
+fn exec_error(step: &str, timeout: Duration, e: SshError) -> CommandError {
+    if matches!(&e, SshError::Session(m) if m == "exec timeout") {
+        CommandError::Api(format!("{step} timed out after {}s", timeout.as_secs()))
+    } else {
+        CommandError::from(e)
+    }
+}
+
+/// Шаги установки внутри уже открытой сессии. Возвращает разобранные креды.
+///
+/// Вынесено отдельно по двум причинам: вызывающий гарантированно закрывает
+/// сессию ровно один раз на любом пути выхода (ошибка exec, ненулевой код,
+/// успех), а сырой вывод инсталлятора (в нём пароль панели) не переживает этот
+/// стык — наружу уходит только разобранный `FpCredentials`.
 async fn run_fastpanel_install_steps(
     app: &AppHandle,
     session: &mut SshSession,
     server_id: &str,
     os: &str,
-) -> Result<String, CommandError> {
+) -> Result<FpCredentials, CommandError> {
     let _ = app.emit(
         "fastpanel:progress",
         serde_json::json!({ "step": "updating", "server_id": server_id }),
     );
-    let (upd_code, _upd_out) = session
+    let (upd_code, upd_out) = session
         .exec(&update_command(os), FP_UPDATE_TIMEOUT, false)
-        .await?;
+        .await
+        .map_err(|e| exec_error("system update", FP_UPDATE_TIMEOUT, e))?;
     if upd_code != 0 {
-        return Err(CommandError::Api(format!(
-            "system update failed (exit {upd_code})"
-        )));
+        // Вывод apt/yum секретов не содержит — прикладываем хвост, иначе у
+        // пользователя остаётся только код возврата.
+        let msg = format!("system update failed (exit {upd_code})");
+        let tail = tail_lines(&upd_out, FP_UPDATE_TAIL_LINES);
+        return Err(CommandError::Api(if tail.is_empty() {
+            msg
+        } else {
+            format!("{msg}\n{tail}")
+        }));
     }
 
     let _ = app.emit(
         "fastpanel:progress",
         serde_json::json!({ "step": "installing", "server_id": server_id }),
     );
-    // Вывод инсталлятора содержит пароль панели — он не попадает ни в ошибки,
-    // ни в логи: наружу отдаём только код возврата.
-    let (inst_code, inst_out) = session.exec(INSTALL_CMD, FP_INSTALL_TIMEOUT, false).await?;
+    let (inst_code, inst_out) = session
+        .exec(INSTALL_CMD, FP_INSTALL_TIMEOUT, false)
+        .await
+        .map_err(|e| exec_error("fastpanel installer", FP_INSTALL_TIMEOUT, e))?;
     if inst_code != 0 {
+        // В отличие от апдейта, вывод инсталлятора содержит пароль панели —
+        // наружу отдаём только код возврата, без хвоста.
         return Err(CommandError::Api(format!(
             "fastpanel installer failed (exit {inst_code})"
         )));
     }
-    Ok(inst_out)
+
+    let creds = parse_fastpanel_credentials(&inst_out);
+    if creds.password.is_none() {
+        // Инсталлятор отработал, но формат вывода изменился и пароль не
+        // достался. Молчать нельзя: пользователь решит, что всё хорошо, а
+        // пароль панели не существует больше нигде.
+        let _ = app.emit(
+            "fastpanel:progress",
+            serde_json::json!({ "step": "creds_unparsed", "server_id": server_id }),
+        );
+    }
+    Ok(creds)
 }
 
 #[tauri::command]
@@ -309,6 +354,16 @@ pub async fn install_fastpanel(
         ));
     }
 
+    // Без ОС `update_command` молча уходит в apt-ветку, и RHEL-сервер падает на
+    // невнятном коде возврата уже после подключения. Отсекаем сразу.
+    let os = server_row.get("os").and_then(json_str).unwrap_or_default();
+    if os.trim().is_empty() {
+        return Err(CommandError::Api(
+            "server has no OS recorded — set it before installing FastPanel (decides apt vs yum)"
+                .into(),
+        ));
+    }
+
     let blob_id = server_row
         .get("ssh_password_blob_id")
         .and_then(json_str)
@@ -327,7 +382,13 @@ pub async fn install_fastpanel(
         .get("ssh_user")
         .and_then(json_str)
         .unwrap_or_else(|| "root".into());
-    let os = server_row.get("os").and_then(json_str).unwrap_or_default();
+
+    // Всё, что нужно из локального кэша, забираем до SSH: держать соединение с
+    // SQLCipher открытым все 30-40 минут установки незачем.
+    let device_id = cache::get_meta(&conn, "device_id")
+        .map_err(|e| CommandError::Api(e.to_string()))?
+        .and_then(|s| Uuid::parse_str(&s).ok());
+    drop(conn);
 
     let _ = app.emit(
         "fastpanel:progress",
@@ -343,15 +404,10 @@ pub async fn install_fastpanel(
     )
     .await?;
 
-    let steps = run_fastpanel_install_steps(&app, &mut session, &server_id, &os).await;
+    let installed = run_fastpanel_install_steps(&app, &mut session, &server_id, &os).await;
     let _ = session.disconnect().await;
-    let inst_out = steps?;
+    let creds = installed?;
 
-    let creds = parse_fastpanel_credentials(&inst_out);
-
-    let device_id = cache::get_meta(&conn, "device_id")
-        .map_err(|e| CommandError::Api(e.to_string()))?
-        .and_then(|s| Uuid::parse_str(&s).ok());
     // metadata без пароля (redaction guard в http.rs — debug_assert, в release
     // его нет, поэтому чистота метаданных обеспечивается здесь).
     //
@@ -383,4 +439,53 @@ pub async fn install_fastpanel(
         user: creds.user,
         password: creds.password,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_lines_returns_whole_output_when_shorter_than_limit() {
+        assert_eq!(tail_lines("a\nb\nc", 30), "a\nb\nc");
+    }
+
+    #[test]
+    fn tail_lines_keeps_only_the_last_n_lines() {
+        let out = (1..=50)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(tail_lines(&out, 3), "48\n49\n50");
+    }
+
+    #[test]
+    fn tail_lines_of_empty_output_is_empty() {
+        assert_eq!(tail_lines("", 30), "");
+    }
+
+    // `exec` reports a timeout as a bare `SshError::Session("exec timeout")`,
+    // which names neither the step nor the limit that was exceeded.
+    #[test]
+    fn exec_error_names_step_and_limit_on_timeout() {
+        let e = exec_error(
+            "system update",
+            Duration::from_secs(900),
+            SshError::Session("exec timeout".into()),
+        );
+        assert_eq!(e.to_string(), "api: system update timed out after 900s");
+    }
+
+    // Anything that is not the timeout must keep its original message.
+    #[test]
+    fn exec_error_passes_through_non_timeout_errors() {
+        let e = exec_error("fastpanel installer", FP_INSTALL_TIMEOUT, SshError::Auth);
+        assert_eq!(e.to_string(), "ssh: auth failed");
+        let e = exec_error(
+            "fastpanel installer",
+            FP_INSTALL_TIMEOUT,
+            SshError::Session("channel closed".into()),
+        );
+        assert_eq!(e.to_string(), "ssh: session: channel closed");
+    }
 }
