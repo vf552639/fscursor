@@ -52,6 +52,9 @@ pub fn run() {
             commands::cloudflare::cf_update_dns_record,
             commands::cloudflare::cf_delete_dns_record,
             commands::cloudflare::cf_purge_cache,
+            commands::registrars::registrar_test_connection,
+            commands::registrars::registrar_get_domains,
+            commands::registrars::registrar_set_nameservers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
