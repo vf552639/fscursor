@@ -107,6 +107,19 @@ pub fn bulk_run_complete(conn: &Connection, key: &str, detail: &str) -> rusqlite
     Ok(())
 }
 
+/// Пометить прогон неудачным, чтобы повтор с тем же ключом был возможен.
+///
+/// Не `bulk_run_complete`: тот всегда пишет `done`, а `done` — как и `running` —
+/// заставляет повторный запуск вернуть ключ, ничего не сделав. Прогон, брошенный
+/// на середине, обязан оставить статус, по которому его можно перезапустить.
+pub fn bulk_run_fail(conn: &Connection, key: &str, detail: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE bulk_runs SET status = 'failed', detail = ?2 WHERE idempotency_key = ?1",
+        params![key, detail],
+    )?;
+    Ok(())
+}
+
 pub fn bulk_run_status(conn: &Connection, key: &str) -> rusqlite::Result<Option<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT status, IFNULL(detail, '') FROM bulk_runs WHERE idempotency_key = ?1",
@@ -144,6 +157,27 @@ mod tests {
         drop(conn);
         let conn = open(&path, &key).unwrap();
         assert_eq!(get_meta(&conn, "version").unwrap().as_deref(), Some("5"));
+    }
+
+    // Брошенный на середине прогон обязан стать перезапускаемым: `running` и
+    // `done` — те два статуса, при которых provision_bulk возвращает ключ, не
+    // сделав ничего.
+    #[test]
+    fn failed_bulk_run_leaves_a_retryable_status() {
+        let dir = tempdir().unwrap();
+        let conn = open(&dir.path().join("cache.db"), &[7u8; 32]).unwrap();
+        bulk_run_upsert_start(&conn, "k1", "provision_bulk", "[\"1\"]").unwrap();
+        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().0, "running");
+
+        bulk_run_fail(&conn, "k1", "failed on domain 1: boom").unwrap();
+        let (status, detail) = bulk_run_status(&conn, "k1").unwrap().unwrap();
+        assert_ne!(status, "running");
+        assert_ne!(status, "done");
+        assert!(detail.contains("boom"));
+
+        // И повторный старт с тем же ключом снова переводит его в running.
+        bulk_run_upsert_start(&conn, "k1", "provision_bulk", "[\"1\"]").unwrap();
+        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().0, "running");
     }
 
     #[test]

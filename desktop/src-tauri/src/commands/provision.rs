@@ -4,6 +4,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::commands::auth::CommandError;
 use crate::commands::creds::{blob_plaintext, cache_path, json_i64, json_str};
@@ -54,11 +55,14 @@ pub struct InstallFastpanelResult {
 /// Сколько молчания сервера считаем обрывом связи во время провижининга домена.
 ///
 /// Обычных для FastPanel CLI 45s тут мало: `certificates create-le` уходит в
-/// ACME-валидацию и молчит минутами, да и сам provision между шагами простаивает
-/// (до ~15s на проверку DNS плюс запрос `/auth/me`) — russh рвал бы живую сессию
-/// задолго до 300s exec-таймаута команды. Берём 300s, чтобы предел задавал exec,
-/// а не inactivity.
-const PROVISION_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
+/// ACME-валидацию и молчит минутами. Но и ровно 300s брать нельзя — это в
+/// точности exec-таймаут самой команды, и кто сработает первым, было бы гонкой.
+/// Разница принципиальная: exec-таймаут убивает команду, и её ошибку ловит
+/// non-fatal ветка SSL, а inactivity убивает СЕССИЮ — тогда следующий шаг
+/// (`create_database`) падает уже намертво, и пользователь теряет отчёт об
+/// удавшихся site и FTP. Берём 420s: 120s запаса, чтобы exec провёл границу
+/// заведомо раньше.
+const PROVISION_SESSION_TIMEOUT: Duration = Duration::from_secs(420);
 /// Сколько раз перепроверяем DNS перед выпуском SSL и с какой паузой между
 /// попытками (~15s суммарно): свежая A-запись нередко «доезжает» до резолвера
 /// за эти секунды, а ждать дольше внутри provision смысла нет — Let's Encrypt
@@ -71,22 +75,39 @@ const SSL_ERROR_TAIL_LINES: usize = 20;
 
 /// Ошибка создания БД — без пароля этой БД.
 ///
-/// `create_database` в fallback-ветке кладёт в текст ошибки вывод
-/// `mysql -e "... IDENTIFIED BY '<пароль>'"`, а mysql в сообщении об ошибке
-/// повторяет исходный запрос — то есть пароль. Поэтому `SshError::Session`
-/// (единственный вариант, который несёт вывод команды) схлопываем в
-/// обезличенный текст; остальные варианты вывода не содержат и идут как есть.
+/// Вторая линия обороны: `create_database` уже отдаёт обезличенный
+/// `opaque_exit`, но её `?` пропускает и любой другой `SshError::Session`,
+/// который может нести вывод команды. Схлопываем весь вариант; остальные
+/// (`auth failed`, `io: ...`) вывода не содержат и идут как есть.
 fn db_error(e: SshError) -> CommandError {
     match e {
-        SshError::Session(m) if m == "exec timeout" => {
-            CommandError::Api("database creation timed out".into())
-        }
-        SshError::Session(_) => CommandError::Api("database creation failed on the server".into()),
+        SshError::Session(m) if m == "exec timeout" => CommandError::Api(
+            "database creation timed out — check the MySQL/MariaDB service on the server".into(),
+        ),
+        SshError::Session(_) => CommandError::Api(
+            "database creation failed on the server (output withheld: it echoes the generated \
+             db password) — run `fastpanel database create` manually or check the MySQL log"
+                .into(),
+        ),
         other => CommandError::from(other),
     }
 }
 
-/// Параметры провижининга, вычитанные из локального кэша до открытия SSH.
+/// Почему SSL пропущен из-за DNS — с данными, по которым это можно починить.
+///
+/// Самый частый реальный случай — не «запись ещё не доехала», а оранжевое
+/// облако Cloudflare: домен резолвится прекрасно, только в прокси-IP, и тогда
+/// HTTP-01 на этом сервере не пройдёт НИКОГДА. Поэтому имя, ожидаемый IP и
+/// число попыток должны быть в тексте, а не подразумеваться.
+fn dns_gate_message(domain: &str, expected_ip: &str, attempts: u32) -> String {
+    format!(
+        "{domain} does not resolve to {expected_ip} (checked {attempts} times) — SSL skipped. \
+         If the record is proxied (Cloudflare orange cloud), it never will: turn the proxy off \
+         for issuance, or terminate TLS at the proxy instead."
+    )
+}
+
+/// Параметры провижининга, вычитанные до открытия SSH.
 struct ProvisionPlan<'a> {
     domain_id: &'a str,
     domain_name: &'a str,
@@ -96,6 +117,13 @@ struct ProvisionPlan<'a> {
     site_user_existing: Option<String>,
     site_only: bool,
     with_db: bool,
+    /// Почта аккаунта для Let's Encrypt, прочитанная ДО открытия сессии:
+    /// сетевой запрос посреди живого SSH — это молчание в канале, за которое
+    /// russh может закрыть сессию (см. `PROVISION_SESSION_TIMEOUT`).
+    le_email: Option<&'a str>,
+    /// Почему `le_email` пуст — не запрашивали (`site_only`) или не получили.
+    /// Читается только во второй ситуации: в первой до SSL дело не доходит.
+    le_email_error: Option<&'a str>,
 }
 
 /// Что провижининг успел сделать внутри уже открытой сессии.
@@ -103,6 +131,10 @@ struct ProvisionSteps {
     site_user: String,
     site_path: String,
     steps: Vec<&'static str>,
+    /// Прошёл ли preflight портов 80/443. Закрытый firewall — причина №1
+    /// последующего провала HTTP-01, и без этого флага в аудите связать
+    /// `ssl_error` с ним постфактум нечем.
+    firewall_ok: bool,
     ssl_issued: Option<bool>,
     ssl_error: Option<String>,
     db: Option<DbInfoOut>,
@@ -116,7 +148,6 @@ struct ProvisionSteps {
 async fn run_provision_steps(
     app: &AppHandle,
     session: &mut SshSession,
-    api: &ApiClient,
     plan: &ProvisionPlan<'_>,
 ) -> Result<ProvisionSteps, CommandError> {
     let domain_id = plan.domain_id;
@@ -136,31 +167,50 @@ async fn run_provision_steps(
     );
     let ports = fastpanel::ensure_ports_open(session, &[80, 443]).await?;
     if !ports.success {
+        // Закрытые 80/443 — причина №1 будущего провала HTTP-01. В лог этого
+        // мало: пользователь увидит только невнятный ssl_error через минуту.
         tracing::warn!(target: "provision", "firewall preflight: {:?}", ports.error);
+        let _ = app.emit(
+            "provision:progress",
+            serde_json::json!({
+                "step": "firewall_warning",
+                "domain_id": domain_id,
+                "firewall": ports.firewall,
+                "error": ports.error,
+            }),
+        );
     }
 
-    let CreateSiteResult {
-        site_user,
-        site_path,
-        ..
-    } = if let Some(ref u) = plan.site_user_existing {
+    // Переиспользование существующего сайта и его создание — разные события, и
+    // аудит не должен называть первое вторым.
+    let (site, site_step) = if let Some(ref u) = plan.site_user_existing {
         if fastpanel::site_exists(session, u, domain_name).await? {
-            CreateSiteResult {
-                site_user: u.clone(),
-                site_path: format!("/var/www/{u}/data/www/{domain_name}"),
-                output: "already exists".into(),
-            }
+            (
+                CreateSiteResult {
+                    site_user: u.clone(),
+                    site_path: format!("/var/www/{u}/data/www/{domain_name}"),
+                    output: "already exists".into(),
+                },
+                "site_exists",
+            )
         } else {
-            fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?
+            (
+                fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?,
+                "create_site",
+            )
         }
     } else {
-        fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?
+        (
+            fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?,
+            "create_site",
+        )
     };
 
     let mut done = ProvisionSteps {
-        site_user,
-        site_path,
-        steps: vec!["ssh", "create_site"],
+        site_user: site.site_user,
+        site_path: site.site_path,
+        steps: vec!["ssh", site_step],
+        firewall_ok: ports.success,
         ssl_issued: None,
         ssl_error: None,
         db: None,
@@ -171,68 +221,100 @@ async fn run_provision_steps(
             "provision:progress",
             serde_json::json!({ "step": "ftp", "domain_id": domain_id }),
         );
-        let _ftp = fastpanel::create_ftp_account(session, &fp_path, domain_name).await?;
+        // `let _ =`, а не `let _ftp =`: CreateFtpResult несёт пароль, и биндинг
+        // держал бы его живым всю выдачу SSL. Здесь он умирает сразу.
+        let _ = fastpanel::create_ftp_account(session, &fp_path, domain_name).await?;
         done.steps.push("ftp");
 
         // SSL. Ни один путь этого блока не возвращает Err: сайт и FTP уже
         // созданы, и провалить из-за них весь provision значило бы отрапортовать
         // неудачу об удавшейся работе, а на повторе заново прогонять create_site.
         // Причина неудачи уезжает во фронт в `ssl_error`.
-        let _ = app.emit(
-            "provision:progress",
-            serde_json::json!({ "step": "ssl_dns_check", "domain_id": domain_id }),
-        );
-        let resolves = fastpanel::dns_resolves_to(
-            domain_name,
-            plan.host,
-            SSL_DNS_ATTEMPTS,
-            SSL_DNS_RETRY_DELAY,
-        )
-        .await;
-        if !resolves {
-            // Домен ещё не смотрит на сервер: Let's Encrypt не пройдёт HTTP-01,
-            // и дёргать его сейчас — только жечь rate limit.
+        //
+        // Идемпотентность (принцип 4): у Let's Encrypt лимит дубликатов — 5
+        // одинаковых сертификатов в неделю, он выгорает куда быстрее прочих, а
+        // повторный provision домена штука обычная. Уже выпущенный сертификат
+        // не перевыпускаем. Продление — забота certbot-таймера, не provision.
+        let has_cert = match fastpanel::cert_exists(session, domain_name).await {
+            Ok(v) => v,
+            // Не смогли проверить — не повод падать: пойдём обычным путём, и
+            // если сессия действительно мертва, это поймает ветка issue ниже.
+            Err(e) => {
+                tracing::warn!(target: "provision", "cert_exists check failed: {e}");
+                false
+            }
+        };
+        if has_cert {
             let _ = app.emit(
                 "provision:progress",
-                serde_json::json!({ "step": "ssl_skipped_dns", "domain_id": domain_id }),
+                serde_json::json!({ "step": "ssl_exists", "domain_id": domain_id }),
             );
-            done.ssl_issued = Some(false);
-            done.ssl_error = Some("dns does not resolve to server ip yet".into());
+            done.ssl_issued = Some(true);
+            done.steps.push("ssl_exists");
         } else {
-            // Почта для LE — почта самого аккаунта. Сбой `/auth/me` не должен
-            // валить provision: это отдельный сетевой вызов, к состоянию сервера
-            // отношения не имеющий.
-            match api.me().await {
-                Err(e) => {
-                    tracing::warn!(target: "provision", "no account email for LE: {e}");
-                    let _ = app.emit(
-                        "provision:progress",
-                        serde_json::json!({ "step": "ssl_skipped_no_email", "domain_id": domain_id }),
-                    );
-                    done.ssl_issued = Some(false);
-                    done.ssl_error = Some(format!("could not read account email for LE: {e}"));
-                }
-                Ok(me) => {
-                    let _ = app.emit(
-                        "provision:progress",
-                        serde_json::json!({ "step": "ssl_issue", "domain_id": domain_id }),
-                    );
-                    match fastpanel::issue_ssl_certificate(
-                        session,
-                        &fp_path,
-                        domain_name,
-                        &me.email,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            done.ssl_issued = Some(true);
-                            done.steps.push("ssl");
-                        }
-                        Err(e) => {
-                            tracing::warn!(target: "provision", "ssl issue failed: {e}");
-                            done.ssl_issued = Some(false);
-                            done.ssl_error = Some(tail_lines(&e.to_string(), SSL_ERROR_TAIL_LINES));
+            let _ = app.emit(
+                "provision:progress",
+                serde_json::json!({ "step": "ssl_dns_check", "domain_id": domain_id }),
+            );
+            let resolves = fastpanel::dns_resolves_to(
+                domain_name,
+                plan.host,
+                SSL_DNS_ATTEMPTS,
+                SSL_DNS_RETRY_DELAY,
+            )
+            .await;
+            if !resolves {
+                // Домен не смотрит на сервер: Let's Encrypt не пройдёт HTTP-01,
+                // и дёргать его сейчас — только жечь rate limit.
+                let _ = app.emit(
+                    "provision:progress",
+                    serde_json::json!({ "step": "ssl_skipped_dns", "domain_id": domain_id }),
+                );
+                done.ssl_issued = Some(false);
+                done.ssl_error = Some(dns_gate_message(domain_name, plan.host, SSL_DNS_ATTEMPTS));
+            } else {
+                match plan.le_email {
+                    // Почту читали до сессии и не прочитали. Не повод валить
+                    // provision: это сетевой сбой, к состоянию сервера
+                    // отношения не имеющий.
+                    None => {
+                        let _ = app.emit(
+                            "provision:progress",
+                            serde_json::json!({
+                                "step": "ssl_skipped_no_email",
+                                "domain_id": domain_id,
+                            }),
+                        );
+                        done.ssl_issued = Some(false);
+                        done.ssl_error = Some(
+                            plan.le_email_error
+                                .unwrap_or("no account email for Let's Encrypt")
+                                .to_string(),
+                        );
+                    }
+                    Some(email) => {
+                        let _ = app.emit(
+                            "provision:progress",
+                            serde_json::json!({ "step": "ssl_issue", "domain_id": domain_id }),
+                        );
+                        match fastpanel::issue_ssl_certificate(
+                            session,
+                            &fp_path,
+                            domain_name,
+                            email,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                done.ssl_issued = Some(true);
+                                done.steps.push("ssl");
+                            }
+                            Err(e) => {
+                                tracing::warn!(target: "provision", "ssl issue failed: {e}");
+                                done.ssl_issued = Some(false);
+                                done.ssl_error =
+                                    Some(tail_lines(&e.to_string(), SSL_ERROR_TAIL_LINES));
+                            }
                         }
                     }
                 }
@@ -278,7 +360,7 @@ pub async fn run_provision_domain(
     cache_path: &Path,
     api: &ApiClient,
 ) -> Result<ProvisionResultOut, CommandError> {
-    let key = keychain::load_master_key(user_id)
+    let mut key = keychain::load_master_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let conn = cache::open(cache_path, &key).map_err(|e| CommandError::Api(e.to_string()))?;
@@ -304,7 +386,10 @@ pub async fn run_provision_domain(
         .and_then(json_str)
         .ok_or_else(|| CommandError::Api("server has no ssh_password_blob_id".into()))?;
 
-    let password = blob_plaintext(api, &key, &blob_id).await?;
+    let mut password = blob_plaintext(api, &key, &blob_id).await?;
+    // Мастер-ключ больше не нужен: дальше только SSH и HTTP. Раньше он жил до
+    // конца функции, а она теперь тянется все минуты провижининга.
+    key.zeroize();
     let host = server_row
         .get("ip_address")
         .and_then(json_str)
@@ -336,12 +421,27 @@ pub async fn run_provision_domain(
         .and_then(|s| Uuid::parse_str(&s).ok());
     drop(conn);
 
+    // Почта для Let's Encrypt — до открытия сессии. Внутри неё этот HTTP-запрос
+    // был бы паузой в тишину канала, а провал остаётся не фатальным: без почты
+    // просто не будет SSL.
+    let le_email = if site_only {
+        Err("ssl not requested (site_only)".to_string())
+    } else {
+        api.me().await.map(|me| me.email).map_err(|e| {
+            tracing::warn!(target: "provision", "no account email for LE: {e}");
+            tail_lines(
+                &format!("could not read account email for Let's Encrypt: {e}"),
+                SSL_ERROR_TAIL_LINES,
+            )
+        })
+    };
+
     let _ = app.emit(
         "provision:progress",
         serde_json::json!({ "step": "ssh_connect", "domain_id": domain_id }),
     );
 
-    let mut session = ssh_connect_session_with_timeout(
+    let session = ssh_connect_session_with_timeout(
         app,
         &host,
         port,
@@ -349,7 +449,11 @@ pub async fn run_provision_domain(
         &password,
         PROVISION_SESSION_TIMEOUT,
     )
-    .await?;
+    .await;
+    // Пароль сервера дальше не нужен ни на одном пути — ни на успешном, ни на
+    // ошибочном. Гасим до разбора результата, а не после.
+    password.zeroize();
+    let mut session = session?;
 
     let plan = ProvisionPlan {
         domain_id,
@@ -359,8 +463,10 @@ pub async fn run_provision_domain(
         site_user_existing,
         site_only,
         with_db,
+        le_email: le_email.as_ref().ok().map(String::as_str),
+        le_email_error: le_email.as_ref().err().map(String::as_str),
     };
-    let stepped = run_provision_steps(app, &mut session, api, &plan).await;
+    let stepped = run_provision_steps(app, &mut session, &plan).await;
     let _ = session.disconnect().await;
     let done = stepped?;
 
@@ -384,6 +490,8 @@ pub async fn run_provision_domain(
                 "domain_name": domain_name,
                 "server_id": server_id,
                 "site_only": site_only,
+                "with_db": with_db,
+                "firewall_ok": done.firewall_ok,
                 "ssl_issued": done.ssl_issued,
             })),
         )
@@ -468,7 +576,27 @@ pub async fn provision_bulk(
         );
         // Массовый прогон — без БД: пароли БД возвращаются только в ответе на
         // одиночный provision, а bulk отдаёт наружу лишь ключ идемпотентности.
-        run_provision_domain(&app, &user_id, did, false, false, &cache_path, &api).await?;
+        //
+        // Ошибку нельзя просто пробросить: строка осталась бы в `running`, и
+        // guard выше на повторе вернул бы этот же ключ, не сделав ничего, —
+        // пользователь жмёт «повторить», видит успех и не получает ничего.
+        // Помечаем прогон failed, чтобы повтор был возможен, и только потом
+        // отдаём ошибку.
+        if let Err(e) =
+            run_provision_domain(&app, &user_id, did, false, false, &cache_path, &api).await
+        {
+            // Секретов в тексте нет: пароль БД гасит `db_error`, вывод команд с
+            // паролями в argv — `opaque_exit`, SSL до ошибки не доходит вовсе.
+            let detail = format!("failed on domain {did}: {e}");
+            if let Err(ce) = cache::bulk_run_fail(&conn, &key, &detail) {
+                tracing::warn!(target: "provision", "could not mark bulk run failed: {ce}");
+            }
+            let _ = app.emit(
+                "provision:progress",
+                serde_json::json!({ "step": "bulk_failed", "domain_id": did }),
+            );
+            return Err(e);
+        }
     }
     cache::bulk_run_complete(&conn, &key, "ok").map_err(|e| CommandError::Api(e.to_string()))?;
     Ok(key)
@@ -744,14 +872,50 @@ mod tests {
         let leaky = "ERROR 1064 at line 1: near \"CREATE USER 'u'@'localhost' \
                      IDENTIFIED BY 'sup3rSecret'\"";
         let e = db_error(SshError::Session(leaky.into()));
-        assert_eq!(e.to_string(), "api: database creation failed on the server");
-        assert!(!e.to_string().contains("sup3rSecret"));
+        assert!(!e.to_string().contains("sup3rSecret"), "{e}");
+        assert!(!e.to_string().contains("CREATE USER"), "{e}");
     }
 
     #[test]
     fn db_error_names_the_timeout() {
         let e = db_error(SshError::Session("exec timeout".into()));
-        assert_eq!(e.to_string(), "api: database creation timed out");
+        assert!(e.to_string().contains("database creation timed out"));
+    }
+
+    // Причину, по которой вывод не показан, пользователь должен прочитать —
+    // иначе «failed on the server» выглядит как проглоченная ошибка.
+    #[test]
+    fn db_error_says_why_the_output_is_withheld_and_what_to_do() {
+        let msg = db_error(SshError::Session("boom".into())).to_string();
+        assert!(msg.contains("withheld"), "{msg}");
+        assert!(msg.contains("db password"), "{msg}");
+        assert!(msg.contains("fastpanel database create"), "{msg}");
+    }
+
+    // Самый частый случай — проксирование Cloudflare, при котором домен
+    // резолвится прекрасно, просто не в тот IP, и ждать бесполезно.
+    #[test]
+    fn dns_gate_message_names_domain_ip_attempts_and_the_proxy_trap() {
+        let m = dns_gate_message("example.com", "203.0.113.7", 5);
+        assert!(m.contains("example.com"), "{m}");
+        assert!(m.contains("203.0.113.7"), "{m}");
+        assert!(m.contains("5 times"), "{m}");
+        assert!(m.to_lowercase().contains("cloudflare"), "{m}");
+    }
+
+    // Инвариант таймаутов: exec выпуска SSL (300s в ssh/fastpanel.rs) обязан
+    // истечь раньше, чем russh закроет сессию по молчанию. Иначе умирает
+    // сессия, а не команда, и следующий шаг падает уже фатально.
+    #[test]
+    fn session_timeout_outlives_the_longest_exec() {
+        const SSL_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+        assert!(
+            PROVISION_SESSION_TIMEOUT > SSL_EXEC_TIMEOUT,
+            "session {:?} must exceed ssl exec {:?}",
+            PROVISION_SESSION_TIMEOUT,
+            SSL_EXEC_TIMEOUT
+        );
+        assert!(PROVISION_SESSION_TIMEOUT - SSL_EXEC_TIMEOUT >= Duration::from_secs(60));
     }
 
     // Варианты без вывода команды диагностику терять не должны.

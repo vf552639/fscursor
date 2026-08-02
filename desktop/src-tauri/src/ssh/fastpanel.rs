@@ -68,6 +68,19 @@ fn q(s: &str) -> String {
     escape(Cow::Borrowed(s)).into_owned()
 }
 
+/// Ошибка команды, в argv которой был сгенерированный пароль.
+///
+/// Такие утилиты (FastPanel CLI, mysql) при ошибке повторяют полученный запрос
+/// или usage вместе с аргументами — то есть кладут пароль прямо в текст. Наружу
+/// поэтому уходит только код возврата; сам пароль в этот момент уже может быть
+/// живым (mysql выполняет `CREATE USER` до `GRANT`, и падение на втором
+/// оставляет созданного пользователя с этим паролем).
+fn opaque_exit(step: &str, code: i32) -> SshError {
+    SshError::Session(format!(
+        "{step} exit {code} (output withheld: it echoes the generated password)"
+    ))
+}
+
 pub async fn get_fastpanel_path(
     s: &mut SshSession,
     override_path: Option<&str>,
@@ -187,9 +200,7 @@ pub async fn create_ftp_account(
     );
     let (code, output) = s.exec(&cmd, Duration::from_secs(120), false).await?;
     if code != 0 {
-        return Err(SshError::Session(format!(
-            "create_ftp_account exit {code}: {output}"
-        )));
+        return Err(opaque_exit("create_ftp_account", code));
     }
     Ok(CreateFtpResult {
         ftp_user,
@@ -284,9 +295,9 @@ pub async fn create_database(
         .exec(&fallback_cmd, Duration::from_secs(60), false)
         .await?;
     if fb_code != 0 {
-        return Err(SshError::Session(
-            format!("{out}\n{fb_out}").trim().to_string(),
-        ));
+        // Ни `out` (вывод fastpanel с `--password=` в argv), ни `fb_out` (mysql
+        // повторяет в ошибке весь запрос, включая IDENTIFIED BY) наружу нельзя.
+        return Err(opaque_exit("create_database", fb_code));
     }
     Ok(CreateDbResult {
         db_name: database_name,
@@ -820,5 +831,25 @@ mod tests {
     #[test]
     fn make_site_user_slug() {
         assert_eq!(make_site_user("foo-bar.example.com"), "foo_bar_usr");
+    }
+
+    // Вывод этих команд повторяет argv (а там `--password=`) или сам SQL с
+    // IDENTIFIED BY. Наружу должен уходить только код возврата.
+    #[test]
+    fn opaque_exit_keeps_only_the_exit_code() {
+        let e = opaque_exit("create_database", 1);
+        let msg = e.to_string();
+        assert!(msg.contains("create_database"), "{msg}");
+        assert!(msg.contains("exit 1"), "{msg}");
+        assert!(msg.contains("withheld"), "{msg}");
+    }
+
+    // Пароль генерируется здесь же — убеждаемся, что ему просто некуда попасть
+    // в текст ошибки.
+    #[test]
+    fn opaque_exit_has_no_room_for_command_output() {
+        let pw = generate_password(18);
+        let e = opaque_exit("create_ftp_account", 2);
+        assert!(!e.to_string().contains(&pw));
     }
 }
