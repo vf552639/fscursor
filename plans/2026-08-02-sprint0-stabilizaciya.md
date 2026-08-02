@@ -539,10 +539,9 @@ Expected: `nothing to commit, working tree clean` (кроме, возможно,
    layout `nonce(24) || mac(16) || ciphertext`) — `e584ca3`.
 8. Баннеры «устарело / замещено» проставлены в `docs/CURRENT_STATUS.md`,
    `docs/PROJECT_OVERVIEW.md`, `docs/ARCHITECTURE.md` — `4696fc4`.
-9. Финальная верификация зелёная по всем трём сьютам; `git status` доведён до чистого
-   отдельным коммитом документации (`CLAUDE.md`, `design-brief.md`, `docs/AUDIT_2026-08-02.md`,
-   `plans/`, `stage4.md`, `stage5.md`, `.claude/settings.json`), `.claude/worktrees/` внесён
-   в `.gitignore`.
+9. Финальная верификация зелёная по всем трём сьютам; документация вне плана закоммичена
+   отдельно (`CLAUDE.md`, `design-brief.md`, `docs/AUDIT_2026-08-02.md`, `plans/`,
+   `.claude/settings.json`), `.claude/worktrees/` внесён в `.gitignore`.
 
 **Что осталось:** ничего из объёма спринта.
 
@@ -551,9 +550,14 @@ Expected: `nothing to commit, working tree clean` (кроме, возможно,
 - `cargo test` даёт **26 passed; 1 ignored** вместо ожидавшихся планом 24 — тестов в desktop
   стало больше, все зелёные.
 - Плана не хватало на «чистый `git status`»: untracked `CLAUDE.md`, `design-brief.md`,
-  `docs/AUDIT_2026-08-02.md`, `plans/`, `stage4.md`, `stage5.md`, `.claude/` задачами 1–8 не
-  покрывались. Закоммичены отдельно; активные worktree-чекауты `.claude/worktrees/`
+  `docs/AUDIT_2026-08-02.md`, `plans/`, `stage*.md`, `.claude/` задачами 1–8 не покрывались.
+  Документация закоммичена отдельно; активные worktree-чекауты `.claude/worktrees/`
   заигнорены (коммитить их нельзя).
+- **Критерий «чистый `git status`» достигнут не полностью — по решению владельца проекта.**
+  Во время сессии сторонним образом (не действиями исполнителя) с диска исчезли `stage0.md` …
+  `stage3.md` (были в git) и `stage4.md` (был untracked). Владелец выбрал «оставить как есть»,
+  поэтому в дереве остаются 4 незакоммиченных удаления и untracked `stage5.md`. Всё остальное,
+  что относится к спринту, зафиксировано.
 - Коммиты подписаны `Co-Authored-By: Claude Opus 5 (1M context)` вместо указанного в плане
   `Claude Opus 4.8` — по фактической модели исполнителя.
 
