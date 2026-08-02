@@ -1,14 +1,13 @@
 use std::path::Path;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::commands::auth::CommandError;
+use crate::commands::creds::{blob_plaintext, cache_path, json_i64, json_str};
 use crate::commands::ssh::ssh_connect_session;
 use crate::commands::sync_cmd::SyncHandle;
-use crate::crypto::aead;
 use crate::keychain;
 use crate::provision::bulk;
 use crate::ssh::fastpanel::{self, CreateSiteResult};
@@ -20,25 +19,6 @@ pub struct ProvisionResultOut {
     pub domain_id: String,
     pub site_user: String,
     pub site_path: String,
-}
-
-async fn blob_plaintext(api: &ApiClient, key: &[u8; 32], blob_id: &str) -> Result<Vec<u8>, CommandError> {
-    let blob = api
-        .blob_get(blob_id)
-        .await
-        .map_err(|e| CommandError::Api(e.to_string()))?;
-    let raw = B64
-        .decode(blob.ciphertext_b64.as_bytes())
-        .map_err(|_| CommandError::Aead("b64".into()))?;
-    aead::decrypt(&raw, key).map_err(|e| CommandError::Aead(e.to_string()))
-}
-
-fn json_str(v: &serde_json::Value) -> Option<String> {
-    v.as_str().map(|s| s.to_string())
-}
-
-fn json_i64(v: &serde_json::Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_u64().map(|u| u as i64))
 }
 
 pub async fn run_provision_domain(
@@ -187,13 +167,7 @@ pub async fn provision_domain(
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<ProvisionResultOut, CommandError> {
-    let cache_path = {
-        let g = handle.0.lock().map_err(|e| CommandError::Api(e.to_string()))?;
-        let c = g
-            .as_ref()
-            .ok_or_else(|| CommandError::Api("sync not initialized".into()))?;
-        c.cache_path.clone()
-    };
+    let cache_path = cache_path(&handle)?;
     run_provision_domain(&app, &user_id, &domain_id, site_only, &cache_path, &api).await
 }
 
@@ -206,13 +180,7 @@ pub async fn provision_bulk(
     api: State<'_, ApiClient>,
 ) -> Result<String, CommandError> {
     let key = idempotency_key("provision_bulk", &domain_ids);
-    let cache_path = {
-        let g = handle.0.lock().map_err(|e| CommandError::Api(e.to_string()))?;
-        let c = g
-            .as_ref()
-            .ok_or_else(|| CommandError::Api("sync not initialized".into()))?;
-        c.cache_path.clone()
-    };
+    let cache_path = cache_path(&handle)?;
     let mk = keychain::load_master_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
