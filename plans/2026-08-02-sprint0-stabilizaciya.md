@@ -539,9 +539,10 @@ Expected: `nothing to commit, working tree clean` (кроме, возможно,
    layout `nonce(24) || mac(16) || ciphertext`) — `e584ca3`.
 8. Баннеры «устарело / замещено» проставлены в `docs/CURRENT_STATUS.md`,
    `docs/PROJECT_OVERVIEW.md`, `docs/ARCHITECTURE.md` — `4696fc4`.
-9. Финальная верификация зелёная по всем трём сьютам; документация вне плана закоммичена
-   отдельно (`CLAUDE.md`, `design-brief.md`, `docs/AUDIT_2026-08-02.md`, `plans/`,
-   `.claude/settings.json`), `.claude/worktrees/` внесён в `.gitignore`.
+9. Финальная верификация зелёная по всем трём сьютам; `git status` чистый. Документация вне
+   плана закоммичена отдельно (`CLAUDE.md`, `design-brief.md`, `docs/AUDIT_2026-08-02.md`,
+   `plans/`, `.claude/settings.json`), `.claude/worktrees/` внесён в `.gitignore`,
+   реализованные `stage0-4.md` удалены, `stage5.md` взят под git.
 
 **Что осталось:** ничего из объёма спринта.
 
@@ -553,23 +554,27 @@ Expected: `nothing to commit, working tree clean` (кроме, возможно,
   `docs/AUDIT_2026-08-02.md`, `plans/`, `stage*.md`, `.claude/` задачами 1–8 не покрывались.
   Документация закоммичена отдельно; активные worktree-чекауты `.claude/worktrees/`
   заигнорены (коммитить их нельзя).
-- **Критерий «чистый `git status`» достигнут не полностью — по решению владельца проекта.**
-  Во время сессии сторонним образом (не действиями исполнителя) с диска исчезли `stage0.md` …
-  `stage3.md` (были в git) и `stage4.md` (был untracked). Владелец выбрал «оставить как есть»,
-  поэтому в дереве остаются 4 незакоммиченных удаления и untracked `stage5.md`. Всё остальное,
-  что относится к спринту, зафиксировано.
+- **`stage0.md` … `stage4.md` удалены владельцем проекта во время сессии** — эти планы миграции
+  уже реализованы, документы больше не нужны. Удаление зафиксировано коммитом `6428806`;
+  `stage5.md` (единственный ещё не реализованный этап) взят под git. `git status` чистый.
 - Коммиты подписаны `Co-Authored-By: Claude Opus 5 (1M context)` вместо указанного в плане
   `Claude Opus 4.8` — по фактической модели исполнителя.
 
 **Открытые вопросы / инфраструктурные пропуски:**
 
-- **`npx tsc --noEmit` падает: 64 строки ошибок.** Это pre-existing долг, не связанный со
-  спринтом — проверено сравнением до/после правки `crypto.ts` (64 строки в обоих случаях).
-  Природа: `noImplicitAny` на inline-обработчиках (`Cloudflare.tsx`, `Settings.tsx`,
-  `Servers.tsx`, `ServerDetail.tsx`, `Notifications.tsx`, `UnlockModal.tsx`), отсутствие
-  `@types/node` и декларации модуля `argon2-browser` (`crypto.ts`), а также рассинхрон типов
-  `Domain[] / TaskLog[]` против `.items` в `Dashboard.tsx` и `Activity.tsx`. Шаг 3 задачи 6
-  ожидал «tsc без ошибок» — это ошибочная посылка плана. **Кандидат в отдельный спринт:
-  типизационная гигиена frontend.**
+- **`npx tsc --noEmit` падает: 61 ошибка.** Это pre-existing долг, не связанный со спринтом —
+  проверено сравнением до/после правки `crypto.ts` (одинаковый вывод в обоих случаях).
+  Шаг 3 задачи 6 ожидал «tsc без ошибок» — ошибочная посылка плана. Разбивка:
+
+  | Код | Кол-во | Суть | Характер |
+  |---|---|---|---|
+  | TS7006 | 49 | `noImplicitAny` на inline-обработчиках (`Cloudflare.tsx` 14, `Settings.tsx` 11, `Servers.tsx` 9, `ServerDetail.tsx` 7, `Notifications.tsx` 2, `Activity.tsx` 5, `UnlockModal.tsx` 1) | механический |
+  | TS2580 / TS2307 | 6 | `crypto.ts`: `process`, `Buffer`, `node:fs`, `node:path` — нет `@types/node` | конфигурационный |
+  | TS7016 | 3 | `crypto.ts`: нет декларации модуля `argon2-browser` | конфигурационный |
+  | **TS2339** | **3** | **`Activity.tsx:13`, `Dashboard.tsx:31,34` — код читает `.items`, а тип объявлен как `TaskLog[]` / `Domain[]`** | **смысловой** |
+
+  **Кандидат в отдельный спринт: типизационная гигиена frontend.** Приоритет внутри —
+  сначала три TS2339 (реальный рассинхрон контракта API и типов), затем `@types/node` +
+  `declare module 'argon2-browser'`, затем массовая аннотация обработчиков.
 - Backend-тесты, требующие живого `SUPABASE_DB_URL`, не пропускались: все 22 прошли
   (сьют занимает ~2 минуты).
