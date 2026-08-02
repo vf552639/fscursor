@@ -83,6 +83,25 @@ pub async fn ssh_connect_session(
     user: &str,
     password: &[u8],
 ) -> Result<SshSession, CommandError> {
+    ssh_connect_session_with_timeout(app, host, port, user, password, Duration::from_secs(45)).await
+}
+
+/// Same as [`ssh_connect_session`], but with an explicit session inactivity
+/// timeout.
+///
+/// `ConnectOptions::timeout` becomes russh's `inactivity_timeout`: the client
+/// tears the session down with `InactivityTimeout` if the server sends nothing
+/// for that long. The 45s default fits short FastPanel CLI calls, but would kill
+/// a healthy multi-minute `apt-get upgrade` / installer run, so long operations
+/// pass their own value.
+pub async fn ssh_connect_session_with_timeout(
+    app: &AppHandle,
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &[u8],
+    session_timeout: Duration,
+) -> Result<SshSession, CommandError> {
     let path = known_hosts_path(app)?;
     let opts = ConnectOptions {
         host,
@@ -90,7 +109,7 @@ pub async fn ssh_connect_session(
         user,
         password,
         known_hosts_path: path,
-        timeout: Duration::from_secs(45),
+        timeout: session_timeout,
     };
     match connect(opts).await {
         Err(SshError::HostKeyUnknown { fingerprint }) => {

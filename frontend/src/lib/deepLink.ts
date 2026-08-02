@@ -45,7 +45,7 @@ export async function handleSdmpDeepLinkInTauri(url: string, userId: string | nu
   if (host === "install-fastpanel") {
     const sid = u.searchParams.get("serverId") || u.searchParams.get("id");
     if (!sid) return false;
-    await invoke("install_fastpanel", { serverId: sid, force: false });
+    await invoke("install_fastpanel", { userId, serverId: sid, force: false });
     return true;
   }
 

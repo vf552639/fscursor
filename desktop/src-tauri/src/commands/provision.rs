@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -6,10 +7,14 @@ use uuid::Uuid;
 
 use crate::commands::auth::CommandError;
 use crate::commands::creds::{blob_plaintext, cache_path, json_i64, json_str};
-use crate::commands::ssh::ssh_connect_session;
+use crate::commands::ssh::{ssh_connect_session, ssh_connect_session_with_timeout};
 use crate::commands::sync_cmd::SyncHandle;
 use crate::keychain;
 use crate::provision::bulk;
+use crate::provision::fastpanel_install::{
+    parse_fastpanel_credentials, update_command, INSTALL_CMD,
+};
+use crate::ssh::client::SshSession;
 use crate::ssh::fastpanel::{self, CreateSiteResult};
 use crate::sync::cache;
 use crate::sync::http::ApiClient;
@@ -19,6 +24,15 @@ pub struct ProvisionResultOut {
     pub domain_id: String,
     pub site_user: String,
     pub site_path: String,
+}
+
+#[derive(Serialize)]
+pub struct InstallFastpanelResult {
+    pub server_id: String,
+    pub url: Option<String>,
+    pub user: Option<String>,
+    /// Пароль панели: чувствительно, показывать по образцу RevealSecret.
+    pub password: Option<String>,
 }
 
 pub async fn run_provision_domain(
@@ -216,13 +230,151 @@ fn idempotency_key(action: &str, domain_ids: &[String]) -> String {
     bulk::idempotency_key(action, domain_ids)
 }
 
+/// Сколько молчания сервера считаем обрывом связи во время установки FastPanel.
+///
+/// Уходит в `inactivity_timeout` russh. И `apt-get upgrade`, и инсталлятор
+/// непрерывно пишут в вывод, поэтому 5 минут полной тишины = мёртвый коннект,
+/// тогда как дефолтные 45s убили бы живую многоминутную операцию.
+const FP_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
+/// Обновление системы: apt/yum на свежей VPS укладывается в ~10 минут.
+const FP_UPDATE_TIMEOUT: Duration = Duration::from_secs(900);
+/// Инсталлятор FastPanel тянет nginx/apache/mysql/php — закладываем 30 минут.
+const FP_INSTALL_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Шаги установки внутри уже открытой сессии. Возвращает вывод инсталлятора.
+///
+/// Вынесено отдельно, чтобы вызывающий гарантированно закрыл сессию ровно один
+/// раз на любом пути выхода (ошибка exec, ненулевой код, успех).
+async fn run_fastpanel_install_steps(
+    app: &AppHandle,
+    session: &mut SshSession,
+    server_id: &str,
+    os: &str,
+) -> Result<String, CommandError> {
+    let _ = app.emit(
+        "fastpanel:progress",
+        serde_json::json!({ "step": "updating", "server_id": server_id }),
+    );
+    let (upd_code, _upd_out) = session
+        .exec(&update_command(os), FP_UPDATE_TIMEOUT, false)
+        .await?;
+    if upd_code != 0 {
+        return Err(CommandError::Api(format!(
+            "system update failed (exit {upd_code})"
+        )));
+    }
+
+    let _ = app.emit(
+        "fastpanel:progress",
+        serde_json::json!({ "step": "installing", "server_id": server_id }),
+    );
+    // Вывод инсталлятора содержит пароль панели — он не попадает ни в ошибки,
+    // ни в логи: наружу отдаём только код возврата.
+    let (inst_code, inst_out) = session.exec(INSTALL_CMD, FP_INSTALL_TIMEOUT, false).await?;
+    if inst_code != 0 {
+        return Err(CommandError::Api(format!(
+            "fastpanel installer failed (exit {inst_code})"
+        )));
+    }
+    Ok(inst_out)
+}
+
 #[tauri::command]
 pub async fn install_fastpanel(
-    _app: AppHandle,
-    _server_id: String,
-    _force: bool,
-) -> Result<(), CommandError> {
-    Err(CommandError::Api(
-        "install_fastpanel not yet implemented (stage 3 partial)".into(),
-    ))
+    app: AppHandle,
+    user_id: String,
+    server_id: String,
+    force: bool,
+    handle: State<'_, SyncHandle>,
+    api: State<'_, ApiClient>,
+) -> Result<InstallFastpanelResult, CommandError> {
+    let key = keychain::load_master_key(&user_id)
+        .map_err(|e| CommandError::Keychain(e.to_string()))?
+        .ok_or_else(|| CommandError::Keychain("locked".into()))?;
+    let path = cache_path(&handle)?;
+    let conn = cache::open(&path, &key).map_err(|e| CommandError::Api(e.to_string()))?;
+
+    let server_row = cache::get_row_fields(&conn, "servers", &server_id)
+        .map_err(|e| CommandError::Api(e.to_string()))?
+        .ok_or_else(|| CommandError::Api("server not in local cache".into()))?;
+
+    // Идемпотентность: не переустанавливаем, если уже установлено (кроме force).
+    let fp_status = server_row
+        .get("fastpanel_status")
+        .and_then(json_str)
+        .unwrap_or_default();
+    if fp_status == "installed" && !force {
+        return Err(CommandError::Api(
+            "FastPanel already installed on this server (use force to reinstall)".into(),
+        ));
+    }
+
+    let blob_id = server_row
+        .get("ssh_password_blob_id")
+        .and_then(json_str)
+        .ok_or_else(|| CommandError::Api("server has no ssh_password_blob_id".into()))?;
+    let password = blob_plaintext(&api, &key, &blob_id).await?;
+    let host = server_row
+        .get("ip_address")
+        .and_then(json_str)
+        .ok_or_else(|| CommandError::Api("server missing ip_address".into()))?;
+    let port = server_row
+        .get("ssh_port")
+        .and_then(json_i64)
+        .map(|p| p as u16)
+        .unwrap_or(22);
+    let ssh_user = server_row
+        .get("ssh_user")
+        .and_then(json_str)
+        .unwrap_or_else(|| "root".into());
+    let os = server_row.get("os").and_then(json_str).unwrap_or_default();
+
+    let _ = app.emit(
+        "fastpanel:progress",
+        serde_json::json!({ "step": "ssh_connect", "server_id": server_id }),
+    );
+    let mut session = ssh_connect_session_with_timeout(
+        &app,
+        &host,
+        port,
+        &ssh_user,
+        &password,
+        FP_SESSION_TIMEOUT,
+    )
+    .await?;
+
+    let steps = run_fastpanel_install_steps(&app, &mut session, &server_id, &os).await;
+    let _ = session.disconnect().await;
+    let inst_out = steps?;
+
+    let creds = parse_fastpanel_credentials(&inst_out);
+
+    let device_id = cache::get_meta(&conn, "device_id")
+        .map_err(|e| CommandError::Api(e.to_string()))?
+        .and_then(|s| Uuid::parse_str(&s).ok());
+    // metadata без пароля (redaction guard в http.rs — debug_assert, в release
+    // его нет, поэтому чистота метаданных обеспечивается здесь).
+    //
+    // Ошибка аудита не роняет команду: FastPanel уже установлен, а пароль панели
+    // существует только в этом ответе — вернуть ошибку значит потерять его
+    // навсегда. Пишем предупреждение и отдаём креды.
+    if let Err(e) = api
+        .audit_log(
+            "server.fastpanel_install",
+            Some("server"),
+            Some(&server_id),
+            device_id,
+            Some(serde_json::json!({ "url": creds.url, "user": creds.user })),
+        )
+        .await
+    {
+        tracing::warn!(target: "provision", "audit log for fastpanel_install failed: {e}");
+    }
+
+    Ok(InstallFastpanelResult {
+        server_id,
+        url: creds.url,
+        user: creds.user,
+        password: creds.password,
+    })
 }
