@@ -1,7 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
+import { invokeIfTauri } from "../lib/tauri-invoke";
+import { isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
+import { useAuthStore } from "../store/auth";
 
 export type RegistrarProvider = "hostiq" | "namecheap";
 
@@ -45,6 +48,12 @@ export interface RegistrarDomain {
   nameservers: string[];
 }
 
+function requireUserId(): string {
+  const userId = useAuthStore.getState().userId;
+  if (!userId) throw new Error("Desktop: unlock session (user id missing)");
+  return userId;
+}
+
 export const registrarsKeys = {
   accounts: ["registrars", "accounts"] as const,
   domains: (accountId: number) => ["registrars", accountId, "domains"] as const,
@@ -82,15 +91,33 @@ export function useDeleteRegistrarAccount() {
 
 export function useTestRegistrarConnection() {
   return useMutation({
-    mutationFn: (id: number) =>
-      apiPost<RegistrarTestResult>(`/registrars/accounts/${id}/test`),
+    mutationFn: async (id: number): Promise<RegistrarTestResult> => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        const [success, message] = await invokeIfTauri<[boolean, string]>(
+          "registrar_test_connection",
+          { userId, accountId: String(id) }
+        );
+        return { success, message };
+      }
+      return apiPost<RegistrarTestResult>(`/registrars/accounts/${id}/test`);
+    },
   });
 }
 
 export function useRegistrarDomains(accountId: number | null | undefined) {
   return useQuery({
     queryKey: accountId ? registrarsKeys.domains(accountId) : ["registrars", "domains", "disabled"],
-    queryFn: () => apiGet<RegistrarDomain[]>(`/registrars/accounts/${accountId}/domains`),
+    queryFn: async () => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        return invokeIfTauri<RegistrarDomain[]>("registrar_get_domains", {
+          userId,
+          accountId: String(accountId),
+        });
+      }
+      return apiGet<RegistrarDomain[]>(`/registrars/accounts/${accountId}/domains`);
+    },
     enabled: !!accountId,
   });
 }

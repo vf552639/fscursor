@@ -1,7 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
+import { invokeIfTauri } from "../lib/tauri-invoke";
+import { isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
+import { useAuthStore } from "../store/auth";
 
 export interface CloudflareAccount {
   id: number;
@@ -84,6 +87,12 @@ export interface Nameservers {
   name_servers: string[];
 }
 
+function requireUserId(): string {
+  const userId = useAuthStore.getState().userId;
+  if (!userId) throw new Error("Desktop: unlock session (user id missing)");
+  return userId;
+}
+
 export const cloudflareKeys = {
   accounts: ["cloudflare", "accounts"] as const,
   zones: (accountId: number) => ["cloudflare", accountId, "zones"] as const,
@@ -126,8 +135,21 @@ export function useDeleteCloudflareAccount() {
 
 export function useTestCloudflareAccount() {
   return useMutation({
-    mutationFn: (id: number) =>
-      apiPost<CloudflareTestResponse>(`/cloudflare/accounts/${id}/test`),
+    mutationFn: async (id: number) => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        const ok = await invokeIfTauri<boolean>("cf_verify_token", {
+          userId,
+          accountId: String(id),
+        });
+        return {
+          success: ok,
+          message: ok ? "OK" : "invalid token",
+          account_email: null,
+        } satisfies CloudflareTestResponse;
+      }
+      return apiPost<CloudflareTestResponse>(`/cloudflare/accounts/${id}/test`);
+    },
   });
 }
 
@@ -170,11 +192,18 @@ export function useDnsRecords(
 
 export function useCreateDnsRecord(accountId: number, zoneId: string) {
   return useMutation({
-    mutationFn: (data: DnsRecordCreate) =>
-      apiPost<DnsRecord>(
-        `/cloudflare/accounts/${accountId}/zones/${zoneId}/dns`,
-        data
-      ),
+    mutationFn: async (data: DnsRecordCreate) => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        return invokeIfTauri<DnsRecord>("cf_create_dns_record", {
+          userId,
+          accountId: String(accountId),
+          zoneId,
+          record: { type: data.type, name: data.name, content: data.content, ttl: data.ttl },
+        });
+      }
+      return apiPost<DnsRecord>(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns`, data);
+    },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: cloudflareKeys.dns(accountId, zoneId) }),
   });
@@ -182,11 +211,22 @@ export function useCreateDnsRecord(accountId: number, zoneId: string) {
 
 export function useUpdateDnsRecord(accountId: number, zoneId: string) {
   return useMutation({
-    mutationFn: ({ recordId, data }: { recordId: string; data: DnsRecordUpdate }) =>
-      apiPut<DnsRecord>(
+    mutationFn: async ({ recordId, data }: { recordId: string; data: DnsRecordUpdate }) => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        return invokeIfTauri<DnsRecord>("cf_update_dns_record", {
+          userId,
+          accountId: String(accountId),
+          zoneId,
+          recordId,
+          patch: { name: data.name, content: data.content, ttl: data.ttl },
+        });
+      }
+      return apiPut<DnsRecord>(
         `/cloudflare/accounts/${accountId}/zones/${zoneId}/dns/${recordId}`,
         data
-      ),
+      );
+    },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: cloudflareKeys.dns(accountId, zoneId) }),
   });
@@ -194,8 +234,18 @@ export function useUpdateDnsRecord(accountId: number, zoneId: string) {
 
 export function useDeleteDnsRecord(accountId: number, zoneId: string) {
   return useMutation({
-    mutationFn: (recordId: string) =>
-      apiDelete(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns/${recordId}`),
+    mutationFn: async (recordId: string) => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        return invokeIfTauri<void>("cf_delete_dns_record", {
+          userId,
+          accountId: String(accountId),
+          zoneId,
+          recordId,
+        });
+      }
+      return apiDelete(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns/${recordId}`);
+    },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: cloudflareKeys.dns(accountId, zoneId) }),
   });
@@ -203,10 +253,20 @@ export function useDeleteDnsRecord(accountId: number, zoneId: string) {
 
 export function usePurgeCache(accountId: number, zoneId: string) {
   return useMutation({
-    mutationFn: () =>
-      apiPost<{ success: boolean; message: string | null }>(
+    mutationFn: async () => {
+      if (isTauri()) {
+        const userId = requireUserId();
+        await invokeIfTauri<void>("cf_purge_cache", {
+          userId,
+          accountId: String(accountId),
+          zoneId,
+        });
+        return { success: true, message: null } as { success: boolean; message: string | null };
+      }
+      return apiPost<{ success: boolean; message: string | null }>(
         `/cloudflare/accounts/${accountId}/zones/${zoneId}/purge`
-      ),
+      );
+    },
   });
 }
 
