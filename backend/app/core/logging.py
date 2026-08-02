@@ -29,7 +29,11 @@ def configure_logging() -> None:
 
 def add_loguru_intercept_handler() -> None:
     intercept = _InterceptHandler()
-    for name in ("uvicorn", "uvicorn.access", "uvicorn.error", "sqlalchemy", "celery"):
+    # "app" covers our own modules; without it their logger.info() goes nowhere,
+    # which silently swallows the dev-mode email confirmation link.
+    for name in ("app", "uvicorn", "uvicorn.access", "uvicorn.error", "sqlalchemy", "celery"):
         target = logging.getLogger(name)
         target.handlers = [intercept]
         target.propagate = False
+        if name == "app":
+            target.setLevel(logging.INFO)
