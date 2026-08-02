@@ -1,3 +1,6 @@
+# Бизнес-контекст — секретные знания (экономика, цены, клиенты), НЕ в публичный репозиторий
+.business/
+
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -25,3 +28,6 @@ desktop/src-tauri/target/
 desktop/src-tauri/Cargo.lock
 desktop/node_modules/
 desktop/dist/
+
+# Celery beat runtime state — не должен коммититься
+backend/celerybeat-schedule
