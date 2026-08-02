@@ -46,6 +46,12 @@ pub fn run() {
             commands::provision::provision_domain,
             commands::provision::provision_bulk,
             commands::provision::install_fastpanel,
+            commands::cloudflare::cf_verify_token,
+            commands::cloudflare::cf_create_zone,
+            commands::cloudflare::cf_create_dns_record,
+            commands::cloudflare::cf_update_dns_record,
+            commands::cloudflare::cf_delete_dns_record,
+            commands::cloudflare::cf_purge_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
