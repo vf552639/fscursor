@@ -355,9 +355,11 @@ pub async fn install_fastpanel(
     // metadata без пароля (redaction guard в http.rs — debug_assert, в release
     // его нет, поэтому чистота метаданных обеспечивается здесь).
     //
-    // Ошибка аудита не роняет команду: FastPanel уже установлен, а пароль панели
-    // существует только в этом ответе — вернуть ошибку значит потерять его
-    // навсегда. Пишем предупреждение и отдаём креды.
+    // Аудит — best-effort, и намеренно: FastPanel уже установлен, а пароль панели
+    // существует только в этом ответе, поэтому `?` здесь потерял бы его навсегда.
+    // Не превращать обратно в `?`. Но «best-effort» не значит «молча»: помимо
+    // варнинга в лог шлём тот же `fastpanel:progress`, что и остальные шаги, —
+    // один слушатель на фронте покажет, что действие осталось незаписанным.
     if let Err(e) = api
         .audit_log(
             "server.fastpanel_install",
@@ -369,6 +371,10 @@ pub async fn install_fastpanel(
         .await
     {
         tracing::warn!(target: "provision", "audit log for fastpanel_install failed: {e}");
+        let _ = app.emit(
+            "fastpanel:progress",
+            serde_json::json!({ "step": "audit_failed", "server_id": server_id }),
+        );
     }
 
     Ok(InstallFastpanelResult {
