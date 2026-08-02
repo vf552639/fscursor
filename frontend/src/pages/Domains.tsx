@@ -1,6 +1,6 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
-import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useCheckNs, useMarkNsSet, useRefreshSsl, useBulkFullSetup, Domain } from "../api/domains";
+import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useCheckNs, useMarkNsSet, useRefreshSsl, useBulkFullSetup, Domain, ProvisionDesktopResult } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
@@ -237,6 +237,12 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const deleteDomain = useDeleteDomain();
   const [progressTaskId, setProgressTaskId] = useState<number | null>(null);
   const [progressTaskIds, setProgressTaskIds] = useState<number[]>([]);
+  // Desktop provisioning is synchronous (no server-side task log to poll), so
+  // its outcome is shown directly instead of routed through progressTaskId/
+  // TaskProgressModal — that pair is for the backend-queued flows below
+  // (bulk full setup, Activity page). db.db_password lives only in this
+  // state: it is never written to storage, the query cache, or a log.
+  const [provisionResult, setProvisionResult] = useState<{ domain: string; result: ProvisionDesktopResult } | null>(null);
   const [showFileImport, setShowFileImport] = useState(false);
   const [showFullSetup, setShowFullSetup] = useState(false);
 
@@ -544,7 +550,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                                 icon: "⚙",
                                 title: "Provision domain",
                                 onClick: () =>
-                                  singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) }),
+                                  singleProvision.mutate(d.id, {
+                                    onSuccess: (result) => setProvisionResult({ domain: d.domain, result }),
+                                  }),
                               },
                             ]
                           : []),
@@ -565,7 +573,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                         label="Provision"
                         size="sm"
                         desktopOnClick={() =>
-                          singleProvision.mutate(d.id, { onSuccess: (r) => setProgressTaskId(r.task_log_id) })
+                          singleProvision.mutate(d.id, {
+                            onSuccess: (result) => setProvisionResult({ domain: d.domain, result }),
+                          })
                         }
                       />
                     ) : null}
@@ -674,6 +684,87 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
           }
         }}
       />
+    )}
+    {provisionResult && (
+      <Modal
+        title={`Provisioned ${provisionResult.domain}`}
+        onClose={() => setProvisionResult(null)}
+        width={520}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {provisionResult.result.ssl_issued !== undefined && (
+            <div>
+              <Badge variant={provisionResult.result.ssl_issued ? "green" : "yellow"}>
+                {provisionResult.result.ssl_issued ? "SSL issued" : "SSL skipped"}
+              </Badge>
+            </div>
+          )}
+          {!provisionResult.result.ssl_issued && provisionResult.result.ssl_error ? (
+            <div
+              style={{
+                fontSize: 12.5,
+                color: "#92400e",
+                background: "#fffbeb",
+                border: "1px solid #fde68a",
+                borderRadius: 8,
+                padding: "10px 12px",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {provisionResult.result.ssl_error}
+            </div>
+          ) : null}
+          {provisionResult.result.db ? (
+            <div>
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: "#92400e",
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  borderRadius: 8,
+                  padding: "10px 12px",
+                  marginBottom: 10,
+                }}
+              >
+                Database credentials — shown once. Not stored anywhere; copy them now.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {(
+                  [
+                    ["DB name", provisionResult.result.db.db_name],
+                    ["DB user", provisionResult.result.db.db_user],
+                    ["DB password", provisionResult.result.db.db_password],
+                  ] as const
+                ).map(([label, value]) => (
+                  <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 100, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>{label}</div>
+                    <code
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: 13,
+                        background: "#f3f4f6",
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {value}
+                    </code>
+                    <CopyBtn value={value} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
+          <Btn variant="primary" onClick={() => setProvisionResult(null)}>
+            Done
+          </Btn>
+        </div>
+      </Modal>
     )}
     {progressTaskId !== null && (
       <TaskProgressModal taskId={progressTaskId} onClose={() => setProgressTaskId(null)} />
