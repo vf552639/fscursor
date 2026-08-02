@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::commands::auth::CommandError;
 use crate::commands::creds::{blob_plaintext, cache_path, json_i64, json_str};
-use crate::commands::ssh::{ssh_connect_session, ssh_connect_session_with_timeout};
+use crate::commands::ssh::ssh_connect_session_with_timeout;
 use crate::commands::sync_cmd::SyncHandle;
 use crate::keychain;
 use crate::provision::bulk;
@@ -15,7 +15,7 @@ use crate::provision::fastpanel_install::{
     parse_fastpanel_credentials, update_command, FpCredentials, INSTALL_CMD,
 };
 use crate::ssh::client::{SshError, SshSession};
-use crate::ssh::fastpanel::{self, CreateSiteResult};
+use crate::ssh::fastpanel::{self, CreateDbResult, CreateSiteResult};
 use crate::sync::cache;
 use crate::sync::http::ApiClient;
 
@@ -24,6 +24,22 @@ pub struct ProvisionResultOut {
     pub domain_id: String,
     pub site_user: String,
     pub site_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssl_issued: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssl_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db: Option<DbInfoOut>,
+}
+
+/// Реквизиты созданной БД. Намеренно без `Debug`: `db_password` существует
+/// только здесь, и случайный `{:?}` не должен уносить его в лог.
+#[derive(Serialize)]
+pub struct DbInfoOut {
+    pub db_name: String,
+    pub db_user: String,
+    /// Пароль БД: чувствительно, показывать по образцу RevealSecret.
+    pub db_password: String,
 }
 
 #[derive(Serialize)]
@@ -35,11 +51,230 @@ pub struct InstallFastpanelResult {
     pub password: Option<String>,
 }
 
+/// Сколько молчания сервера считаем обрывом связи во время провижининга домена.
+///
+/// Обычных для FastPanel CLI 45s тут мало: `certificates create-le` уходит в
+/// ACME-валидацию и молчит минутами, да и сам provision между шагами простаивает
+/// (до ~15s на проверку DNS плюс запрос `/auth/me`) — russh рвал бы живую сессию
+/// задолго до 300s exec-таймаута команды. Берём 300s, чтобы предел задавал exec,
+/// а не inactivity.
+const PROVISION_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
+/// Сколько раз перепроверяем DNS перед выпуском SSL и с какой паузой между
+/// попытками (~15s суммарно): свежая A-запись нередко «доезжает» до резолвера
+/// за эти секунды, а ждать дольше внутри provision смысла нет — Let's Encrypt
+/// всё равно проверяет домен со своей стороны.
+const SSL_DNS_ATTEMPTS: u32 = 5;
+const SSL_DNS_RETRY_DELAY: Duration = Duration::from_secs(3);
+/// Сколько последних строк вывода certbot/FastPanel отдавать во фронт как
+/// причину неудачного выпуска SSL.
+const SSL_ERROR_TAIL_LINES: usize = 20;
+
+/// Ошибка создания БД — без пароля этой БД.
+///
+/// `create_database` в fallback-ветке кладёт в текст ошибки вывод
+/// `mysql -e "... IDENTIFIED BY '<пароль>'"`, а mysql в сообщении об ошибке
+/// повторяет исходный запрос — то есть пароль. Поэтому `SshError::Session`
+/// (единственный вариант, который несёт вывод команды) схлопываем в
+/// обезличенный текст; остальные варианты вывода не содержат и идут как есть.
+fn db_error(e: SshError) -> CommandError {
+    match e {
+        SshError::Session(m) if m == "exec timeout" => {
+            CommandError::Api("database creation timed out".into())
+        }
+        SshError::Session(_) => CommandError::Api("database creation failed on the server".into()),
+        other => CommandError::from(other),
+    }
+}
+
+/// Параметры провижининга, вычитанные из локального кэша до открытия SSH.
+struct ProvisionPlan<'a> {
+    domain_id: &'a str,
+    domain_name: &'a str,
+    /// IP сервера — он же ожидаемый ответ DNS перед выпуском SSL.
+    host: &'a str,
+    php_version: &'a str,
+    site_user_existing: Option<String>,
+    site_only: bool,
+    with_db: bool,
+}
+
+/// Что провижининг успел сделать внутри уже открытой сессии.
+struct ProvisionSteps {
+    site_user: String,
+    site_path: String,
+    steps: Vec<&'static str>,
+    ssl_issued: Option<bool>,
+    ssl_error: Option<String>,
+    db: Option<DbInfoOut>,
+}
+
+/// Шаги провижининга внутри уже открытой сессии.
+///
+/// Вынесено отдельно ровно затем же, зачем `run_fastpanel_install_steps`:
+/// вызывающий закрывает сессию один раз на любом пути выхода. Каждый `?`
+/// здесь — от `create_site` до `create_database` — иначе утекал бы соединением.
+async fn run_provision_steps(
+    app: &AppHandle,
+    session: &mut SshSession,
+    api: &ApiClient,
+    plan: &ProvisionPlan<'_>,
+) -> Result<ProvisionSteps, CommandError> {
+    let domain_id = plan.domain_id;
+    let domain_name = plan.domain_name;
+
+    let _ = app.emit(
+        "provision:progress",
+        serde_json::json!({ "step": "fastpanel_path", "domain_id": domain_id }),
+    );
+    let fp_path = fastpanel::get_fastpanel_path(session, None)
+        .await?
+        .ok_or_else(|| CommandError::Api("fastpanel binary not found on server".into()))?;
+
+    let _ = app.emit(
+        "provision:progress",
+        serde_json::json!({ "step": "firewall_preflight", "domain_id": domain_id }),
+    );
+    let ports = fastpanel::ensure_ports_open(session, &[80, 443]).await?;
+    if !ports.success {
+        tracing::warn!(target: "provision", "firewall preflight: {:?}", ports.error);
+    }
+
+    let CreateSiteResult {
+        site_user,
+        site_path,
+        ..
+    } = if let Some(ref u) = plan.site_user_existing {
+        if fastpanel::site_exists(session, u, domain_name).await? {
+            CreateSiteResult {
+                site_user: u.clone(),
+                site_path: format!("/var/www/{u}/data/www/{domain_name}"),
+                output: "already exists".into(),
+            }
+        } else {
+            fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?
+        }
+    } else {
+        fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?
+    };
+
+    let mut done = ProvisionSteps {
+        site_user,
+        site_path,
+        steps: vec!["ssh", "create_site"],
+        ssl_issued: None,
+        ssl_error: None,
+        db: None,
+    };
+
+    if !plan.site_only {
+        let _ = app.emit(
+            "provision:progress",
+            serde_json::json!({ "step": "ftp", "domain_id": domain_id }),
+        );
+        let _ftp = fastpanel::create_ftp_account(session, &fp_path, domain_name).await?;
+        done.steps.push("ftp");
+
+        // SSL. Ни один путь этого блока не возвращает Err: сайт и FTP уже
+        // созданы, и провалить из-за них весь provision значило бы отрапортовать
+        // неудачу об удавшейся работе, а на повторе заново прогонять create_site.
+        // Причина неудачи уезжает во фронт в `ssl_error`.
+        let _ = app.emit(
+            "provision:progress",
+            serde_json::json!({ "step": "ssl_dns_check", "domain_id": domain_id }),
+        );
+        let resolves = fastpanel::dns_resolves_to(
+            domain_name,
+            plan.host,
+            SSL_DNS_ATTEMPTS,
+            SSL_DNS_RETRY_DELAY,
+        )
+        .await;
+        if !resolves {
+            // Домен ещё не смотрит на сервер: Let's Encrypt не пройдёт HTTP-01,
+            // и дёргать его сейчас — только жечь rate limit.
+            let _ = app.emit(
+                "provision:progress",
+                serde_json::json!({ "step": "ssl_skipped_dns", "domain_id": domain_id }),
+            );
+            done.ssl_issued = Some(false);
+            done.ssl_error = Some("dns does not resolve to server ip yet".into());
+        } else {
+            // Почта для LE — почта самого аккаунта. Сбой `/auth/me` не должен
+            // валить provision: это отдельный сетевой вызов, к состоянию сервера
+            // отношения не имеющий.
+            match api.me().await {
+                Err(e) => {
+                    tracing::warn!(target: "provision", "no account email for LE: {e}");
+                    let _ = app.emit(
+                        "provision:progress",
+                        serde_json::json!({ "step": "ssl_skipped_no_email", "domain_id": domain_id }),
+                    );
+                    done.ssl_issued = Some(false);
+                    done.ssl_error = Some(format!("could not read account email for LE: {e}"));
+                }
+                Ok(me) => {
+                    let _ = app.emit(
+                        "provision:progress",
+                        serde_json::json!({ "step": "ssl_issue", "domain_id": domain_id }),
+                    );
+                    match fastpanel::issue_ssl_certificate(
+                        session,
+                        &fp_path,
+                        domain_name,
+                        &me.email,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            done.ssl_issued = Some(true);
+                            done.steps.push("ssl");
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "provision", "ssl issue failed: {e}");
+                            done.ssl_issued = Some(false);
+                            done.ssl_error = Some(tail_lines(&e.to_string(), SSL_ERROR_TAIL_LINES));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // БД — независимый opt-in, а не часть «полного» набора: её просят явным
+    // флагом, в том числе вместе с `site_only`, и молча игнорировать явную
+    // просьбу хуже, чем создать лишнюю базу.
+    if plan.with_db {
+        let _ = app.emit(
+            "provision:progress",
+            serde_json::json!({ "step": "db", "domain_id": domain_id }),
+        );
+        // `output` из CreateDbResult отбрасываем здесь же: в fallback-ветке это
+        // вывод mysql, в котором повторён CREATE USER ... IDENTIFIED BY.
+        let CreateDbResult {
+            db_name,
+            db_user,
+            db_password,
+            ..
+        } = fastpanel::create_database(session, &fp_path, domain_name, None, None)
+            .await
+            .map_err(db_error)?;
+        done.steps.push("db");
+        done.db = Some(DbInfoOut {
+            db_name,
+            db_user,
+            db_password,
+        });
+    }
+
+    Ok(done)
+}
+
 pub async fn run_provision_domain(
     app: &AppHandle,
     user_id: &str,
     domain_id: &str,
     site_only: bool,
+    with_db: bool,
     cache_path: &Path,
     api: &ApiClient,
 ) -> Result<ProvisionResultOut, CommandError> {
@@ -92,97 +327,108 @@ pub async fn run_provision_domain(
         .get("php_version")
         .and_then(json_str)
         .unwrap_or_else(|| "8.1".into());
+    let site_user_existing = domain_row.get("site_user").and_then(json_str);
+
+    // Всё нужное из кэша забираем до SSH: держать SQLCipher открытым весь
+    // provision (выпуск LE — минуты) незачем.
+    let device_id = cache::get_meta(&conn, "device_id")
+        .map_err(|e| CommandError::Api(e.to_string()))?
+        .and_then(|s| Uuid::parse_str(&s).ok());
+    drop(conn);
 
     let _ = app.emit(
         "provision:progress",
         serde_json::json!({ "step": "ssh_connect", "domain_id": domain_id }),
     );
 
-    let mut session = ssh_connect_session(app, &host, port, &ssh_user, &password).await?;
+    let mut session = ssh_connect_session_with_timeout(
+        app,
+        &host,
+        port,
+        &ssh_user,
+        &password,
+        PROVISION_SESSION_TIMEOUT,
+    )
+    .await?;
 
-    let _ = app.emit(
-        "provision:progress",
-        serde_json::json!({ "step": "fastpanel_path", "domain_id": domain_id }),
-    );
-    let fp_path = fastpanel::get_fastpanel_path(&mut session, None)
-        .await?
-        .ok_or_else(|| CommandError::Api("fastpanel binary not found on server".into()))?;
-
-    let _ = app.emit(
-        "provision:progress",
-        serde_json::json!({ "step": "firewall_preflight", "domain_id": domain_id }),
-    );
-    let ports = fastpanel::ensure_ports_open(&mut session, &[80, 443]).await?;
-    if !ports.success {
-        tracing::warn!(target: "provision", "firewall preflight: {:?}", ports.error);
-    }
-
-    let site_user_existing = domain_row.get("site_user").and_then(json_str);
-    let CreateSiteResult {
-        site_user,
-        site_path,
-        ..
-    } = if let Some(ref u) = site_user_existing {
-        if fastpanel::site_exists(&mut session, u, &domain_name).await? {
-            CreateSiteResult {
-                site_user: u.clone(),
-                site_path: format!("/var/www/{u}/data/www/{domain_name}"),
-                output: "already exists".into(),
-            }
-        } else {
-            fastpanel::create_site(&mut session, &fp_path, &domain_name, &php_version).await?
-        }
-    } else {
-        fastpanel::create_site(&mut session, &fp_path, &domain_name, &php_version).await?
+    let plan = ProvisionPlan {
+        domain_id,
+        domain_name: &domain_name,
+        host: &host,
+        php_version: &php_version,
+        site_user_existing,
+        site_only,
+        with_db,
     };
+    let stepped = run_provision_steps(app, &mut session, api, &plan).await;
+    let _ = session.disconnect().await;
+    let done = stepped?;
 
-    if !site_only {
+    // metadata без секретов: ни пароля БД, ни FTP, ни текста ssl_error (это
+    // вывод certbot, и он всё равно длинный). Redaction guard в http.rs —
+    // debug_assert, в release его нет, так что чистота обеспечивается здесь.
+    //
+    // Аудит — best-effort, как и в install_fastpanel, и по той же причине:
+    // при `with_db` пароль БД существует только в этом ответе, и `?` здесь
+    // потерял бы его навсегда из-за сетевого сбоя на последнем шаге. Не
+    // превращать обратно в `?`. Незаписанный аудит не замалчиваем: помимо
+    // варнинга шлём тот же `provision:progress`, что и остальные шаги.
+    if let Err(e) = api
+        .audit_log(
+            "device.action.complete",
+            Some("domain"),
+            Some(domain_id),
+            device_id,
+            Some(serde_json::json!({
+                "steps": done.steps,
+                "domain_name": domain_name,
+                "server_id": server_id,
+                "site_only": site_only,
+                "ssl_issued": done.ssl_issued,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(target: "provision", "audit log for provision failed: {e}");
         let _ = app.emit(
             "provision:progress",
-            serde_json::json!({ "step": "ftp", "domain_id": domain_id }),
+            serde_json::json!({ "step": "audit_failed", "domain_id": domain_id }),
         );
-        let _ftp = fastpanel::create_ftp_account(&mut session, &fp_path, &domain_name).await?;
     }
-
-    let _ = session.disconnect().await;
-
-    let device_id = cache::get_meta(&conn, "device_id")
-        .map_err(|e| CommandError::Api(e.to_string()))?
-        .and_then(|s| Uuid::parse_str(&s).ok());
-
-    api.audit_log(
-        "device.action.complete",
-        Some("domain"),
-        Some(domain_id),
-        device_id,
-        Some(serde_json::json!({
-            "steps": ["ssh", "create_site"],
-            "domain_name": domain_name,
-            "server_id": server_id,
-            "site_only": site_only,
-        })),
-    )
-    .await
-    .map_err(|e| CommandError::Api(e.to_string()))?;
 
     Ok(ProvisionResultOut {
         domain_id: domain_id.to_string(),
-        site_user,
-        site_path,
+        site_user: done.site_user,
+        site_path: done.site_path,
+        ssl_issued: done.ssl_issued,
+        ssl_error: done.ssl_error,
+        db: done.db,
     })
 }
 
+/// `with_db` — `Option` ради обратной совместимости: фронт до Task 9 этот
+/// аргумент не шлёт, и без `Option` его вызовы стали бы ошибкой десериализации.
 #[tauri::command]
 pub async fn provision_domain(
     app: AppHandle,
     user_id: String,
     domain_id: String,
     site_only: bool,
+    with_db: Option<bool>,
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<ProvisionResultOut, CommandError> {
     let cache_path = cache_path(&handle)?;
-    run_provision_domain(&app, &user_id, &domain_id, site_only, &cache_path, &api).await
+    run_provision_domain(
+        &app,
+        &user_id,
+        &domain_id,
+        site_only,
+        with_db.unwrap_or(false),
+        &cache_path,
+        &api,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -220,7 +466,9 @@ pub async fn provision_bulk(
             "provision:progress",
             serde_json::json!({ "step": "bulk_item", "domain_id": did }),
         );
-        run_provision_domain(&app, &user_id, did, false, &cache_path, &api).await?;
+        // Массовый прогон — без БД: пароли БД возвращаются только в ответе на
+        // одиночный provision, а bulk отдаёт наружу лишь ключ идемпотентности.
+        run_provision_domain(&app, &user_id, did, false, false, &cache_path, &api).await?;
     }
     cache::bulk_run_complete(&conn, &key, "ok").map_err(|e| CommandError::Api(e.to_string()))?;
     Ok(key)
@@ -487,5 +735,67 @@ mod tests {
             SshError::Session("channel closed".into()),
         );
         assert_eq!(e.to_string(), "ssh: session: channel closed");
+    }
+
+    // `create_database` кладёт в текст ошибки вывод mysql, а тот повторяет
+    // `CREATE USER ... IDENTIFIED BY '<пароль>'`. Наружу пароль уйти не должен.
+    #[test]
+    fn db_error_drops_command_output_with_the_password() {
+        let leaky = "ERROR 1064 at line 1: near \"CREATE USER 'u'@'localhost' \
+                     IDENTIFIED BY 'sup3rSecret'\"";
+        let e = db_error(SshError::Session(leaky.into()));
+        assert_eq!(e.to_string(), "api: database creation failed on the server");
+        assert!(!e.to_string().contains("sup3rSecret"));
+    }
+
+    #[test]
+    fn db_error_names_the_timeout() {
+        let e = db_error(SshError::Session("exec timeout".into()));
+        assert_eq!(e.to_string(), "api: database creation timed out");
+    }
+
+    // Варианты без вывода команды диагностику терять не должны.
+    #[test]
+    fn db_error_passes_through_errors_without_command_output() {
+        assert_eq!(db_error(SshError::Auth).to_string(), "ssh: auth failed");
+        assert_eq!(
+            db_error(SshError::Connect("refused".into())).to_string(),
+            "ssh: connect: refused"
+        );
+    }
+
+    #[test]
+    fn provision_result_omits_empty_optionals() {
+        let r = ProvisionResultOut {
+            domain_id: "1".into(),
+            site_user: "u".into(),
+            site_path: "/p".into(),
+            ssl_issued: None,
+            ssl_error: None,
+            db: None,
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(!j.contains("ssl_issued"));
+        assert!(!j.contains("ssl_error"));
+        assert!(!j.contains("\"db\""));
+    }
+
+    #[test]
+    fn provision_result_includes_db_when_present() {
+        let r = ProvisionResultOut {
+            domain_id: "1".into(),
+            site_user: "u".into(),
+            site_path: "/p".into(),
+            ssl_issued: Some(true),
+            ssl_error: None,
+            db: Some(DbInfoOut {
+                db_name: "d".into(),
+                db_user: "du".into(),
+                db_password: "dp".into(),
+            }),
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(j.contains("ssl_issued"));
+        assert!(j.contains("db_name"));
     }
 }

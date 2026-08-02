@@ -5,7 +5,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::auth::CommandError;
-use crate::ssh::client::{connect, append_known_host, ConnectOptions, SshError, SshSession};
+use crate::ssh::client::{append_known_host, connect, ConnectOptions, SshError, SshSession};
 
 #[derive(Clone, Serialize)]
 pub struct HostKeyPrompt {
@@ -75,25 +75,15 @@ pub async fn ssh_exec(
     Ok(out)
 }
 
-/// Used by provisioning; same host-key / TOFU semantics as [`ssh_exec`].
-pub async fn ssh_connect_session(
-    app: &AppHandle,
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &[u8],
-) -> Result<SshSession, CommandError> {
-    ssh_connect_session_with_timeout(app, host, port, user, password, Duration::from_secs(45)).await
-}
-
-/// Same as [`ssh_connect_session`], but with an explicit session inactivity
-/// timeout.
+/// Long-lived session for provisioning; same host-key / TOFU semantics as
+/// [`ssh_exec`], but the caller owns the session and must disconnect it.
 ///
-/// `ConnectOptions::timeout` becomes russh's `inactivity_timeout`: the client
-/// tears the session down with `InactivityTimeout` if the server sends nothing
-/// for that long. The 45s default fits short FastPanel CLI calls, but would kill
-/// a healthy multi-minute `apt-get upgrade` / installer run, so long operations
-/// pass their own value.
+/// `session_timeout` becomes russh's `inactivity_timeout`: the client tears the
+/// session down with `InactivityTimeout` if the server sends nothing for that
+/// long. There is deliberately no default — 45s fits a short FastPanel CLI call
+/// but would kill a healthy multi-minute `apt-get upgrade`, installer run or
+/// Let's Encrypt issuance, so every caller states the limit its own longest
+/// step needs (see `FP_*`/`PROVISION_SESSION_TIMEOUT` in `commands::provision`).
 pub async fn ssh_connect_session_with_timeout(
     app: &AppHandle,
     host: &str,
