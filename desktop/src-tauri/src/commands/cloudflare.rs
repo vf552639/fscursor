@@ -64,6 +64,7 @@ pub struct DnsRecordInput {
     pub name: String,
     pub content: String,
     pub ttl: Option<u32>,
+    pub proxied: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +72,7 @@ pub struct DnsRecordPatchInput {
     pub name: Option<String>,
     pub content: Option<String>,
     pub ttl: Option<u32>,
+    pub proxied: Option<bool>,
 }
 
 #[tauri::command]
@@ -127,6 +129,7 @@ pub async fn cf_create_dns_record(
         name: record.name,
         content: record.content,
         ttl: record.ttl,
+        proxied: record.proxied,
     };
     let rec = client::create_dns_record(&ctx.token, &zone_id, &payload)
         .await
@@ -158,6 +161,7 @@ pub async fn cf_update_dns_record(
         name: patch.name,
         content: patch.content,
         ttl: patch.ttl,
+        proxied: patch.proxied,
     };
     let rec = client::update_dns_record(&ctx.token, &zone_id, &record_id, &p)
         .await

@@ -199,7 +199,13 @@ export function useCreateDnsRecord(accountId: number, zoneId: string) {
           userId,
           accountId: String(accountId),
           zoneId,
-          record: { type: data.type, name: data.name, content: data.content, ttl: data.ttl },
+          record: {
+            type: data.type,
+            name: data.name,
+            content: data.content,
+            ttl: data.ttl,
+            proxied: data.proxied,
+          },
         });
       }
       return apiPost<DnsRecord>(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns`, data);
@@ -219,7 +225,12 @@ export function useUpdateDnsRecord(accountId: number, zoneId: string) {
           accountId: String(accountId),
           zoneId,
           recordId,
-          patch: { name: data.name, content: data.content, ttl: data.ttl },
+          patch: {
+            name: data.name,
+            content: data.content,
+            ttl: data.ttl,
+            proxied: data.proxied,
+          },
         });
       }
       return apiPut<DnsRecord>(

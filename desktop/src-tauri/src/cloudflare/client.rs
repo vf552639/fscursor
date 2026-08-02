@@ -148,6 +148,10 @@ pub struct DnsRecord {
     pub content: String,
     #[serde(default)]
     pub ttl: Option<u32>,
+    #[serde(default)]
+    pub proxied: bool,
+    #[serde(default)]
+    pub zone_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +162,8 @@ pub struct DnsRecordPayload {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxied: Option<bool>,
 }
 
 pub async fn list_dns_records(
@@ -235,6 +241,8 @@ pub struct DnsRecordPatch {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxied: Option<bool>,
 }
 
 pub async fn update_dns_record(
@@ -347,7 +355,7 @@ pub async fn get_nameservers(token: &str, zone_id: &str) -> Result<Vec<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -390,6 +398,7 @@ mod tests {
             .await;
         Mock::given(method("PATCH"))
             .and(path("/client/v4/zones/z1/dns_records/rec1"))
+            .and(body_partial_json(serde_json::json!({ "proxied": true })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "success": true,
                 "result": {"id": "rec1", "type": "A", "name": "x", "content": "2.2.2.2"}
@@ -403,6 +412,7 @@ mod tests {
             name: "x".into(),
             content: "2.2.2.2".into(),
             ttl: None,
+            proxied: Some(true),
         };
         // create_dns_record uses global CF_API — test local helper path by duplicating logic slice:
         let params = vec![
@@ -432,5 +442,45 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(data["result"]["content"], "2.2.2.2");
+    }
+
+    #[test]
+    fn dns_record_payload_omits_proxied_when_none() {
+        let p = DnsRecordPayload {
+            record_type: "A".into(),
+            name: "x".into(),
+            content: "1.1.1.1".into(),
+            ttl: None,
+            proxied: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("proxied"));
+    }
+
+    #[test]
+    fn dns_record_patch_serializes_proxied_when_set() {
+        let p = DnsRecordPatch {
+            proxied: Some(false),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["proxied"], false);
+        assert!(!v.as_object().unwrap().contains_key("name"));
+    }
+
+    #[test]
+    fn dns_record_deserializes_proxied_and_zone_id() {
+        let raw = serde_json::json!({
+            "id": "rec1",
+            "type": "A",
+            "name": "x",
+            "content": "1.1.1.1",
+            "ttl": 1,
+            "proxied": true,
+            "zone_id": "zone123"
+        });
+        let rec: DnsRecord = serde_json::from_value(raw).unwrap();
+        assert!(rec.proxied);
+        assert_eq!(rec.zone_id.as_deref(), Some("zone123"));
     }
 }
