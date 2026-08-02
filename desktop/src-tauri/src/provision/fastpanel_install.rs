@@ -31,11 +31,25 @@ pub fn update_command(os: &str) -> String {
 }
 
 /// Разобранные креды из вывода инсталлятора.
-#[derive(Debug, Default, PartialEq)]
+///
+/// `password` несёт секрет в открытом виде, поэтому `Debug` реализован
+/// вручную и маскирует значение — см. impl ниже (аудит без секретов, см.
+/// `CreateFtpResult`/`CreateDbResult` в `ssh/fastpanel.rs`, у которых по той
+/// же причине нет `derive(Debug)`).
 pub struct FpCredentials {
     pub url: Option<String>,
     pub user: Option<String>,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for FpCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FpCredentials")
+            .field("url", &self.url)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 /// Достать URL панели / логин / пароль из stdout инсталлятора (порт `_parse_credentials`).
@@ -227,6 +241,22 @@ mod tests {
         let c = parse_fastpanel_credentials(out);
         assert_eq!(c.user.as_deref(), Some("admin"));
         assert_eq!(c.password.as_deref(), Some("Sup3r!"));
+    }
+
+    // FpCredentials carries a plaintext panel password; Debug must never
+    // print it (project convention — no secrets in logs/audit, see
+    // CreateFtpResult/CreateDbResult which deliberately skip derive(Debug)).
+    // Presence/absence still has to be visible for troubleshooting, so
+    // Some(password) renders as a fixed placeholder, not the real value.
+    #[test]
+    fn debug_output_redacts_password_value() {
+        let c = parse_fastpanel_credentials(
+            "Panel URL: https://1.2.3.4:8888\nUsername: fastuser\nPassword: s3cr3t!\n",
+        );
+        let debug_str = format!("{c:?}");
+        assert!(!debug_str.contains("s3cr3t"));
+        assert!(debug_str.contains("fastuser"));
+        assert!(debug_str.contains("https://1.2.3.4:8888"));
     }
 
     #[test]
