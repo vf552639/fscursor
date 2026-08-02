@@ -26,7 +26,7 @@ The current SDMP is an internal-style panel where the FastAPI backend holds SSH 
 1. **Fix stale alembic head constant** — update [backend/app/main.py:16](/Users/andrey/Documents/Python/FS_cursor/.claude/worktrees/agitated-mclean-2fcfd1/backend/app/main.py:16) to `010_domain_extras` so current code boots; this is independent of zero-knowledge work but blocks any subsequent migration.
 2. **Bootstrap Tauri 2 project** in new top-level `desktop/` directory. Use `cargo create-tauri-app` with React + TypeScript + Vite preset; configure to load existing `frontend/` source via Tauri's frontend-dist pointer (during dev) and bundle for production build.
 3. **Set up Rust workspace** under `desktop/src-tauri/` with sub-crates for `crypto`, `keychain`, `sync`, `ssh`, `cloudflare`, `registrars`, `provision`. Empty `lib.rs` files; just structure.
-4. **Pin dependencies:** `tauri = "2"`, `sodiumoxide` or `dryoc` (libsodium binding for XChaCha20-Poly1305 + Argon2id), `russh = "0.45"`, `keyring = "3"`, `tiny-bip39 = "1"`, `rusqlite = "0.32"` with `bundled-sqlcipher` feature (encrypted local cache), `tokio`, `serde`, `reqwest`.
+4. **Pin dependencies:** `tauri = "2"`, `sodiumoxide` or `dryoc` (libsodium binding for `crypto_secretbox` XSalsa20-Poly1305 + Argon2id), `russh = "0.45"`, `keyring = "3"`, `tiny-bip39 = "1"`, `rusqlite = "0.32"` with `bundled-sqlcipher` feature (encrypted local cache), `tokio`, `serde`, `reqwest`.
 5. **Add backend deps** to [backend/requirements.txt](/Users/andrey/Documents/Python/FS_cursor/.claude/worktrees/agitated-mclean-2fcfd1/backend/requirements.txt): `argon2-cffi`, `slowapi`, `itsdangerous` (signed cookies), `bcrypt` (hash auth-key for transit defense-in-depth).
 6. **Document unsigned-install UX** in `docs/INSTALL.md` (new file): macOS right-click → Open instructions, Windows SmartScreen "More info" → "Run anyway" instructions, verification of SHA256 from website.
 
@@ -73,8 +73,8 @@ The current SDMP is an internal-style panel where the FastAPI backend holds SSH 
 **Goal:** Desktop app boots, user can register, log in, see metadata-only views synced from server. No SSH execution yet.
 
 16. **Crypto module** in `desktop/src-tauri/src/crypto/`:
-   - `kdf.rs` — Argon2id wrapper (`t=3, m=64MiB, p=4`); two contexts (`auth` and `enc`) derived via per-context label appended to password, hashed independently.
-   - `aead.rs` — XChaCha20-Poly1305 encrypt/decrypt; per-blob random 24-byte nonce; layout `nonce || ciphertext || tag`.
+   - `kdf.rs` — Argon2id wrapper (`t=3, m=64MiB, p=1`); two contexts (`auth` and `enc`) derived via per-context label appended to password, hashed independently. (Реализация: `p=1`, согласовано web↔desktop; ранее в спеке ошибочно стояло `p=4`.)
+   - `aead.rs` — libsodium `crypto_secretbox` (XSalsa20-Poly1305) encrypt/decrypt; per-blob random 24-byte nonce; layout `nonce(24) || mac(16) || ciphertext`. (Реализация использует secretbox, не XChaCha20; форматы web↔desktop совпадают побайтно.)
    - `bip39.rs` — generate 24-word phrase, derive recovery key, wrap/unwrap master key.
    - Unit tests with libsodium known-answer vectors.
 17. **Keychain integration** in `desktop/src-tauri/src/keychain/`: store/retrieve master key by user_id; backed by macOS Keychain, Windows Credential Manager, Linux Secret Service via `keyring` crate.
