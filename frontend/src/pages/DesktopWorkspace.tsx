@@ -13,7 +13,17 @@ import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
 import { apiPost } from "../api/client";
-import { handleSdmpDeepLinkInTauri } from "../lib/deepLink";
+import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
+import { Modal, CopyBtn, Btn } from "../components/ui/Primitives";
+
+/** Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`). */
+const FASTPANEL_STEP_LABEL: Record<string, string> = {
+  ssh_connect: "FastPanel: connecting over SSH…",
+  updating: "FastPanel: updating the system, this takes a while…",
+  installing: "FastPanel: running the installer, this takes a while…",
+  creds_unparsed: "FastPanel installed, but its credentials could not be read",
+  audit_failed: "FastPanel installed, but the audit entry was not recorded",
+};
 
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
@@ -35,6 +45,9 @@ export default function DesktopWorkspace() {
   });
   const [srvCtx, setSrv] = useState<any>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Креды FastPanel живут только в стейте этого компонента: их нет ни на
+  // сервере, ни в кэше, и они НЕ должны туда попадать.
+  const [fpCreds, setFpCreds] = useState<InstallFastpanelResult | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tweaks, setTweaks] = useState(false);
   const [tw, setTw] = useState(TWEAK_DEFAULTS);
@@ -88,27 +101,22 @@ export default function DesktopWorkspace() {
     let unlisten: (() => void) | undefined;
     (async () => {
       const { onOpenUrl, getCurrent } = await import("@tauri-apps/plugin-deep-link");
+      const runDeepLink = async (url: string) => {
+        try {
+          const res = await handleSdmpDeepLinkInTauri(url, userId);
+          if (!res.handled) showToast(`Deep link: ${url}`);
+          else if (res.fastpanel) setFpCreds(res.fastpanel);
+        } catch (e) {
+          showToast(e instanceof Error ? e.message : String(e));
+        }
+      };
       const start = await getCurrent();
       if (start?.length) {
-        for (const url of start) {
-          try {
-            const ran = await handleSdmpDeepLinkInTauri(url, userId);
-            if (!ran) showToast(`Deep link: ${url}`);
-          } catch (e) {
-            showToast(e instanceof Error ? e.message : String(e));
-          }
-        }
+        for (const url of start) await runDeepLink(url);
       }
       unlisten = await onOpenUrl((urls) => {
         void (async () => {
-          for (const url of urls) {
-            try {
-              const ran = await handleSdmpDeepLinkInTauri(url, userId);
-              if (!ran) showToast(`Deep link: ${url}`);
-            } catch (e) {
-              showToast(e instanceof Error ? e.message : String(e));
-            }
-          }
+          for (const url of urls) await runDeepLink(url);
         })();
       });
     })();
@@ -137,6 +145,22 @@ export default function DesktopWorkspace() {
           }
         },
       );
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // Установка FastPanel идёт десятки минут — показываем, на каком она шаге.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ step: string; server_id: string }>("fastpanel:progress", (event) => {
+        const label = FASTPANEL_STEP_LABEL[event.payload.step];
+        if (label) showToast(label);
+      });
     })();
     return () => {
       unlisten?.();
@@ -504,6 +528,67 @@ export default function DesktopWorkspace() {
           <ServerDetail server={srvCtx} onBack={(pg: string) => nav(pg || "servers")} onNav={nav} />
         )}
       </main>
+
+      {fpCreds && (
+        <Modal title="FastPanel installed" onClose={() => setFpCreds(null)} width={520}>
+          <div
+            style={{
+              fontSize: 12.5,
+              color: "#92400e",
+              background: "#fffbeb",
+              border: "1px solid #fde68a",
+              borderRadius: 8,
+              padding: "10px 12px",
+              marginBottom: 16,
+            }}
+          >
+            Shown once. These credentials are not stored anywhere — copy them now.
+          </div>
+          {fpCreds.password ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {(
+                [
+                  ["Panel URL", fpCreds.url],
+                  ["User", fpCreds.user],
+                  ["Password", fpCreds.password],
+                ] as const
+              ).map(([label, value]) => (
+                <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 90, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>{label}</div>
+                  <code
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 13,
+                      background: "#f3f4f6",
+                      padding: "8px 10px",
+                      borderRadius: 6,
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {value || "—"}
+                  </code>
+                  {value ? <CopyBtn value={value} /> : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, color: "#b91c1c", lineHeight: 1.5 }}>
+              FastPanel was installed, but its credentials could not be read from the installer
+              output. Reset the panel password on the server manually (SSH in and run{" "}
+              <code style={{ background: "#f3f4f6", padding: "1px 5px", borderRadius: 4 }}>
+                fastpanel users change-password
+              </code>
+              ).
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
+            <Btn variant="primary" onClick={() => setFpCreds(null)}>
+              Done
+            </Btn>
+          </div>
+        </Modal>
+      )}
 
       {toast && (
         <div
