@@ -4,6 +4,7 @@ import { useServers, useCreateServer } from "../api/servers";
 import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
+import { describeQueryError } from "../lib/queryError";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
   const [tab,setTab]=useState("install");
@@ -195,7 +196,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
   const [showAdd,setShowAdd]=useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
 
-  const { data, isPending, isError, refetch } = useServers();
+  const { data, isPending, isError, error, refetch } = useServers();
   
   const toUiStatus = (s: any) => {
     if (s.last_check_ok === false || s.status === "error") return "error";
@@ -231,9 +232,9 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
       <div style={{ padding: "8px 0" }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 16 }}>Servers</h1>
         <ErrorState
-          title="Backend unavailable or database schema is out of date"
-          message="The servers list could not be loaded."
-          hint="docker compose logs backend | grep -i alembic"
+          title={describeQueryError(error).title}
+          message={`The servers list could not be loaded. ${describeQueryError(error).message}`}
+          hint={describeQueryError(error).hint}
         />
       </div>
     );

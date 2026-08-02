@@ -3,9 +3,10 @@ import { Card, CHd, CTi, CBo, StatCard, Badge, Btn, Modal, Inp, EmptyState, Erro
 import { useRegistrarAccounts, useCreateRegistrarAccount, useTestRegistrarConnection, useUpdateRegistrarAccount, useDeleteRegistrarAccount, RegistrarProvider } from "../api/registrars";
 import { useSystemConfig, useTestNotificationDelivery, useUpdateSystemConfig } from "../api/settings";
 import { useCreateSslEmail, useDeleteSslEmail, usePatchSslEmail, useSslEmails } from "../api/sslEmails";
+import { describeQueryError } from "../lib/queryError";
 
 export default function Settings(){
-  const { data: registrarsData, isPending, isError } = useRegistrarAccounts();
+  const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
   const createReg = useCreateRegistrarAccount();
   const testReg = useTestRegistrarConnection();
   const deleteReg = useDeleteRegistrarAccount();
@@ -107,9 +108,9 @@ export default function Settings(){
       </div>
       {isError ? (
         <ErrorState
-          title="Backend unavailable or database schema is out of date"
-          message="Registrar accounts could not be loaded."
-          hint="docker compose logs backend | grep -i alembic"
+          title={describeQueryError(error).title}
+          message={`Registrar accounts could not be loaded. ${describeQueryError(error).message}`}
+          hint={describeQueryError(error).hint}
         />
       ) : isPending ? (
         <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading registrars...</div>

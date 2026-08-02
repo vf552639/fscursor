@@ -5,6 +5,7 @@ import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
 import StatusBadge from "../components/StatusBadge";
+import { describeQueryError } from "../lib/queryError";
 import TaskProgressModal from "../components/TaskProgressModal";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
@@ -408,9 +409,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
           <div style={{ fontSize: 13, color: "#6b7280" }}>Domain inventory</div>
         </div>
         <ErrorState
-          title="Backend unavailable or database schema is out of date"
-          message="The domains list could not be loaded. If the API returned an error, the database may be missing migrations or the backend is down."
-          hint="docker compose logs backend | grep -i alembic"
+          title={describeQueryError(domainsQ.error).title}
+          message={`The domains list could not be loaded. ${describeQueryError(domainsQ.error).message}`}
+          hint={describeQueryError(domainsQ.error).hint}
         />
       </div>
     );
