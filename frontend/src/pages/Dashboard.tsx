@@ -5,6 +5,8 @@ import { useDomains } from "../api/domains";
 import { useCloudflareAccounts } from "../api/cloudflare";
 import { useRegistrarAccounts } from "../api/registrars";
 import { useTaskLogs } from "../api/tasks";
+import { useAuditLog } from "../api/audit";
+import { serverMetrics, auditRowToActivity, isSslExpiringSoon } from "./dashboardData";
 
 export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>void}){
   const { data: qServers, isLoading: l1 } = useServers();
@@ -12,36 +14,37 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
   const { data: qCF, isLoading: l3 } = useCloudflareAccounts();
   const { data: qReg, isLoading: l4 } = useRegistrarAccounts();
   const { data: qTasks, isLoading: l5 } = useTaskLogs();
+  const { data: qAudit, isLoading: l6 } = useAuditLog(20);
 
-  const servers = (qServers?.items || []).map((s: any) => ({
-    id: s.id,
-    name: s.name,
-    ip: s.ip_address,
-    cpu: 0,
-    ram_used: 0,
-    ram_total: 4,
-    ssd_used: 0,
-    ssd_total: 20,
-    uptime: "0 days",
-    status: s.status === "active" ? "healthy" : (s.status || "warning"),
-    fastpanel: s.fastpanel_status === "installed",
-    original: s
-  }));
+  const servers = (qServers?.items || []).map((s: any) => {
+    const m = serverMetrics(s);
+    return {
+      id: s.id,
+      name: s.name,
+      ip: s.ip_address,
+      cpu: m.cpu,
+      ram_used: m.ramUsed,
+      ram_total: m.ramTotal,
+      ssd_used: m.ssdUsed,
+      ssd_total: m.ssdTotal,
+      uptime: m.uptime,
+      status: s.status === "active" ? "healthy" : (s.status || "warning"),
+      fastpanel: s.fastpanel_status === "installed",
+      original: s,
+    };
+  });
 
   const domains = qDomains ?? [];
   const cfAccounts = qCF || [];
   const registrars = qReg || [];
   const taskLogs = qTasks ?? [];
-  const activityLogs: any[] = [];
+  const activityLogs = (qAudit ?? []).map(auditRowToActivity);
 
   const healthy = servers.filter(s=>s.status==="healthy").length;
   const warning = servers.filter(s=>s.status==="warning").length;
   const critical = servers.filter(s=>s.status==="critical").length;
-  
-  const aLabel: Record<string, string> = {create:"Created",delete:"Deleted",update:"Updated",fastpanel_install:"FP Install",ns_update:"NS Updated",bulk_create:"Bulk Created",reboot:"Rebooted"};
-  const aIcon: Record<string, string> = {server:"🖥",domain:"◎",cloudflare:"☁",registrar:"📋"};
-  
-  if (l1 || l2 || l3 || l4 || l5) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading dashboard data...</div>;
+
+  if (l1 || l2 || l3 || l4 || l5 || l6) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading dashboard data...</div>;
 
   return (
     <>
@@ -97,8 +100,8 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
             <CBo style={{padding:"6px 20px 12px"}}>
               {[
                 ["FastPanel Installed",`${servers.filter(s=>s.fastpanel).length}/${servers.length}`,"#2563eb"],
-                ["Domains w/ SSL",domains.filter((d: any)=>d.ssl==="valid").length,"#16a34a"],
-                ["SSL Expiring",domains.filter((d: any)=>d.ssl==="expiring").length,"#d97706"],
+                ["Domains w/ SSL",domains.filter((d: any)=>d.ssl_status==="active").length,"#16a34a"],
+                ["SSL Expiring",domains.filter((d: any)=>isSslExpiringSoon(d.ssl_status,d.ssl_expires_at)).length,"#d97706"],
                 ["NS Errors",domains.filter((d: any)=>d.ns_status==="error").length,"#dc2626"],
                 ["NS Pending",domains.filter((d: any)=>d.ns_status==="pending").length,"#7c3aed"],
                 ["Task Failures",taskLogs.filter((t: any)=>t.status==="failed"||t.status==="error").length,"#dc2626"]
@@ -112,10 +115,10 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
             <CBo style={{padding:"4px 20px 12px"}}>
               {activityLogs.slice(0,6).map(l=>(
                 <div key={l.id} style={{display:"flex",gap:10,padding:"9px 0",borderBottom:"1px solid #f3f4f6",alignItems:"flex-start"}}>
-                  <div style={{width:26,height:26,borderRadius:6,background:"#f3f4f6",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>{aIcon[l.entity]||"·"}</div>
+                  <div style={{width:26,height:26,borderRadius:6,background:"#f3f4f6",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>{l.icon}</div>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:13,color:"#111"}}><span style={{color:"#9ca3af"}}>{aLabel[l.action]||l.action}: </span>{l.details?.name||l.details?.domain||`${l.entity} #${l.entity_id}`}</div>
-                    <div style={{fontSize:11.5,color:"#9ca3af",marginTop:1}}>{fmtDT(l.created)}</div>
+                    <div style={{fontSize:13,color:"#111"}}><span style={{color:"#9ca3af"}}>{l.label}: </span>{l.target}</div>
+                    <div style={{fontSize:11.5,color:"#9ca3af",marginTop:1}}>{fmtDT(l.ts)}</div>
                   </div>
                 </div>
               ))}

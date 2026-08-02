@@ -84,6 +84,23 @@ const TYPE_ICONS: Record<string, string> = {
   registrar_account: "📋",
 };
 
+// The backend never stores an "expiring" ssl_status — the column is one of
+// none/pending/active/error (see backend/app/models/domain.py). "Expiring
+// soon" is derived here from ssl_expires_at on an active cert.
+const SSL_EXPIRING_SOON_DAYS = 30;
+
+export function isSslExpiringSoon(
+  sslStatus: string | null | undefined,
+  sslExpiresAt: string | null | undefined,
+  now: Date = new Date()
+): boolean {
+  if (sslStatus !== "active" || !sslExpiresAt) return false;
+  const expires = new Date(sslExpiresAt);
+  if (Number.isNaN(expires.getTime())) return false;
+  const daysLeft = (expires.getTime() - now.getTime()) / 86400000;
+  return daysLeft <= SSL_EXPIRING_SOON_DAYS;
+}
+
 export function auditRowToActivity(row: AuditLogRow): ActivityItem {
   const meta = (row.metadata ?? {}) as Record<string, unknown>;
   // `||`, not `??`: an empty-string domain_name is deliberately treated as

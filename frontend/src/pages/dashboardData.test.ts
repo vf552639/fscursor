@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { serverMetrics, formatUptime, auditRowToActivity, ACTION_LABELS } from "./dashboardData";
+import { serverMetrics, formatUptime, auditRowToActivity, ACTION_LABELS, isSslExpiringSoon } from "./dashboardData";
 
 describe("serverMetrics", () => {
   it("maps real server fields instead of zeros", () => {
@@ -172,5 +172,34 @@ describe("auditRowToActivity", () => {
     expect(auditRowToActivity({ id: 4, action: "cf.cache_purge", target_type: null, target_id: null, metadata: null, ts: "x" } as any).label).toBe("Cache purged");
     expect(auditRowToActivity({ id: 5, action: "registrar.ns_set", target_type: null, target_id: null, metadata: null, ts: "x" } as any).label).toBe("Nameservers set");
     expect(auditRowToActivity({ id: 6, action: "server.fastpanel_install", target_type: null, target_id: null, metadata: null, ts: "x" } as any).label).toBe("FastPanel installed");
+  });
+});
+
+describe("isSslExpiringSoon", () => {
+  const now = new Date("2026-08-02T00:00:00Z");
+
+  it("is false for non-active ssl_status regardless of expiry", () => {
+    expect(isSslExpiringSoon("pending", "2026-08-10T00:00:00Z", now)).toBe(false);
+    expect(isSslExpiringSoon(null, "2026-08-10T00:00:00Z", now)).toBe(false);
+  });
+
+  it("is false when there is no expiry date", () => {
+    expect(isSslExpiringSoon("active", null, now)).toBe(false);
+  });
+
+  it("is true when an active cert expires within 30 days", () => {
+    expect(isSslExpiringSoon("active", "2026-08-20T00:00:00Z", now)).toBe(true);
+  });
+
+  it("is false when an active cert expires more than 30 days out", () => {
+    expect(isSslExpiringSoon("active", "2026-12-01T00:00:00Z", now)).toBe(false);
+  });
+
+  it("treats an already-expired active cert as expiring", () => {
+    expect(isSslExpiringSoon("active", "2026-07-01T00:00:00Z", now)).toBe(true);
+  });
+
+  it("is false for an unparseable date string", () => {
+    expect(isSslExpiringSoon("active", "not-a-date", now)).toBe(false);
   });
 });
