@@ -4,8 +4,10 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import Activity from "./Activity";
 
+// GET /tasks отдаёт голый массив (List[TaskLogResponse]), а GET /servers —
+// пагинированный объект (ServerListResponse). Моки повторяют реальные контракты.
 vi.mock("../api/tasks", () => ({
-  useTaskLogs: () => ({ data: { items: [] }, isLoading: false }),
+  useTaskLogs: () => ({ data: [], isLoading: false }),
 }));
 
 vi.mock("../api/servers", () => ({

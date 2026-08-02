@@ -28,10 +28,10 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
     original: s
   }));
 
-  const domains = qDomains?.items || [];
+  const domains = qDomains ?? [];
   const cfAccounts = qCF || [];
   const registrars = qReg || [];
-  const taskLogs = qTasks?.items || [];
+  const taskLogs = qTasks ?? [];
   const activityLogs: any[] = [];
 
   const healthy = servers.filter(s=>s.status==="healthy").length;

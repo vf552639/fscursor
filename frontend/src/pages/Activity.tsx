@@ -10,7 +10,7 @@ export default function Activity(){
   const { data: qServers, isLoading: l2 } = useServers();
   const { data: auditRows, isLoading: auditLoading } = useAuditLog(100);
   
-  const rawTasks = qTasks?.items || [];
+  const rawTasks = qTasks ?? [];
   const taskLogs = rawTasks.map((t: any) => ({
     id: t.id,
     type: t.task_type,
