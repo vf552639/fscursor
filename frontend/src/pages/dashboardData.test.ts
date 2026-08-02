@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { serverMetrics, formatUptime, auditRowToActivity } from "./dashboardData";
+import { serverMetrics, formatUptime, auditRowToActivity, ACTION_LABELS } from "./dashboardData";
 
 describe("serverMetrics", () => {
   it("maps real server fields instead of zeros", () => {
@@ -147,6 +147,22 @@ describe("auditRowToActivity", () => {
     } as any);
     expect(a.id).toBe("12");
     expect(a.ts).toBe("2026-01-01T00:00:00Z");
+  });
+
+  it("has exactly one label per SAFE_ACTIONS entry (bump to 27 -> N when backend/app/audit/service.py::SAFE_ACTIONS changes)", () => {
+    expect(Object.keys(ACTION_LABELS).length).toBe(27);
+  });
+
+  it("falls back to target_id alone when target_type is null", () => {
+    const a = auditRowToActivity({
+      id: 13,
+      action: "device.action.complete",
+      target_type: null,
+      target_id: "5",
+      metadata: null,
+      ts: "x",
+    } as any);
+    expect(a.target).toBe("#5");
   });
 
   it("labels executive cf/registrar/fastpanel actions added this sprint", () => {

@@ -41,7 +41,7 @@ export interface ActivityItem {
 // Keep in sync with backend/app/audit/service.py::SAFE_ACTIONS — the server
 // rejects anything not in that allow-list, so every action that can actually
 // reach us should have a human label here.
-const ACTION_LABELS: Record<string, string> = {
+export const ACTION_LABELS: Record<string, string> = {
   "domain.create": "Domain created",
   "domain.update": "Domain updated",
   "domain.delete": "Domain deleted",
@@ -73,7 +73,9 @@ const ACTION_LABELS: Record<string, string> = {
 
 // Matches the target_type strings audit.log callers actually pass (backend
 // routes: "server", "domain", "registrar_account", "cloudflare_account";
-// desktop Tauri commands: "cloudflare_zone" for cf.zone/cf.dns/cf.cache_purge).
+// desktop Tauri commands: "cloudflare_zone" for cf.zone/cf.dns/cf.cache_purge —
+// but "domain" is also emitted from the desktop side, by registrar.ns_set and
+// device.action.complete, not just the backend domain routes).
 const TYPE_ICONS: Record<string, string> = {
   domain: "◎",
   server: "🖥",
@@ -84,6 +86,9 @@ const TYPE_ICONS: Record<string, string> = {
 
 export function auditRowToActivity(row: AuditLogRow): ActivityItem {
   const meta = (row.metadata ?? {}) as Record<string, unknown>;
+  // `||`, not `??`: an empty-string domain_name is deliberately treated as
+  // absent too, since falling through to the `type #id` fallback is more
+  // useful than rendering a blank target.
   const target =
     (meta.domain_name as string) ||
     (row.target_id ? `${row.target_type ?? ""} #${row.target_id}`.trim() : "");
