@@ -89,6 +89,3 @@ export async function encryptBlob(plaintext: Uint8Array, key: Uint8Array): Promi
   framed.set(boxed, NONCE_LEN);
   return framed;
 }
-
-/** Alias for callers that followed the Stage 4 plan name; same as `decryptBlob`. */
-export const decryptBlobXChaCha = decryptBlob;
