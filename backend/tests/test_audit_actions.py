@@ -19,3 +19,21 @@ def test_executive_actions_are_in_safe_actions():
 def test_device_action_complete_still_present():
     # provision продолжает логироваться под этим действием
     assert "device.action.complete" in SAFE_ACTIONS
+
+
+MUTATION_AUDIT_ACTIONS = [
+    "blob.upsert",
+    "blob.delete",
+    "settings.config_update",
+    "settings.notification_test",
+    "notification.mark_read",
+    "notification.delete",
+    "notification.check_renewals",
+]
+
+
+def test_mutation_actions_are_in_safe_actions():
+    from app.audit.service import SAFE_ACTIONS
+
+    for action in MUTATION_AUDIT_ACTIONS:
+        assert action in SAFE_ACTIONS, f"{action} must be allow-listed"

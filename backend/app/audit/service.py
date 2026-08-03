@@ -34,6 +34,13 @@ SAFE_ACTIONS = frozenset(
         "auth.password_change",
         "auth.recovery",
         "auth.totp_enable",
+        "blob.upsert",
+        "blob.delete",
+        "settings.config_update",
+        "settings.notification_test",
+        "notification.mark_read",
+        "notification.delete",
+        "notification.check_renewals",
     }
 )
 
