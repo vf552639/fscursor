@@ -548,11 +548,17 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                           ? [
                               {
                                 icon: "⚙",
-                                title: "Provision domain",
-                                onClick: () =>
+                                // Второй клик стартовал бы вторую SSH-сессию с
+                                // create_site/create_ftp_account/certbot по тому
+                                // же домену — блокируем на время выполнения.
+                                title: singleProvision.isPending ? "Provisioning…" : "Provision domain",
+                                disabled: singleProvision.isPending,
+                                onClick: () => {
+                                  if (singleProvision.isPending) return;
                                   singleProvision.mutate(d.id, {
                                     onSuccess: (result) => setProvisionResult({ domain: d.domain, result }),
-                                  }),
+                                  });
+                                },
                               },
                             ]
                           : []),
@@ -570,13 +576,15 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                     {!isTauri() ? (
                       <OpenInDesktop
                         action={`provision?domainId=${d.id}`}
-                        label="Provision"
+                        label={singleProvision.isPending ? "Provisioning…" : "Provision"}
                         size="sm"
-                        desktopOnClick={() =>
+                        disabled={singleProvision.isPending}
+                        desktopOnClick={() => {
+                          if (singleProvision.isPending) return;
                           singleProvision.mutate(d.id, {
                             onSuccess: (result) => setProvisionResult({ domain: d.domain, result }),
-                          })
-                        }
+                          });
+                        }}
                       />
                     ) : null}
                   </div>

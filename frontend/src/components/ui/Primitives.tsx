@@ -188,12 +188,15 @@ type RowAction = {
   title: string;
   onClick?: () => void;
   variant?: "default" | "danger";
+  disabled?: boolean;
 };
 
 export function RowActions({ actions = [] }: { actions: RowAction[] }) {
   return <div style={{display:"flex",gap:5}}>
     {actions.map((a, i) => {
       const isDanger = a.variant === "danger";
+      // Как в Btn: заблокированное действие не просто инертно, оно и выглядит так.
+      const isDisabled = Boolean(a.disabled);
       return (
         <button
           key={`${a.title}-${i}`}
@@ -201,8 +204,9 @@ export function RowActions({ actions = [] }: { actions: RowAction[] }) {
           title={a.title}
           aria-label={a.title}
           onClick={a.onClick}
-          style={{width:28,height:28,border:"1px solid #e5e7eb",borderRadius:6,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:a.onClick?"pointer":"default",fontSize:12,color:isDanger?"#dc2626":"#6b7280",transition:"all 0.15s"}}
-          onMouseEnter={e=>{if(a.onClick){e.currentTarget.style.background=isDanger?"#fef2f2":"#eff4ff";e.currentTarget.style.color=isDanger?"#dc2626":"#2563eb";}}}
+          disabled={isDisabled}
+          style={{width:28,height:28,border:"1px solid #e5e7eb",borderRadius:6,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:isDisabled?"not-allowed":a.onClick?"pointer":"default",opacity:isDisabled?0.5:1,fontSize:12,color:isDanger?"#dc2626":"#6b7280",transition:"all 0.15s"}}
+          onMouseEnter={e=>{if(a.onClick&&!isDisabled){e.currentTarget.style.background=isDanger?"#fef2f2":"#eff4ff";e.currentTarget.style.color=isDanger?"#dc2626":"#2563eb";}}}
           onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color=isDanger?"#dc2626":"#6b7280";}}
         >
           {a.icon}

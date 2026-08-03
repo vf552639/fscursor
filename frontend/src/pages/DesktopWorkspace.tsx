@@ -105,6 +105,7 @@ export default function DesktopWorkspace() {
         try {
           const res = await handleSdmpDeepLinkInTauri(url, userId);
           if (!res.handled) showToast(`Deep link: ${url}`);
+          else if (res.cancelled) showToast("Deep link cancelled — nothing was run");
           else if (res.fastpanel) setFpCreds(res.fastpanel);
         } catch (e) {
           showToast(e instanceof Error ? e.message : String(e));

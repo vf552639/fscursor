@@ -205,6 +205,8 @@ export function useCreateDnsRecord(accountId: number, zoneId: string) {
             content: data.content,
             ttl: data.ttl,
             proxied: data.proxied,
+            // MX/SRV/URI без приоритета уезжали в Cloudflare сломанными.
+            priority: data.priority,
           },
         });
       }
@@ -226,10 +228,14 @@ export function useUpdateDnsRecord(accountId: number, zoneId: string) {
           zoneId,
           recordId,
           patch: {
+            // Форма правки даёт менять тип записи, и веб-путь его шлёт —
+            // десктопный молча терял и type, и priority.
+            type: data.type,
             name: data.name,
             content: data.content,
             ttl: data.ttl,
             proxied: data.proxied,
+            priority: data.priority,
           },
         });
       }
