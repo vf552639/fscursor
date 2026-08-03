@@ -25,6 +25,7 @@ async def test_register_login_me_logout_flow():
                 "salt_b64": b64(b"\x00" * 16),
                 "auth_key_b64": b64(b"\x01" * 32),
                 "recovery_blob_b64": b64(b"\x02" * 96),
+                "recovery_auth_key_b64": b64(b"\x03" * 32),
             },
         )
         assert r.status_code == 201
@@ -75,6 +76,7 @@ async def test_register_duplicate_email_returns_409():
             "salt_b64": b64(b"\x00" * 16),
             "auth_key_b64": b64(b"\x01" * 32),
             "recovery_blob_b64": b64(b"\x02" * 96),
+            "recovery_auth_key_b64": b64(b"\x03" * 32),
         }
         r1 = await c.post("/api/auth/register", json=body)
         assert r1.status_code == 201
@@ -93,6 +95,7 @@ async def test_login_finish_wrong_password_returns_401():
                 "salt_b64": b64(b"\x00" * 16),
                 "auth_key_b64": b64(b"\x01" * 32),
                 "recovery_blob_b64": b64(b"\x02" * 96),
+                "recovery_auth_key_b64": b64(b"\x03" * 32),
             },
         )
         r = await c.post(

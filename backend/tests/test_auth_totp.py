@@ -28,6 +28,7 @@ async def test_totp_enable_and_login_with_code():
                 "salt_b64": b64(b"\x00" * 16),
                 "auth_key_b64": b64(b"\x01" * 32),
                 "recovery_blob_b64": b64(b"\x02" * 96),
+                "recovery_auth_key_b64": b64(b"\x03" * 32),
             },
         )
         async with AsyncSessionLocal() as s:

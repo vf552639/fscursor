@@ -54,6 +54,11 @@ class RecoveryBlob(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # bcrypt-хеш recovery_auth_key, выведенного клиентом из recovery-фразы
+    # (Argon2id, контекст "sdmp-recovery-key-v1"). Сервер не может ни расшифровать
+    # блоб, ни восстановить фразу — только проверить владение ею.
+    # NULL = recovery настроен до миграции 014; восстановление по нему запрещено.
+    recovery_auth_key_hash: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )

@@ -1,7 +1,9 @@
 import base64
+import binascii
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 import uuid
 
 import pyotp
@@ -27,6 +29,24 @@ def _b64decode(s: str) -> bytes:
     return base64.b64decode(s.encode("utf-8"))
 
 
+def _b64decode_or_400(s: str, field: str) -> bytes:
+    try:
+        return base64.b64decode(s.encode("utf-8"), validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid base64 in {field}")
+
+
+# Сравнение по времени с несуществующим пользователем: без этого recovery/finish
+# отвечает 401 мгновенно для неизвестного email и медленно (bcrypt) для известного.
+@lru_cache(maxsize=1)
+def _dummy_recovery_hash() -> bytes:
+    return hash_auth_key(b"\x00" * 32)
+
+
+def _burn_recovery_timing(candidate: bytes) -> None:
+    verify_auth_key(candidate, _dummy_recovery_hash())
+
+
 def _set_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
@@ -49,6 +69,7 @@ async def register(
     salt = _b64decode(body.salt_b64)
     auth_key = _b64decode(body.auth_key_b64)
     recovery_blob = _b64decode(body.recovery_blob_b64)
+    recovery_auth_key = _b64decode_or_400(body.recovery_auth_key_b64, "recovery_auth_key_b64")
     confirm_token = secrets.token_urlsafe(32)
     user = User(
         email=body.email,
@@ -58,7 +79,13 @@ async def register(
     )
     db.add(user)
     await db.flush()
-    db.add(RecoveryBlob(user_id=user.id, ciphertext=recovery_blob))
+    db.add(
+        RecoveryBlob(
+            user_id=user.id,
+            ciphertext=recovery_blob,
+            recovery_auth_key_hash=hash_auth_key(recovery_auth_key),
+        )
+    )
     await db.commit()
     await send_confirmation_email(body.email, confirm_token)
     return {"user_id": str(user.id)}
@@ -170,8 +197,44 @@ async def me(user: User = Depends(get_current_user_or_401)) -> schemas.UserMeRes
     )
 
 
+@router.post("/recovery/setup", status_code=status.HTTP_200_OK)
+async def recovery_setup(
+    request: Request,
+    body: schemas.RecoverySetupRequest,
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """(Пере)настроить recovery: новый блоб + хеш ключа-доказательства.
+
+    Единственный путь, которым пользователь с NULL-хешем (recovery настроен до
+    миграции 014) снова получает право на /recovery/finish.
+    """
+    if not verify_auth_key(_b64decode_or_400(body.auth_key_b64, "auth_key_b64"), user.auth_key_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid current password")
+    ciphertext = _b64decode_or_400(body.recovery_blob_b64, "recovery_blob_b64")
+    key_hash = hash_auth_key(_b64decode_or_400(body.recovery_auth_key_b64, "recovery_auth_key_b64"))
+    rb = await db.get(RecoveryBlob, user.id)
+    if rb is None:
+        db.add(
+            RecoveryBlob(user_id=user.id, ciphertext=ciphertext, recovery_auth_key_hash=key_hash)
+        )
+    else:
+        rb.ciphertext = ciphertext
+        rb.recovery_auth_key_hash = key_hash
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="auth.recovery_setup",
+        ip=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"ok": True}
+
+
 @router.post("/recovery/start", response_model=schemas.RecoveryStartResponse)
+@limiter.limit("10/minute")
 async def recovery_start(
+    request: Request,
     body: schemas.RecoveryStartRequest,
     db: AsyncSession = Depends(get_db),
 ) -> schemas.RecoveryStartResponse:
@@ -191,22 +254,45 @@ async def recovery_start(
 
 
 @router.post("/recovery/finish", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
 async def recovery_finish(
     request: Request,
     body: schemas.RecoveryFinishRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    # --- Только чтение и валидация до самого конца проверок. ---
+    proof = _b64decode_or_400(body.recovery_auth_key_b64, "recovery_auth_key_b64")
+    new_salt = _b64decode_or_400(body.new_salt_b64, "new_salt_b64")
+    new_auth_key = _b64decode_or_400(body.new_auth_key_b64, "new_auth_key_b64")
+    new_blob = _b64decode_or_400(body.new_recovery_blob_b64, "new_recovery_blob_b64")
+    rotated_key = (
+        _b64decode_or_400(body.new_recovery_auth_key_b64, "new_recovery_auth_key_b64")
+        if body.new_recovery_auth_key_b64 is not None
+        else None
+    )
+
     user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
     if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
-    user.salt = _b64decode(body.new_salt_b64)
-    user.auth_key_hash = hash_auth_key(_b64decode(body.new_auth_key_b64))
+        # Тот же ответ, что и на неверный ключ: эндпоинт не подтверждает существование email.
+        _burn_recovery_timing(proof)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid recovery key")
     rb = await db.get(RecoveryBlob, user.id)
-    if rb is None:
-        rb = RecoveryBlob(user_id=user.id, ciphertext=_b64decode(body.new_recovery_blob_b64))
-        db.add(rb)
-    else:
-        rb.ciphertext = _b64decode(body.new_recovery_blob_b64)
+    if rb is None or rb.recovery_auth_key_hash is None:
+        _burn_recovery_timing(proof)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "recovery is not configured for this account: sign in and set up recovery "
+            "again (Settings -> recovery) before using recovery",
+        )
+    if not verify_auth_key(proof, rb.recovery_auth_key_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid recovery key")
+
+    # --- Ниже — первая мутация. Всё, что выше, ничего не меняет. ---
+    user.salt = new_salt
+    user.auth_key_hash = hash_auth_key(new_auth_key)
+    rb.ciphertext = new_blob
+    if rotated_key is not None:
+        rb.recovery_auth_key_hash = hash_auth_key(rotated_key)
     await db.execute(sa_delete(DbSession).where(DbSession.user_id == user.id))
     await audit_service.log(
         db,

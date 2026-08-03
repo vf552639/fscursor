@@ -26,6 +26,7 @@ async def _register_confirm_login(client: AsyncClient, email: str) -> None:
             "salt_b64": b64(b"\x00" * 16),
             "auth_key_b64": b64(b"\x01" * 32),
             "recovery_blob_b64": b64(b"\x02" * 96),
+            "recovery_auth_key_b64": b64(b"\x03" * 32),
         },
     )
     async with AsyncSessionLocal() as s:

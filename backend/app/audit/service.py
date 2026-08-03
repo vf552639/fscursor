@@ -38,6 +38,7 @@ SAFE_ACTIONS = frozenset(
         "auth.logout",
         "auth.password_change",
         "auth.recovery",
+        "auth.recovery_setup",
         "auth.totp_enable",
         "blob.upsert",
         "blob.delete",

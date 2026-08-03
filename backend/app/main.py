@@ -16,7 +16,7 @@ from app.core.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "013_drop_ssl_email_pool"
+EXPECTED_ALEMBIC_HEAD = "014_recovery_auth_key"
 
 
 @asynccontextmanager
