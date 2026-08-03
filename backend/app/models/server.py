@@ -40,7 +40,6 @@ class Server(Base, TimestampMixin):
     fastpanel_password_blob_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("blob_storage.id", ondelete="SET NULL"), nullable=True
     )
-    notes: Mapped[Optional[str]] = mapped_column(Text)
     uptime_seconds: Mapped[Optional[int]] = mapped_column(BigInteger)
     cpu_usage_pct: Mapped[Optional[int]] = mapped_column(Integer)
     cpu_count: Mapped[Optional[int]] = mapped_column(Integer)

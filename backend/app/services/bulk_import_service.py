@@ -77,7 +77,6 @@ class ServerImportRow:
     ssh_user: str
     ssh_password: str
     ssh_port: int
-    notes: Optional[str]
 
 
 async def process_bulk_import(
@@ -139,7 +138,6 @@ def _parse_server_row(row: list[str], idx: int) -> Optional[ServerImportRow]:
     ssh_user = str(row[2] or "").strip() if len(row) > 2 else "root"
     ssh_password = str(row[3] or "").strip() if len(row) > 3 else ""
     raw_port = str(row[4] or "").strip() if len(row) > 4 else "22"
-    notes = str(row[5] or "").strip() if len(row) > 5 and row[5] is not None else None
     try:
         ssh_port = int(raw_port or "22")
     except ValueError:
@@ -151,7 +149,6 @@ def _parse_server_row(row: list[str], idx: int) -> Optional[ServerImportRow]:
         ssh_user=ssh_user or "root",
         ssh_password=ssh_password,
         ssh_port=ssh_port,
-        notes=notes or None,
     )
 
 
@@ -228,7 +225,6 @@ async def process_server_bulk_import(
             ip_address=item.ip,
             ssh_user=item.ssh_user,
             ssh_port=item.ssh_port,
-            notes=item.notes,
         )
         try:
             await server_service.create(db, payload, user_id)

@@ -16,7 +16,6 @@ export interface Server {
   fastpanel_status: string;
   fastpanel_url: string | null;
   fastpanel_user: string | null;
-  notes: string | null;
   created_at: string;
   updated_at: string;
   has_ssh: boolean;
@@ -55,7 +54,6 @@ export interface ServerCreate {
   os?: string | null;
   purchase_date?: string | null;
   expiry_date?: string | null;
-  notes?: string | null;
   fastpanel_user?: string;
   fastpanel_password?: string;
   fastpanel_url?: string;
@@ -72,7 +70,6 @@ export interface ServerUpdate {
   status?: string;
   purchase_date?: string | null;
   expiry_date?: string | null;
-  notes?: string | null;
   fastpanel_user?: string;
   fastpanel_password?: string;
   fastpanel_url?: string;

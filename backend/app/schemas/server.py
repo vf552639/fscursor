@@ -13,7 +13,6 @@ class ServerBase(BaseModel):
     os: Optional[str] = None
     purchase_date: Optional[date] = None
     expiry_date: Optional[date] = None
-    notes: Optional[str] = None
 
 
 class ServerCreate(ServerBase):
@@ -33,7 +32,6 @@ class ServerUpdate(BaseModel):
     status: Optional[str] = None
     purchase_date: Optional[date] = None
     expiry_date: Optional[date] = None
-    notes: Optional[str] = None
     ssh_password_blob_id: Optional[UUID] = None
     fastpanel_user: Optional[str] = None
     fastpanel_password_blob_id: Optional[UUID] = None
