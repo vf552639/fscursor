@@ -1092,6 +1092,65 @@ git commit -m "docs(security): ADR for plaintext TOTP tradeoff + zk-sweep gate"
 
 ---
 
+## Task 12: Audit для массовых (bulk) маршрутов — [x] выполнено
+
+Найдено ZK-sweep'ом: **каждый единичный CRUD-маршрут пишет audit, ни один его bulk-вариант — нет.**
+Перенос одного домена оставлял запись, переезд 500 доменов — ни одной.
+
+**Истинный список пробелов (сверено `grep @router.(post|put|patch|delete)` против
+`grep audit_service.log`): 6 маршрутов, не 7.**
+
+| Маршрут | Действие |
+|---|---|
+| `POST /domains/bulk` | `domain.bulk_create` (`mode: "text"`) |
+| `POST /domains/bulk-structured` | `domain.bulk_create` (`mode: "structured"`) |
+| `POST /domains/bulk-assign-server` | `domain.bulk_assign_server` |
+| `POST /domains/bulk-assign-cloudflare` | `domain.bulk_assign_cloudflare` |
+| `POST /domains/bulk-import` | `domain.bulk_import` |
+| `POST /servers/bulk-import` | `server.bulk_import` |
+
+6 маршрутов → 5 действий: два маршрута создания доменов — одна и та же операция с разной формой
+входа, их различает `metadata.mode`, а не отдельное действие.
+
+**Дисциплина метаданных** (в `backend/app/audit/` нет ни одного слоя редакции — metadata пишется
+в JSONB как есть):
+
+- только счётчики и цель, **никаких перечней сущностей**: 500-элементный массив id в JSONB
+  бесполезен;
+- у bulk-assign цель — сервер / CF-аккаунт (`target_type`/`target_id`) плюс
+  `domains_requested`/`domains_updated`;
+- у импортов — `filename` (обрезано до 255), `created`/`skipped`/`errors` (**число** ошибок, не
+  список: список построчно повторяет содержимое файла);
+- **не пишется** `errors_csv_url` — в нём токен неаутентифицированной выдачи CSV;
+- **не пишется** ничего из колонки `ssh_password` CSV импорта серверов и ни одной ячейки строки.
+
+**Files:**
+- Modify: `backend/app/audit/service.py` (`SAFE_ACTIONS`: 34 → 39)
+- Modify: `backend/app/api/routes/domains.py`, `backend/app/api/routes/servers.py`
+- Modify: `backend/tests/test_audit_actions.py` (TDD: сначала падающий тест на allow-list)
+- Create: `backend/tests/test_bulk_audit.py` (5 httpx ASGI интеграционных тестов)
+- Modify: `frontend/src/pages/dashboardData.ts` (`ACTION_LABELS`), `dashboardData.test.ts` (34 → 39)
+
+- [x] **Step 1:** падающий тест `test_bulk_actions_are_in_safe_actions`, затем 5 действий в
+      `SAFE_ACTIONS`.
+- [x] **Step 2:** `audit_service.log(...)` + `await db.commit()` в 6 маршрутах.
+- [x] **Step 3:** `ACTION_LABELS` 1:1 с `SAFE_ACTIONS` (проверено скриптом-диффом, не глазами:
+      39 = 39, симметрическая разность пуста).
+- [x] **Step 4:** `pytest` 35 passed; `vitest` 53/9; `tsc` 51 ошибка (все pre-existing).
+
+**Известные ограничения (зафиксировано, не чинится здесь):**
+
+1. **Аудит и мутация — в разных транзакциях.** Все `domain_service.*` / `server_service.create`
+   коммитят внутри себя, маршрут потом делает `log(...)` + `commit()` вторым коммитом. Это ровно та
+   же неатомарность, что найдена в `settings.config_update`, и она уже была у *единичных* CRUD —
+   новые вызовы ей следуют, а не вводят её. Общая починка — вынести `commit` из сервисов.
+2. **`GET /{domains,servers}/bulk-import-errors/{token}` не требует аутентификации** — проверено
+   запросом без сессии, оба отдают 200. Хранилище `_ERROR_EXPORTS` — глобальный dict процесса без
+   привязки к пользователю и без TTL, и оба маршрута принимают токен друг друга. Это чтение, поэтому
+   вне задачи аудита, но пробел доступа реален.
+
+---
+
 ## Acceptance criteria (что значит «готово»)
 
 - [ ] Любая мутация пишет запись в `audit_log`: blob PUT/DELETE, settings config-update и
