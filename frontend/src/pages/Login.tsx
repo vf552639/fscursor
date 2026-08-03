@@ -101,8 +101,11 @@ export default function Login() {
       setUser(userId, email);
       setUnlocked(true);
       try {
-        await invokeIfTauri("sync_init", { user_id: userId });
-        await invokeIfTauri<number>("sync_now", { user_id: userId });
+        // Ключи аргументов Tauri v2 — camelCase (rename_all по умолчанию):
+        // с `user_id` команда падала на "missing required key userId", а catch
+        // это молча съедал — локальный кэш не наполнялся вообще никогда.
+        await invokeIfTauri("sync_init", { userId });
+        await invokeIfTauri<number>("sync_now", { userId });
       } catch {
         /* sync optional on first login */
       }

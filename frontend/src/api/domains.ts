@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
-import { invokeIfTauri } from "../lib/tauri-invoke";
+import { invokeSynced } from "../lib/localCache";
 import { isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
@@ -260,6 +260,15 @@ export function useBulkSetNameservers() {
   });
 }
 
+/**
+ * Ответ `provision_domain` (см. `ProvisionResultOut` в `commands/provision.rs`).
+ * Опциональные поля Rust опускает целиком, когда их нет; `ftp` приходит только
+ * при `site_only: false`.
+ *
+ * `db.db_password` и `ftp.ftp_password` генерируются на сервере и больше нигде
+ * не хранятся: показать один раз в модалке и не писать ни в localStorage, ни в
+ * sessionStorage, ни в кэш запросов, ни в лог, ни в URL.
+ */
 export interface ProvisionDesktopResult {
   domain_id: string;
   site_user: string;
@@ -267,6 +276,7 @@ export interface ProvisionDesktopResult {
   ssl_issued?: boolean;
   ssl_error?: string;
   db?: { db_name: string; db_user: string; db_password: string };
+  ftp?: { ftp_user: string; ftp_password: string };
 }
 
 export function useProvisionDomain() {
@@ -281,7 +291,7 @@ export function useProvisionDomain() {
       if (!userId) {
         throw new Error("Desktop: unlock session (user id missing)");
       }
-      const result = await invokeIfTauri<ProvisionDesktopResult>("provision_domain", {
+      const result = await invokeSynced<ProvisionDesktopResult>("provision_domain", {
         userId,
         domainId: String(domainId),
         siteOnly: false,

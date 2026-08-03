@@ -240,8 +240,9 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   // Desktop provisioning is synchronous (no server-side task log to poll), so
   // its outcome is shown directly instead of routed through progressTaskId/
   // TaskProgressModal — that pair is for the backend-queued flows below
-  // (bulk full setup, Activity page). db.db_password lives only in this
-  // state: it is never written to storage, the query cache, or a log.
+  // (bulk full setup, Activity page). db.db_password and ftp.ftp_password live
+  // only in this state: they are never written to storage, the query cache,
+  // a log, or a URL.
   const [provisionResult, setProvisionResult] = useState<{ domain: string; result: ProvisionDesktopResult } | null>(null);
   const [showFileImport, setShowFileImport] = useState(false);
   const [showFullSetup, setShowFullSetup] = useState(false);
@@ -743,6 +744,49 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                     ["DB name", provisionResult.result.db.db_name],
                     ["DB user", provisionResult.result.db.db_user],
                     ["DB password", provisionResult.result.db.db_password],
+                  ] as const
+                ).map(([label, value]) => (
+                  <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 100, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>{label}</div>
+                    <code
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: 13,
+                        background: "#f3f4f6",
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {value}
+                    </code>
+                    <CopyBtn value={value} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {provisionResult.result.ftp ? (
+            <div>
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: "#92400e",
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  borderRadius: 8,
+                  padding: "10px 12px",
+                  marginBottom: 10,
+                }}
+              >
+                FTP credentials — shown once. Not stored anywhere; copy them now.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {(
+                  [
+                    ["FTP user", provisionResult.result.ftp.ftp_user],
+                    ["FTP password", provisionResult.result.ftp.ftp_password],
                   ] as const
                 ).map(([label, value]) => (
                   <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>

@@ -1,13 +1,20 @@
 import type { Server } from "../api/servers";
 import type { AuditLogRow } from "../api/audit";
 
+/**
+ * Метрики сервера. `null` — «данных нет», и это НЕ то же самое, что 0: ничего
+ * в продукте эти поля пока не пишет (сборщика нет, роут refresh-metrics на
+ * бэкенде отсутствует), поэтому подстановка нулей рисовала бы «здоровый
+ * простаивающий сервер» там, где мы просто ничего не знаем. Рендерить `null`
+ * как «—», по образцу ServerDetail.tsx.
+ */
 export interface ServerMetrics {
-  cpu: number;
-  ramUsed: number;
-  ramTotal: number;
-  ssdUsed: number;
-  ssdTotal: number;
-  uptime: string;
+  cpu: number | null;
+  ramUsed: number | null;
+  ramTotal: number | null;
+  ssdUsed: number | null;
+  ssdTotal: number | null;
+  uptime: string | null;
 }
 
 export function formatUptime(seconds: number): string {
@@ -19,14 +26,17 @@ export function formatUptime(seconds: number): string {
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
+const mapNum = <T>(v: number | null | undefined, f: (n: number) => T): T | null =>
+  v === null || v === undefined ? null : f(v);
+
 export function serverMetrics(s: Server): ServerMetrics {
   return {
-    cpu: Math.round(s.cpu_usage_pct ?? 0),
-    ramUsed: round1((s.ram_used_mb ?? 0) / 1024),
-    ramTotal: round1((s.ram_total_mb ?? 0) / 1024),
-    ssdUsed: Math.round(s.disk_used_gb ?? 0),
-    ssdTotal: Math.round(s.disk_total_gb ?? 0),
-    uptime: formatUptime(s.uptime_seconds ?? 0),
+    cpu: mapNum(s.cpu_usage_pct, Math.round),
+    ramUsed: mapNum(s.ram_used_mb, (n) => round1(n / 1024)),
+    ramTotal: mapNum(s.ram_total_mb, (n) => round1(n / 1024)),
+    ssdUsed: mapNum(s.disk_used_gb, Math.round),
+    ssdTotal: mapNum(s.disk_total_gb, Math.round),
+    uptime: mapNum(s.uptime_seconds, formatUptime),
   };
 }
 

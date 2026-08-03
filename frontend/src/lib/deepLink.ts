@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeSynced } from "./localCache";
 
 /**
  * Результат команды `install_fastpanel` (см. `InstallFastpanelResult` в
@@ -136,7 +136,7 @@ export async function handleSdmpDeepLinkInTauri(
   }
 
   if (action.kind === "provision") {
-    await invoke("provision_domain", {
+    await invokeSynced("provision_domain", {
       userId,
       domainId: action.domainId,
       siteOnly: false,
@@ -145,13 +145,13 @@ export async function handleSdmpDeepLinkInTauri(
   }
 
   if (action.kind === "bulk-provision") {
-    await invoke("provision_bulk", { userId, domainIds: action.domainIds });
+    await invokeSynced("provision_bulk", { userId, domainIds: action.domainIds });
     return { handled: true };
   }
 
   // Креды панели живут только в этом ответе — обязательно отдаём их наверх,
   // иначе после 30 минут установки пароль потерян безвозвратно.
-  const res = await invoke<InstallFastpanelResult>("install_fastpanel", {
+  const res = await invokeSynced<InstallFastpanelResult>("install_fastpanel", {
     userId,
     serverId: action.serverId,
     force: false,

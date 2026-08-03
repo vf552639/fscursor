@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
-import { invokeIfTauri } from "../lib/tauri-invoke";
+import { invokeSynced } from "../lib/localCache";
 import { isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
@@ -94,7 +94,7 @@ export function useTestRegistrarConnection() {
     mutationFn: async (id: number): Promise<RegistrarTestResult> => {
       if (isTauri()) {
         const userId = requireUserId();
-        const [success, message] = await invokeIfTauri<[boolean, string]>(
+        const [success, message] = await invokeSynced<[boolean, string]>(
           "registrar_test_connection",
           { userId, accountId: String(id) }
         );
@@ -111,7 +111,7 @@ export function useRegistrarDomains(accountId: number | null | undefined) {
     queryFn: async () => {
       if (isTauri()) {
         const userId = requireUserId();
-        return invokeIfTauri<RegistrarDomain[]>("registrar_get_domains", {
+        return invokeSynced<RegistrarDomain[]>("registrar_get_domains", {
           userId,
           accountId: String(accountId),
         });

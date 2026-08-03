@@ -77,17 +77,20 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
         <Card>
           <CHd><CTi>🖥 Server Health</CTi><Btn size="sm" onClick={()=>onNav("servers")}>View All →</Btn></CHd>
           {servers.map(s=>{
-            const pct = s.cpu; 
-            const bc = cpuColor(pct);
+            // Метрик пока не пишет никто: cpu === null означает «нет данных»,
+            // и это надо показывать как «—», а не как здоровый 0%.
+            const pct = s.cpu;
+            const bc = pct === null ? "#e5e7eb" : cpuColor(pct);
+            const ram = s.ram_used !== null && s.ram_total !== null ? `${s.ram_used}/${s.ram_total}GB` : "—";
             return (
               <div key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 20px",borderBottom:"1px solid #f3f4f6",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                 <StatusDot status={s.status}/>
                 <div style={{minWidth:170}}><div style={{fontSize:13.5,fontWeight:600,color:"#111"}}>{s.name}</div><div style={{fontSize:11.5,color:"#9ca3af"}}>{s.ip}</div></div>
                 <div style={{flex:1}}>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5,color:"#6b7280",marginBottom:4}}><span>CPU {s.cpu}%</span><span>RAM {s.ram_used}/{s.ram_total}GB</span><span>SSD {s.ssd_used}GB</span></div>
-                  <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:bc,borderRadius:3}}/></div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5,color:"#6b7280",marginBottom:4}}><span>CPU {pct === null ? "—" : `${pct}%`}</span><span>RAM {ram}</span><span>SSD {s.ssd_used === null ? "—" : `${s.ssd_used}GB`}</span></div>
+                  <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>{pct === null ? null : <div style={{height:"100%",width:`${pct}%`,background:bc,borderRadius:3}}/>}</div>
                 </div>
-                <div style={{minWidth:70,textAlign:"right",fontSize:12,color:"#6b7280"}}>{s.uptime}</div>
+                <div style={{minWidth:70,textAlign:"right",fontSize:12,color:"#6b7280"}}>{s.uptime ?? "—"}</div>
                 <Badge variant={s.status==="healthy"?"green":s.status==="warning"?"yellow":"red"}>{s.status}</Badge>
               </div>
             );

@@ -25,6 +25,41 @@ const FASTPANEL_STEP_LABEL: Record<string, string> = {
   audit_failed: "FastPanel installed, but the audit entry was not recorded",
 };
 
+/**
+ * Шаг provision → текст в тосте (события `provision:progress`, шлёт
+ * `commands/provision.rs`). Провижн идёт минутами и до этого не показывал
+ * ничего. Неизвестные шаги игнорируем — сырые имена шагов пользователю не текст.
+ */
+const PROVISION_STEP_LABEL: Record<string, string> = {
+  ssh_connect: "Provision: connecting over SSH…",
+  fastpanel_path: "Provision: locating FastPanel…",
+  firewall_preflight: "Provision: checking the firewall…",
+  firewall_warning: "Provision: firewall may block HTTP/HTTPS — SSL can fail",
+  ftp: "Provision: creating the FTP account…",
+  db: "Provision: creating the database…",
+  ssl_exists: "Provision: certificate already present, skipping issue",
+  ssl_dns_check: "Provision: checking DNS before issuing SSL…",
+  ssl_skipped_dns: "Provision: SSL skipped — the domain does not resolve here yet",
+  ssl_skipped_no_email: "Provision: SSL skipped — no contact email configured",
+  ssl_issue: "Provision: issuing the certificate, this takes a while…",
+  audit_failed: "Provisioned, but the audit entry was not recorded",
+  bulk_item: "Bulk provision: next domain…",
+  bulk_failed: "Bulk provision: a domain failed, continuing…",
+};
+
+/**
+ * Действие cf/registrar → текст, если его не удалось записать в audit log
+ * (канал `audit:progress`, шаг `audit_failed`). Само действие при этом успешно.
+ */
+const AUDIT_ACTION_LABEL: Record<string, string> = {
+  "cf.zone.create": "Zone created",
+  "cf.dns.create": "DNS record created",
+  "cf.dns.update": "DNS record updated",
+  "cf.dns.delete": "DNS record deleted",
+  "cf.cache_purge": "Cache purged",
+  "registrar.ns_set": "Nameservers set",
+};
+
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
   sidebarWidth: 200,
@@ -161,6 +196,45 @@ export default function DesktopWorkspace() {
       unlisten = await listen<{ step: string; server_id: string }>("fastpanel:progress", (event) => {
         const label = FASTPANEL_STEP_LABEL[event.payload.step];
         if (label) showToast(label);
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // Провижн тоже идёт минутами — те же тосты по шагам.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ step: string; domain_id: string }>("provision:progress", (event) => {
+        const label = PROVISION_STEP_LABEL[event.payload.step];
+        if (label) showToast(label);
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // cf/registrar-мутации выполняются, даже если запись в audit log не прошла:
+  // об этом молчать нельзя — иначе действие исчезает из истории незаметно.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{
+        step: string;
+        action: string;
+        target_type: string;
+        target_id: string;
+      }>("audit:progress", (event) => {
+        if (event.payload.step !== "audit_failed") return;
+        const label = AUDIT_ACTION_LABEL[event.payload.action];
+        if (label) showToast(`${label}, but the audit entry was not recorded`);
       });
     })();
     return () => {

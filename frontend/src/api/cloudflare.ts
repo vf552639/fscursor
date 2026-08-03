@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
-import { invokeIfTauri } from "../lib/tauri-invoke";
+import { invokeSynced } from "../lib/localCache";
 import { isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
@@ -138,7 +138,7 @@ export function useTestCloudflareAccount() {
     mutationFn: async (id: number) => {
       if (isTauri()) {
         const userId = requireUserId();
-        const ok = await invokeIfTauri<boolean>("cf_verify_token", {
+        const ok = await invokeSynced<boolean>("cf_verify_token", {
           userId,
           accountId: String(id),
         });
@@ -195,7 +195,7 @@ export function useCreateDnsRecord(accountId: number, zoneId: string) {
     mutationFn: async (data: DnsRecordCreate) => {
       if (isTauri()) {
         const userId = requireUserId();
-        return invokeIfTauri<DnsRecord>("cf_create_dns_record", {
+        return invokeSynced<DnsRecord>("cf_create_dns_record", {
           userId,
           accountId: String(accountId),
           zoneId,
@@ -222,7 +222,7 @@ export function useUpdateDnsRecord(accountId: number, zoneId: string) {
     mutationFn: async ({ recordId, data }: { recordId: string; data: DnsRecordUpdate }) => {
       if (isTauri()) {
         const userId = requireUserId();
-        return invokeIfTauri<DnsRecord>("cf_update_dns_record", {
+        return invokeSynced<DnsRecord>("cf_update_dns_record", {
           userId,
           accountId: String(accountId),
           zoneId,
@@ -254,7 +254,7 @@ export function useDeleteDnsRecord(accountId: number, zoneId: string) {
     mutationFn: async (recordId: string) => {
       if (isTauri()) {
         const userId = requireUserId();
-        return invokeIfTauri<void>("cf_delete_dns_record", {
+        return invokeSynced<void>("cf_delete_dns_record", {
           userId,
           accountId: String(accountId),
           zoneId,
@@ -273,7 +273,7 @@ export function usePurgeCache(accountId: number, zoneId: string) {
     mutationFn: async () => {
       if (isTauri()) {
         const userId = requireUserId();
-        await invokeIfTauri<void>("cf_purge_cache", {
+        await invokeSynced<void>("cf_purge_cache", {
           userId,
           accountId: String(accountId),
           zoneId,

@@ -18,9 +18,22 @@ describe("serverMetrics", () => {
     expect(m.uptime).toBe("2 days");
   });
 
-  it("defaults missing metrics to zero without throwing", () => {
+  // Ноль здесь врал бы: метрики никто не собирает, и "CPU 0% · 0h" читается
+  // как здоровый простаивающий сервер вместо "данных нет".
+  it("keeps missing metrics absent instead of inventing zeros", () => {
     const m = serverMetrics({} as any);
+    expect(m.cpu).toBeNull();
+    expect(m.ramUsed).toBeNull();
+    expect(m.ramTotal).toBeNull();
+    expect(m.ssdUsed).toBeNull();
+    expect(m.ssdTotal).toBeNull();
+    expect(m.uptime).toBeNull();
+  });
+
+  it("keeps a real zero as zero, not as missing", () => {
+    const m = serverMetrics({ cpu_usage_pct: 0, disk_used_gb: 0, uptime_seconds: 0 } as any);
     expect(m.cpu).toBe(0);
+    expect(m.ssdUsed).toBe(0);
     expect(m.uptime).toBe("0h");
   });
 
@@ -38,12 +51,12 @@ describe("serverMetrics", () => {
       disk_total_gb: null,
       uptime_seconds: null,
     } as any);
-    expect(m.cpu).toBe(0);
-    expect(m.ramUsed).toBe(0);
-    expect(m.ramTotal).toBe(0);
-    expect(m.ssdUsed).toBe(0);
-    expect(m.ssdTotal).toBe(0);
-    expect(m.uptime).toBe("0h");
+    expect(m.cpu).toBeNull();
+    expect(m.ramUsed).toBeNull();
+    expect(m.ramTotal).toBeNull();
+    expect(m.ssdUsed).toBeNull();
+    expect(m.ssdTotal).toBeNull();
+    expect(m.uptime).toBeNull();
   });
 
   it("rounds fractional RAM to one decimal place", () => {
