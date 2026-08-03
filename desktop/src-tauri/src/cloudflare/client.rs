@@ -164,6 +164,10 @@ pub struct DnsRecordPayload {
     pub ttl: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxied: Option<bool>,
+    /// Приоритет MX/SRV/URI. У Cloudflare это целое 0..=65535, поэтому `u16`;
+    /// для остальных типов записи поле не шлём вовсе — иначе API ругается.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u16>,
 }
 
 pub async fn list_dns_records(
@@ -235,6 +239,11 @@ pub async fn create_dns_record(
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct DnsRecordPatch {
+    /// Тип записи (A/CNAME/MX/...). Cloudflare разрешает менять его через PATCH,
+    /// и форма редактирования во фронте это предлагает; без поля смена типа
+    /// молча не доезжала до API.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +252,9 @@ pub struct DnsRecordPatch {
     pub ttl: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxied: Option<bool>,
+    /// Приоритет MX/SRV/URI — см. `DnsRecordPayload::priority`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u16>,
 }
 
 pub async fn update_dns_record(
@@ -396,23 +408,33 @@ mod tests {
             })))
             .mount(&srv)
             .await;
+        // Матчер перечисляет все поля payload'а, которые обязаны доехать до CF:
+        // если любое перестанет сериализоваться, ни один mock не подойдёт,
+        // сервер ответит 404 и тест упадёт.
         Mock::given(method("PATCH"))
             .and(path("/client/v4/zones/z1/dns_records/rec1"))
-            .and(body_partial_json(serde_json::json!({ "proxied": true })))
+            .and(body_partial_json(serde_json::json!({
+                "type": "MX",
+                "name": "x",
+                "content": "2.2.2.2",
+                "proxied": true,
+                "priority": 10,
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "success": true,
-                "result": {"id": "rec1", "type": "A", "name": "x", "content": "2.2.2.2"}
+                "result": {"id": "rec1", "type": "MX", "name": "x", "content": "2.2.2.2"}
             })))
             .mount(&srv)
             .await;
 
         let base = format!("{}/client/v4", srv.uri());
         let p = DnsRecordPayload {
-            record_type: "A".into(),
+            record_type: "MX".into(),
             name: "x".into(),
             content: "2.2.2.2".into(),
             ttl: None,
             proxied: Some(true),
+            priority: Some(10),
         };
         // create_dns_record uses global CF_API — test local helper path by duplicating logic slice:
         let params = vec![
@@ -444,6 +466,47 @@ mod tests {
         assert_eq!(data["result"]["content"], "2.2.2.2");
     }
 
+    // Смена типа записи (A → MX и обратно) и приоритет MX обязаны доехать до
+    // Cloudflare: форма редактирования во фронте предлагает и то, и другое.
+    // Матчер здесь — тот же приём, что и в тесте выше: не совпало тело —
+    // сервер отвечает 404, и `unwrap` падает.
+    #[tokio::test]
+    async fn dns_patch_sends_type_and_priority() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/client/v4/zones/z1/dns_records/rec1"))
+            .and(body_partial_json(serde_json::json!({
+                "type": "MX",
+                "content": "mail.example.com",
+                "priority": 20,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": {"id": "rec1", "type": "MX", "name": "x", "content": "mail.example.com"}
+            })))
+            .mount(&srv)
+            .await;
+
+        let patch = DnsRecordPatch {
+            record_type: Some("MX".into()),
+            content: Some("mail.example.com".into()),
+            priority: Some(20),
+            ..Default::default()
+        };
+        let base = format!("{}/client/v4", srv.uri());
+        let data = call_with_base(
+            &base,
+            "t",
+            Method::PATCH,
+            "/zones/z1/dns_records/rec1",
+            None,
+            Some(serde_json::to_value(&patch).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(data["result"]["type"], "MX");
+    }
+
     #[test]
     fn dns_record_payload_omits_proxied_when_none() {
         let p = DnsRecordPayload {
@@ -452,9 +515,13 @@ mod tests {
             content: "1.1.1.1".into(),
             ttl: None,
             proxied: None,
+            priority: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(!v.as_object().unwrap().contains_key("proxied"));
+        // priority шлём только для MX/SRV/URI: для A-записи Cloudflare на него
+        // отвечает ошибкой, поэтому пустое поле обязано исчезать из тела.
+        assert!(!v.as_object().unwrap().contains_key("priority"));
     }
 
     #[test]
@@ -466,6 +533,10 @@ mod tests {
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["proxied"], false);
         assert!(!v.as_object().unwrap().contains_key("name"));
+        // PATCH в Cloudflare — частичный: незаданный тип не должен превращаться
+        // в `null` и перетирать реальный тип записи.
+        assert!(!v.as_object().unwrap().contains_key("type"));
+        assert!(!v.as_object().unwrap().contains_key("priority"));
     }
 
     #[test]

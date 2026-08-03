@@ -1,13 +1,15 @@
 //! Tauri-команды Cloudflare. Токен CF-аккаунта расшифровывается на клиенте,
-//! операции идут напрямую в Cloudflare API v4. Каждая мутация пишется в audit_log.
+//! операции идут напрямую в Cloudflare API v4. Каждая мутация пишется в
+//! audit_log — best-effort, см. `creds::audit_best_effort`.
 
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::cloudflare::client::{self, DnsRecord, DnsRecordPatch, DnsRecordPayload, Zone};
 use crate::commands::auth::CommandError;
-use crate::commands::creds::{blob_plaintext, cache_path, json_str};
+use crate::commands::creds::{audit_best_effort, blob_plaintext, cache_path, json_str};
 use crate::commands::sync_cmd::SyncHandle;
 use crate::keychain;
 use crate::sync::cache;
@@ -15,10 +17,22 @@ use crate::sync::http::ApiClient;
 
 /// Контекст CF-аккаунта: расшифрованный токен, CF account_id (для create_zone),
 /// device_id (для audit).
+///
+/// Намеренно без `Debug`: `token` — это ключ ко всему аккаунту Cloudflare.
 struct CfCtx {
     token: String,
     cf_account_id: Option<String>,
     device_id: Option<Uuid>,
+}
+
+/// Токен гасим в `Drop`, а не вручную по месту: контекст живёт в шести
+/// командах, и в каждой между его созданием и концом функции есть `?` после
+/// вызова Cloudflare — ручной `.zeroize()` в конце пропускался бы ровно на
+/// ошибочных путях.
+impl Drop for CfCtx {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
 }
 
 async fn cf_ctx(
@@ -27,7 +41,7 @@ async fn cf_ctx(
     handle: &State<'_, SyncHandle>,
     account_id: &str,
 ) -> Result<CfCtx, CommandError> {
-    let key = keychain::load_master_key(user_id)
+    let mut key = keychain::load_master_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let path = cache_path(handle)?;
@@ -41,7 +55,11 @@ async fn cf_ctx(
         .get("api_token_blob_id")
         .and_then(json_str)
         .ok_or_else(|| CommandError::Api("account has no api_token_blob_id".into()))?;
-    let token_bytes = blob_plaintext(api, &key, &blob_id).await?;
+    let token_bytes = blob_plaintext(api, &key, &blob_id).await;
+    // Мастер-ключ больше не нужен: дальше только HTTP в Cloudflare. Гасим до
+    // разбора результата, а не после, — иначе ошибочный путь его пропустит.
+    key.zeroize();
+    let token_bytes = token_bytes?;
     let token =
         String::from_utf8(token_bytes).map_err(|_| CommandError::Aead("token not utf8".into()))?;
 
@@ -65,14 +83,22 @@ pub struct DnsRecordInput {
     pub content: String,
     pub ttl: Option<u32>,
     pub proxied: Option<bool>,
+    /// Приоритет MX/SRV/URI. Веб-путь его передаёт; десктопный до этого молча
+    /// терял, и MX-запись уезжала в Cloudflare без приоритета.
+    pub priority: Option<u16>,
 }
 
 #[derive(Deserialize)]
 pub struct DnsRecordPatchInput {
+    /// Смена типа записи. Форма редактирования во фронте её предлагает, и
+    /// веб-путь её передаёт; без этого поля на десктопе она молча не работала.
+    #[serde(rename = "type")]
+    pub record_type: Option<String>,
     pub name: Option<String>,
     pub content: Option<String>,
     pub ttl: Option<u32>,
     pub proxied: Option<bool>,
+    pub priority: Option<u16>,
 }
 
 #[tauri::command]
@@ -90,6 +116,7 @@ pub async fn cf_verify_token(
 
 #[tauri::command]
 pub async fn cf_create_zone(
+    app: AppHandle,
     user_id: String,
     account_id: String,
     zone_name: String,
@@ -101,21 +128,26 @@ pub async fn cf_create_zone(
         .await
         .map_err(|e| CommandError::Api(e.to_string()))?;
     if created {
-        api.audit_log(
+        // Зона в Cloudflare уже создана. `?` здесь отрапортовал бы неудачу об
+        // удавшейся работе, а повтор упёрся бы в «zone already exists» —
+        // best-effort, не превращать обратно в `?` (см. `audit_best_effort`).
+        audit_best_effort(
+            &app,
+            &api,
             "cf.zone.create",
-            Some("cloudflare_zone"),
-            Some(&zone.id),
+            "cloudflare_zone",
+            &zone.id,
             ctx.device_id,
             Some(serde_json::json!({ "name": zone.name })),
         )
-        .await
-        .map_err(|e| CommandError::Api(e.to_string()))?;
+        .await;
     }
     Ok(zone)
 }
 
 #[tauri::command]
 pub async fn cf_create_dns_record(
+    app: AppHandle,
     user_id: String,
     account_id: String,
     zone_id: String,
@@ -130,24 +162,33 @@ pub async fn cf_create_dns_record(
         content: record.content,
         ttl: record.ttl,
         proxied: record.proxied,
+        priority: record.priority,
     };
     let rec = client::create_dns_record(&ctx.token, &zone_id, &payload)
         .await
         .map_err(|e| CommandError::Api(e.to_string()))?;
-    api.audit_log(
+    // Запись в Cloudflare уже создана: `?` из-за сбоя аудита превратил бы успех
+    // в ошибку, а повтор создал бы дубль. Best-effort, не превращать в `?`.
+    audit_best_effort(
+        &app,
+        &api,
         "cf.dns.create",
-        Some("cloudflare_zone"),
-        Some(&zone_id),
+        "cloudflare_zone",
+        &zone_id,
         ctx.device_id,
         Some(serde_json::json!({ "type": rec.record_type, "name": rec.name })),
     )
-    .await
-    .map_err(|e| CommandError::Api(e.to_string()))?;
+    .await;
     Ok(rec)
 }
 
+/// Аргументов восемь, и сгруппировать их нельзя: у Tauri-команды форма
+/// параметров — это контракт с фронтом (invoke передаёт их по именам), а `app`
+/// добавлен ради события о незаписанном аудите.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn cf_update_dns_record(
+    app: AppHandle,
     user_id: String,
     account_id: String,
     zone_id: String,
@@ -158,28 +199,34 @@ pub async fn cf_update_dns_record(
 ) -> Result<DnsRecord, CommandError> {
     let ctx = cf_ctx(&api, &user_id, &handle, &account_id).await?;
     let p = DnsRecordPatch {
+        record_type: patch.record_type,
         name: patch.name,
         content: patch.content,
         ttl: patch.ttl,
         proxied: patch.proxied,
+        priority: patch.priority,
     };
     let rec = client::update_dns_record(&ctx.token, &zone_id, &record_id, &p)
         .await
         .map_err(|e| CommandError::Api(e.to_string()))?;
-    api.audit_log(
+    // Запись в Cloudflare уже изменена: `?` из-за сбоя аудита показал бы
+    // пользователю ошибку на удавшейся правке. Best-effort, не превращать в `?`.
+    audit_best_effort(
+        &app,
+        &api,
         "cf.dns.update",
-        Some("cloudflare_zone"),
-        Some(&zone_id),
+        "cloudflare_zone",
+        &zone_id,
         ctx.device_id,
         Some(serde_json::json!({ "record_id": record_id })),
     )
-    .await
-    .map_err(|e| CommandError::Api(e.to_string()))?;
+    .await;
     Ok(rec)
 }
 
 #[tauri::command]
 pub async fn cf_delete_dns_record(
+    app: AppHandle,
     user_id: String,
     account_id: String,
     zone_id: String,
@@ -191,20 +238,26 @@ pub async fn cf_delete_dns_record(
     client::delete_dns_record(&ctx.token, &zone_id, &record_id)
         .await
         .map_err(|e| CommandError::Api(e.to_string()))?;
-    api.audit_log(
+    // Самый наглядный случай, ради которого аудит здесь best-effort: записи в
+    // Cloudflare уже нет. `?` вернул бы `Err` на удавшемся удалении,
+    // пользователь повторил бы его и получил 404 — а в аудите так ничего и не
+    // появилось бы. Не превращать обратно в `?`.
+    audit_best_effort(
+        &app,
+        &api,
         "cf.dns.delete",
-        Some("cloudflare_zone"),
-        Some(&zone_id),
+        "cloudflare_zone",
+        &zone_id,
         ctx.device_id,
         Some(serde_json::json!({ "record_id": record_id })),
     )
-    .await
-    .map_err(|e| CommandError::Api(e.to_string()))?;
+    .await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn cf_purge_cache(
+    app: AppHandle,
     user_id: String,
     account_id: String,
     zone_id: String,
@@ -215,14 +268,16 @@ pub async fn cf_purge_cache(
     client::purge_cache(&ctx.token, &zone_id)
         .await
         .map_err(|e| CommandError::Api(e.to_string()))?;
-    api.audit_log(
+    // Кэш уже сброшен, откатить это нельзя. Best-effort, не превращать в `?`.
+    audit_best_effort(
+        &app,
+        &api,
         "cf.cache_purge",
-        Some("cloudflare_zone"),
-        Some(&zone_id),
+        "cloudflare_zone",
+        &zone_id,
         ctx.device_id,
         None,
     )
-    .await
-    .map_err(|e| CommandError::Api(e.to_string()))?;
+    .await;
     Ok(())
 }

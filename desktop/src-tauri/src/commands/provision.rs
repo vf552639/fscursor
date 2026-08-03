@@ -16,7 +16,7 @@ use crate::provision::fastpanel_install::{
     parse_fastpanel_credentials, update_command, FpCredentials, INSTALL_CMD,
 };
 use crate::ssh::client::{SshError, SshSession};
-use crate::ssh::fastpanel::{self, CreateDbResult, CreateSiteResult, SslInfo};
+use crate::ssh::fastpanel::{self, CreateDbResult, CreateFtpResult, CreateSiteResult, SslInfo};
 use crate::sync::cache;
 use crate::sync::http::ApiClient;
 
@@ -31,6 +31,8 @@ pub struct ProvisionResultOut {
     pub ssl_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<DbInfoOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ftp: Option<FtpInfoOut>,
 }
 
 /// Реквизиты созданной БД. Намеренно без `Debug`: `db_password` существует
@@ -41,6 +43,19 @@ pub struct DbInfoOut {
     pub db_user: String,
     /// Пароль БД: чувствительно, показывать по образцу RevealSecret.
     pub db_password: String,
+}
+
+/// Реквизиты созданного FTP-аккаунта. Намеренно без `Debug` — по той же причине,
+/// что и `DbInfoOut`.
+///
+/// `output` из `CreateFtpResult` сюда не переносится: это сырой вывод команды,
+/// пользы в нём нет, а гарантий, что FastPanel не повторит в нём пароль, — тоже.
+#[derive(Serialize)]
+pub struct FtpInfoOut {
+    pub ftp_user: String,
+    /// Пароль FTP: генерируется на сервере и больше нигде не хранится —
+    /// показывать по образцу RevealSecret, как пароль БД и пароль панели.
+    pub ftp_password: String,
 }
 
 #[derive(Serialize)]
@@ -163,6 +178,7 @@ struct ProvisionSteps {
     ssl_issued: Option<bool>,
     ssl_error: Option<String>,
     db: Option<DbInfoOut>,
+    ftp: Option<FtpInfoOut>,
 }
 
 /// Шаги провижининга внутри уже открытой сессии.
@@ -244,6 +260,7 @@ async fn run_provision_steps(
         ssl_issued: None,
         ssl_error: None,
         db: None,
+        ftp: None,
     };
 
     if !plan.site_only {
@@ -251,9 +268,23 @@ async fn run_provision_steps(
             "provision:progress",
             serde_json::json!({ "step": "ftp", "domain_id": domain_id }),
         );
-        // `let _ =`, а не `let _ftp =`: CreateFtpResult несёт пароль, и биндинг
-        // держал бы его живым всю выдачу SSL. Здесь он умирает сразу.
-        let _ = fastpanel::create_ftp_account(session, &fp_path, domain_name).await?;
+        // Пароль FTP генерируется на сервере и нигде больше не хранится: не
+        // отдав его в ответе, мы оставляем пользователя с аккаунтом, войти в
+        // который он не сможет никогда. Поэтому он живёт в `done.ftp` до
+        // возврата результата — ровно как пароль БД ниже.
+        //
+        // `output` (сырой вывод команды) отбрасываем прямо в деструктуризации,
+        // как и у `create_database`: пользы в нём нет, а гарантий, что FastPanel
+        // не повторит в нём пароль, — тоже.
+        let CreateFtpResult {
+            ftp_user,
+            ftp_password,
+            ..
+        } = fastpanel::create_ftp_account(session, &fp_path, domain_name).await?;
+        done.ftp = Some(FtpInfoOut {
+            ftp_user,
+            ftp_password,
+        });
         done.steps.push("ftp");
 
         // SSL. Ни один путь этого блока не возвращает Err: сайт и FTP уже
@@ -555,6 +586,7 @@ pub async fn run_provision_domain(
         ssl_issued: done.ssl_issued,
         ssl_error: done.ssl_error,
         db: done.db,
+        ftp: done.ftp,
     })
 }
 
@@ -766,7 +798,7 @@ pub async fn install_fastpanel(
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<InstallFastpanelResult, CommandError> {
-    let key = keychain::load_master_key(&user_id)
+    let mut key = keychain::load_master_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let path = cache_path(&handle)?;
@@ -801,7 +833,11 @@ pub async fn install_fastpanel(
         .get("ssh_password_blob_id")
         .and_then(json_str)
         .ok_or_else(|| CommandError::Api("server has no ssh_password_blob_id".into()))?;
-    let password = blob_plaintext(&api, &key, &blob_id).await?;
+    let password = blob_plaintext(&api, &key, &blob_id).await;
+    // Мастер-ключ больше не нужен: дальше только SSH и HTTP, а функция тянется
+    // все 30-40 минут установки. Гасим до разбора результата, а не после.
+    key.zeroize();
+    let mut password = password?;
     let host = server_row
         .get("ip_address")
         .and_then(json_str)
@@ -827,7 +863,7 @@ pub async fn install_fastpanel(
         "fastpanel:progress",
         serde_json::json!({ "step": "ssh_connect", "server_id": server_id }),
     );
-    let mut session = ssh_connect_session_with_timeout(
+    let session = ssh_connect_session_with_timeout(
         &app,
         &host,
         port,
@@ -835,7 +871,11 @@ pub async fn install_fastpanel(
         &password,
         FP_SESSION_TIMEOUT,
     )
-    .await?;
+    .await;
+    // Пароль сервера дальше не нужен ни на одном пути — ни на успешном, ни на
+    // ошибочном. Гасим до разбора результата, а не после.
+    password.zeroize();
+    let mut session = session?;
 
     let installed = run_fastpanel_install_steps(&app, &mut session, &server_id, &os).await;
     let _ = session.disconnect().await;
@@ -1048,11 +1088,13 @@ mod tests {
             ssl_issued: None,
             ssl_error: None,
             db: None,
+            ftp: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         assert!(!j.contains("ssl_issued"));
         assert!(!j.contains("ssl_error"));
         assert!(!j.contains("\"db\""));
+        assert!(!j.contains("\"ftp\""));
     }
 
     #[test]
@@ -1068,9 +1110,31 @@ mod tests {
                 db_user: "du".into(),
                 db_password: "dp".into(),
             }),
+            ftp: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains("ssl_issued"));
         assert!(j.contains("db_name"));
+    }
+
+    // Пароль FTP генерируется на сервере и нигде не хранится: если он не уедет
+    // во фронт этим ответом, пользователь не узнает его никогда.
+    #[test]
+    fn provision_result_includes_ftp_credentials_when_present() {
+        let r = ProvisionResultOut {
+            domain_id: "1".into(),
+            site_user: "u".into(),
+            site_path: "/p".into(),
+            ssl_issued: Some(true),
+            ssl_error: None,
+            db: None,
+            ftp: Some(FtpInfoOut {
+                ftp_user: "fu".into(),
+                ftp_password: "fp".into(),
+            }),
+        };
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["ftp"]["ftp_user"], "fu");
+        assert_eq!(v["ftp"]["ftp_password"], "fp");
     }
 }

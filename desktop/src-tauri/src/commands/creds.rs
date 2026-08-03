@@ -1,9 +1,10 @@
-//! Общие helper'ы для Tauri-команд: расшифровка blob'ов и доступ к локальному кэшу.
+//! Общие helper'ы для Tauri-команд: расшифровка blob'ов, доступ к локальному
+//! кэшу и best-effort запись в audit log.
 
 use std::path::PathBuf;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::auth::CommandError;
 use crate::commands::sync_cmd::SyncHandle;
@@ -32,6 +33,56 @@ pub(crate) fn json_str(v: &serde_json::Value) -> Option<String> {
 
 pub(crate) fn json_i64(v: &serde_json::Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_u64().map(|u| u as i64))
+}
+
+/// Канал событий для действий, чей аудит не удалось записать.
+///
+/// Отдельный от `provision:progress`/`fastpanel:progress` канал: те привязаны к
+/// длинной операции с шагами, а cf/registrar — одиночные мутации, и слушателю
+/// нужен один общий подписчик на все из них.
+pub(crate) const AUDIT_PROGRESS_EVENT: &str = "audit:progress";
+
+/// Записать действие в audit log, не роняя саму команду.
+///
+/// Мутация к этому моменту уже выполнена на стороне Cloudflare/регистратора и
+/// откату не подлежит. Фатальный аудит (`?`) на сетевом сбое последнего шага
+/// превращал бы успешную операцию в `Err`: пользователь повторял бы её (для
+/// delete — уже по несуществующей записи, то есть в 404), а записи в аудите всё
+/// равно бы не появилось. «Фатально» не даёт никакой гарантии и стоит
+/// корректности — НЕ превращать обратно в `?`.
+///
+/// Но best-effort не значит «молча»: помимо варнинга в лог шлём событие, по
+/// которому фронт покажет, что действие осталось незаписанным.
+pub(crate) async fn audit_best_effort(
+    app: &AppHandle,
+    api: &ApiClient,
+    action: &str,
+    target_type: &str,
+    target_id: &str,
+    device_id: Option<uuid::Uuid>,
+    metadata: Option<serde_json::Value>,
+) {
+    if let Err(e) = api
+        .audit_log(
+            action,
+            Some(target_type),
+            Some(target_id),
+            device_id,
+            metadata,
+        )
+        .await
+    {
+        tracing::warn!(target: "audit", "audit log for {action} failed: {e}");
+        let _ = app.emit(
+            AUDIT_PROGRESS_EVENT,
+            serde_json::json!({
+                "step": "audit_failed",
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+            }),
+        );
+    }
 }
 
 /// Путь к локальному кэшу из инициализированного `SyncHandle`.
