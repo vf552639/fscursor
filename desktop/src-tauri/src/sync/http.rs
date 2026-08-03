@@ -141,7 +141,8 @@ struct BlobUpsertBody<'a> {
     ciphertext_b64: String,
 }
 
-/// Несекретный результат провижининга, уезжающий обратно в `domains.*`.
+/// Несекретный результат десктопной операции над доменом (провижининг, смена
+/// NS), уезжающий обратно в `domains.*`.
 ///
 /// Сервер применяет патч через `model_dump(exclude_unset=True)`: опущенное поле
 /// он не трогает, а явный `null` — затирает. Поэтому все поля `Option` и все
@@ -162,6 +163,12 @@ pub struct DomainWriteBack {
     pub db_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db_user: Option<String>,
+    /// Итог смены NS у регистратора: `ok` | `error`. В отличие от `ssl_status`,
+    /// enum'а на бэкенде под это НЕТ — колонка голый `String(32)`, и словарь
+    /// задаёт фронт (бейдж «NS push to registrar»). Значения — в
+    /// `commands::registrars`, там же и почему.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ns_status: Option<String>,
     /// `Some(None)` — погасить прошлую ошибку явным `null`; `None` — не трогать.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_provision_error: Option<Option<String>>,

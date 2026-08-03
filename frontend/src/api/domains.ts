@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { invokeSynced } from "../lib/localCache";
-import { isTauri } from "../lib/runtime";
+import { desktopOnly, isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -106,10 +106,6 @@ export interface DomainFilters {
 export interface SetNsResponse {
   task_id: string;
   domain_id: number;
-}
-
-export interface BulkSetNsResponse {
-  task_ids: string[];
 }
 
 export interface ProvisionResponse {
@@ -242,21 +238,117 @@ export function useBulkAssignCloudflare() {
   });
 }
 
-export function useSetNameservers(id: number) {
-  return useMutation({
-    mutationFn: () => apiPost<SetNsResponse>(`/domains/${id}/set-ns`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: domainsKeys.detail(id) });
-      queryClient.invalidateQueries({ queryKey: domainsKeys.all });
-    },
-  });
+/**
+ * Одна фраза и для брошенной ошибки, и для подписи под выключенной кнопкой:
+ * оба места объясняют пользователю одно и то же, и разъехаться они не должны.
+ */
+export const NS_DESKTOP_NOTE = desktopOnly("Setting nameservers");
+
+/**
+ * Минимум nameservers, который принимают оба регистратора. Меньше двух — это
+ * гарантированный отказ на их стороне, а отказ теперь ещё и оседает на сервере
+ * как `ns_status: error`. Дешевле не пускать.
+ */
+export const MIN_NAMESERVERS = 2;
+
+/**
+ * Нормализация списка перед отправкой: убрать пустое, схлопнуть регистр и
+ * повторы. Дубль (`ns1.x` дважды — обычная опечатка при ручном вводе) Namecheap
+ * отбивает ошибкой, а отбитая попытка теперь пишет на сервер `ns_status: error`
+ * — то есть опечатка портила бы состояние домена.
+ */
+export function normalizeNameservers(input: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input) {
+    const ns = raw.trim();
+    if (!ns) continue;
+    const key = ns.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ns);
+  }
+  return out;
 }
 
-export function useBulkSetNameservers() {
+/**
+ * Аргументы смены NS. Три разных идентификатора, которые легко перепутать, —
+ * поэтому они и разведены по именам, а не по позициям.
+ */
+export interface SetNameserversVars {
+  /** Строка `domains` на сервере: адресат write-back'а `ns_status`. */
+  domainId: number;
+  /** ИМЯ домена: именно его ждёт API регистратора и аудит (`target_id`). */
+  domainName: string;
+  /**
+   * Аккаунт РЕГИСТРАТОРА (`domains.registrar_id`), из которого команда достаёт
+   * и расшифровывает API-ключ. Не аккаунт Cloudflare и не id домена.
+   */
+  registrarAccountId: number | null;
+  nameservers: string[];
+}
+
+/**
+ * Прописать NS у регистратора. Выполняет ТОЛЬКО десктоп: API-ключ регистратора
+ * лежит на сервере зашифрованным блобом и расшифровывается на клиенте, поэтому
+ * `POST /domains/{id}/set-ns` на бэкенде нет и не будет (в `routes/domains.py`
+ * его никогда не было — остались только схемы ответа). Веб — «только смотрит».
+ *
+ * `invokeSynced`, а не `invokeIfTauri`: команда резолвит аккаунт регистратора из
+ * локального SQLCipher-кэша, и без свежей синхронизации только что назначенный
+ * регистратор ей не виден.
+ *
+ * Список NS передаётся явно: команда не умеет его добывать. Откуда его берёт UI
+ * — вопрос UI (обычно NS зоны Cloudflare, см. `useZoneNameservers`).
+ */
+export function useSetNameservers() {
   return useMutation({
-    mutationFn: (domain_ids: number[]) =>
-      apiPost<BulkSetNsResponse>("/domains/bulk-set-ns", { domain_ids }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
+    mutationFn: async (vars: SetNameserversVars): Promise<boolean> => {
+      if (!isTauri()) {
+        throw new Error(NS_DESKTOP_NOTE);
+      }
+      const userId = useAuthStore.getState().userId;
+      if (!userId) {
+        throw new Error("Desktop: unlock session (user id missing)");
+      }
+      if (vars.registrarAccountId == null) {
+        throw new Error("Assign a registrar account to this domain first.");
+      }
+      const nameservers = normalizeNameservers(vars.nameservers);
+      if (nameservers.length < MIN_NAMESERVERS) {
+        throw new Error(`Enter at least ${MIN_NAMESERVERS} distinct nameservers.`);
+      }
+      const ok = await invokeSynced<boolean>("registrar_set_nameservers", {
+        userId,
+        accountId: String(vars.registrarAccountId),
+        // Оба: `domain` уходит регистратору и в аудит, `domainId` адресует
+        // write-back `ns_status` (см. `registrar_set_nameservers` в Rust).
+        domainId: String(vars.domainId),
+        domain: vars.domainName,
+        nameservers,
+      });
+      // Сегодня оба провайдера отвечают либо `Ok(true)`, либо ошибкой, так что
+      // ветка недостижима. Но «успех» на `false` — молчаливая ложь про то,
+      // делегирование чего пользователь только что менял.
+      if (!ok) {
+        throw new Error("The registrar did not apply the nameserver change.");
+      }
+      return ok;
+    },
+    // Именно `onSettled`: `ns_status` на сервере переписывает write-back самой
+    // команды, и он срабатывает на ОБОИХ исходах — отказ регистратора кладёт
+    // туда `error` и только потом доезжает сюда ошибкой. На `onSuccess` самый
+    // интересный случай остался бы без обновления списка.
+    onSettled: (_data, _err, vars) => {
+      // Работу делает `all`: карточку домена рисует строка из списка (см.
+      // `DomainDetailModal` в `Domains.tsx`), и без этой инвалидации она бы ещё
+      // долго показывала «pending» после удавшейся смены.
+      queryClient.invalidateQueries({ queryKey: domainsKeys.all });
+      // `detail` пока сбрасывать некому: у `useDomain` нет ни одного
+      // вызывающего. Оставлено как парная инвалидация — в тот день, когда
+      // карточка станет отдельным запросом, забыть её здесь будет дороже.
+      queryClient.invalidateQueries({ queryKey: domainsKeys.detail(vars.domainId) });
+    },
   });
 }
 

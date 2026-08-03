@@ -2,7 +2,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
 import { invokeSynced } from "../lib/localCache";
-import { isTauri } from "../lib/runtime";
+// Мутации Cloudflare живут только в десктопе: токен аккаунта расшифровывается
+// на клиенте, и HTTP-роутов под них на бэкенде нет и не будет (в
+// `routes/cloudflare.py` только CRUD аккаунтов). Веб — «только смотрит».
+import { isTauri, requireDesktop } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -95,15 +98,6 @@ function requireUserId(): string {
   const userId = useAuthStore.getState().userId;
   if (!userId) throw new Error("Desktop: unlock session (user id missing)");
   return userId;
-}
-
-/**
- * Мутации Cloudflare живут только в десктопе: токен аккаунта расшифровывается
- * на клиенте, и HTTP-роутов под них на бэкенде нет и не будет (в
- * `routes/cloudflare.py` только CRUD аккаунтов). Веб — «только смотрит».
- */
-function requireDesktop(what: string): void {
-  if (!isTauri()) throw new Error(`${what} runs in the SDMP desktop app.`);
 }
 
 export const cloudflareKeys = {

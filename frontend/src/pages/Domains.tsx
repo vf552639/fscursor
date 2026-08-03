@@ -1,6 +1,6 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useBulkSetNameservers, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useCheckNs, useMarkNsSet, useRefreshSsl, useBulkFullSetup, Domain, ProvisionDesktopResult } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useCheckNs, useMarkNsSet, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, Domain, ProvisionDesktopResult } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
@@ -75,12 +75,23 @@ interface EditDomainModalProps {
   cfAccounts: CloudflareAccount[];
 }
 
+/**
+ * ВНИМАНИЕ: эта модалка НЕДОСТИЖИМА. `setEditingDomain` нигде не вызывается со
+ * значением — единственные два вхождения это её же объявление и сброс в `null`
+ * при закрытии, то есть открыть её нечем. Ни одна кнопка строки таблицы её не
+ * поднимает (в `RowActions` только «Open detail», «Provision» и «Delete»).
+ *
+ * Код внутри поддерживается в рабочем виде (иначе он не компилируется вместе с
+ * остальным), но проверить руками его нельзя. Живая правка NS — во вкладке NS
+ * `DomainDetailModal`. Дать модалке точку входа или удалить её — отдельное
+ * решение, не эта фаза.
+ */
 function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: EditDomainModalProps) {
   const [name, setName] = useState(domain.domain);
   const [serverId, setServerId] = useState(domain.server_id ? String(domain.server_id) : "");
   const [registrarId, setRegistrarId] = useState(domain.registrar_id ? String(domain.registrar_id) : "");
   const [cfZoneId, setCfZoneId] = useState(domain.cf_zone_id || "");
-  const setNameservers = useSetNameservers(domain.id);
+  const setNameservers = useSetNameservers();
   const { data: nameserversData, isLoading: isNameserversLoading, isError: isNameserversError } =
     useZoneNameservers(domain.cf_id, domain.cf_zone_id);
   const { data: zoneDetails, isLoading: isZoneLoading, isError: isZoneError } =
@@ -169,11 +180,47 @@ function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: E
                 )}
               </div>
             )}
+            {/* Ошибка команды раньше терялась целиком: `mutate()` без onError,
+                и отказ регистратора выглядел как «ничего не произошло». */}
+            {setNameservers.isError ? (
+              <div style={{fontSize:12.5,color:"#dc2626",marginBottom:6}}>
+                {String((setNameservers.error as any)?.message || "Set NS failed")}
+              </div>
+            ) : null}
+            {domain.registrar_id == null ? (
+              <div style={{fontSize:12.5,color:"#b45309",marginBottom:6}}>
+                Assign a registrar account to this domain first.
+              </div>
+            ) : null}
+            {/* Выключенная кнопка без объяснения — это загадка, а не запрет.
+                Каждое условие в `disabled` ниже имеет свою строчку. */}
+            {domain.registrar_id != null && (nameserversData?.name_servers.length ?? 0) < MIN_NAMESERVERS ? (
+              <div style={{fontSize:12.5,color:"#b45309",marginBottom:6}}>
+                Nothing to push: this Cloudflare zone returned fewer than {MIN_NAMESERVERS} nameservers.
+              </div>
+            ) : null}
+            {!isTauri() ? (
+              <div style={{fontSize:12.5,color:"#92400e",marginBottom:6}}>
+                Read-only here. {NS_DESKTOP_NOTE}
+              </div>
+            ) : null}
             <Btn
               size="sm"
               variant="secondary"
-              onClick={() => setNameservers.mutate()}
-              disabled={setNameservers.isPending}
+              onClick={() =>
+                setNameservers.mutate({
+                  domainId: domain.id,
+                  domainName: domain.domain,
+                  registrarAccountId: domain.registrar_id,
+                  nameservers: nameserversData?.name_servers ?? [],
+                })
+              }
+              disabled={
+                setNameservers.isPending ||
+                !isTauri() ||
+                domain.registrar_id == null ||
+                (nameserversData?.name_servers.length ?? 0) < MIN_NAMESERVERS
+              }
             >
               {setNameservers.isPending ? "Setting NS..." : "↺ Set NS"}
             </Btn>
@@ -232,7 +279,6 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
 
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
-  const bulkSetNs = useBulkSetNameservers();
   const bulkProvision = useBulkProvisionDomains();
   const checkNs = useCheckNs();
   const markNsSet = useMarkNsSet();
@@ -377,12 +423,6 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     );
   };
 
-  const handleSetNs = () => {
-    bulkSetNs.mutate(Array.from(sel), {
-      onSuccess: () => setSel(new Set())
-    });
-  };
-
   const handleBulkProvision = () => {
     bulkProvision.mutate(Array.from(sel), {
       onSuccess: () => setSel(new Set())
@@ -483,14 +523,13 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
       selectedDomainIds={Array.from(sel)}
       onAssignServer={() => setShowAssignServer(true)}
       onAssignCF={() => setShowAssignCF(true)}
-      onSetNs={handleSetNs}
       onCheckNs={handleBulkCheckNs}
       onMarkNsSet={handleBulkMarkNsSet}
       onBulkRefreshSsl={handleBulkRefreshSsl}
       onFullSetup={() => setShowFullSetup(true)}
       onProvision={handleBulkProvision}
       onDelete={handleBulkDelete}
-      pending={bulkSetNs.isPending || bulkProvision.isPending || checkNs.isPending || markNsSet.isPending || refreshSsl.isPending || bulkFullSetup.isPending}
+      pending={bulkProvision.isPending || checkNs.isPending || markNsSet.isPending || refreshSsl.isPending || bulkFullSetup.isPending}
     />
     <Card>
       <div style={{overflowX:"auto"}}>
@@ -605,7 +644,21 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
 
     {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />}
     {editingDomain && <EditDomainModal domain={editingDomain} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onClose={() => setEditingDomain(null)} />}
-    {detailDomain && <DomainDetailModal domain={detailDomain} onClose={() => setDetailDomain(null)} />}
+    {/* `detailDomain` — снимок строки на момент клика, и он НЕ обновляется от
+        инвалидации: модалка показывала бы «NS status: pending» ещё долго после
+        удачной смены NS, то есть ровно ту ложь, ради устранения которой заведён
+        write-back. Берём живую строку из свежего списка, а снимок оставляем
+        резервом на случай, если домен из списка исчез (удалён, ушёл под фильтр).
+
+        `key` — чтобы при переходе с домена на домен модалка пересоздавалась:
+        иначе её собственный стейт (набранные NS) пережил бы смену props. */}
+    {detailDomain && (
+      <DomainDetailModal
+        key={detailDomain.id}
+        domain={domainsData.find((x) => x.id === detailDomain.id) ?? detailDomain}
+        onClose={() => setDetailDomain(null)}
+      />
+    )}
     {showFullSetup && (
       <BulkSetupWizard
         selectedCount={sel.size}

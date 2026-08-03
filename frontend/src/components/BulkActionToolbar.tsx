@@ -12,7 +12,6 @@ export default function BulkActionToolbar({
   selectedDomainIds = [],
   onAssignServer,
   onAssignCF,
-  onSetNs,
   onCheckNs,
   onMarkNsSet,
   onProvision,
@@ -26,7 +25,6 @@ export default function BulkActionToolbar({
   selectedDomainIds?: number[];
   onAssignServer: () => void;
   onAssignCF: () => void;
-  onSetNs: () => void;
   onCheckNs?: () => void;
   onMarkNsSet?: () => void;
   onProvision: () => void;
@@ -67,12 +65,14 @@ export default function BulkActionToolbar({
         desktopOnClick={onAssignCF}
         disabled={Boolean(pending)}
       />
-      <OpenInDesktop
-        action={`set-ns${q}`}
-        label="Set NS"
-        desktopOnClick={onSetNs}
-        disabled={Boolean(pending)}
-      />
+      {/* Массового «Set NS» здесь намеренно нет: `POST /domains/bulk-set-ns` на
+          бэкенде не существует, а `sdmp://set-ns` не разбирает
+          parseDeepLinkAction — кнопка вела в никуда в обеих средах. Смена NS
+          пачкой — это не проброс кнопки: команде `registrar_set_nameservers`
+          нужен свой список NS на каждый домен (у каждого — своя зона
+          Cloudflare, возможно в другом аккаунте) плюс отчёт по каждому. Это
+          отдельная функция со своим планом, а не достижимость. NS одного домена
+          ставятся во вкладке NS его карточки. */}
       {onCheckNs ? (
         <OpenInDesktop
           action={`check-ns${q}`}

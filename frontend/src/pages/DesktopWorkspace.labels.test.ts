@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { FASTPANEL_STEP_LABEL, PROVISION_STEP_LABEL } from "./DesktopWorkspace";
+import { AUDIT_ACTION_LABEL, FASTPANEL_STEP_LABEL, PROVISION_STEP_LABEL } from "./DesktopWorkspace";
 
 /**
  * Слушатели `fastpanel:progress` / `provision:progress` молча выбрасывают шаги,
@@ -33,6 +33,22 @@ describe("таблицы шагов прогресса", () => {
       "writeback_failed",
     ]) {
       expect(FASTPANEL_STEP_LABEL[step], `нет текста для шага ${step}`).toBeTruthy();
+    }
+  });
+
+  // Тот же слушатель `audit:progress` разводит теперь два шага, и оба молча
+  // выбрасывают действие, которого нет в таблице. `registrar.ns_set` шлют оба:
+  // и audit_best_effort, и провал write-back'а `ns_status`.
+  it("знает все действия, которые шлёт Rust по каналу audit:progress", () => {
+    for (const action of [
+      "cf.zone.create",
+      "cf.dns.create",
+      "cf.dns.update",
+      "cf.dns.delete",
+      "cf.cache_purge",
+      "registrar.ns_set",
+    ]) {
+      expect(AUDIT_ACTION_LABEL[action], `нет названия для действия ${action}`).toBeTruthy();
     }
   });
 });

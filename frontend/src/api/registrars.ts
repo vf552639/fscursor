@@ -2,7 +2,11 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
 import { invokeSynced } from "../lib/localCache";
-import { isTauri } from "../lib/runtime";
+// Всё, что ходит в API регистратора, живёт только в десктопе: ключ и секрет
+// расшифровываются на клиенте, и роутов под них на бэкенде нет и не будет (в
+// `routes/registrars.py` только CRUD аккаунтов). HTTP-резерв здесь был мёртвым —
+// он уходил в 404. Веб — «только смотрит».
+import { requireDesktop } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -92,15 +96,13 @@ export function useDeleteRegistrarAccount() {
 export function useTestRegistrarConnection() {
   return useMutation({
     mutationFn: async (id: number): Promise<RegistrarTestResult> => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        const [success, message] = await invokeSynced<[boolean, string]>(
-          "registrar_test_connection",
-          { userId, accountId: String(id) }
-        );
-        return { success, message };
-      }
-      return apiPost<RegistrarTestResult>(`/registrars/accounts/${id}/test`);
+      requireDesktop("Testing a registrar connection");
+      const userId = requireUserId();
+      const [success, message] = await invokeSynced<[boolean, string]>(
+        "registrar_test_connection",
+        { userId, accountId: String(id) }
+      );
+      return { success, message };
     },
   });
 }
@@ -109,14 +111,12 @@ export function useRegistrarDomains(accountId: number | null | undefined) {
   return useQuery({
     queryKey: accountId ? registrarsKeys.domains(accountId) : ["registrars", "domains", "disabled"],
     queryFn: async () => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        return invokeSynced<RegistrarDomain[]>("registrar_get_domains", {
-          userId,
-          accountId: String(accountId),
-        });
-      }
-      return apiGet<RegistrarDomain[]>(`/registrars/accounts/${accountId}/domains`);
+      requireDesktop("Reading domains from a registrar");
+      const userId = requireUserId();
+      return invokeSynced<RegistrarDomain[]>("registrar_get_domains", {
+        userId,
+        accountId: String(accountId),
+      });
     },
     enabled: !!accountId,
   });

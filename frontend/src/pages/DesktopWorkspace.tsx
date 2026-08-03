@@ -58,10 +58,19 @@ export const PROVISION_STEP_LABEL: Record<string, string> = {
 };
 
 /**
- * Действие cf/registrar → текст, если его не удалось записать в audit log
- * (канал `audit:progress`, шаг `audit_failed`). Само действие при этом успешно.
+ * Действие cf/registrar → его название для канала `audit:progress`. Сообщается
+ * только то, что не удалось ЗАПИСАТЬ: строчку в audit log (`audit_failed`) или
+ * результат на сервере (`writeback_failed`).
+ *
+ * Название подставляется в утвердительном прошедшем времени («Nameservers set,
+ * but …»), поэтому Rust обязан слать эти шаги ТОЛЬКО после состоявшегося
+ * действия. Для `audit_failed` это гарантировано устройством
+ * `audit_best_effort` (он зовётся после успеха), для `writeback_failed` —
+ * явной проверкой в `registrar_set_nameservers`: write-back там выполняется и
+ * на отказе регистратора, но событие о его провале на этом пути не шлётся,
+ * иначе тост «Nameservers set…» встал бы рядом с баннером об ошибке.
  */
-const AUDIT_ACTION_LABEL: Record<string, string> = {
+export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "cf.zone.create": "Zone created",
   "cf.dns.create": "DNS record created",
   "cf.dns.update": "DNS record updated",
@@ -231,8 +240,9 @@ export default function DesktopWorkspace() {
     };
   }, []);
 
-  // cf/registrar-мутации выполняются, даже если запись в audit log не прошла:
-  // об этом молчать нельзя — иначе действие исчезает из истории незаметно.
+  // cf/registrar-мутации выполняются, даже если запись их следа не прошла: ни
+  // про потерянную строчку аудита, ни про незаписанный на сервере результат
+  // молчать нельзя — иначе действие исчезает незаметно.
   useEffect(() => {
     if (!isTauri()) return;
     let unlisten: (() => void) | undefined;
@@ -244,9 +254,13 @@ export default function DesktopWorkspace() {
         target_type: string;
         target_id: string;
       }>("audit:progress", (event) => {
-        if (event.payload.step !== "audit_failed") return;
         const label = AUDIT_ACTION_LABEL[event.payload.action];
-        if (label) showToast(`${label}, but the audit entry was not recorded`);
+        if (!label) return;
+        if (event.payload.step === "audit_failed") {
+          showToast(`${label}, but the audit entry was not recorded`);
+        } else if (event.payload.step === "writeback_failed") {
+          showToast(`${label}, but the result could not be saved on the server`);
+        }
       });
     })();
     return () => {
