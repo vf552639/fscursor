@@ -2,9 +2,10 @@ import base64
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit import service as audit_service
 from app.auth.dependencies import get_current_user_or_401
 from app.auth.models import User
 from app.blobs.models import BlobStorage
@@ -32,6 +33,7 @@ def _to_response(b: BlobStorage) -> BlobResponse:
 async def upsert_blob(
     blob_id: uuid.UUID,
     body: BlobUpsert,
+    request: Request,
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> BlobResponse:
@@ -65,6 +67,16 @@ async def upsert_blob(
         existing.updated_at = datetime.now(timezone.utc)
         existing.deleted = False
         b = existing
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="blob.upsert",
+        target_type="blob",
+        target_id=str(blob_id),
+        device_id=body.device_id,
+        ip=request.client.host if request.client else None,
+        metadata={"blob_kind": body.blob_kind},
+    )
     await db.commit()
     await db.refresh(b)
     return _to_response(b)
@@ -85,6 +97,7 @@ async def get_blob(
 @router.delete("/{blob_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_blob(
     blob_id: uuid.UUID,
+    request: Request,
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -95,4 +108,13 @@ async def delete_blob(
     b.deleted = True
     b.version = new_version
     b.updated_at = datetime.now(timezone.utc)
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="blob.delete",
+        target_type="blob",
+        target_id=str(blob_id),
+        ip=request.client.host if request.client else None,
+        metadata={"blob_kind": b.blob_kind},
+    )
     await db.commit()
