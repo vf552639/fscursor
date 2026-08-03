@@ -494,9 +494,20 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
   // отметку «это я уже видел»: иначе красное от неудавшегося create висит над
   // таблицей всё время, что пользователь в этой зоне.
   const [seenActionAt, setSeenActionAt] = useState(0);
-  const bannerVisible = lastAction.submittedAt > seenActionAt;
-  const actionError = bannerVisible ? lastAction.error : null;
-  const dismissBanner = () => setSeenActionAt(lastAction.submittedAt);
+  const bannerFresh = lastAction.submittedAt > seenActionAt;
+  const purgeSucceeded = purge.isSuccess && purge.submittedAt === lastAction.submittedAt;
+  const actionError = bannerFresh ? lastAction.error : null;
+  /**
+   * Есть ли ПРЯМО СЕЙЧАС что гасить. Пока мутация в полёте, `error` ещё null и
+   * на экране пусто — но `bannerFresh` уже true. Двигать отметку в этот момент
+   * значило бы съесть ошибку, которая случится через секунду: `T > T` даст
+   * false, и провал не покажется никогда. Воспроизводится так: Purge (висит) →
+   * «+ Add Record» (во время полёта не заблокирована) → Purge падает.
+   */
+  const bannerShown = bannerFresh && (lastAction.error != null || purgeSucceeded);
+  const dismissBanner = () => {
+    if (bannerShown) setSeenActionAt(lastAction.submittedAt);
+  };
   const openAddRecord = () => { dismissBanner(); setShowDns(true); };
   const openEditRecord = (r: DnsRecord) => { dismissBanner(); setEditingRecord(r); };
   const handleCreateRecord = () => {
@@ -557,7 +568,7 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
           <Btn size="sm" variant="ghost" onClick={dismissBanner}>✕</Btn>
         </div>
       )}
-      {bannerVisible && !actionError && purge.isSuccess && purge.submittedAt === lastAction.submittedAt && (
+      {bannerFresh && !actionError && purgeSucceeded && (
         <div style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#16a34a",display:"flex",gap:10,alignItems:"baseline"}}>
           <span style={{flex:1}}>✓ Cache purged</span>
           <Btn size="sm" variant="ghost" onClick={dismissBanner}>✕</Btn>

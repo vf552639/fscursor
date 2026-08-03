@@ -102,6 +102,10 @@ pub struct Zone {
 }
 
 pub async fn list_zones(token: &str) -> Result<Vec<Zone>, CloudflareError> {
+    list_zones_with_base(CF_API, token).await
+}
+
+async fn list_zones_with_base(api_base: &str, token: &str) -> Result<Vec<Zone>, CloudflareError> {
     let mut all = Vec::new();
     let mut page = 1u32;
     loop {
@@ -109,7 +113,7 @@ pub async fn list_zones(token: &str) -> Result<Vec<Zone>, CloudflareError> {
             ("per_page".into(), "50".into()),
             ("page".into(), page.to_string()),
         ];
-        let data = call(token, Method::GET, "/zones", Some(params), None).await?;
+        let data = call_with_base(api_base, token, Method::GET, "/zones", Some(params), None).await?;
         let rows: Vec<Zone> = serde_json::from_value(
             data.get("result")
                 .cloned()
@@ -428,43 +432,64 @@ mod tests {
         assert!(bare.status.is_none());
     }
 
+    /// Мокает `pages` страниц по одной строке на каждой. `per_page` в матчере
+    /// не для красоты: если размер страницы перестанет уезжать в запрос, ни
+    /// один mock не подойдёт и тест упадёт.
+    async fn mount_pages(
+        srv: &MockServer,
+        api_path: &str,
+        per_page: &str,
+        pages: u32,
+        row: impl Fn(u32) -> serde_json::Value,
+    ) {
+        for p in 1..=pages {
+            Mock::given(method("GET"))
+                .and(path(api_path))
+                .and(query_param("per_page", per_page))
+                .and(query_param("page", p.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "success": true,
+                    "result": [row(p)],
+                    "result_info": {"total_pages": pages}
+                })))
+                .mount(srv)
+                .await;
+        }
+    }
+
+    /// Одна страница и ни одного лишнего запроса: `result_info` в ответе нет,
+    /// и это не повод уйти в бесконечный цикл. `.expect(1)` проверяется в Drop.
+    async fn mount_single_page_without_result_info(
+        srv: &MockServer,
+        api_path: &str,
+        row: serde_json::Value,
+    ) {
+        Mock::given(method("GET"))
+            .and(path(api_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": [row]
+            })))
+            .expect(1)
+            .mount(srv)
+            .await;
+    }
+
+    fn dns_row(p: u32) -> serde_json::Value {
+        serde_json::json!({"id": format!("r{p}"), "type": "A", "name": format!("n{p}"), "content": "1.1.1.1"})
+    }
+
+    fn zone_row(p: u32) -> serde_json::Value {
+        serde_json::json!({"id": format!("z{p}"), "name": format!("d{p}.com"), "status": "active"})
+    }
+
     /// Зона на несколько страниц: без цикла редактор показал бы первую сотню
     /// записей под уверенным заголовком «DNS Records (100)», и пользователь,
     /// не найдя запись, завёл бы дубль.
     #[tokio::test]
     async fn list_dns_records_walks_all_pages() {
         let srv = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/client/v4/zones/z1/dns_records"))
-            .and(query_param("page", "1"))
-            .and(query_param("per_page", "100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "success": true,
-                "result": [{"id": "r1", "type": "A", "name": "a", "content": "1.1.1.1"}],
-                "result_info": {"total_pages": 3}
-            })))
-            .mount(&srv)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/client/v4/zones/z1/dns_records"))
-            .and(query_param("page", "2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "success": true,
-                "result": [{"id": "r2", "type": "A", "name": "b", "content": "2.2.2.2"}],
-                "result_info": {"total_pages": 3}
-            })))
-            .mount(&srv)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/client/v4/zones/z1/dns_records"))
-            .and(query_param("page", "3"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "success": true,
-                "result": [{"id": "r3", "type": "A", "name": "c", "content": "3.3.3.3"}],
-                "result_info": {"total_pages": 3}
-            })))
-            .mount(&srv)
-            .await;
+        mount_pages(&srv, "/client/v4/zones/z1/dns_records", "100", 3, dns_row).await;
 
         let base = format!("{}/client/v4", srv.uri());
         let recs = list_dns_records_with_base(&base, "t", "z1").await.unwrap();
@@ -472,24 +497,39 @@ mod tests {
         assert_eq!(ids, vec!["r1", "r2", "r3"]);
     }
 
-    /// Одна страница — один запрос: `total_pages` отсутствует в ответе, и это
-    /// не повод уйти в бесконечный цикл.
     #[tokio::test]
     async fn list_dns_records_stops_without_result_info() {
         let srv = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/client/v4/zones/z1/dns_records"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "success": true,
-                "result": [{"id": "r1", "type": "A", "name": "a", "content": "1.1.1.1"}]
-            })))
-            .expect(1)
-            .mount(&srv)
+        mount_single_page_without_result_info(&srv, "/client/v4/zones/z1/dns_records", dns_row(1))
             .await;
 
         let base = format!("{}/client/v4", srv.uri());
         let recs = list_dns_records_with_base(&base, "t", "z1").await.unwrap();
         assert_eq!(recs.len(), 1);
+    }
+
+    /// Тот же цикл, что и у записей, — и до сих пор без единого теста под ним.
+    /// У аккаунта с сотней доменов вторая страница зон так же обязательна.
+    #[tokio::test]
+    async fn list_zones_walks_all_pages() {
+        let srv = MockServer::start().await;
+        mount_pages(&srv, "/client/v4/zones", "50", 3, zone_row).await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let zones = list_zones_with_base(&base, "t").await.unwrap();
+        let ids: Vec<&str> = zones.iter().map(|z| z.id.as_str()).collect();
+        assert_eq!(ids, vec!["z1", "z2", "z3"]);
+        assert_eq!(zones[0].status.as_deref(), Some("active"));
+    }
+
+    #[tokio::test]
+    async fn list_zones_stops_without_result_info() {
+        let srv = MockServer::start().await;
+        mount_single_page_without_result_info(&srv, "/client/v4/zones", zone_row(1)).await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let zones = list_zones_with_base(&base, "t").await.unwrap();
+        assert_eq!(zones.len(), 1);
     }
 
     #[tokio::test]

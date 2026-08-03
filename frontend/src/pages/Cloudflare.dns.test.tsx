@@ -188,15 +188,23 @@ function lastMutation() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // Именно reset, а не clear: `clearAllMocks` — это mockClear, он стирает
+  // историю вызовов, но ОСТАВЛЯЕТ реализацию. Из-за этого «зависший»
+  // `mockReturnValue(new Promise(() => {}))` из теста про удаление доживал до
+  // следующих тестов и подвесил бы первый же, который не задаёт свою.
+  vi.resetAllMocks();
   localStorage.clear();
   sessionStorage.clear();
   // Клиент общий на весь файл — вычищаем, чтобы тесты не подглядывали друг
-  // другу в кэш, и глушим ретраи (в проде их 1, тут они только тянут время).
+  // другу в кэш. Ретраи глушим поверх продовых дефолтов, а не вместо них:
+  // `setDefaultOptions` заменяет объект целиком, и без спреда из-под теста
+  // молча уехал бы `staleTime`.
   queryClient.clear();
+  const base = queryClient.getDefaultOptions();
   queryClient.setDefaultOptions({
-    queries: { retry: false, refetchOnWindowFocus: false },
-    mutations: { retry: false },
+    ...base,
+    queries: { ...base.queries, retry: false },
+    mutations: { ...base.mutations, retry: false },
   });
   useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
   mockHttp();
@@ -402,6 +410,9 @@ describe("Cloudflare — мутации в десктопе", () => {
     expect(args.zoneId).toBe("zone-a");
     expect(args.patch.proxied).toBe(false);
     expect(args.patch.type).toBe("A");
+    // Пресетный TTL обязан доехать как есть: ветка `ttlOptionsFor` без «— (not
+    // set)» и без своей опции — единственная, на которую не было проверки.
+    expect(args.patch.ttl).toBe(1);
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });
 
@@ -585,6 +596,29 @@ describe("Cloudflare — судьба ошибок", () => {
     // Провалившаяся мутация держит свой error до следующего вызова — показывать
     // надо итог последнего действия, иначе красное висит над успехом.
     await waitFor(() => expect(screen.queryByText(/purge failed/)).toBeNull());
+  });
+
+  it("не съедает ошибку мутации, которая в момент закрытия ещё летела", async () => {
+    setTauri(true);
+    let failPurge: (e: Error) => void = () => {};
+    mocks.mutate.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { failPurge = reject; })
+    );
+
+    renderPage();
+    await openZone();
+    fireEvent.click(screen.getByText("🗑 Purge Cache"));
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
+
+    // Purge ещё летит — на экране пусто, гасить нечего. Но «+ Add Record» во
+    // время его полёта НЕ заблокирована, и открытие формы двигало отметку
+    // «уже видел» на сам летящий purge: `T > T` → его провал не показывался.
+    fireEvent.click(screen.getByText("+ Add Record"));
+    fireEvent.click(screen.getByText("Cancel"));
+
+    failPurge(new Error("cloudflare: purge failed"));
+
+    expect(await screen.findByText(/purge failed/)).toBeTruthy();
   });
 
   it("даёт закрыть баннер: сообщение не живёт вечно", async () => {
