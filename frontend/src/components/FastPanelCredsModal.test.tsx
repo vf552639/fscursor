@@ -1,7 +1,6 @@
 import React from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
 import { FastPanelCredsModal } from "./FastPanelCredsModal";
 
 describe("FastPanelCredsModal", () => {
@@ -32,20 +31,18 @@ describe("FastPanelCredsModal", () => {
     expect(JSON.stringify(sessionStorage)).not.toContain("s3cr3t-panel-pw");
   });
 
-  it("по Done закрывается — и пароля больше нет в документе", () => {
+  it("по Done просит владельца стейта погасить креды", () => {
     const onClose = vi.fn();
-    const { rerender, container } = render(
+    render(
       <FastPanelCredsModal
         creds={{ server_id: "7", url: null, user: "fastuser", password: "s3cr3t-panel-pw" }}
         onClose={onClose}
       />,
     );
     fireEvent.click(screen.getByText("Done"));
+    // Своего стейта у модалки нет: показ-один-раз держится на том, что владелец
+    // (DesktopWorkspace) по этому вызову обнуляет creds.
     expect(onClose).toHaveBeenCalledTimes(1);
-
-    // Владелец стейта гасит creds — модалка исчезает вместе с паролем.
-    rerender(<></>);
-    expect(container.innerHTML).not.toContain("s3cr3t-panel-pw");
   });
 
   it("без пароля объясняет, что делать, вместо пустого поля", () => {

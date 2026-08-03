@@ -110,6 +110,13 @@ export const serversKeys = {
   detail: (id: number) => ["servers", id] as const,
 };
 
+/**
+ * Ключ запущенной установки FastPanel. Один и тот же у `useInstallFastPanel` и
+ * у `useMutationState` на странице: он и есть тот общий адрес, по которому
+ * страница узнаёт про установку, начатую до её последнего монтирования.
+ */
+export const installFastPanelKey = (id: number) => ["install-fastpanel", id] as const;
+
 export function useServers() {
   return useQuery({
     queryKey: serversKeys.all,
@@ -178,14 +185,32 @@ export function useRefreshMetrics(id: number) {
  * (`fastpanel_status == "installed"`), которую заполняет write-back.
  *
  * Ответ команды содержит пароль панели в открытом виде — он существует только
- * там и больше нигде. Поэтому креды уходят в `onCreds` напрямую, а наружу
- * возвращается один `server_id`: попади они в возврат `mutationFn`, react-query
- * положил бы их в `data` MutationCache, откуда их не убирает даже `reset()` —
- * запись живёт там ещё gcTime (5 минут по умолчанию). `onCreds` обязан только
- * показать их один раз и не сохранять (см. FastPanelCredsModal).
+ * там и больше нигде. Отсюда две связанные вещи, которые нельзя «упростить».
+ *
+ * 1. Креды уходят в `onCreds` изнутри `mutationFn`, а наружу возвращается один
+ *    `server_id`. Попади они в возврат `mutationFn`, react-query положил бы их
+ *    в `data` MutationCache, откуда их не убирает даже `reset()` — запись живёт
+ *    там ещё gcTime (5 минут по умолчанию).
+ * 2. Именно `onCreds`, а НЕ `mutate(vars, { onSuccess })` у места вызова.
+ *    Замыкание `mutationFn` переживает размонтирование (здесь `onCreds`
+ *    захватывает `setFpCreds` всегда смонтированного DesktopWorkspace), а
+ *    per-call коллбэки — нет: `MutationObserver` гасит их через
+ *    `this.hasListeners()`, и они молча теряются. Для операции на 40 минут это
+ *    разница между «пароль показан» и «пароль потерян навсегда».
+ *
+ * `onCreds` обязан только показать креды один раз и не сохранять
+ * (см. FastPanelCredsModal).
+ *
+ * `mutationKey` не косметика: по нему `useMutationState` находит запущенную
+ * установку после ухода со страницы и обратно. Без ключа новый observer не
+ * подхватывает живую мутацию, `isPending` читается как `false` — и второй клик
+ * запускает вторую установку поверх первой. В Rust страховки нет: проверка
+ * идемпотентности смотрит `fastpanel_status == "installed"`, а он появляется
+ * только в конце, при write-back.
  */
 export function useInstallFastPanel(id: number, onCreds: (creds: InstallFastpanelResult) => void) {
   return useMutation({
+    mutationKey: installFastPanelKey(id),
     mutationFn: async (opts?: { force?: boolean }) => {
       if (!isTauri()) {
         throw new Error("Installing FastPanel runs in the SDMP desktop app.");
@@ -200,12 +225,13 @@ export function useInstallFastPanel(id: number, onCreds: (creds: InstallFastpane
         force: Boolean(opts?.force),
       });
       onCreds(creds);
+      // НЕ «return creds»: ушло бы в data MutationCache на gcTime — см. JSDoc выше.
       return { server_id: creds.server_id };
     },
     onSuccess: () => {
       // Обновление статуса тянем с сервера: его туда пишет write-back самой
       // команды. В кэш запросов кладём только то, что уже знает сервер.
-      queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
+      // `all` = ["servers"] совпадает по префиксу и с ["servers", id].
       queryClient.invalidateQueries({ queryKey: serversKeys.all });
     },
   });

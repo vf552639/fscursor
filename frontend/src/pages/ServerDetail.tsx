@@ -1,6 +1,7 @@
 import React, { useState } from "react";
+import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
-import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
+import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -14,11 +15,14 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   /**
    * Куда отдать креды панели после установки. Показывает их единственная
    * модалка показа-один-раз, которой владеет DesktopWorkspace: тот же экран уже
-   * получает креды из deep link, и второго быть не должно. Без этого пропа
-   * пароль панели после 30-40 минут установки теряется безвозвратно — он
-   * существует только в ответе команды.
+   * получает креды из deep link, и второго быть не должно.
+   *
+   * Обязательный, хотя формально мог бы быть опциональным: пароль панели
+   * существует только в ответе команды, и без этого пропа он после 30-40 минут
+   * установки исчезал бы молча. Такую потерю компилятор умеет делать
+   * невыразимой — комментарий умеет только объяснить её задним числом.
    */
-  onFastpanelCreds?: (creds: InstallFastpanelResult)=>void,
+  onFastpanelCreds: (creds: InstallFastpanelResult)=>void,
 }){
   const [tab,setTab]=useState("overview");
   const [domSearch,setDS]=useState("");
@@ -47,7 +51,22 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // Mutations
   const delSrv = useDeleteServer();
   const testSsh = useTestSsh(server?.id || 0);
-  const installFp = useInstallFastPanel(server?.id || 0, (creds) => onFastpanelCreds?.(creds));
+  const installFp = useInstallFastPanel(server?.id || 0, onFastpanelCreds);
+  // Состояние установки читаем из MutationCache, а не из локального observer:
+  // установка идёт 30-40 минут и переживает уход со страницы, а observer при
+  // размонтировании теряет с ней связь. Без этого после возврата на страницу
+  // кнопка снова активна (второй `install_fastpanel` поверх первого), нет
+  // признака идущей установки и не видно ошибки, случившейся в отсутствие
+  // страницы.
+  const fpStates = useMutationState({
+    filters: { mutationKey: installFastPanelKey(server?.id || 0) },
+    select: (m) => m.state,
+  });
+  const fpRunning = fpStates.some((st) => st.status === "pending");
+  // Свежая ошибка — последняя в кэше; во время новой попытки её не показываем.
+  const fpError = fpRunning
+    ? null
+    : [...fpStates].reverse().find((st) => st.status === "error")?.error;
   const refreshMetrics = useRefreshMetrics(server?.id || 0);
   const syncDomains = useSyncServerDomains(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
@@ -247,13 +266,13 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             <OpenInDesktop
               variant="primary"
               action={`install-fastpanel?serverId=${s.id}`}
-              label={installFp.isPending ? "Installing…" : "Install FastPanel"}
+              label={fpRunning ? "Installing…" : "Install FastPanel"}
               desktopOnClick={() => installFp.mutate(undefined)}
-              disabled={installFp.isPending}
+              disabled={fpRunning}
             />
-            {installFp.isError && (
+            {fpError && (
               <div role="alert" style={{marginTop:12, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
-                Install failed: {(installFp.error as any)?.message || String(installFp.error)}
+                Install failed: {fpError.message || String(fpError)}
               </div>
             )}
           </CBo>

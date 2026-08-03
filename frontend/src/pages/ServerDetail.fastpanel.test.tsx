@@ -15,20 +15,20 @@ import { useAuthStore } from "../store/auth";
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(),
-  apiPut: vi.fn(),
-  apiDelete: vi.fn(),
   invokeSynced: vi.fn(),
 }));
 
-vi.mock("../api/client", () => ({
+// Подменяем только то, что действительно перехватываем: перечислять экспорты
+// модуля целиком значит ловить `No "…" export is defined on the mock` в тот
+// день, когда где-то в поддереве ServerDetail появится новый экспорт.
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
   apiGet: mocks.apiGet,
   apiPost: mocks.apiPost,
-  apiPut: mocks.apiPut,
-  apiDelete: mocks.apiDelete,
-  http: { post: vi.fn() },
 }));
 
-vi.mock("../lib/localCache", () => ({
+vi.mock("../lib/localCache", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
 }));
@@ -77,7 +77,10 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-function renderDetail(overrides: Partial<typeof SERVER> = {}, onFastpanelCreds?: (c: any) => void) {
+function renderDetail(
+  overrides: Partial<typeof SERVER> = {},
+  onFastpanelCreds: (c: any) => void = vi.fn(),
+) {
   const server = { ...SERVER, ...overrides };
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === `/servers/${server.id}`) return server;
@@ -87,18 +90,18 @@ function renderDetail(overrides: Partial<typeof SERVER> = {}, onFastpanelCreds?:
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return {
-    client,
-    ...render(
-      <QueryClientProvider client={client}>
-        <ServerDetail
-          server={{ id: server.id }}
-          onBack={() => {}}
-          onFastpanelCreds={onFastpanelCreds}
-        />
-      </QueryClientProvider>,
-    ),
+  const ui = (
+    <QueryClientProvider client={client}>
+      <ServerDetail server={{ id: server.id }} onBack={() => {}} onFastpanelCreds={onFastpanelCreds} />
+    </QueryClientProvider>
+  );
+  // `remount` — уход со страницы и возврат на неё: тот же QueryClient (он живёт
+  // в DesktopWorkspace выше), новый ServerDetail.
+  const remount = () => {
+    cleanup();
+    return render(ui);
   };
+  return { client, remount, ...render(ui) };
 }
 
 describe("ServerDetail — Install FastPanel", () => {
@@ -160,15 +163,16 @@ describe("ServerDetail — Install FastPanel", () => {
     expect(container.innerHTML).not.toContain("s3cr3t-panel-pw");
     expect(JSON.stringify(localStorage)).not.toContain("s3cr3t-panel-pw");
     expect(JSON.stringify(sessionStorage)).not.toContain("s3cr3t-panel-pw");
-    // И не оставляет его в стейте мутации: без reset() react-query держал бы
-    // `data` с паролем до размонтирования страницы.
-    await waitFor(() => {
-      const states = client
-        .getMutationCache()
-        .getAll()
-        .map((m) => m.state);
-      expect(JSON.stringify(states)).not.toContain("s3cr3t-panel-pw");
-    });
+    // И не оставляет его в MutationCache: `return creds` из mutationFn положил
+    // бы пароль в `data`, откуда его не убирает даже reset().
+    await waitFor(() =>
+      expect(client.getMutationCache().getAll()[0]?.state.status).toBe("success"),
+    );
+    const states = client
+      .getMutationCache()
+      .getAll()
+      .map((m) => m.state);
+    expect(JSON.stringify(states)).not.toContain("s3cr3t-panel-pw");
   });
 
   it("показывает ошибку команды, а не проглатывает её", async () => {
@@ -196,7 +200,7 @@ describe("ServerDetail — Install FastPanel", () => {
     expect(link?.getAttribute("href")).toBe("sdmp://install-fastpanel?serverId=7");
     expect(link?.textContent).toContain("Install FastPanel");
     // Кнопки — то есть пути в обход deep link — на вебе нет.
-    expect(container.querySelector("button")?.textContent).not.toContain("Install FastPanel");
+    expect(screen.queryByRole("button", { name: /Install FastPanel/ })).toBeNull();
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
@@ -206,10 +210,48 @@ describe("ServerDetail — Install FastPanel", () => {
     renderDetail({ fastpanel_status: "installing" });
     expect(await screen.findByText("Install FastPanel")).toBeTruthy();
     // И ни одного опроса несуществующего /fastpanel-status.
-    await waitFor(() =>
-      expect(
-        mocks.apiGet.mock.calls.some((c: any[]) => String(c[0]).includes("fastpanel-status")),
-      ).toBe(false),
+    expect(
+      mocks.apiGet.mock.calls.some((c: any[]) => String(c[0]).includes("fastpanel-status")),
+    ).toBe(false);
+  });
+
+  it("после ухода со страницы и возврата не даёт запустить вторую установку", async () => {
+    setTauri(true);
+    // Установка идёт 30-40 минут: моделируем её промисом, который не завершится.
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    const { remount } = renderDetail();
+    fireEvent.click(await screen.findByText("Install FastPanel"));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    remount();
+
+    // Живую мутацию новый ServerDetail находит по mutationKey в MutationCache.
+    const btn = (await screen.findByText("Installing…")) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+
+  it("после возврата на страницу показывает ошибку, случившуюся в её отсутствие", async () => {
+    setTauri(true);
+    let fail: (e: Error) => void = () => {};
+    mocks.invokeSynced.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      }),
     );
+
+    const { remount } = renderDetail();
+    fireEvent.click(await screen.findByText("Install FastPanel"));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    cleanup();
+    fail(new Error("ssh: connection refused"));
+    await new Promise((r) => setTimeout(r, 0));
+    remount();
+
+    // Иначе 40-минутная операция падала бы молча.
+    expect(await screen.findByText(/ssh: connection refused/)).toBeTruthy();
   });
 });
