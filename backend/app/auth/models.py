@@ -18,6 +18,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     auth_key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # NOTE: плейнтекст — осознанный временный компромисс (фаза «для себя»), см.
+    # docs/security/TOTP_STORAGE.md. Зашифровать перед продуктовой фазой.
     totp_secret: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     email_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     email_confirm_token_hash: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
