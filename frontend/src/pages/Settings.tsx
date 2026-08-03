@@ -4,6 +4,7 @@ import { useRegistrarAccounts, useCreateRegistrarAccount, useTestRegistrarConnec
 import { useSystemConfig, useTestNotificationDelivery, useUpdateSystemConfig } from "../api/settings";
 import { useCreateSslEmail, useDeleteSslEmail, usePatchSslEmail, useSslEmails } from "../api/sslEmails";
 import { describeQueryError } from "../lib/queryError";
+import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 
 export default function Settings(){
   const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
@@ -308,15 +309,9 @@ export default function Settings(){
       <CBo>
         <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:9,padding:"14px 16px",marginBottom:16,display:"flex",alignItems:"flex-start",gap:10}}>
           <span style={{fontSize:18}}>✓</span>
-          <div><div style={{fontSize:13.5,fontWeight:600,color:"#16a34a"}}>AES-256-GCM Encryption Active</div><div style={{fontSize:12.5,color:"#15803d",marginTop:2}}>All passwords and API keys encrypted. Key derived via SHA-256 from ENCRYPTION_KEY env var.</div></div>
+          <div><div style={{fontSize:13.5,fontWeight:600,color:"#16a34a"}}>{ENCRYPTION_BANNER.title}</div><div style={{fontSize:12.5,color:"#15803d",marginTop:2}}>{ENCRYPTION_BANNER.body}</div></div>
         </div>
-        {[
-          ["Algorithm","AES-256-GCM"],
-          ["Key Derivation","SHA-256 from ENCRYPTION_KEY env var"],
-          ["Stored Fields","SSH passwords, FastPanel passwords, API keys, tokens"],
-          ["In-Memory Only","Keys decrypted per-request and cleared immediately"],
-          ["API Exposure","Passwords never appear in API responses"]
-        ].map(([k,v])=>(
+        {ENCRYPTION_INFO.map(([k,v])=>(
           <div key={k} style={{display:"flex",justifyContent:"space-between",padding:"11px 0",borderBottom:"1px solid #f3f4f6"}}>
             <div style={{fontSize:13,color:"#6b7280",fontWeight:500}}>{k}</div>
             <div style={{fontSize:13,fontWeight:600,color:"#111",textAlign:"right",maxWidth:340}}>{v}</div>
