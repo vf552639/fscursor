@@ -1,10 +1,14 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import Domains from "./Domains";
+import { ProvisionResultModal } from "../components/ProvisionResultModal";
+import { useShowOnceQueue } from "../hooks/useShowOnceQueue";
+import { handleSdmpDeepLinkInTauri } from "../lib/deepLink";
 import { queryClient } from "../api/queryClient";
+import type { ProvisionOutcome } from "../api/domains";
 import { useAuthStore } from "../store/auth";
 
 /**
@@ -63,10 +67,10 @@ const PROVISION_RESULT = {
   ftp: { ftp_user: "example_ftp", ftp_password: FTP_PASSWORD },
 };
 
-function domainRow() {
+function domainRow(id = 42, name = "example.com") {
   return {
-    id: 42,
-    domain_name: "example.com",
+    id,
+    domain_name: name,
     status: "new",
     registrar_id: null,
     server_id: 5,
@@ -112,10 +116,62 @@ function renderPage(onProvisionResult: (r: any) => void = vi.fn()) {
   return { remount, ...render(ui) };
 }
 
+/**
+ * Владелец результатов — копия проводки `DesktopWorkspace`: очередь показов и
+ * модалка живут НАД страницей, потому что страница размонтируется, а результат
+ * существует в единственном экземпляре.
+ */
+function Workspace({ rows }: { rows: Array<{ id: number; name: string }> }) {
+  const queue = useShowOnceQueue<ProvisionOutcome>();
+  return (
+    <QueryClientProvider client={queryClient}>
+      <Domains onProvisionResult={queue.push} />
+      {queue.current && (
+        <ProvisionResultModal
+          domain={queue.current.domain}
+          result={queue.current.result}
+          onClose={queue.dismiss}
+        />
+      )}
+      <span data-testid="rows">{rows.length}</span>
+    </QueryClientProvider>
+  );
+}
+
+function renderWorkspace(rows: Array<{ id: number; name: string }>) {
+  mocks.apiGet.mockImplementation(async (url: string) => {
+    if (url === "/domains") return rows.map((r) => domainRow(r.id, r.name));
+    if (url === "/servers") return { items: [], total: 0 };
+    if (url === "/registrars/accounts") return [];
+    if (url === "/cloudflare/accounts") return [];
+    return {};
+  });
+  return render(<Workspace rows={rows} />);
+}
+
 /** Открыть диалог provision у единственной строки таблицы. */
 async function openProvisionDialog() {
   fireEvent.click(await screen.findByRole("button", { name: "Provision domain" }));
   return (await screen.findByLabelText(/Also create a database/i)) as HTMLInputElement;
+}
+
+/** Запустить provision у строки конкретного домена (диалог → БД → Provision). */
+async function provisionRow(domain: string, withDb: boolean) {
+  const row = (await screen.findByText(domain)).closest("tr") as HTMLElement;
+  fireEvent.click(within(row).getByRole("button", { name: "Provision domain" }));
+  const cb = (await screen.findByLabelText(/Also create a database/i)) as HTMLInputElement;
+  if (withDb) fireEvent.click(cb);
+  fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+}
+
+/** Результат provision с узнаваемым паролем БД. */
+function resultWithPassword(id: string, password: string) {
+  return {
+    ...PROVISION_RESULT,
+    domain_id: id,
+    db: { db_name: `db_${id}`, db_user: `user_${id}`, db_password: password },
+    ftp: { ftp_user: `ftp_${id}`, ftp_password: `${password}-ftp` },
+  };
 }
 
 beforeEach(() => {
@@ -291,5 +347,75 @@ describe("Domains — provision: web", () => {
     expect(
       mocks.apiPost.mock.calls.some((c: any[]) => String(c[0]).includes("provision")),
     ).toBe(false);
+  });
+});
+
+describe("Domains — provision: два домена подряд", () => {
+  it("второй результат не затирает первый — показаны оба", async () => {
+    setTauri(true);
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    mocks.invokeSynced.mockImplementation(
+      (_cmd: string, args: any) =>
+        new Promise((resolve) => {
+          resolvers[args.domainId] = resolve;
+        }),
+    );
+
+    renderWorkspace([
+      { id: 1, name: "a.com" },
+      { id: 2, name: "b.com" },
+    ]);
+
+    await provisionRow("a.com", true);
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+    // Гейт подоменный: второй домен запускается, пока идёт первый. Это
+    // намеренно — но именно поэтому приёмник результата обязан быть очередью.
+    await provisionRow("b.com", true);
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(2));
+
+    resolvers["1"](resultWithPassword("1", "PW-A"));
+    expect(await screen.findByText("PW-A")).toBeTruthy();
+    expect(screen.getByText("Provisioned a.com")).toBeTruthy();
+
+    resolvers["2"](resultWithPassword("2", "PW-B"));
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .filter((m) => m.state.status === "success"),
+      ).toHaveLength(2),
+    );
+
+    // Пароли `a.com` существуют только на экране: сервер их не знает, в кэше
+    // мутаций их нет. Перезаписать их вторым результатом = потерять навсегда,
+    // притом что FTP-аккаунт и БД на сервере уже созданы.
+    expect(screen.getByText("PW-A")).toBeTruthy();
+    expect(screen.getByText("Provisioned a.com")).toBeTruthy();
+    expect(screen.queryByText("PW-B")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("PW-B")).toBeTruthy();
+    expect(screen.getByText("Provisioned b.com")).toBeTruthy();
+  });
+});
+
+describe("Domains — provision: deep link", () => {
+  it("provision из deep link виден странице и блокирует ⚙ той же строки", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    renderPage();
+    await screen.findByText("example.com");
+    // Ссылку обрабатывает DesktopWorkspace, вне рендера страницы. Если этот путь
+    // идёт мимо PROVISION_DOMAIN_KEY, страница его не видит и ⚙ остаётся
+    // активной — клик открыл бы вторую SSH-сессию по тому же домену.
+    void handleSdmpDeepLinkInTauri("sdmp://provision?domainId=42", "user-1", () => true);
+
+    const gear = (await screen.findByRole("button", {
+      name: "Provisioning…",
+    })) as HTMLButtonElement;
+    expect(gear.disabled).toBe(true);
+    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
   });
 });

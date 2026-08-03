@@ -443,8 +443,8 @@ export const PROVISION_DOMAIN_KEY = ["provision-domain"] as const;
  * `onResult` обязан только показать креды один раз и не сохранять
  * (см. `ProvisionResultModal`).
  */
-export function useProvisionDomain(onResult: (outcome: ProvisionOutcome) => void) {
-  return useMutation({
+function provisionDomainOptions(onResult: (outcome: ProvisionOutcome) => void) {
+  return {
     mutationKey: PROVISION_DOMAIN_KEY,
     mutationFn: async (vars: ProvisionDomainVars) => {
       if (!isTauri()) {
@@ -464,8 +464,42 @@ export function useProvisionDomain(onResult: (outcome: ProvisionOutcome) => void
       // НЕ «return result»: пароли ушли бы в data MutationCache — см. JSDoc.
       return { domain_id: result.domain_id };
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: domainsKeys.all });
+    },
+  };
+}
+
+export function useProvisionDomain(onResult: (outcome: ProvisionOutcome) => void) {
+  return useMutation(provisionDomainOptions(onResult));
+}
+
+/**
+ * Тот же provision, но запущенный ВНЕ React — путь deep link `sdmp://provision`.
+ *
+ * Не прямой `invokeSynced`, а мутация в том же `MutationCache` и под тем же
+ * `PROVISION_DOMAIN_KEY`: иначе страница `Domains` запущенной по ссылке
+ * операции не видит (`useMutationState` смотрит именно в кэш), ⚙ той же строки
+ * остаётся активной, и клик открывает вторую SSH-сессию с
+ * create_site/create_ftp_account/certbot по тому же домену.
+ *
+ * Результат возвращается вызывающему — он обязан показать пароли один раз
+ * (`ProvisionResultModal`) и не сохранять. В кэше мутаций их нет: туда попадает
+ * только возврат `mutationFn`, то есть `{ domain_id }`.
+ */
+export async function runProvisionDomain(vars: ProvisionDomainVars): Promise<ProvisionOutcome> {
+  let outcome: ProvisionOutcome | null = null;
+  const mutation = queryClient
+    .getMutationCache()
+    .build(queryClient, provisionDomainOptions((o) => { outcome = o; }));
+  await mutation.execute(vars);
+  if (!outcome) {
+    // Недостижимо: `mutationFn` зовёт `onResult` до возврата, а до сюда мы
+    // доходим только после его успеха. Но молча вернуть «результата нет» —
+    // это тот же потерянный пароль, поэтому громко.
+    throw new Error("Provision finished without a result");
+  }
+  return outcome;
 }
 
 export function useBulkProvisionDomains() {

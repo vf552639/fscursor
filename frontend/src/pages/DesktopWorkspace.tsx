@@ -16,6 +16,7 @@ import { apiPost } from "../api/client";
 import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
 import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
 import { ProvisionResultModal } from "../components/ProvisionResultModal";
+import { useShowOnceQueue } from "../hooks/useShowOnceQueue";
 import type { ProvisionOutcome } from "../api/domains";
 
 /**
@@ -105,12 +106,18 @@ export default function DesktopWorkspace() {
   // сервере, ни в кэше, и они НЕ должны туда попадать. Поставщика два —
   // deep link `sdmp://install-fastpanel` и кнопка на ServerDetail, — а место
   // показа одно.
-  const [fpCreds, setFpCreds] = useState<InstallFastpanelResult | null>(null);
+  //
   // Пароли БД и FTP после provision — та же история и то же место показа: их
   // нет ни на сервере, ни в кэше, и страница `Domains`, которая их заказала,
   // размонтируется при уходе пользователя. Держать их обязан тот, кто
   // смонтирован всегда.
-  const [provisionOutcome, setProvisionOutcome] = useState<ProvisionOutcome | null>(null);
+  //
+  // Очередь, а не один слот: гейты в UI подоменные и посерверные, поэтому вторая
+  // операция запускается, пока идёт первая (это намеренно — обе идут минутами).
+  // Одноместный слот означал бы, что второй результат затирает первый прямо на
+  // глазах у читающего пароли, а взять их больше негде.
+  const fpQueue = useShowOnceQueue<InstallFastpanelResult>();
+  const provisionQueue = useShowOnceQueue<ProvisionOutcome>();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tweaks, setTweaks] = useState(false);
   const [tw, setTw] = useState(TWEAK_DEFAULTS);
@@ -169,7 +176,8 @@ export default function DesktopWorkspace() {
           const res = await handleSdmpDeepLinkInTauri(url, userId);
           if (!res.handled) showToast(`Deep link: ${url}`);
           else if (res.cancelled) showToast("Deep link cancelled — nothing was run");
-          else if (res.fastpanel) setFpCreds(res.fastpanel);
+          else if (res.fastpanel) fpQueue.push(res.fastpanel);
+          else if (res.provision) provisionQueue.push(res.provision);
         } catch (e) {
           showToast(e instanceof Error ? e.message : String(e));
         }
@@ -630,7 +638,7 @@ export default function DesktopWorkspace() {
         {page === "dashboard" && <Dashboard onNav={nav} />}
         {page === "servers" && <Servers onNav={nav} />}
         {page === "domains" && (
-          <Domains onNav={nav} ctx={srvCtx} onProvisionResult={setProvisionOutcome} />
+          <Domains onNav={nav} ctx={srvCtx} onProvisionResult={provisionQueue.push} />
         )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}
         {page === "notifications" && <Notifications onNav={nav} />}
@@ -641,17 +649,19 @@ export default function DesktopWorkspace() {
             server={srvCtx}
             onBack={(pg: string) => nav(pg || "servers")}
             onNav={nav}
-            onFastpanelCreds={setFpCreds}
+            onFastpanelCreds={fpQueue.push}
           />
         )}
       </main>
 
-      {fpCreds && <FastPanelCredsModal creds={fpCreds} onClose={() => setFpCreds(null)} />}
-      {provisionOutcome && (
+      {fpQueue.current && (
+        <FastPanelCredsModal creds={fpQueue.current} onClose={fpQueue.dismiss} />
+      )}
+      {provisionQueue.current && (
         <ProvisionResultModal
-          domain={provisionOutcome.domain}
-          result={provisionOutcome.result}
-          onClose={() => setProvisionOutcome(null)}
+          domain={provisionQueue.current.domain}
+          result={provisionQueue.current.result}
+          onClose={provisionQueue.dismiss}
         />
       )}
 

@@ -16,6 +16,14 @@ import MultiTaskProgressModal from "../components/MultiTaskProgressModal";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
 
+/**
+ * Заглушка для обязательного `desktopOnClick` у `OpenInDesktop` там, где сам
+ * компонент отрендерен под `!isTauri()`: в вебе он отдаёт ссылку и до колбэка
+ * не доходит. Именованная константа — чтобы читатель видел «сюда не попадают», а
+ * не второй, конкурирующий вход в то же действие.
+ */
+const NOOP_DESKTOP_ONLY_BRANCH = () => {};
+
 interface AddDomainModalProps {
   onClose: () => void;
   servers: Server[];
@@ -639,15 +647,17 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
                       // БД»: хост `provision` у `parseDeepLinkAction` знает один
                       // параметр `domainId`, лишний десктоп молча проглотит —
                       // то есть галочка, поставленная в вебе, соврала бы.
+                      //
+                      // Ветка рендерится только в вебе, а `desktopOnClick`,
+                      // `disabled` и динамический `label` у `OpenInDesktop`
+                      // работают только в десктопе (там компонент отдаёт кнопку
+                      // вместо ссылки). Поэтому здесь они не «упрощены», а
+                      // недостижимы: вход в диалог один — ⚙ строки выше.
                       <OpenInDesktop
                         action={`provision?domainId=${d.id}`}
-                        label={isProvisioning(d.id) ? "Provisioning…" : "Provision"}
+                        label="Provision"
                         size="sm"
-                        disabled={isProvisioning(d.id)}
-                        desktopOnClick={() => {
-                          if (isProvisioning(d.id)) return;
-                          openProvisionDialog(d);
-                        }}
+                        desktopOnClick={NOOP_DESKTOP_ONLY_BRANCH}
                       />
                     ) : null}
                   </div>
@@ -783,9 +793,19 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
         {/* Единственное место, где «создавать ли БД» вообще решается: команда
             `provision_domain` принимает `with_db`, но до этого чекбокса ни один
             вызывающий его не передавал — опциональная БД была недостижима.
-            Массовых аналогов нет намеренно: и `bulk-provision`, и bulk full
-            setup уходят в бэкенд-очередь, а не в эту Tauri-команду, и флагу там
-            некуда доехать. */}
+
+            Массового аналога нет по двум причинам, и обе проверяемые.
+            (1) `BulkSetupWizard` вообще не провижинит: он назначает сервер и
+            Cloudflare, создаёт зону и пушит NS.
+            (2) Tauri-команда `provision_bulk` намеренно не принимает `with_db`
+            («Массовый прогон — без БД: пароли БД возвращаются только в ответе
+            на одиночный provision», `commands/provision.rs`), а показать пароль
+            один раз для сотни доменов сразу и нельзя.
+
+            NB на будущее: обе массовые кнопки («Provision» тулбара и «Run Full
+            Setup») бьют в `POST /domains/bulk-provision` и
+            `/domains/bulk-full-setup`, которых на бэкенде НЕТ (grep по
+            `backend/app/` пуст) — сегодня это 404, разбор в отдельной задаче. */}
         <label
           style={{
             display: "flex",

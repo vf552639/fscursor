@@ -1,4 +1,5 @@
 import { invokeSynced } from "./localCache";
+import { runProvisionDomain, type ProvisionOutcome } from "../api/domains";
 
 /**
  * Результат команды `install_fastpanel` (см. `InstallFastpanelResult` в
@@ -16,10 +17,20 @@ export interface InstallFastpanelResult {
 /**
  * Что сделал deep link. `handled: false` — ссылка не наша, вызывающий тостит.
  * `cancelled: true` — ссылка наша, но пользователь не подтвердил выполнение.
+ *
+ * `fastpanel` и `provision` — результаты, которые существуют только здесь:
+ * пароль панели, пароли БД и FTP. Вызывающий обязан показать их один раз;
+ * потерять их — значит оставить пользователя с аккаунтами, войти в которые он
+ * не сможет никогда.
  */
 export type DeepLinkOutcome =
   | { handled: false }
-  | { handled: true; cancelled?: boolean; fastpanel?: InstallFastpanelResult };
+  | {
+      handled: true;
+      cancelled?: boolean;
+      fastpanel?: InstallFastpanelResult;
+      provision?: ProvisionOutcome;
+    };
 
 /**
  * Действие, которое просит выполнить ссылка. Все три — ИСПОЛНЯЮЩИЕ: каждое
@@ -136,12 +147,24 @@ export async function handleSdmpDeepLinkInTauri(
   }
 
   if (action.kind === "provision") {
-    await invokeSynced("provision_domain", {
-      userId,
-      domainId: action.domainId,
-      siteOnly: false,
+    // Через мутацию, а не напрямую: у ссылки тот же `PROVISION_DOMAIN_KEY`, что
+    // у кнопки, поэтому страница видит запущенный по ссылке provision и не даёт
+    // запустить по тому же домену второй.
+    //
+    // БД по ссылке не создаётся (`withDb: false`): выбор «создавать ли базу»
+    // делается чекбоксом в диалоге, а хост `provision` такого параметра не
+    // знает — молча создать базу по ссылке значит сделать за пользователя
+    // выбор, которого он не делал.
+    const provision = await runProvisionDomain({
+      domainId: Number(action.domainId),
+      // Имени домена у ссылки нет — она адресует по id; та же форма, что и в
+      // тексте подтверждения выше («Provision domain #3?»).
+      domainName: `#${action.domainId}`,
+      withDb: false,
     });
-    return { handled: true };
+    // Результат ОБЯЗАТЕЛЬНО отдаём наверх: FTP-аккаунт создаётся на каждом
+    // не-`site_only` прогоне, а его пароль возвращается только в этом ответе.
+    return { handled: true, provision };
   }
 
   if (action.kind === "bulk-provision") {
