@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import { Card, CHd, CTi, CBo, StatCard, Badge, Btn, Modal, Inp, EmptyState, ErrorState } from "../components/ui/Primitives";
 import { useRegistrarAccounts, useCreateRegistrarAccount, useTestRegistrarConnection, useUpdateRegistrarAccount, useDeleteRegistrarAccount, RegistrarProvider } from "../api/registrars";
 import { useSystemConfig, useTestNotificationDelivery, useUpdateSystemConfig } from "../api/settings";
-import { useCreateSslEmail, useDeleteSslEmail, usePatchSslEmail, useSslEmails } from "../api/sslEmails";
 import { describeQueryError } from "../lib/queryError";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 
@@ -14,15 +13,9 @@ export default function Settings(){
   const { data: systemConfigData } = useSystemConfig();
   const updateSystemConfig = useUpdateSystemConfig();
   const testDelivery = useTestNotificationDelivery();
-  
-  const { data: sslEmailsData, isPending: sslPending, isError: sslError } = useSslEmails();
-  const createSslEmail = useCreateSslEmail();
-  const patchSslEmail = usePatchSslEmail();
-  const deleteSslEmail = useDeleteSslEmail();
 
   const registrars = registrarsData || [];
-  const sslEmails = sslEmailsData || [];
-  
+
   const [tab,setTab]=useState("registrars"); const [showAdd,setSA]=useState(false);
   const [provider,setProvider]=useState<RegistrarProvider>("hostiq");
   
@@ -33,9 +26,6 @@ export default function Settings(){
   const [testing,setTest]=useState<any>({}); const [testRes,setRes]=useState<any>({});
   const [editingRegistrar, setEditingRegistrar] = useState<any | null>(null);
   const [editingSystem, setEditingSystem] = useState<{ key: string; value: string } | null>(null);
-  const [showAddSslEmail, setShowAddSslEmail] = useState(false);
-  const [newSslEmail, setNewSslEmail] = useState("");
-  const [newSslCap, setNewSslCap] = useState("100");
   const [testResult, setTestResult] = useState<{ webhook: string; telegram: string } | null>(null);
   const systemConfig = systemConfigData || [
     { key: "API Base URL", value: "http://localhost:8100/api", editable: false },
@@ -92,7 +82,7 @@ export default function Settings(){
   return <>
     <div style={{marginBottom:24}}><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Settings</h1><div style={{fontSize:13,color:"#6b7280"}}>Manage integrations and system configuration</div></div>
     <div style={{display:"flex",gap:0,borderBottom:"1px solid #e5e7eb",marginBottom:24}}>
-      {[["registrars","📋 Registrars"],["ssl_pool","✉ SSL Pool"],["system","⚙ System"],["encryption","🔑 Encryption"]].map(([k,l])=>(
+      {[["registrars","📋 Registrars"],["system","⚙ System"],["encryption","🔑 Encryption"]].map(([k,l])=>(
         <div key={k} onClick={()=>setTab(k)} style={{padding:"11px 20px",fontSize:13.5,fontWeight:500,cursor:"pointer",borderBottom:`2px solid ${tab===k?"#2563eb":"transparent"}`,marginBottom:-1,color:tab===k?"#2563eb":"#6b7280"}}>{l}</div>
       ))}
     </div>
@@ -175,89 +165,6 @@ export default function Settings(){
         </div>
         <div style={{marginTop:8}}><Btn variant="secondary" onClick={()=>setSA(false)} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
       </Modal>}
-    </>}
-    {tab==="ssl_pool"&&<>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-        <div style={{fontSize:14,fontWeight:600,color:"#111"}}>SSL Email Pool <span style={{fontSize:13,fontWeight:400,color:"#9ca3af"}}>({sslEmails.length})</span></div>
-        <Btn variant="primary" onClick={()=>setShowAddSslEmail(true)}>+ Add Email</Btn>
-      </div>
-      {sslError ? (
-        <ErrorState
-          title="SSL email pool unavailable"
-          message="Could not load SSL pool data from backend."
-          hint="docker compose logs backend --tail 100"
-        />
-      ) : sslPending ? (
-        <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading SSL email pool...</div>
-      ) : sslEmails.length === 0 ? (
-        <Card>
-          <EmptyState
-            title="SSL email pool is empty"
-            description="Add one or more emails to issue SSL certificates during domain provisioning."
-          >
-            <Btn variant="primary" onClick={() => setShowAddSslEmail(true)}>+ Add Email</Btn>
-          </EmptyState>
-        </Card>
-      ) : (
-        <Card>
-          <CBo style={{padding:"6px 20px 14px"}}>
-            {sslEmails.map((item) => {
-              const ratio = item.usage_cap > 0 ? Math.min(100, Math.round((item.usage_count / item.usage_cap) * 100)) : 0;
-              const barColor = ratio < 70 ? "#16a34a" : ratio < 90 ? "#d97706" : "#dc2626";
-              return (
-                <div key={item.id} style={{padding:"12px 0",borderBottom:"1px solid #f3f4f6"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <div style={{fontSize:13.5,fontWeight:600,color:"#111"}}>{item.email}</div>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <Badge variant={item.is_active ? "green" : "gray"}>{item.is_active ? "Active" : "Inactive"}</Badge>
-                      <Btn size="sm" variant="secondary" onClick={() => patchSslEmail.mutate({ id: item.id, payload: { is_active: !item.is_active } })}>
-                        {item.is_active ? "Disable" : "Enable"}
-                      </Btn>
-                      <Btn size="sm" variant="danger" onClick={() => { if (!confirm(`Delete ${item.email}?`)) return; deleteSslEmail.mutate(item.id); }}>✕</Btn>
-                    </div>
-                  </div>
-                  <div style={{fontSize:12.5,color:"#6b7280",marginBottom:8}}>
-                    Used {item.usage_count} / {item.usage_cap}
-                  </div>
-                  <div style={{height:8,background:"#e5e7eb",borderRadius:999,overflow:"hidden"}}>
-                    <div style={{height:"100%",width:`${ratio}%`,background:barColor,borderRadius:999}} />
-                  </div>
-                </div>
-              );
-            })}
-          </CBo>
-        </Card>
-      )}
-      {showAddSslEmail && (
-        <Modal title="Add SSL Email" onClose={() => setShowAddSslEmail(false)} width={440}>
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Email</label><Inp value={newSslEmail} onChange={e=>setNewSslEmail((e.target as any).value)} placeholder="ssl@example.com" /></div>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Usage Cap</label><Inp value={newSslCap} onChange={e=>setNewSslCap((e.target as any).value)} placeholder="100" /></div>
-          </div>
-          <div style={{display:"flex",gap:8,marginTop:20}}>
-            <Btn
-              variant="primary"
-              style={{flex:1,justifyContent:"center"}}
-              disabled={createSslEmail.isPending || !newSslEmail.trim()}
-              onClick={() => {
-                createSslEmail.mutate(
-                  { email: newSslEmail.trim(), usage_cap: Math.max(1, Number(newSslCap || "100")) },
-                  {
-                    onSuccess: () => {
-                      setShowAddSslEmail(false);
-                      setNewSslEmail("");
-                      setNewSslCap("100");
-                    },
-                  }
-                );
-              }}
-            >
-              {createSslEmail.isPending ? "Saving..." : "Save"}
-            </Btn>
-            <Btn variant="secondary" style={{flex:1,justifyContent:"center"}} onClick={() => setShowAddSslEmail(false)}>Cancel</Btn>
-          </div>
-        </Modal>
-      )}
     </>}
     {tab==="system"&&<Card>
       <CHd><CTi>⚙ System Configuration</CTi></CHd>

@@ -12,7 +12,6 @@ from app.models.domain import Domain
 from app.models.notification import Notification
 from app.models.registrar_account import RegistrarAccount
 from app.models.server import Server
-from app.models.ssl_email import SslEmail
 from app.models.system_config import SystemConfig
 from app.models.task_log import TaskLog
 from app.sync import schemas
@@ -29,7 +28,6 @@ SCOPED_MODELS = {
     "task_logs": TaskLog,
     "system_config": SystemConfig,
     "activity_logs": ActivityLog,
-    "ssl_email_pool": SslEmail,
 }
 
 
