@@ -2,6 +2,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { queryClient } from "./queryClient";
+import { invokeSynced } from "../lib/localCache";
+import { isTauri } from "../lib/runtime";
+import { useAuthStore } from "../store/auth";
+import type { InstallFastpanelResult } from "../lib/deepLink";
 
 export interface Server {
   id: number;
@@ -81,21 +85,6 @@ export interface SshTestResult {
   message: string;
 }
 
-export interface InstallFastPanelResponse {
-  task_id: string;
-  server_id: number;
-}
-
-export type TaskLogLine = string;
-
-export interface FastPanelStatus {
-  server_id: number;
-  fastpanel_status: string;
-  fastpanel_url: string | null;
-  fastpanel_user: string | null;
-  log_tail: TaskLogLine[];
-}
-
 export interface ServerBulkImportError {
   row: number;
   server: string;
@@ -119,7 +108,6 @@ export interface SyncDomainsResponse {
 export const serversKeys = {
   all: ["servers"] as const,
   detail: (id: number) => ["servers", id] as const,
-  fastpanel: (id: number) => ["servers", id, "fastpanel-status"] as const,
 };
 
 export function useServers() {
@@ -179,12 +167,46 @@ export function useRefreshMetrics(id: number) {
   });
 }
 
-export function useInstallFastPanel(id: number) {
+/**
+ * Установка FastPanel. Выполняет ТОЛЬКО десктоп: команда лезет по SSH на живой
+ * сервер, обновляет все пакеты и запускает инсталлятор (30-40 минут). Эндпоинта
+ * `POST /servers/{id}/install-fastpanel` на бэкенде нет и быть не должно — веб
+ * вместо вызова отдаёт deep link `sdmp://install-fastpanel` (см. OpenInDesktop).
+ *
+ * `invokeSynced`, а не `invokeIfTauri`: команда резолвит сервер из локального
+ * SQLCipher-кэша, и от свежести кэша зависит проверка идемпотентности
+ * (`fastpanel_status == "installed"`), которую заполняет write-back.
+ *
+ * Ответ команды содержит пароль панели в открытом виде — он существует только
+ * там и больше нигде. Поэтому креды уходят в `onCreds` напрямую, а наружу
+ * возвращается один `server_id`: попади они в возврат `mutationFn`, react-query
+ * положил бы их в `data` MutationCache, откуда их не убирает даже `reset()` —
+ * запись живёт там ещё gcTime (5 минут по умолчанию). `onCreds` обязан только
+ * показать их один раз и не сохранять (см. FastPanelCredsModal).
+ */
+export function useInstallFastPanel(id: number, onCreds: (creds: InstallFastpanelResult) => void) {
   return useMutation({
-    mutationFn: () => apiPost<InstallFastPanelResponse>(`/servers/${id}/install-fastpanel`),
+    mutationFn: async (opts?: { force?: boolean }) => {
+      if (!isTauri()) {
+        throw new Error("Installing FastPanel runs in the SDMP desktop app.");
+      }
+      const userId = useAuthStore.getState().userId;
+      if (!userId) {
+        throw new Error("Desktop: unlock session (user id missing)");
+      }
+      const creds = await invokeSynced<InstallFastpanelResult>("install_fastpanel", {
+        userId,
+        serverId: String(id),
+        force: Boolean(opts?.force),
+      });
+      onCreds(creds);
+      return { server_id: creds.server_id };
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: serversKeys.fastpanel(id) });
+      // Обновление статуса тянем с сервера: его туда пишет write-back самой
+      // команды. В кэш запросов кладём только то, что уже знает сервер.
       queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: serversKeys.all });
     },
   });
 }
@@ -197,15 +219,6 @@ export function useSyncServerDomains(id: number) {
       queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
       queryClient.invalidateQueries({ queryKey: serversKeys.all });
     },
-  });
-}
-
-export function useFastPanelStatus(id: number | null | undefined, enabled: boolean) {
-  return useQuery({
-    queryKey: id ? serversKeys.fastpanel(id) : ["servers", "fastpanel", "disabled"],
-    queryFn: () => apiGet<FastPanelStatus>(`/servers/${id}/fastpanel-status`),
-    enabled: !!id && enabled,
-    refetchInterval: enabled ? 3000 : false,
   });
 }
 

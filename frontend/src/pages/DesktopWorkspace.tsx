@@ -14,15 +14,22 @@ import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
 import { apiPost } from "../api/client";
 import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
-import { Modal, CopyBtn, Btn } from "../components/ui/Primitives";
+import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
 
-/** Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`). */
-const FASTPANEL_STEP_LABEL: Record<string, string> = {
+/**
+ * Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`).
+ * Экспортируется ради теста: неизвестный шаг слушатель молча выбрасывает, то
+ * есть забытая строчка здесь делает шаг невидимым.
+ */
+export const FASTPANEL_STEP_LABEL: Record<string, string> = {
   ssh_connect: "FastPanel: connecting over SSH…",
   updating: "FastPanel: updating the system, this takes a while…",
   installing: "FastPanel: running the installer, this takes a while…",
   creds_unparsed: "FastPanel installed, but its credentials could not be read",
   audit_failed: "FastPanel installed, but the audit entry was not recorded",
+  // Панель стоит, но сервер об этом не знает: fastpanel_status остался прежним,
+  // и проверка идемпотентности в следующий раз пропустит переустановку.
+  writeback_failed: "FastPanel installed, but the result could not be saved on the server",
 };
 
 /**
@@ -30,7 +37,7 @@ const FASTPANEL_STEP_LABEL: Record<string, string> = {
  * `commands/provision.rs`). Провижн идёт минутами и до этого не показывал
  * ничего. Неизвестные шаги игнорируем — сырые имена шагов пользователю не текст.
  */
-const PROVISION_STEP_LABEL: Record<string, string> = {
+export const PROVISION_STEP_LABEL: Record<string, string> = {
   ssh_connect: "Provision: connecting over SSH…",
   fastpanel_path: "Provision: locating FastPanel…",
   firewall_preflight: "Provision: checking the firewall…",
@@ -43,6 +50,9 @@ const PROVISION_STEP_LABEL: Record<string, string> = {
   ssl_skipped_no_email: "Provision: SSL skipped — no contact email configured",
   ssl_issue: "Provision: issuing the certificate, this takes a while…",
   audit_failed: "Provisioned, but the audit entry was not recorded",
+  // Сайт создан, но домен на сервере остался в прежнем статусе: следующий
+  // провижн не увидит, что делать уже нечего.
+  writeback_failed: "Provisioned, but the result could not be saved on the server",
   bulk_item: "Bulk provision: next domain…",
   bulk_failed: "Bulk provision: a domain failed, continuing…",
 };
@@ -81,7 +91,9 @@ export default function DesktopWorkspace() {
   const [srvCtx, setSrv] = useState<any>(null);
   const [toast, setToast] = useState<string | null>(null);
   // Креды FastPanel живут только в стейте этого компонента: их нет ни на
-  // сервере, ни в кэше, и они НЕ должны туда попадать.
+  // сервере, ни в кэше, и они НЕ должны туда попадать. Поставщика два —
+  // deep link `sdmp://install-fastpanel` и кнопка на ServerDetail, — а место
+  // показа одно.
   const [fpCreds, setFpCreds] = useState<InstallFastpanelResult | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tweaks, setTweaks] = useState(false);
@@ -602,70 +614,16 @@ export default function DesktopWorkspace() {
         {page === "activity" && <Activity />}
         {page === "settings" && <Settings />}
         {page === "server-detail" && (
-          <ServerDetail server={srvCtx} onBack={(pg: string) => nav(pg || "servers")} onNav={nav} />
+          <ServerDetail
+            server={srvCtx}
+            onBack={(pg: string) => nav(pg || "servers")}
+            onNav={nav}
+            onFastpanelCreds={setFpCreds}
+          />
         )}
       </main>
 
-      {fpCreds && (
-        <Modal title="FastPanel installed" onClose={() => setFpCreds(null)} width={520}>
-          <div
-            style={{
-              fontSize: 12.5,
-              color: "#92400e",
-              background: "#fffbeb",
-              border: "1px solid #fde68a",
-              borderRadius: 8,
-              padding: "10px 12px",
-              marginBottom: 16,
-            }}
-          >
-            Shown once. These credentials are not stored anywhere — copy them now.
-          </div>
-          {fpCreds.password ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {(
-                [
-                  ["Panel URL", fpCreds.url],
-                  ["User", fpCreds.user],
-                  ["Password", fpCreds.password],
-                ] as const
-              ).map(([label, value]) => (
-                <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ width: 90, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>{label}</div>
-                  <code
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      fontSize: 13,
-                      background: "#f3f4f6",
-                      padding: "8px 10px",
-                      borderRadius: 6,
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {value || "—"}
-                  </code>
-                  {value ? <CopyBtn value={value} /> : null}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div style={{ fontSize: 13, color: "#b91c1c", lineHeight: 1.5 }}>
-              FastPanel was installed, but its credentials could not be read from the installer
-              output. Reset the panel password on the server manually (SSH in and run{" "}
-              <code style={{ background: "#f3f4f6", padding: "1px 5px", borderRadius: 4 }}>
-                fastpanel users change-password
-              </code>
-              ).
-            </div>
-          )}
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-            <Btn variant="primary" onClick={() => setFpCreds(null)}>
-              Done
-            </Btn>
-          </div>
-        </Modal>
-      )}
+      {fpCreds && <FastPanelCredsModal creds={fpCreds} onClose={() => setFpCreds(null)} />}
 
       {toast && (
         <div

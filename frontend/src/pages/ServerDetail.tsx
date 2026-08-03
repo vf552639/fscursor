@@ -1,12 +1,25 @@
 import React, { useState } from "react";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
-import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useFastPanelStatus, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
+import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
+import type { InstallFastpanelResult } from "../lib/deepLink";
 
-export default function ServerDetail({server, onBack, onNav}: {server?: any, onBack: (p: string)=>void, onNav?: (p: string, ctx?: any)=>void}){
+export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
+  server?: any,
+  onBack: (p: string)=>void,
+  onNav?: (p: string, ctx?: any)=>void,
+  /**
+   * Куда отдать креды панели после установки. Показывает их единственная
+   * модалка показа-один-раз, которой владеет DesktopWorkspace: тот же экран уже
+   * получает креды из deep link, и второго быть не должно. Без этого пропа
+   * пароль панели после 30-40 минут установки теряется безвозвратно — он
+   * существует только в ответе команды.
+   */
+  onFastpanelCreds?: (creds: InstallFastpanelResult)=>void,
+}){
   const [tab,setTab]=useState("overview");
   const [domSearch,setDS]=useState("");
   const [showPass,setShowPass]=useState(false);
@@ -24,13 +37,17 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
   
   // FastPanel setup
   const isFPInstalled = s?.fastpanel_status === "installed";
-  const isFPPending = s?.fastpanel_status === "pending" || s?.fastpanel_status === "updating" || s?.fastpanel_status === "installing";
-  const { data: fpStatus } = useFastPanelStatus(s?.id, isFPPending);
-  
+  // Легаси-статусы времён серверной установки через Celery. Сейчас статус
+  // двигает только write-back десктопа, и то сразу в `installed`, так что эти
+  // значения означают «прошлая попытка оборвалась». Показываем их как контекст,
+  // но кнопку НЕ прячем: иначе сервер, застрявший в "installing", остаётся без
+  // единственного способа поставить панель.
+  const isFPStuck = s?.fastpanel_status === "pending" || s?.fastpanel_status === "updating" || s?.fastpanel_status === "installing";
+
   // Mutations
   const delSrv = useDeleteServer();
   const testSsh = useTestSsh(server?.id || 0);
-  const installFp = useInstallFastPanel(server?.id || 0);
+  const installFp = useInstallFastPanel(server?.id || 0, (creds) => onFastpanelCreds?.(creds));
   const refreshMetrics = useRefreshMetrics(server?.id || 0);
   const syncDomains = useSyncServerDomains(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
@@ -216,19 +233,28 @@ export default function ServerDetail({server, onBack, onNav}: {server?: any, onB
         {!isFPInstalled && <Card style={{marginBottom:16}}>
           <CHd><CTi>⚡ FastPanel Installation</CTi></CHd>
           <CBo>
-            {isFPPending ? (
-              <div style={{padding: 10, background:"#f3f4f6", borderRadius:8, fontFamily: "monospace", fontSize:12, whiteSpace:"pre-wrap"}}>
-                Status: {s.fastpanel_status}
-                {fpStatus?.log_tail?.join("\n")}
+            {isFPStuck && (
+              <div style={{marginBottom:12, padding:"10px 12px", background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, fontSize:12.5, color:"#92400e"}}>
+                Прошлая попытка осталась в статусе «{s.fastpanel_status}». Запустите установку заново.
               </div>
-            ) : (
-              <OpenInDesktop
-                variant="primary"
-                action={`install-fastpanel?serverId=${s.id}`}
-                label={installFp.isPending ? "Starting..." : "Install FastPanel"}
-                desktopOnClick={() => installFp.mutate()}
-                disabled={installFp.isPending}
-              />
+            )}
+            <div style={{marginBottom:12, fontSize:12.5, color:"#6b7280", lineHeight:1.5}}>
+              Обновит все пакеты и поставит FastPanel по SSH — 30+ минут. Шаги приходят тостами.
+            </div>
+            {/* Прогресс идёт отдельным каналом: Rust шлёт `fastpanel:progress`,
+                а тостит его один глобальный слушатель в DesktopWorkspace —
+                установка переживает уход с этой страницы. */}
+            <OpenInDesktop
+              variant="primary"
+              action={`install-fastpanel?serverId=${s.id}`}
+              label={installFp.isPending ? "Installing…" : "Install FastPanel"}
+              desktopOnClick={() => installFp.mutate(undefined)}
+              disabled={installFp.isPending}
+            />
+            {installFp.isError && (
+              <div role="alert" style={{marginTop:12, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+                Install failed: {(installFp.error as any)?.message || String(installFp.error)}
+              </div>
             )}
           </CBo>
         </Card>}
