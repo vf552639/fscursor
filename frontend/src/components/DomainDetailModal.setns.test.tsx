@@ -540,6 +540,63 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     expect(screen.getByText(/Invalid nameserver/)).toBeTruthy();
   });
 
+  it("удавшийся повтор гасит своё же красное на той же вкладке", async () => {
+    setTauri(true);
+    let attempt = 0;
+    mocks.apiPost.mockImplementation(async (url: string) => {
+      if (String(url).includes("create-db")) {
+        attempt += 1;
+        if (attempt === 1) throw new Error("Create DB failed: no space left");
+      }
+      return {};
+    });
+
+    renderModal();
+    fireEvent.click(screen.getByText("DB"));
+    fireEvent.click(screen.getByText("Create DB"));
+    expect(await screen.findByText(/no space left/)).toBeTruthy();
+
+    // Повтор на месте — тот самый сценарий, ради которого сброс в начале
+    // действия и заводился. Пер-вкладочная карта не должна была его потерять:
+    // гасим свой ключ, а не чужие.
+    fireEvent.click(screen.getByText("Create DB"));
+    await waitFor(() => expect(screen.queryByText(/no space left/)).toBeNull());
+  });
+
+  it("поздний чужой отказ не стирает ошибку, на которую сейчас смотрят", async () => {
+    setTauri(true);
+    let failSsl: (e: Error) => void = () => {};
+    mocks.apiPost.mockImplementation(async (url: string) => {
+      if (String(url).includes("ssl-request")) {
+        return new Promise((_res, rej) => { failSsl = rej; });
+      }
+      if (String(url).includes("create-db")) throw new Error("Create DB failed: no space left");
+      return {};
+    });
+
+    renderModal();
+    fireEvent.click(screen.getByText("SSL"));
+    fireEvent.click(screen.getByText("Request SSL"));
+
+    fireEvent.click(screen.getByText("DB"));
+    fireEvent.click(screen.getByText("Create DB"));
+    expect(await screen.findByText(/no space left/)).toBeTruthy();
+
+    // Пути чтения и гашения пер-вкладочные, а путь ЗАПИСИ был глобальным:
+    // вернувшийся отказ SSL затирал слот целиком. Чужого текста на DB не
+    // появлялось — но и своё исчезало, и пустая вкладка утверждала, что здесь
+    // ничего не падало. Текст, по которому чинят, терялся.
+    await act(async () => { failSsl(new Error("SSL request failed: rate limited")); });
+
+    expect(screen.queryByText(/no space left/)).not.toBeNull();
+    expect(screen.queryByText(/rate limited/)).toBeNull();
+
+    // Обе ошибки живут одновременно, каждая на своей вкладке.
+    fireEvent.click(screen.getByText("SSL"));
+    expect(await screen.findByText(/rate limited/)).toBeTruthy();
+    expect(screen.queryByText(/no space left/)).toBeNull();
+  });
+
   it("не теряет чужую ошибку из-за действия на другой вкладке", async () => {
     setTauri(true);
     mocks.apiPost.mockImplementation(async (url: string) => {
