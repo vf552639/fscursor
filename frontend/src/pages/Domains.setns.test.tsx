@@ -89,7 +89,7 @@ function setTauri(on: boolean) {
 function renderPage() {
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains />
+      <Domains onProvisionResult={() => {}} />
     </QueryClientProvider>
   );
 }

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
-import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, Domain, ProvisionDesktopResult } from "../api/domains";
+import { useMutationState } from "@tanstack/react-query";
+import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
@@ -235,7 +236,21 @@ function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: E
   </Modal>;
 }
 
-export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any) => void; ctx?: any }){
+export default function Domains({ onNav, ctx, onProvisionResult }: {
+  onNav?: (pg: string, ctx?: any) => void;
+  ctx?: any;
+  /**
+   * Куда отдать результат provision. Показывает его модалка показа-один-раз,
+   * которой владеет DesktopWorkspace: пароли БД и FTP существуют только в этом
+   * ответе, а сама страница размонтируется при уходе пользователя и унесла бы
+   * их с собой.
+   *
+   * Обязательный, хотя формально мог бы быть опциональным: потерю, которую
+   * нечем восстановить (сервер паролей не знает), компилятор умеет делать
+   * невыразимой — комментарий умеет только объяснить её задним числом.
+   */
+  onProvisionResult: (outcome: ProvisionOutcome) => void;
+}){
   const domainsQ = useDomains();
   const serversQ = useServers();
   const registrarsQ = useRegistrarAccounts();
@@ -282,17 +297,36 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const bulkProvision = useBulkProvisionDomains();
   const refreshSsl = useRefreshSsl();
   const bulkFullSetup = useBulkFullSetup();
-  const singleProvision = useProvisionDomain();
+  const singleProvision = useProvisionDomain(onProvisionResult);
+  // Состояние provision читаем из MutationCache, а не из локального observer:
+  // операция идёт минутами (SSH + certbot) и переживает уход со страницы, а
+  // observer при размонтировании теряет с ней связь. Без этого после возврата
+  // на страницу кнопка снова активна, и второй клик открывает вторую SSH-сессию
+  // по тому же домену.
+  const provisioningIds = useMutationState({
+    filters: { mutationKey: PROVISION_DOMAIN_KEY, status: "pending" },
+    select: (m) => (m.state.variables as ProvisionDomainVars | undefined)?.domainId,
+  });
+  const isProvisioning = (id: number) => provisioningIds.includes(id);
   const deleteDomain = useDeleteDomain();
   const [progressTaskId, setProgressTaskId] = useState<number | null>(null);
   const [progressTaskIds, setProgressTaskIds] = useState<number[]>([]);
   // Desktop provisioning is synchronous (no server-side task log to poll), so
   // its outcome is shown directly instead of routed through progressTaskId/
   // TaskProgressModal — that pair is for the backend-queued flows below
-  // (bulk full setup, Activity page). db.db_password and ftp.ftp_password live
-  // only in this state: they are never written to storage, the query cache,
-  // a log, or a URL.
-  const [provisionResult, setProvisionResult] = useState<{ domain: string; result: ProvisionDesktopResult } | null>(null);
+  // (bulk full setup, Activity page). Показывает результат не эта страница, а
+  // DesktopWorkspace (см. `onProvisionResult`): пароли БД и FTP не должны
+  // зависеть от того, ушёл ли пользователь со страницы, пока шёл provision.
+  //
+  // Диалог перед запуском: домен, для которого он открыт, и выбор «создавать ли
+  // базу». Выбор живёт здесь, а не в аргументах строки, чтобы не залипать между
+  // доменами — БД это отдельный артефакт на сервере, и умолчание у него «нет».
+  const [provisionTarget, setProvisionTarget] = useState<DomainUI | null>(null);
+  const [provisionWithDb, setProvisionWithDb] = useState(false);
+  const openProvisionDialog = (d: DomainUI) => {
+    setProvisionWithDb(false);
+    setProvisionTarget(d);
+  };
   const [showFileImport, setShowFileImport] = useState(false);
   const [showFullSetup, setShowFullSetup] = useState(false);
 
@@ -580,13 +614,11 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                                 // Второй клик стартовал бы вторую SSH-сессию с
                                 // create_site/create_ftp_account/certbot по тому
                                 // же домену — блокируем на время выполнения.
-                                title: singleProvision.isPending ? "Provisioning…" : "Provision domain",
-                                disabled: singleProvision.isPending,
+                                title: isProvisioning(d.id) ? "Provisioning…" : "Provision domain",
+                                disabled: isProvisioning(d.id),
                                 onClick: () => {
-                                  if (singleProvision.isPending) return;
-                                  singleProvision.mutate(d.id, {
-                                    onSuccess: (result) => setProvisionResult({ domain: d.domain, result }),
-                                  });
+                                  if (isProvisioning(d.id)) return;
+                                  openProvisionDialog(d);
                                 },
                               },
                             ]
@@ -603,16 +635,18 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
                       ]}
                     />
                     {!isTauri() ? (
+                      // В вебе — только ссылка в десктоп, и БЕЗ чекбокса «создать
+                      // БД»: хост `provision` у `parseDeepLinkAction` знает один
+                      // параметр `domainId`, лишний десктоп молча проглотит —
+                      // то есть галочка, поставленная в вебе, соврала бы.
                       <OpenInDesktop
                         action={`provision?domainId=${d.id}`}
-                        label={singleProvision.isPending ? "Provisioning…" : "Provision"}
+                        label={isProvisioning(d.id) ? "Provisioning…" : "Provision"}
                         size="sm"
-                        disabled={singleProvision.isPending}
+                        disabled={isProvisioning(d.id)}
                         desktopOnClick={() => {
-                          if (singleProvision.isPending) return;
-                          singleProvision.mutate(d.id, {
-                            onSuccess: (result) => setProvisionResult({ domain: d.domain, result }),
-                          });
+                          if (isProvisioning(d.id)) return;
+                          openProvisionDialog(d);
                         }}
                       />
                     ) : null}
@@ -736,126 +770,69 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
         }}
       />
     )}
-    {provisionResult && (
+    {provisionTarget && (
       <Modal
-        title={`Provisioned ${provisionResult.domain}`}
-        onClose={() => setProvisionResult(null)}
-        width={520}
+        title={`Provision ${provisionTarget.domain}`}
+        onClose={() => setProvisionTarget(null)}
+        width={460}
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {provisionResult.result.ssl_issued !== undefined && (
-            <div>
-              <Badge variant={provisionResult.result.ssl_issued ? "green" : "yellow"}>
-                {provisionResult.result.ssl_issued ? "SSL issued" : "SSL skipped"}
-              </Badge>
-            </div>
-          )}
-          {!provisionResult.result.ssl_issued && provisionResult.result.ssl_error ? (
-            <div
-              style={{
-                fontSize: 12.5,
-                color: "#92400e",
-                background: "#fffbeb",
-                border: "1px solid #fde68a",
-                borderRadius: 8,
-                padding: "10px 12px",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {provisionResult.result.ssl_error}
-            </div>
-          ) : null}
-          {provisionResult.result.db ? (
-            <div>
-              <div
-                style={{
-                  fontSize: 12.5,
-                  color: "#92400e",
-                  background: "#fffbeb",
-                  border: "1px solid #fde68a",
-                  borderRadius: 8,
-                  padding: "10px 12px",
-                  marginBottom: 10,
-                }}
-              >
-                Database credentials — shown once. Not stored anywhere; copy them now.
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {(
-                  [
-                    ["DB name", provisionResult.result.db.db_name],
-                    ["DB user", provisionResult.result.db.db_user],
-                    ["DB password", provisionResult.result.db.db_password],
-                  ] as const
-                ).map(([label, value]) => (
-                  <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 100, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>{label}</div>
-                    <code
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        fontSize: 13,
-                        background: "#f3f4f6",
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        wordBreak: "break-all",
-                      }}
-                    >
-                      {value}
-                    </code>
-                    <CopyBtn value={value} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          {provisionResult.result.ftp ? (
-            <div>
-              <div
-                style={{
-                  fontSize: 12.5,
-                  color: "#92400e",
-                  background: "#fffbeb",
-                  border: "1px solid #fde68a",
-                  borderRadius: 8,
-                  padding: "10px 12px",
-                  marginBottom: 10,
-                }}
-              >
-                FTP credentials — shown once. Not stored anywhere; copy them now.
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {(
-                  [
-                    ["FTP user", provisionResult.result.ftp.ftp_user],
-                    ["FTP password", provisionResult.result.ftp.ftp_password],
-                  ] as const
-                ).map(([label, value]) => (
-                  <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 100, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>{label}</div>
-                    <code
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        fontSize: 13,
-                        background: "#f3f4f6",
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        wordBreak: "break-all",
-                      }}
-                    >
-                      {value}
-                    </code>
-                    <CopyBtn value={value} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
+        <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.5, marginBottom: 14 }}>
+          SDMP will connect over SSH to this domain's server and create the site, its FTP
+          account and its SSL certificate.
         </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-          <Btn variant="primary" onClick={() => setProvisionResult(null)}>
-            Done
+        {/* Единственное место, где «создавать ли БД» вообще решается: команда
+            `provision_domain` принимает `with_db`, но до этого чекбокса ни один
+            вызывающий его не передавал — опциональная БД была недостижима.
+            Массовых аналогов нет намеренно: и `bulk-provision`, и bulk full
+            setup уходят в бэкенд-очередь, а не в эту Tauri-команду, и флагу там
+            некуда доехать. */}
+        <label
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            fontSize: 13,
+            color: "#374151",
+            cursor: "pointer",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={provisionWithDb}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setProvisionWithDb(e.target.checked)}
+            style={{ marginTop: 2, cursor: "pointer" }}
+          />
+          <span>
+            Also create a database
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              A MySQL database and its user are created on the server. The password is shown
+              once, right after provisioning — it is not stored anywhere.
+            </div>
+          </span>
+        </label>
+        <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
+          <Btn
+            variant="primary"
+            onClick={() => {
+              const target = provisionTarget;
+              if (isProvisioning(target.id)) return;
+              // Без per-call `onSuccess`: результат доставляет замыкание
+              // `mutationFn` (см. `useProvisionDomain`), потому что per-call
+              // коллбэки react-query глушит при размонтировании наблюдателя —
+              // а именно после ухода со страницы пароли и терялись.
+              singleProvision.mutate({
+                domainId: target.id,
+                domainName: target.domain,
+                withDb: provisionWithDb,
+              });
+              setProvisionTarget(null);
+            }}
+            disabled={isProvisioning(provisionTarget.id)}
+          >
+            {isProvisioning(provisionTarget.id) ? "Provisioning…" : "Provision"}
+          </Btn>
+          <Btn variant="secondary" onClick={() => setProvisionTarget(null)}>
+            Cancel
           </Btn>
         </div>
       </Modal>

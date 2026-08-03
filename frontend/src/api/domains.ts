@@ -386,25 +386,83 @@ export interface ProvisionDesktopResult {
   ftp?: { ftp_user: string; ftp_password: string };
 }
 
-export function useProvisionDomain() {
+/**
+ * Аргументы одиночного provision.
+ *
+ * `withDb` обязателен и не имеет умолчания: создавать базу или нет — решение
+ * пользователя, а не хука. Пока флаг был опциональным, ни один вызывающий его
+ * не передавал, и опциональная БД была недостижима из интерфейса вообще.
+ *
+ * `domainName` команде не нужен (она адресует домен по id) — он нужен модалке
+ * результата, чтобы назвать домен, чьи пароли показывает. Едет в аргументах
+ * мутации, потому что путь «результат → показ» переживает размонтирование
+ * страницы, с которой известно имя.
+ */
+export interface ProvisionDomainVars {
+  domainId: number;
+  domainName: string;
+  withDb: boolean;
+}
+
+/** Результат provision вместе с именем домена — то, что показывает модалка. */
+export interface ProvisionOutcome {
+  domain: string;
+  result: ProvisionDesktopResult;
+}
+
+/**
+ * Ключ запущенного provision. Общий на все домены, конкретный отбирается
+ * предикатом по `variables.domainId` — как у `SET_NAMESERVERS_KEY`, и по той же
+ * причине: хук на странице один, а строк в таблице много.
+ *
+ * Не косметика: без ключа перемонтированная страница не видит летящую мутацию
+ * (`MutationObserver` подхватывает только мутации своего ключа), `isPending`
+ * читается как `false`, и второй клик открывает вторую SSH-сессию с
+ * create_site/create_ftp_account/certbot по тому же домену.
+ */
+export const PROVISION_DOMAIN_KEY = ["provision-domain"] as const;
+
+/**
+ * Provision одного домена. Выполняет ТОЛЬКО десктоп.
+ *
+ * Ответ команды содержит пароли БД и FTP в открытом виде — они существуют
+ * только там и больше нигде (сервер их не знает по определению). Отсюда две
+ * связанные вещи, которые нельзя «упростить», — ровно как у
+ * `useInstallFastPanel`, см. его JSDoc.
+ *
+ * 1. Результат уходит в `onResult` изнутри `mutationFn`, а наружу возвращается
+ *    один `domain_id`. Попади он в возврат `mutationFn`, react-query положил бы
+ *    пароли в `data` MutationCache, откуда их не убирает даже `reset()`: запись
+ *    живёт там ещё gcTime (5 минут по умолчанию).
+ * 2. Именно `onResult`, а НЕ `mutate(vars, { onSuccess })` у места вызова.
+ *    Замыкание `mutationFn` переживает размонтирование, а per-call коллбэки —
+ *    нет: `MutationObserver` гасит их через `this.hasListeners()`, и они молча
+ *    теряются. Для операции на минуты (SSH + certbot) это разница между
+ *    «пароли показаны» и «пароли потеряны навсегда».
+ *
+ * `onResult` обязан только показать креды один раз и не сохранять
+ * (см. `ProvisionResultModal`).
+ */
+export function useProvisionDomain(onResult: (outcome: ProvisionOutcome) => void) {
   return useMutation({
-    mutationFn: async (arg: number | { domainId: number; withDb?: boolean }) => {
+    mutationKey: PROVISION_DOMAIN_KEY,
+    mutationFn: async (vars: ProvisionDomainVars) => {
       if (!isTauri()) {
         throw new Error(desktopOnly("Provisioning"));
       }
-      const domainId = typeof arg === "number" ? arg : arg.domainId;
-      const withDb = typeof arg === "number" ? false : Boolean(arg.withDb);
       const userId = useAuthStore.getState().userId;
       if (!userId) {
         throw new Error("Desktop: unlock session (user id missing)");
       }
       const result = await invokeSynced<ProvisionDesktopResult>("provision_domain", {
         userId,
-        domainId: String(domainId),
+        domainId: String(vars.domainId),
         siteOnly: false,
-        withDb,
+        withDb: vars.withDb,
       });
-      return result;
+      onResult({ domain: vars.domainName, result });
+      // НЕ «return result»: пароли ушли бы в data MutationCache — см. JSDoc.
+      return { domain_id: result.domain_id };
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
   });

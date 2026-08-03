@@ -15,6 +15,8 @@ import { isTauri } from "../lib/runtime";
 import { apiPost } from "../api/client";
 import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
 import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
+import { ProvisionResultModal } from "../components/ProvisionResultModal";
+import type { ProvisionOutcome } from "../api/domains";
 
 /**
  * Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`).
@@ -104,6 +106,11 @@ export default function DesktopWorkspace() {
   // deep link `sdmp://install-fastpanel` и кнопка на ServerDetail, — а место
   // показа одно.
   const [fpCreds, setFpCreds] = useState<InstallFastpanelResult | null>(null);
+  // Пароли БД и FTP после provision — та же история и то же место показа: их
+  // нет ни на сервере, ни в кэше, и страница `Domains`, которая их заказала,
+  // размонтируется при уходе пользователя. Держать их обязан тот, кто
+  // смонтирован всегда.
+  const [provisionOutcome, setProvisionOutcome] = useState<ProvisionOutcome | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tweaks, setTweaks] = useState(false);
   const [tw, setTw] = useState(TWEAK_DEFAULTS);
@@ -622,7 +629,9 @@ export default function DesktopWorkspace() {
       >
         {page === "dashboard" && <Dashboard onNav={nav} />}
         {page === "servers" && <Servers onNav={nav} />}
-        {page === "domains" && <Domains onNav={nav} ctx={srvCtx} />}
+        {page === "domains" && (
+          <Domains onNav={nav} ctx={srvCtx} onProvisionResult={setProvisionOutcome} />
+        )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}
         {page === "notifications" && <Notifications onNav={nav} />}
         {page === "activity" && <Activity />}
@@ -638,6 +647,13 @@ export default function DesktopWorkspace() {
       </main>
 
       {fpCreds && <FastPanelCredsModal creds={fpCreds} onClose={() => setFpCreds(null)} />}
+      {provisionOutcome && (
+        <ProvisionResultModal
+          domain={provisionOutcome.domain}
+          result={provisionOutcome.result}
+          onClose={() => setProvisionOutcome(null)}
+        />
+      )}
 
       {toast && (
         <div
