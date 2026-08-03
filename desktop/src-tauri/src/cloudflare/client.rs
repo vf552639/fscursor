@@ -93,6 +93,12 @@ pub struct Zone {
     pub name: String,
     #[serde(default)]
     pub name_servers: Option<Vec<String>>,
+    /// Статус делегирования у Cloudflare (`active`/`pending`/`moved`). Приходит
+    /// в том же ответе `/zones`, что и всё остальное, — не читать его значило
+    /// показывать пользователю уверенное «Unknown» вместо ответа, который у нас
+    /// уже на руках.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 pub async fn list_zones(token: &str) -> Result<Vec<Zone>, CloudflareError> {
@@ -170,23 +176,55 @@ pub struct DnsRecordPayload {
     pub priority: Option<u16>,
 }
 
+/// Все записи зоны. Страницы обязательны: у зоны их бывают сотни, а обрезка по
+/// первой сотне не выглядит обрезкой — пользователь просто не находит запись и
+/// заводит дубль. Цикл тот же, что в `list_zones`.
 pub async fn list_dns_records(
     token: &str,
     zone_id: &str,
 ) -> Result<Vec<DnsRecord>, CloudflareError> {
-    let params = vec![("per_page".into(), "100".into())];
-    let data = call(
-        token,
-        Method::GET,
-        &format!("/zones/{zone_id}/dns_records"),
-        Some(params),
-        None,
-    )
-    .await?;
-    Ok(
-        serde_json::from_value(data.get("result").cloned().unwrap_or(serde_json::json!([])))
-            .unwrap_or_default(),
-    )
+    list_dns_records_with_base(CF_API, token, zone_id).await
+}
+
+async fn list_dns_records_with_base(
+    api_base: &str,
+    token: &str,
+    zone_id: &str,
+) -> Result<Vec<DnsRecord>, CloudflareError> {
+    let mut all = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let params = vec![
+            ("per_page".into(), "100".into()),
+            ("page".into(), page.to_string()),
+        ];
+        let data = call_with_base(
+            api_base,
+            token,
+            Method::GET,
+            &format!("/zones/{zone_id}/dns_records"),
+            Some(params),
+            None,
+        )
+        .await?;
+        let rows: Vec<DnsRecord> = serde_json::from_value(
+            data.get("result")
+                .cloned()
+                .unwrap_or(serde_json::json!([])),
+        )
+        .unwrap_or_default();
+        all.extend(rows);
+        let total_pages = data
+            .get("result_info")
+            .and_then(|i| i.get("total_pages"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        if page as u64 >= total_pages {
+            break;
+        }
+        page += 1;
+    }
+    Ok(all)
 }
 
 pub async fn create_dns_record(
@@ -367,8 +405,92 @@ pub async fn get_nameservers(token: &str, zone_id: &str) -> Result<Vec<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// `status` — ответ Cloudflare на «доехало ли делегирование NS». Он лежит в
+    /// том же JSON, что и всё остальное; пока структура его не читала, UI
+    /// показывал уверенное «Unknown» вместо этого ответа.
+    #[test]
+    fn zone_keeps_status_and_survives_its_absence() {
+        let z: Zone = serde_json::from_value(serde_json::json!({
+            "id": "z1",
+            "name": "example.com",
+            "status": "pending",
+            "name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"],
+        }))
+        .unwrap();
+        assert_eq!(z.status.as_deref(), Some("pending"));
+        assert_eq!(z.name_servers.unwrap().len(), 2);
+
+        let bare: Zone =
+            serde_json::from_value(serde_json::json!({"id": "z2", "name": "x"})).unwrap();
+        assert!(bare.status.is_none());
+    }
+
+    /// Зона на несколько страниц: без цикла редактор показал бы первую сотню
+    /// записей под уверенным заголовком «DNS Records (100)», и пользователь,
+    /// не найдя запись, завёл бы дубль.
+    #[tokio::test]
+    async fn list_dns_records_walks_all_pages() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones/z1/dns_records"))
+            .and(query_param("page", "1"))
+            .and(query_param("per_page", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": [{"id": "r1", "type": "A", "name": "a", "content": "1.1.1.1"}],
+                "result_info": {"total_pages": 3}
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones/z1/dns_records"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": [{"id": "r2", "type": "A", "name": "b", "content": "2.2.2.2"}],
+                "result_info": {"total_pages": 3}
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones/z1/dns_records"))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": [{"id": "r3", "type": "A", "name": "c", "content": "3.3.3.3"}],
+                "result_info": {"total_pages": 3}
+            })))
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let recs = list_dns_records_with_base(&base, "t", "z1").await.unwrap();
+        let ids: Vec<&str> = recs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "r2", "r3"]);
+    }
+
+    /// Одна страница — один запрос: `total_pages` отсутствует в ответе, и это
+    /// не повод уйти в бесконечный цикл.
+    #[tokio::test]
+    async fn list_dns_records_stops_without_result_info() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones/z1/dns_records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": [{"id": "r1", "type": "A", "name": "a", "content": "1.1.1.1"}]
+            })))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let recs = list_dns_records_with_base(&base, "t", "z1").await.unwrap();
+        assert_eq!(recs.len(), 1);
+    }
 
     #[tokio::test]
     async fn verify_token_request() {

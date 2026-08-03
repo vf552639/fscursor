@@ -13,6 +13,7 @@ import {
   useCreateDnsRecord,
   useUpdateDnsRecord,
   useDeleteDnsRecord,
+  type CloudflareAccount,
   type DnsRecord,
   type DnsRecordUpdate,
   type Zone,
@@ -54,7 +55,31 @@ const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV"];
 /** Типы, у которых Cloudflare принимает priority. Для прочих поле слать нельзя. */
 const TYPES_WITH_PRIORITY = new Set(["MX", "SRV", "URI"]);
 
-const DESKTOP_ONLY_NOTE = "DNS changes run in the SDMP desktop app.";
+const TTL_PRESETS: { value: string; label: string }[] = [
+  { value: "1", label: "Auto" },
+  { value: "300", label: "5 min" },
+  { value: "3600", label: "1 hour" },
+  { value: "86400", label: "1 day" },
+];
+
+/**
+ * Варианты TTL для формы правки. У записи бывает TTL, которого нет в пресетах
+ * (900), и бывает отсутствующий TTL — и то, и другое `<Sel>` из четырёх
+ * вариантов показывал пустым, а сохранение молча переписывало значение.
+ */
+function ttlOptionsFor(ttl: number | null): { value: string; label: string }[] {
+  if (ttl == null) return [{ value: "", label: "— (not set)" }, ...TTL_PRESETS];
+  const current = String(ttl);
+  if (TTL_PRESETS.some((o) => o.value === current)) return TTL_PRESETS;
+  return [{ value: current, label: `${ttl}s` }, ...TTL_PRESETS];
+}
+
+/**
+ * Общая подпись для всего, что веб не может: и выполнить (мутации), и прочитать
+ * (список зон, записи, NS — им нужен расшифрованный токен). Формулировка
+ * намеренно не про «changes»: две из трёх точек — про чтение.
+ */
+const DESKTOP_ONLY_NOTE = "Cloudflare works through the SDMP desktop app.";
 
 /**
  * Резервный список зон — из доменов (`domains.cloudflare_zone_id`). Нужен
@@ -66,7 +91,11 @@ export function zonesOfAccount(domains: Domain[], accountId: number): CfZoneRef[
   const seen = new Map<string, CfZoneRef>();
   for (const d of domains) {
     if (d.cloudflare_account_id !== accountId || !d.cloudflare_zone_id) continue;
-    if (!seen.has(d.cloudflare_zone_id)) {
+    const prev = seen.get(d.cloudflare_zone_id);
+    // Имя зоны — это апекс, а на одной зоне висят и поддомены. Первый
+    // попавшийся домен дал бы «blog.example.com» и в списке, и в хлебных
+    // крошках; из имён одной зоны апекс — самое короткое.
+    if (!prev || d.domain_name.length < prev.name.length) {
       seen.set(d.cloudflare_zone_id, { id: d.cloudflare_zone_id, name: d.domain_name });
     }
   }
@@ -83,7 +112,7 @@ function AccountCard({
   onOpenZone,
   onAddZone,
 }: {
-  acc: any;
+  acc: CloudflareAccount;
   onEdit: () => void;
   onDelete: () => void;
   onTest: () => void;
@@ -168,7 +197,8 @@ function AccountCard({
           </div>
         ) : !canExecute ? (
           <div style={{ fontSize: 12.5, color: "#92400e", marginBottom: 8 }}>
-            Zones as known from your domains. {DESKTOP_ONLY_NOTE}
+            Zones as known from your domains — the live list needs your API token.{" "}
+            {DESKTOP_ONLY_NOTE}
           </div>
         ) : null}
         {zonesLoading ? (
@@ -181,7 +211,7 @@ function AccountCard({
           zones.map((z) => (
             <div
               key={z.id}
-              data-zone-row=""
+              data-testid="zone-row"
               style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderTop:"1px solid #f3f4f6"}}
             >
               <span style={{ fontSize: 13, fontWeight: 600, color: "#111", flex: 1 }}>{z.name}</span>
@@ -318,7 +348,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
     <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:20}}>
       {[
         ["Total Accounts",cfAccounts.length,"#2563eb"],
-        ["Active",cfAccounts.filter((c: any)=>c.is_active).length,"#16a34a"],
+        ["Active",cfAccounts.filter((c)=>c.is_active).length,"#16a34a"],
       ].map(([l,v,c])=><StatCard key={l as string} label={l} value={v} color={c}/>)}
     </div>
     {cfAccounts.length === 0 ? (
@@ -331,7 +361,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         </EmptyState>
       </Card>
     ) : (
-      cfAccounts.map((acc: any)=>(
+      cfAccounts.map((acc)=>(
       <AccountCard
         key={acc.id}
         acc={acc}
@@ -460,7 +490,15 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
   const lastAction = [purge, createRecord, updateRecord, deleteRecord]
     .map((m) => ({ submittedAt: m.submittedAt, error: m.error as Error | null }))
     .reduce((a, b) => (b.submittedAt > a.submittedAt ? b : a));
-  const actionError = lastAction.error;
+  // Итог действия живёт в мутации до следующего вызова, то есть вечно. Держим
+  // отметку «это я уже видел»: иначе красное от неудавшегося create висит над
+  // таблицей всё время, что пользователь в этой зоне.
+  const [seenActionAt, setSeenActionAt] = useState(0);
+  const bannerVisible = lastAction.submittedAt > seenActionAt;
+  const actionError = bannerVisible ? lastAction.error : null;
+  const dismissBanner = () => setSeenActionAt(lastAction.submittedAt);
+  const openAddRecord = () => { dismissBanner(); setShowDns(true); };
+  const openEditRecord = (r: DnsRecord) => { dismissBanner(); setEditingRecord(r); };
   const handleCreateRecord = () => {
     if (!recordName.trim() || !recordContent.trim()) return;
     createRecord.mutate({
@@ -505,7 +543,7 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
         <div style={{display:"flex",gap:8}}>
           <Btn size="sm" variant="secondary" onClick={()=>purge.mutate()} disabled={!canExecute || purge.isPending}>🗑 Purge Cache</Btn>
           <Btn size="sm" variant="secondary" onClick={()=>setShowNs(true)}>🔗 Nameservers</Btn>
-          <Btn size="sm" variant="primary" onClick={()=>setShowDns(true)} disabled={!canExecute}>+ Add Record</Btn>
+          <Btn size="sm" variant="primary" onClick={openAddRecord} disabled={!canExecute}>+ Add Record</Btn>
         </div>
       </CHd>
       {!canExecute && (
@@ -514,13 +552,15 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
         </div>
       )}
       {actionError && (
-        <div role="alert" style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#dc2626"}}>
-          {String((actionError as any)?.message || "Cloudflare command failed")}
+        <div role="alert" style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#dc2626",display:"flex",gap:10,alignItems:"baseline"}}>
+          <span style={{flex:1}}>{String((actionError as any)?.message || "Cloudflare command failed")}</span>
+          <Btn size="sm" variant="ghost" onClick={dismissBanner}>✕</Btn>
         </div>
       )}
-      {purge.isSuccess && purge.submittedAt === lastAction.submittedAt && (
-        <div style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#16a34a"}}>
-          ✓ Cache purged
+      {bannerVisible && !actionError && purge.isSuccess && purge.submittedAt === lastAction.submittedAt && (
+        <div style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#16a34a",display:"flex",gap:10,alignItems:"baseline"}}>
+          <span style={{flex:1}}>✓ Cache purged</span>
+          <Btn size="sm" variant="ghost" onClick={dismissBanner}>✕</Btn>
         </div>
       )}
       {recsError && (
@@ -544,8 +584,11 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
               <td style={{padding:"11px 16px",fontSize:13,color:"#6b7280"}}>{r.ttl==null?"—":r.ttl===1?"Auto":`${r.ttl}s`}</td>
               <td style={{padding:"11px 16px",fontSize:18}}>{r.proxied?"🟠":"⚫"}</td>
               <td style={{padding:"11px 16px"}}><RowActions actions={[
-                { icon: "✎", title: "Edit DNS record", disabled: !canExecute, onClick: () => setEditingRecord(r) },
-                { icon: "✕", title: "Delete DNS record", variant: "danger", disabled: !canExecute || deleteRecord.isPending, onClick: () => { if (!confirm(`Delete DNS record ${r.name}?`)) return; deleteRecord.mutate(r.id); } },
+                { icon: "✎", title: "Edit DNS record", disabled: !canExecute, onClick: () => openEditRecord(r) },
+                // Блокируем ТУ САМУЮ строку, а не всю таблицу: мутация одна на
+                // весь список, и `isPending` без сверки с `variables` гасил бы
+                // крестики у всех записей разом.
+                { icon: "✕", title: "Delete DNS record", variant: "danger", disabled: !canExecute || (deleteRecord.isPending && deleteRecord.variables === r.id), onClick: () => { dismissBanner(); if (!confirm(`Delete DNS record ${r.name}?`)) return; deleteRecord.mutate(r.id); } },
               ]}/></td>
             </tr>
           ))}
@@ -615,7 +658,10 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
   const [type, setType] = useState(record.type || "A");
   const [name, setName] = useState(record.name || "");
   const [content, setContent] = useState(record.content || "");
-  const [ttl, setTtl] = useState(String(record.ttl || 1));
+  // «Нет TTL» — это пустая строка, а не 1: `String(record.ttl || 1)` превращал
+  // отсутствующий TTL в Auto у любого, кто просто открыл и сохранил запись.
+  const [ttl, setTtl] = useState(record.ttl == null ? "" : String(record.ttl));
+  const ttlOptions = ttlOptionsFor(record.ttl);
   const [proxied, setProxied] = useState(Boolean(record.proxied));
   // Cloudflare не возвращает priority в DnsRecord, поэтому подставить текущее
   // значение нечем: пустое поле = «не трогать» (serde видит undefined как None).
@@ -635,12 +681,12 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
         </div>
       )}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={ttl} onChange={e=>setTtl((e.target as any).value)} style={{width:"100%"}}><option value="1">Auto</option><option value="300">5 min</option><option value="3600">1 hour</option><option value="86400">1 day</option></Sel></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={ttl} onChange={e=>setTtl((e.target as any).value)} style={{width:"100%"}}>{ttlOptions.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}</Sel></div>
         <div style={{paddingTop:22}}><label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={proxied} onChange={e=>setProxied((e.target as any).checked)} /><span>Proxied</span></label></div>
       </div>
     </div>
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      <Btn variant="primary" disabled={isSaving || !name.trim() || !content.trim()} onClick={() => onSave({ type, name: name.trim(), content: content.trim(), ttl: Number(ttl), proxied, priority: needsPriority && priority.trim() ? Number(priority) : undefined })} style={{flex:1,justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
+      <Btn variant="primary" disabled={isSaving || !name.trim() || !content.trim()} onClick={() => onSave({ type, name: name.trim(), content: content.trim(), ttl: ttl === "" ? undefined : Number(ttl), proxied, priority: needsPriority && priority.trim() ? Number(priority) : undefined })} style={{flex:1,justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
       <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;

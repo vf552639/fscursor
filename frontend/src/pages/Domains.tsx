@@ -155,8 +155,13 @@ function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: E
               <div style={{fontSize:12.5,color:"#dc2626"}}>Failed to load nameservers from Cloudflare.</div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
-                {(nameserversData?.name_servers || []).length > 0 ? (
-                  (nameserversData?.name_servers || []).map((ns) => (
+                {/* `null` — зоны с таким id в аккаунте нет; это не то же самое,
+                    что зона без NS, и говорить про неё «No nameservers» значит
+                    отвечать не на тот вопрос. */}
+                {nameserversData == null ? (
+                  <div style={{fontSize:12.5,color:"#dc2626"}}>Zone not found in this Cloudflare account.</div>
+                ) : nameserversData.name_servers.length > 0 ? (
+                  nameserversData.name_servers.map((ns) => (
                     <div key={ns} style={{fontSize:12.5,fontFamily:"monospace",color:"#374151"}}>• {ns}</div>
                   ))
                 ) : (

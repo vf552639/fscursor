@@ -50,13 +50,8 @@ export interface Zone {
   id: string;
   name: string;
   name_servers: string[] | null;
-  /**
-   * Cloudflare шлёт `status` в JSON, но `client::Zone` в Rust его не
-   * десериализует, поэтому до UI он не доезжает и всегда `null`. Поле оставлено
-   * ради бейджа «CF Zone Status» в `Domains.tsx`; чинится добавлением поля в
-   * `desktop/src-tauri/src/cloudflare/client.rs`.
-   */
-  status?: string | null;
+  /** Делегирование у Cloudflare: `active` / `pending` / `moved`. */
+  status: string | null;
 }
 
 /** Запись так, как её отдают `cf_list_dns_records` и мутации. */
@@ -187,7 +182,11 @@ export function useTestCloudflareAccount() {
 export function useCloudflareZones(accountId: number | null | undefined) {
   return useQuery({
     ...zonesQuery(accountId),
-    enabled: !!accountId,
+    // Вне десктопа запрос обречён (`requireDesktop`), а его ошибку список зон
+    // не читает — там своя подпись и резерв из доменов. Не запускаем вовсе.
+    // NB: у `useDnsRecords` наоборот — там текст этой ошибки И ЕСТЬ объяснение,
+    // которое видит веб, поэтому такой же фильтр туда добавлять нельзя.
+    enabled: !!accountId && isTauri(),
   });
 }
 
@@ -209,10 +208,12 @@ export function useZoneNameservers(
   return useQuery({
     ...zonesQuery(accountId),
     enabled: !!accountId && !!zoneId,
-    select: (zones: Zone[]): Nameservers => ({
-      zone_id: String(zoneId),
-      name_servers: zones.find((z) => z.id === zoneId)?.name_servers ?? [],
-    }),
+    // `null` — зоны нет в аккаунте (например, zone_id от другого аккаунта).
+    // Пустой массив тут врал бы: «NS не настроены» вместо «зона не найдена».
+    select: (zones: Zone[]): Nameservers | null => {
+      const zone = zones.find((z) => z.id === zoneId);
+      return zone ? { zone_id: zone.id, name_servers: zone.name_servers ?? [] } : null;
+    },
   });
 }
 
@@ -253,9 +254,15 @@ export function useCreateZone(accountId: number) {
         zoneName,
       });
     },
-    // Список зон страница строит из доменов: связку зоны с доменом ставит
-    // серверная синхронизация, поэтому перечитываем именно домены.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["domains"] }),
+    onSuccess: () => {
+      // Зоны — это то, что рисует список: без инвалидации только что созданная
+      // зона не появлялась бы до ухода со страницы (refetchOnWindowFocus
+      // выключен, карточку модалка не размонтирует).
+      queryClient.invalidateQueries({ queryKey: cloudflareKeys.zones(accountId) });
+      // Домены — потому что серверная синхронизация привязывает зону к строке
+      // домена, и от этого зависит резервный список для веба.
+      queryClient.invalidateQueries({ queryKey: ["domains"] });
+    },
   });
 }
 
