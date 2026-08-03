@@ -25,7 +25,8 @@ export default function Lock() {
       await invokeIfTauri<string>("auth_login", {
         email,
         password,
-        totp_code: totp.trim() || null,
+        // Ключи аргументов Tauri v2 — camelCase: с `totp_code` код молча терялся.
+        totpCode: totp.trim() || null,
       });
       setUnlocked(true);
       navigate("/", { replace: true });

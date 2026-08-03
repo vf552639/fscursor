@@ -30,7 +30,8 @@ export default function RecoveryRestore() {
       await invokeIfTauri<string>("auth_recovery", {
         email,
         phrase: phrase.trim().replace(/\s+/g, " "),
-        new_password: password,
+        // Ключи аргументов Tauri v2 — camelCase.
+        newPassword: password,
       });
       navigate("/login", { state: { notice: "Recovery complete. Sign in with your new password." } });
     } catch (e: unknown) {

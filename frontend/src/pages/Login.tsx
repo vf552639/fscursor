@@ -96,7 +96,8 @@ export default function Login() {
       const userId = await invokeIfTauri<string>("auth_login", {
         email,
         password,
-        totp_code: totp.trim() || null,
+        // camelCase — см. комментарий про ключи аргументов Tauri ниже.
+        totpCode: totp.trim() || null,
       });
       setUser(userId, email);
       setUnlocked(true);

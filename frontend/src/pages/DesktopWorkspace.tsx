@@ -245,7 +245,9 @@ export default function DesktopWorkspace() {
   const handleLogout = async () => {
     if (isTauri() && userId) {
       try {
-        await invokeIfTauri("auth_logout", { user_id: userId });
+        // camelCase: с `user_id` команда падала, forget_master_key не вызывался
+        // и мастер-ключ оставался в OS-keychain после выхода.
+        await invokeIfTauri("auth_logout", { userId });
       } catch {
         /* still clear local session */
       }
