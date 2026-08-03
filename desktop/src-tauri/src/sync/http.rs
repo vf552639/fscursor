@@ -52,6 +52,12 @@ pub struct RecoveryFinishResponse {
 pub struct UserMeResponse {
     pub id: String,
     pub email: String,
+    /// `None` — сервер поля не прислал (бэкенд старше миграции 014). Это «не знаю»,
+    /// а не «не настроено»: UI в таком случае не утверждает ничего, потому что
+    /// ложное «не настроено» толкает пользователя перевыпустить фразу и обесценить
+    /// ту, что уже записана на бумаге.
+    #[serde(default)]
+    pub recovery_configured: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -652,6 +658,29 @@ mod tests {
         c.login_finish("a@b.c", &[9u8; 32], None).await.unwrap();
         let me = c.me().await.unwrap();
         assert_eq!(me.email, "a@b.c");
+        // Поля нет в ответе — «не знаю», и me() из-за этого не падает.
+        assert_eq!(me.recovery_configured, None);
+    }
+
+    #[tokio::test]
+    async fn me_reports_recovery_configured_when_the_server_says_so() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/auth/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "00000000-0000-0000-0000-000000000001",
+                "email": "a@b.c",
+                "email_confirmed_at": null,
+                "totp_enabled": false,
+                "recovery_configured": false
+            })))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        // Явное false отличается от отсутствия поля: одно — «восстановиться нельзя»,
+        // другое — «сервер не в курсе вопроса».
+        assert_eq!(c.me().await.unwrap().recovery_configured, Some(false));
     }
 
     #[tokio::test]

@@ -310,3 +310,40 @@ async def test_successful_recovery_kills_sessions_and_rewrites_blob():
         assert after["recovery_auth_key_hash"] is not None
         r = await c.get("/api/auth/me")
         assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_me_reports_recovery_configured_in_step_with_finish():
+    """`recovery_configured` — это предсказание ответа recovery/finish.
+
+    Тест намеренно сверяет флаг не с колонкой, а с поведением самого эндпоинта:
+    иначе UI сможет тихо разойтись с бэкендом и показывать «всё в порядке»
+    аккаунту, который на деле не восстановится.
+    """
+    email = f"recme-{uuid.uuid4().hex[:10]}@example.com"
+    new_rec_key = b"\x66" * 32
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        await _clear_recovery_hash(email)
+        r = await c.post(
+            "/api/auth/login/finish",
+            json={"email": email, "auth_key_b64": b64(AUTH_KEY)},
+        )
+        assert r.status_code == 200, r.text
+
+        # Легаси-аккаунт: флаг снят, и finish действительно отдаёт 409.
+        assert (await c.get("/api/auth/me")).json()["recovery_configured"] is False
+        assert (
+            await c.post("/api/auth/recovery/finish", json=_finish_body(email, REC_KEY))
+        ).status_code == 409
+
+        r = await c.post(
+            "/api/auth/recovery/setup",
+            json={
+                "auth_key_b64": b64(AUTH_KEY),
+                "recovery_blob_b64": b64(b"\x55" * 96),
+                "recovery_auth_key_b64": b64(new_rec_key),
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert (await c.get("/api/auth/me")).json()["recovery_configured"] is True

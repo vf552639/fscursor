@@ -188,12 +188,20 @@ async def logout(
 
 
 @router.get("/me", response_model=schemas.UserMeResponse)
-async def me(user: User = Depends(get_current_user_or_401)) -> schemas.UserMeResponse:
+async def me(
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> schemas.UserMeResponse:
+    rb = await db.get(RecoveryBlob, user.id)
     return schemas.UserMeResponse(
         id=user.id,
         email=user.email,
         email_confirmed_at=user.email_confirmed_at,
         totp_enabled=user.totp_secret is not None,
+        # Ровно то же условие, по которому recovery/finish отдаёт 409. Аккаунт,
+        # заведённый до миграции 014, восстановиться не может, и узнать об этом
+        # он должен заранее, а не в момент, когда пароль уже потерян.
+        recovery_configured=rb is not None and rb.recovery_auth_key_hash is not None,
     )
 
 

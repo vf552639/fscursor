@@ -4,6 +4,7 @@ import { useRegistrarAccounts, useCreateRegistrarAccount, useTestRegistrarConnec
 import { useSystemConfig, useTestNotificationDelivery, useUpdateSystemConfig } from "../api/settings";
 import { describeQueryError } from "../lib/queryError";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
+import RecoveryPhraseCard from "./RecoveryPhraseCard";
 
 export default function Settings(){
   const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
@@ -211,7 +212,7 @@ export default function Settings(){
         ))}
       </CBo>
     </Card>}
-    {tab==="encryption"&&<Card>
+    {tab==="encryption"&&<><Card>
       <CHd><CTi>🔑 Encryption Settings</CTi></CHd>
       <CBo>
         <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:9,padding:"14px 16px",marginBottom:16,display:"flex",alignItems:"flex-start",gap:10}}>
@@ -225,7 +226,9 @@ export default function Settings(){
           </div>
         ))}
       </CBo>
-    </Card>}
+    </Card>
+    <RecoveryPhraseCard />
+    </>}
     {editingRegistrar && <EditRegistrarModal registrar={editingRegistrar} onClose={() => setEditingRegistrar(null)} />}
     {editingSystem && <Modal title={`Edit ${editingSystem.key}`} onClose={() => setEditingSystem(null)} width={420}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>

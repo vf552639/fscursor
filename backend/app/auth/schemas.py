@@ -33,6 +33,8 @@ class UserMeResponse(BaseModel):
     email: EmailStr
     email_confirmed_at: Optional[datetime] = None
     totp_enabled: bool
+    # True ровно тогда, когда /auth/recovery/finish не ответит 409 (см. routes.me).
+    recovery_configured: bool = False
 
 
 class ConfirmEmailRequest(BaseModel):

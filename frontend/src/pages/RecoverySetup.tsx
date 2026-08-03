@@ -1,7 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
-type LocState = { phrase: string; email: string };
+/**
+ * `mode` различает два входа на этот экран:
+ * - `register` (по умолчанию) — сразу после регистрации, дальше идти в логин;
+ * - `reconfigure` — перевыпуск из Settings под живой сессией. Выкидывать такого
+ *   пользователя на логин было бы враньём: сессию `/auth/recovery/setup` не трогает.
+ */
+type LocState = { phrase: string; email: string; mode?: "register" | "reconfigure" };
 
 function pickFourIndices(): number[] {
   const xs = Array.from({ length: 24 }, (_, i) => i);
@@ -17,6 +23,7 @@ export default function RecoverySetup() {
   const location = useLocation();
   const state = location.state as LocState | null;
   const phrase = state?.phrase ?? "";
+  const reconfigure = state?.mode === "reconfigure";
   const words = useMemo(() => phrase.split(/\s+/).filter(Boolean), [phrase]);
   const checks = useMemo(() => pickFourIndices(), [phrase]);
   const [inputs, setInputs] = useState<Record<number, string>>({});
@@ -26,7 +33,13 @@ export default function RecoverySetup() {
     return (
       <div style={wrap}>
         <div style={card}>
-          <p>Missing recovery phrase. Start from <Link to="/register">register</Link>.</p>
+          {/* Фраза живёт только в location.state — перезагрузка страницы её теряет.
+              Куда идти, зависит от того, есть ли уже аккаунт, поэтому предлагаем оба
+              выхода вместо того, чтобы гадать. */}
+          <p>
+            Missing recovery phrase. Start from <Link to="/register">register</Link>, or, if you
+            already have an account, generate a new phrase in Settings → Encryption.
+          </p>
         </div>
       </div>
     );
@@ -42,16 +55,38 @@ export default function RecoverySetup() {
       setErr("Check the highlighted words match your phrase.");
       return;
     }
+    if (reconfigure) {
+      navigate("/", { replace: true });
+      return;
+    }
     navigate("/login", { state: { notice: "Confirm your email (check dev logs), then sign in." } });
   };
 
   return (
     <div style={wrap}>
       <div style={{ ...card, maxWidth: 560 }}>
-        <h1 style={{ marginTop: 0 }}>Save your recovery phrase</h1>
+        <h1 style={{ marginTop: 0 }}>
+          {reconfigure ? "Save your new recovery phrase" : "Save your recovery phrase"}
+        </h1>
         <p style={{ color: "#6b7280", fontSize: 14 }}>
           Write these 24 words down offline. Anyone with this phrase can recover your vault.
         </p>
+        {reconfigure && (
+          <div
+            style={{
+              background: "#fffbeb",
+              border: "1px solid #fde68a",
+              borderRadius: 8,
+              padding: "10px 12px",
+              fontSize: 13,
+              color: "#92400e",
+              marginBottom: 16,
+            }}
+          >
+            Your previous recovery phrase no longer works. Replace any copy you wrote down
+            earlier — recovery now accepts only the words below.
+          </div>
+        )}
         <div
           style={{
             display: "grid",

@@ -71,7 +71,8 @@ fn describe_recovery_error(e: ApiError) -> CommandError {
         ApiError::Status { status: 404, .. } | ApiError::Status { status: 409, .. } => {
             CommandError::Api(
                 "This account has no recovery key configured (it predates the recovery-proof \
-                 update). Sign in with your password and set recovery up again, then retry."
+                 update). Sign in with your password, open Settings -> Encryption -> Recovery \
+                 phrase and set recovery up again, then retry."
                     .into(),
             )
         }
@@ -151,7 +152,8 @@ pub async fn auth_logout(user_id: String, api: State<'_, ApiClient>) -> Result<(
 /// `/auth/recovery/finish` tells legacy accounts (NULL hash, registered before migration
 /// 014) to do. Requires the master password as a step-up.
 ///
-/// NOTE: no UI calls this yet — see the phase report.
+/// Reached from Settings -> Encryption -> Recovery phrase; the caller must then show the
+/// returned phrase, because the previous one stops working the moment this succeeds.
 #[tauri::command]
 pub async fn auth_recovery_setup(
     password: String,
@@ -180,6 +182,14 @@ pub async fn auth_recovery_setup(
         user_id: me.id,
         recovery_phrase: phrase,
     })
+}
+
+/// Может ли аккаунт вообще восстановиться. `None` — сервер не ответил на этот вопрос
+/// (поле появилось вместе с миграцией 014), и тогда UI молчит вместо того, чтобы гадать.
+#[tauri::command]
+pub async fn auth_recovery_status(api: State<'_, ApiClient>) -> Result<Option<bool>, CommandError> {
+    let me = api.me().await.map_err(|e| CommandError::Api(e.to_string()))?;
+    Ok(me.recovery_configured)
 }
 
 #[tauri::command]

@@ -42,7 +42,7 @@ export function describeRecoveryError(err: unknown): string {
       return "Recovery rejected: this phrase does not match that account. Check the email address and all 24 words.";
     case 404:
     case 409:
-      return "This account has no recovery key configured (it predates the recovery-proof update). Sign in with your password and set recovery up again, then retry.";
+      return "This account has no recovery key configured (it predates the recovery-proof update). Sign in with your password, open Settings → Encryption → Recovery phrase and set recovery up again, then retry.";
     case 429:
       return "Too many recovery attempts. Wait a minute before trying again.";
     default:
