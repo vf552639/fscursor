@@ -1,14 +1,14 @@
 import React, { useMemo, useState } from "react";
+import { useMutationState } from "@tanstack/react-query";
 
 import {
   Domain,
+  SetNameserversVars,
   useCancelSsl,
-  useCheckNs,
   useCreateDb,
   useCreateSite,
   useDbCredentials,
   useGetNginxOverride,
-  useMarkNsSet,
   useRefreshSsl,
   useRequestSsl,
   useSetNginxOverride,
@@ -16,6 +16,7 @@ import {
   normalizeNameservers,
   MIN_NAMESERVERS,
   NS_DESKTOP_NOTE,
+  SET_NAMESERVERS_KEY,
 } from "../api/domains";
 import { useZoneNameservers } from "../api/cloudflare";
 import { isTauri } from "../lib/runtime";
@@ -55,11 +56,42 @@ export default function DomainDetailModal({
   const cancelSsl = useCancelSsl();
   const refreshSsl = useRefreshSsl();
   const setNs = useSetNameservers();
-  const markNs = useMarkNsSet();
-  const checkNs = useCheckNs();
   const setNginx = useSetNginxOverride();
   const nginxOverride = useGetNginxOverride(domain.id);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  /**
+   * Баннер один на всю модалку и живёт между попытками: `key` меняется только
+   * при смене домена, переключение вкладок его не трогает. Без явного сброса
+   * красное про прошлый отказ висело бы над удавшейся следующей попыткой — а
+   * повтор на месте здесь основной сценарий. Поэтому каждое действие начинается
+   * с чистого баннера.
+   */
+  const runAction = (fn: () => void) => {
+    setActionError(null);
+    fn();
+  };
+
+  /**
+   * Отказ смены NS переживает закрытие карточки: читаем последнюю попытку по
+   * этому домену прямо из MutationCache, а не через per-call `onError`, который
+   * при размонтировании глушится. «Последнюю» — потому что предыдущие записи
+   * лежат там ещё gcTime, и удавшийся повтор обязан гасить красное от прошлого
+   * отказа.
+   */
+  const setNsStates = useMutationState({
+    filters: {
+      mutationKey: SET_NAMESERVERS_KEY,
+      predicate: (m) => (m.state.variables as SetNameserversVars | undefined)?.domainId === domain.id,
+    },
+    select: (m) => ({ status: m.state.status, error: m.state.error }),
+  });
+  const lastSetNs = setNsStates[setNsStates.length - 1];
+  const setNsError =
+    lastSetNs?.status === "error"
+      ? String((lastSetNs.error as any)?.message || "Set NS failed")
+      : null;
+  const banner = actionError ?? setNsError;
 
   // NS зоны Cloudflare — источник по умолчанию: в этом продукте «Set NS» почти
   // всегда значит «прописать регистратору те NS, что выдал Cloudflare». Но поле
@@ -75,7 +107,13 @@ export default function DomainDetailModal({
     domain.cloudflare_zone_id
   );
   const [nsText, setNsText] = useState("");
+  // Два разных факта, и путать их нельзя. `nsEdited` — «пользователь трогал
+  // поле», `nsPrefilled` — «подстановку уже сделали». Пока признаком второго
+  // служил сам текст, стирание backspace'ом проходило через пустую строку,
+  // поле мгновенно наполнялось NS зоны обратно, и следующие backspace'ы
+  // стирали уже их.
   const [nsEdited, setNsEdited] = useState(false);
+  const [nsPrefilled, setNsPrefilled] = useState(false);
   // Нормализуем ТУТ же, а не только внутри хука: кнопка гасится по числу NS, и
   // без схлопывания дублей «ns1 + NS1» выглядели бы как два — кнопка живая,
   // мутация падает. Гейт и отправка обязаны считать одинаково; в хуке
@@ -83,17 +121,15 @@ export default function DomainDetailModal({
   const nameservers = useMemo(() => normalizeNameservers(parseNameservers(nsText)), [nsText]);
 
   React.useEffect(() => {
-    // Подставляем, пока пользователь не вписал своё: иначе поздний ответ
-    // Cloudflare затирал бы набранное руками.
-    //
-    // Пустое поле — НЕ «своё»: без проверки на `nsText` вычистивший поле
-    // пользователь оставался бы с ним пустым навсегда, и вернуть подставленные
-    // NS можно было бы только закрыв и открыв карточку. Очистка теперь и есть
-    // «верни как было».
-    if (nsEdited && nsText.trim() !== "") return;
+    // Подставляем РОВНО ОДИН раз и только если пользователь ещё не печатал:
+    // иначе поздний ответ Cloudflare затирал бы набранное руками, а стирание
+    // поля воскрешало бы NS зоны под курсором.
+    if (nsEdited || nsPrefilled) return;
     const fromZone = zoneNs.data?.name_servers ?? [];
-    if (fromZone.length > 0) setNsText(fromZone.join("\n"));
-  }, [zoneNs.data, nsEdited, nsText]);
+    if (fromZone.length === 0) return;
+    setNsText(fromZone.join("\n"));
+    setNsPrefilled(true);
+  }, [zoneNs.data, nsEdited, nsPrefilled]);
 
   React.useEffect(() => {
     if (nginxOverride.data) {
@@ -117,9 +153,9 @@ export default function DomainDetailModal({
 
   return (
     <Modal title={`Domain: ${domain.domain_name}`} onClose={onClose} width={760}>
-      {actionError ? (
-        <div style={{ marginBottom: 10, fontSize: 12.5, color: "#991b1b", background: "#fee2e2", borderRadius: 8, padding: "8px 10px" }}>
-          {actionError}
+      {banner ? (
+        <div role="alert" style={{ marginBottom: 10, fontSize: 12.5, color: "#991b1b", background: "#fee2e2", borderRadius: 8, padding: "8px 10px" }}>
+          {banner}
         </div>
       ) : null}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
@@ -141,7 +177,7 @@ export default function DomainDetailModal({
           <div style={{ marginTop: 10 }}>
             <Btn
               variant="secondary"
-              onClick={() => createSite.mutate({ domainId: domain.id, site_only: true }, { onError: (e: any) => setActionError(e?.message || "Create site failed") })}
+              onClick={() => runAction(() => createSite.mutate({ domainId: domain.id, site_only: true }, { onError: (e: any) => setActionError(e?.message || "Create site failed") }))}
               disabled={createSite.isPending}
             >
               {createSite.isPending ? "Starting..." : "Create Site"}
@@ -155,7 +191,7 @@ export default function DomainDetailModal({
           <div><b>DB name:</b> {dbCreds.data?.db_name ?? domain.db_name ?? "—"}</div>
           <div><b>DB user:</b> {dbCreds.data?.db_user ?? domain.db_user ?? "—"}</div>
           <div><b>DB password:</b> {dbCreds.data?.db_password ?? "—"}</div>
-          <Btn variant="secondary" onClick={() => createDb.mutate(domain.id)} disabled={createDb.isPending}>
+          <Btn variant="secondary" onClick={() => runAction(() => createDb.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Create DB failed") }))} disabled={createDb.isPending}>
             {createDb.isPending ? "Creating..." : "Create DB"}
           </Btn>
         </div>
@@ -166,13 +202,13 @@ export default function DomainDetailModal({
           <div><b>Status:</b> {sslLabel}</div>
           <div><b>Issuer:</b> {domain.ssl_issuer ?? "—"}</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn variant="secondary" onClick={() => requestSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Request SSL failed") })} disabled={requestSsl.isPending}>
+            <Btn variant="secondary" onClick={() => runAction(() => requestSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Request SSL failed") }))} disabled={requestSsl.isPending}>
               Request SSL
             </Btn>
-            <Btn variant="secondary" onClick={() => refreshSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Refresh SSL failed") })} disabled={refreshSsl.isPending}>
+            <Btn variant="secondary" onClick={() => runAction(() => refreshSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Refresh SSL failed") }))} disabled={refreshSsl.isPending}>
               Refresh SSL
             </Btn>
-            <Btn variant="danger" onClick={() => cancelSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Cancel SSL failed") })} disabled={cancelSsl.isPending}>
+            <Btn variant="danger" onClick={() => runAction(() => cancelSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Cancel SSL failed") }))} disabled={cancelSsl.isPending}>
               Cancel SSL
             </Btn>
           </div>
@@ -201,9 +237,11 @@ export default function DomainDetailModal({
           <Btn
             variant="secondary"
             onClick={() =>
-              setNginx.mutate(
-                { domainId: domain.id, data: { snippet, presets } },
-                { onError: (e: any) => setActionError(e?.message || "Save nginx override failed") }
+              runAction(() =>
+                setNginx.mutate(
+                  { domainId: domain.id, data: { snippet, presets } },
+                  { onError: (e: any) => setActionError(e?.message || "Save nginx override failed") }
+                )
               )
             }
             disabled={setNginx.isPending}
@@ -216,11 +254,13 @@ export default function DomainDetailModal({
       {tab === "ns" && (
         <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10 }}>
           <div><b>NS status:</b> {domain.ns_status ?? "pending"}</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <Btn variant="secondary" onClick={() => checkNs.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Check NS failed") })} disabled={checkNs.isPending}>Check NS</Btn>
-            <Btn variant="secondary" onClick={() => markNs.mutate({ domainId: domain.id, set: true }, { onError: (e: any) => setActionError(e?.message || "Mark NS set failed") })} disabled={markNs.isPending}>Mark NS set</Btn>
-            <Btn variant="secondary" onClick={() => markNs.mutate({ domainId: domain.id, set: false }, { onError: (e: any) => setActionError(e?.message || "Unmark NS failed") })} disabled={markNs.isPending}>Unmark NS</Btn>
-          </div>
+          {/* «Check NS» / «Mark NS set» / «Unmark NS» здесь были и удалены:
+              роутов `check-ns` и `mark-ns-set` на бэкенде не существует, так что
+              все три всегда давали 404 — в десктопе в общий баннер, а на вебе
+              вдобавок стояли ВКЛЮЧЁННЫМИ прямо под строкой «Read-only here».
+              Перевести их на Tauri-команду нечем: проверка делегирования — это
+              DNS-резолв, которого в десктопе нет. Вкладка честно осталась с тем
+              одним действием, которое работает. */}
           <div style={{ display: "grid", gap: 6 }}>
             <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
               Nameservers (one per line)
@@ -267,15 +307,18 @@ export default function DomainDetailModal({
             <div>
               <Btn
                 variant="secondary"
+                // Без per-call `onError`: ошибку показывает `setNsError`,
+                // прочитанный из MutationCache. Per-call коллбэк умер бы вместе
+                // с размонтированием, а отказ регистратора может прилететь уже
+                // после закрытия карточки.
                 onClick={() =>
-                  setNs.mutate(
-                    {
+                  runAction(() =>
+                    setNs.mutate({
                       domainId: domain.id,
                       domainName: domain.domain_name,
                       registrarAccountId: domain.registrar_id,
                       nameservers,
-                    },
-                    { onError: (e: any) => setActionError(e?.message || "Set NS failed") }
+                    })
                   )
                 }
                 disabled={

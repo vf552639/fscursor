@@ -12,8 +12,6 @@ export default function BulkActionToolbar({
   selectedDomainIds = [],
   onAssignServer,
   onAssignCF,
-  onCheckNs,
-  onMarkNsSet,
   onProvision,
   onBulkRefreshSsl,
   onFullSetup,
@@ -25,8 +23,6 @@ export default function BulkActionToolbar({
   selectedDomainIds?: number[];
   onAssignServer: () => void;
   onAssignCF: () => void;
-  onCheckNs?: () => void;
-  onMarkNsSet?: () => void;
   onProvision: () => void;
   onBulkRefreshSsl?: () => void;
   onFullSetup?: () => void;
@@ -73,22 +69,11 @@ export default function BulkActionToolbar({
           Cloudflare, возможно в другом аккаунте) плюс отчёт по каждому. Это
           отдельная функция со своим планом, а не достижимость. NS одного домена
           ставятся во вкладке NS его карточки. */}
-      {onCheckNs ? (
-        <OpenInDesktop
-          action={`check-ns${q}`}
-          label="Check NS"
-          desktopOnClick={onCheckNs}
-          disabled={Boolean(pending)}
-        />
-      ) : null}
-      {onMarkNsSet ? (
-        <OpenInDesktop
-          action={`mark-ns-set${q}`}
-          label="Mark NS Set"
-          desktopOnClick={onMarkNsSet}
-          disabled={Boolean(pending)}
-        />
-      ) : null}
+      {/* «Check NS» и «Mark NS Set» удалены следом за «Set NS» и по той же
+          причине: роутов `POST /domains/{id}/check-ns` и `/mark-ns-set` на
+          бэкенде не существует. Массовый вариант был вдобавок хуже одиночного —
+          `Promise.all(ids.map(mutateAsync))` без `catch` давал на 50 доменах 50
+          штук 404 и unhandled rejection. */}
       {onBulkRefreshSsl ? (
         <OpenInDesktop
           action={`refresh-ssl${q}`}

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useCheckNs, useMarkNsSet, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, Domain, ProvisionDesktopResult } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, Domain, ProvisionDesktopResult } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
@@ -280,8 +280,6 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
   const bulkProvision = useBulkProvisionDomains();
-  const checkNs = useCheckNs();
-  const markNsSet = useMarkNsSet();
   const refreshSsl = useRefreshSsl();
   const bulkFullSetup = useBulkFullSetup();
   const singleProvision = useProvisionDomain();
@@ -429,18 +427,6 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
     });
   };
 
-  const handleBulkCheckNs = async () => {
-    const ids = Array.from(sel);
-    await Promise.all(ids.map((id) => checkNs.mutateAsync(id)));
-    setSel(new Set());
-  };
-
-  const handleBulkMarkNsSet = async () => {
-    const ids = Array.from(sel);
-    await Promise.all(ids.map((id) => markNsSet.mutateAsync({ domainId: id, set: true })));
-    setSel(new Set());
-  };
-
   const handleBulkRefreshSsl = async () => {
     const ids = Array.from(sel);
     await Promise.all(ids.map((id) => refreshSsl.mutateAsync(id)));
@@ -523,13 +509,11 @@ export default function Domains({ onNav, ctx }: { onNav?: (pg: string, ctx?: any
       selectedDomainIds={Array.from(sel)}
       onAssignServer={() => setShowAssignServer(true)}
       onAssignCF={() => setShowAssignCF(true)}
-      onCheckNs={handleBulkCheckNs}
-      onMarkNsSet={handleBulkMarkNsSet}
       onBulkRefreshSsl={handleBulkRefreshSsl}
       onFullSetup={() => setShowFullSetup(true)}
       onProvision={handleBulkProvision}
       onDelete={handleBulkDelete}
-      pending={bulkProvision.isPending || checkNs.isPending || markNsSet.isPending || refreshSsl.isPending || bulkFullSetup.isPending}
+      pending={bulkProvision.isPending || refreshSsl.isPending || bulkFullSetup.isPending}
     />
     <Card>
       <div style={{overflowX:"auto"}}>

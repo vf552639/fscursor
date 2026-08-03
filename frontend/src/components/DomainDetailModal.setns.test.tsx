@@ -211,20 +211,25 @@ describe("Set NS — десктоп выполняет", () => {
     expect(setNsCalls()[0][1].nameservers).toEqual(["ns1.mine.net", "ns2.mine.net"]);
   });
 
-  it("очистка поля возвращает nameservers из Cloudflare, а не запирает пустым", async () => {
+  it("стирание поля не воскрешает подставленные NS под курсором", async () => {
     setTauri(true);
 
     renderModal();
     await openNsTab();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
+    // Стирание backspace'ом проходит через пустую строку и через строку из
+    // пробелов. Если признаком «пользователь ничего не вписал» служит сам текст,
+    // поле в этот момент мгновенно наполняется обратно NS зоны — и следующие
+    // backspace'ы стирают уже их. Подставляем ровно один раз.
     fireEvent.change(nsField(), { target: { value: "ns1.mine.net" } });
-    expect(nsField().value).toBe("ns1.mine.net");
-
-    // Пустое поле — не «своё значение»: иначе вернуть подставленное можно было
-    // бы только закрыв и открыв карточку.
     fireEvent.change(nsField(), { target: { value: "" } });
-    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    await act(async () => {});
+    expect(nsField().value).toBe("");
+
+    fireEvent.change(nsField(), { target: { value: "   " } });
+    await act(async () => {});
+    expect(nsField().value).toBe("   ");
   });
 
   it("не шлёт регистратору дубли и требует хотя бы два nameserver'а", async () => {
@@ -341,6 +346,78 @@ describe("Set NS — пустые и ошибочные случаи", () => {
       await screen.findByText("The registrar did not apply the nameserver change.")
     ).toBeTruthy();
   });
+
+  it("ошибка ЧУЖОГО действия не переживает удавшийся Set NS", async () => {
+    setTauri(true);
+    mocks.mutate.mockResolvedValue(true);
+    mocks.apiPost.mockRejectedValue(new Error("SSL request failed: rate limited"));
+
+    renderModal();
+    // Баннер один на всю модалку, и между действиями она не размонтируется:
+    // без явного сброса в начале КАЖДОГО действия красное от прошлого висит
+    // над успехом следующего. Пара «SSL → Set NS» ловит это там, где пара
+    // «Set NS → Set NS» не поймала бы: у Set NS ошибка своя, из MutationCache.
+    fireEvent.click(screen.getByText("SSL"));
+    fireEvent.click(screen.getByText("Request SSL"));
+    expect(await screen.findByText(/rate limited/)).toBeTruthy();
+
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.click(btn);
+
+    await waitFor(() => expect(setNsCalls().length).toBe(1));
+    await waitFor(() => expect(screen.queryByText(/rate limited/)).toBeNull());
+  });
+
+  it("не теряет отказ, прилетевший после закрытия карточки", async () => {
+    setTauri(true);
+    let refuse: (e: Error) => void = () => {};
+    mocks.mutate.mockImplementationOnce(
+      () => new Promise((_res, rej) => { refuse = rej; })
+    );
+
+    const first = renderModal();
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.click(btn);
+    await waitFor(() => expect(setNsCalls().length).toBe(1));
+
+    // Namecheap отвечает секундами; пользователь успевает закрыть карточку.
+    // Per-call `onError` тут умирает вместе с observer'ом (`hasListeners()`), и
+    // единственным следом отказа остался бы бейдж «NS: Error» в строке таблицы
+    // без всякой причины.
+    first.unmount();
+    await act(async () => { refuse(new Error("Namecheap setCustom failed: Invalid nameserver")); });
+
+    renderModal();
+    fireEvent.click(screen.getByText("NS"));
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+  });
+
+  it("не оставляет ошибку прошлой попытки поверх удавшейся следующей", async () => {
+    setTauri(true);
+    mocks.mutate
+      .mockRejectedValueOnce(new Error("Namecheap setCustom failed: Invalid nameserver"))
+      .mockResolvedValueOnce(true);
+
+    renderModal();
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+
+    fireEvent.click(btn);
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+
+    // Повтор на месте — основной сценарий этой вкладки: поле редактируемое,
+    // и всё («Nothing to push», минимум из двух, схлопывание дублей) толкает
+    // исправить ввод и нажать ещё раз. Баннер модалки общий и не
+    // размонтируется между попытками, так что без явного сброса красное про
+    // прошлый отказ висит над удавшейся сменой.
+    fireEvent.change(nsField(), { target: { value: "ns1.fixed.net\nns2.fixed.net" } });
+    fireEvent.click(btn);
+
+    await waitFor(() => expect(setNsCalls().length).toBe(2));
+    await waitFor(() => expect(screen.queryByText(/Invalid nameserver/)).toBeNull());
+  });
 });
 
 describe("Set NS — веб только смотрит", () => {
@@ -368,6 +445,61 @@ describe("Set NS — веб только смотрит", () => {
     // Deep link'а `sdmp://set-ns` не существует: parseDeepLinkAction его не
     // знает, и ссылка вела бы в пустоту.
     expect(container.querySelectorAll('a[href^="sdmp://set-ns"]').length).toBe(0);
+  });
+
+  it("не предлагает других действий рядом с «только чтение»", async () => {
+    setTauri(false);
+
+    renderModal();
+    await openNsTab();
+
+    // «Read-only here» и три живые мутирующие кнопки на одном экране —
+    // взаимоисключающие утверждения. Кнопок больше нет вовсе: роутов
+    // `check-ns`/`mark-ns-set` на бэкенде не существует, так что и в десктопе
+    // они давали только 404.
+    for (const dead of ["Check NS", "Mark NS set", "Unmark NS"]) {
+      expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
+    }
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("мёртвые NS-действия удалены", () => {
+  it("вкладка NS не зовёт несуществующие check-ns / mark-ns-set", async () => {
+    setTauri(true);
+
+    renderModal();
+    await openNsTab();
+
+    for (const dead of ["Check NS", "Mark NS set", "Unmark NS"]) {
+      expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
+    }
+    // На вкладке осталось только то, что действительно работает.
+    expect(screen.getByText(/Set NS/)).toBeTruthy();
+    expect(mocks.apiPost.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
+  });
+
+  it("панель массовых действий не предлагает Check NS / Mark NS Set", () => {
+    for (const tauri of [false, true]) {
+      setTauri(tauri);
+      const { container, unmount } = render(
+        <BulkActionToolbar
+          selectedCount={2}
+          selectedDomainIds={[1, 2]}
+          onAssignServer={() => {}}
+          onAssignCF={() => {}}
+          onProvision={() => {}}
+          onDelete={() => {}}
+        />
+      );
+      // `Promise.all(ids.map(mutateAsync))` без catch на 50 доменах давал 50
+      // штук 404 и unhandled rejection в придачу.
+      expect(screen.queryByText("Check NS")).toBeNull();
+      expect(screen.queryByText("Mark NS Set")).toBeNull();
+      expect(container.querySelectorAll('a[href^="sdmp://check-ns"]').length).toBe(0);
+      expect(container.querySelectorAll('a[href^="sdmp://mark-ns-set"]').length).toBe(0);
+      unmount();
+    }
   });
 });
 

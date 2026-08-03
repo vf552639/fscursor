@@ -127,37 +127,57 @@ const NS_STATUS_ERROR: &str = "error";
 /// Действие аудита смены NS. Оно же — ключ в `AUDIT_ACTION_LABEL` на фронте.
 const AUDIT_ACTION_NS_SET: &str = "registrar.ns_set";
 
+/// Что команда делает с итогом смены NS, кроме как возвращает его.
+///
+/// Три решения, которые обязаны быть согласованы, и раньше принимались врозь
+/// прямо в теле команды: аудит успел разойтись с остальными и записывал
+/// `Ok(false)` как состоявшуюся смену. Вынесено в чистую функцию не ради
+/// красоты: поставить `AppHandle`/`State` в тест дорого, поэтому иначе гейты
+/// не покрыть вовсе — их можно было снять, и все тесты оставались зелёными.
+#[derive(Debug, PartialEq, Eq)]
+struct NsOutcomePlan {
+    /// Значение `domains.ns_status`, которое уедет на сервер. Пишется ВСЕГДА:
+    /// отбитая попытка обязана перестать выглядеть как «менять не пробовали».
+    status: &'static str,
+    /// Писать ли строчку `registrar.ns_set` в audit log. Только за
+    /// состоявшуюся смену — на отказе она врала бы истории.
+    audit: bool,
+    /// Слать ли `writeback_failed`, если write-back не прошёл. Текст на той
+    /// стороне склеивается из `AUDIT_ACTION_LABEL` («Nameservers set») с
+    /// суффиксом, поэтому на отказе тост противоречил бы баннеру об ошибке.
+    report_writeback_failure: bool,
+}
+
+/// Разобрать итог регистратора в план действий.
+///
+/// Принимает ВЕСЬ итог, а не `bool`: отказ (`Err`) — единственный достижимый
+/// провал (обе реализации отвечают либо `Ok(true)`, либо ошибкой — см.
+/// `hostiq.rs`, `namecheap.rs`), и именно ради него `ns_status` и заведён. Если
+/// бы сюда приходил `bool` уже после `?`, `error` не писался бы никогда.
+/// `Ok(false)` — та же семантика «не применил», просто сегодня недостижимая.
+fn ns_outcome_plan(outcome: &Result<bool, RegistrarError>) -> NsOutcomePlan {
+    let applied = matches!(outcome, Ok(true));
+    NsOutcomePlan {
+        status: if applied {
+            NS_STATUS_OK
+        } else {
+            NS_STATUS_ERROR
+        },
+        audit: applied,
+        report_writeback_failure: applied,
+    }
+}
+
 /// Что из итога смены NS уезжает на сервер.
 ///
 /// Только статус: сами nameservers — это состояние зоны у Cloudflare и у
 /// регистратора, дублировать его в строке домена нечем (колонки под список нет),
 /// а `ns_updated_at` не заполняет ни один путь — ни серверный, ни этот.
-///
-/// Принимает ВЕСЬ итог, а не `bool`, ровно потому, что записать надо оба
-/// исхода. Отказ регистратора (`Err`) — единственный достижимый провал: обе
-/// реализации отвечают либо `Ok(true)`, либо ошибкой (`hostiq.rs`,
-/// `namecheap.rs`). Если бы сюда приходил `bool` после `?`, `error` не писался
-/// бы никогда, а домен с отбитой попыткой остался бы `pending` — то есть
-/// «менять ещё не пробовали», что прямая ложь. `Ok(false)` — та же семантика
-/// «не применил», просто сегодня недостижимая.
-fn ns_write_back_body(outcome: &Result<bool, RegistrarError>) -> DomainWriteBack {
-    let status = if ns_applied(outcome) {
-        NS_STATUS_OK
-    } else {
-        NS_STATUS_ERROR
-    };
+fn ns_write_back_body(plan: &NsOutcomePlan) -> DomainWriteBack {
     DomainWriteBack {
-        ns_status: Some(status.to_string()),
+        ns_status: Some(plan.status.to_string()),
         ..Default::default()
     }
-}
-
-/// Смена состоялась? Один предикат на всех, кто про это спрашивает: статус для
-/// сервера, аудит и событие о провале write-back'а. Пока их было три штуки
-/// врозь, аудит успел разойтись с остальными и записывал `Ok(false)` как
-/// состоявшуюся смену.
-fn ns_applied(outcome: &Result<bool, RegistrarError>) -> bool {
-    matches!(outcome, Ok(true))
 }
 
 /// Прописать NS у регистратора.
@@ -181,6 +201,7 @@ pub async fn registrar_set_nameservers(
     // Итог держим целиком и НЕ разворачиваем через `?` до write-back'а: отказ
     // регистратора — это как раз тот исход, ради которого `ns_status` и нужен.
     let outcome = svc.set_nameservers(&domain, &nameservers).await;
+    let plan = ns_outcome_plan(&outcome);
 
     // Write-back раньше аудита — как в провижининге. Без него `ns_status` домена
     // навсегда оставался бы `pending`: другого пути его заполнить нет (роутов
@@ -193,7 +214,7 @@ pub async fn registrar_set_nameservers(
     // одну сторону не превращать в `?`: там он подменил бы собой настоящий
     // результат.
     if let Err(e) = api
-        .domain_write_back(&domain_id, &ns_write_back_body(&outcome))
+        .domain_write_back(&domain_id, &ns_write_back_body(&plan))
         .await
     {
         tracing::warn!(target: "registrars", "write-back of ns_status failed: {e}");
@@ -204,7 +225,7 @@ pub async fn registrar_set_nameservers(
         // setCustom failed: …» — два взаимоисключающих сообщения об одном
         // действии. Незаписанный `ns_status` на уже видимой ошибке — меньшее
         // зло: ошибка на экране, а не молчание.
-        if ns_applied(&outcome) {
+        if plan.report_writeback_failure {
             let _ = app.emit(
                 AUDIT_PROGRESS_EVENT,
                 serde_json::json!({
@@ -226,7 +247,7 @@ pub async fn registrar_set_nameservers(
     // случай трактуют как «не применено» (`ns_status: error`). `?` из-за сбоя
     // аудита показал бы неудачу на удавшейся смене, а повтор ничего бы не
     // исправил. Best-effort, не превращать обратно в `?`.
-    if ok {
+    if plan.audit {
         audit_best_effort(
             &app,
             &api,
@@ -246,7 +267,38 @@ mod tests {
     use super::*;
 
     fn body_of(outcome: Result<bool, RegistrarError>) -> String {
-        serde_json::to_string(&ns_write_back_body(&outcome)).unwrap()
+        serde_json::to_string(&ns_write_back_body(&ns_outcome_plan(&outcome))).unwrap()
+    }
+
+    /// Ожидания ЛИТЕРАЛЬНЫЕ, а не пересчитанные тем же кодом, который
+    /// проверяются. Прошлая версия считала `expected` через ту же функцию, что
+    /// и предмет проверки, — обе стороны равенства были одним выражением, и
+    /// тест не мог упасть в принципе.
+    #[test]
+    fn ns_outcome_plan_spells_out_every_decision() {
+        let ok = ns_outcome_plan(&Ok(true));
+        assert_eq!(ok.status, "ok");
+        assert!(ok.audit, "состоявшаяся смена обязана попасть в audit log");
+        assert!(ok.report_writeback_failure);
+
+        // Отказ регистратора: статус пишем, но ни строчки в историю, ни тоста
+        // «Nameservers set, but…» поверх баннера с текстом отказа.
+        let refused = ns_outcome_plan(&Err(RegistrarError::Api(
+            "Namecheap setCustom failed: Invalid nameserver".into(),
+        )));
+        assert_eq!(refused.status, "error");
+        assert!(!refused.audit, "аудит за несостоявшуюся смену врёт истории");
+        assert!(
+            !refused.report_writeback_failure,
+            "тост «Nameservers set, but…» противоречил бы баннеру об отказе"
+        );
+
+        // `Ok(false)` сегодня недостижим, но семантика у него та же «не
+        // применил» — и решаться он обязан так же, как отказ.
+        let unapplied = ns_outcome_plan(&Ok(false));
+        assert_eq!(unapplied.status, "error");
+        assert!(!unapplied.audit);
+        assert!(!unapplied.report_writeback_failure);
     }
 
     #[test]
@@ -270,35 +322,12 @@ mod tests {
     }
 
     #[test]
-    fn ns_applied_agrees_with_the_written_status() {
-        // Аудит, статус и событие о провале write-back'а спрашивают об одном и
-        // том же — «смена состоялась?». Пока аудит решал это сам (всё, что не
-        // `Err`), он записывал `Ok(false)` как состоявшуюся смену, хотя на
-        // сервер в этот момент уезжал `error`.
-        for outcome in [
-            Ok(true),
-            Ok(false),
-            Err(RegistrarError::Api("refused".into())),
-        ] {
-            let expected = if ns_applied(&outcome) {
-                r#"{"ns_status":"ok"}"#
-            } else {
-                r#"{"ns_status":"error"}"#
-            };
-            assert_eq!(
-                serde_json::to_string(&ns_write_back_body(&outcome)).unwrap(),
-                expected
-            );
-        }
-    }
-
-    #[test]
     fn ns_write_back_body_touches_nothing_but_ns_status() {
         // Патч применяется как `exclude_unset`: лишнее поле здесь затёрло бы
         // чужой результат (например, `ssl_status`, который ставит провижининг).
         for outcome in [Ok(true), Ok(false), Err(RegistrarError::NotImplemented)] {
             let body: serde_json::Value =
-                serde_json::to_value(ns_write_back_body(&outcome)).unwrap();
+                serde_json::to_value(ns_write_back_body(&ns_outcome_plan(&outcome))).unwrap();
             let obj = body.as_object().unwrap();
             assert_eq!(obj.len(), 1, "лишние поля в патче: {obj:?}");
         }

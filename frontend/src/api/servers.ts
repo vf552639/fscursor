@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { queryClient } from "./queryClient";
 import { invokeSynced } from "../lib/localCache";
-import { isTauri } from "../lib/runtime";
+import { desktopOnly, isTauri } from "../lib/runtime";
 import { useAuthStore } from "../store/auth";
 import type { InstallFastpanelResult } from "../lib/deepLink";
 
@@ -213,7 +213,7 @@ export function useInstallFastPanel(id: number, onCreds: (creds: InstallFastpane
     mutationKey: installFastPanelKey(id),
     mutationFn: async (opts?: { force?: boolean }) => {
       if (!isTauri()) {
-        throw new Error("Installing FastPanel runs in the SDMP desktop app.");
+        throw new Error(desktopOnly("Installing FastPanel"));
       }
       const userId = useAuthStore.getState().userId;
       if (!userId) {

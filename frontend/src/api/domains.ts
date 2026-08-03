@@ -301,8 +301,23 @@ export interface SetNameserversVars {
  * Список NS передаётся явно: команда не умеет его добывать. Откуда его берёт UI
  * — вопрос UI (обычно NS зоны Cloudflare, см. `useZoneNameservers`).
  */
+/**
+ * Ключ смены NS. Не косметика: по нему `useMutationState` находит результат
+ * попытки, начатой до последнего монтирования карточки. Namecheap отвечает
+ * секундами, и без ключа отказ, прилетевший после закрытия модалки, терялся бы
+ * совсем — per-call `onError` глушит `MutationObserver` при размонтировании
+ * (`hasListeners()`), а своего канала событий у этой команды нет. Единственным
+ * следом остался бы красный бейдж «NS: Error» в строке таблицы без причины.
+ *
+ * Ключ общий на все домены, а нужный отбирается предикатом по `variables`:
+ * иначе `useSetNameservers` пришлось бы параметризовать доменом, который и так
+ * едет в аргументах мутации.
+ */
+export const SET_NAMESERVERS_KEY = ["set-nameservers"] as const;
+
 export function useSetNameservers() {
   return useMutation({
+    mutationKey: SET_NAMESERVERS_KEY,
     mutationFn: async (vars: SetNameserversVars): Promise<boolean> => {
       if (!isTauri()) {
         throw new Error(NS_DESKTOP_NOTE);
@@ -375,7 +390,7 @@ export function useProvisionDomain() {
   return useMutation({
     mutationFn: async (arg: number | { domainId: number; withDb?: boolean }) => {
       if (!isTauri()) {
-        throw new Error("Provisioning runs in the SDMP desktop app.");
+        throw new Error(desktopOnly("Provisioning"));
       }
       const domainId = typeof arg === "number" ? arg : arg.domainId;
       const withDb = typeof arg === "number" ? false : Boolean(arg.withDb);
@@ -477,21 +492,13 @@ export function useGetNginxOverride(domainId: number | null | undefined) {
   });
 }
 
-export function useMarkNsSet() {
-  return useMutation({
-    mutationFn: (payload: { domainId: number; set: boolean }) =>
-      apiPost<Domain>(`/domains/${payload.domainId}/mark-ns-set`, { set: payload.set }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useCheckNs() {
-  return useMutation({
-    mutationFn: (domainId: number) =>
-      apiPost<SetNsResponse>(`/domains/${domainId}/check-ns`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
+// `useMarkNsSet` и `useCheckNs` удалены вместе с кнопками, которые их звали:
+// роутов `POST /domains/{id}/mark-ns-set` и `/check-ns` на бэкенде нет
+// (`grep -rn "check-ns\|mark-ns-set" backend` — пусто), то есть обе всегда
+// давали 404. Заменить их Tauri-командой сегодня нечем: проверка делегирования
+// — это DNS-резолв, а в десктопе нет ни такой команды (см. список в `lib.rs`),
+// ни резолвера в зависимостях. Кнопка, которая всегда 404, хуже отсутствующей:
+// она обещает функцию, которой нет, и забивает общий баннер ошибок.
 
 export async function bulkImportDomains(params: {
   file: File;
