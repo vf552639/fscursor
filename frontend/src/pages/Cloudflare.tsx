@@ -6,26 +6,26 @@ import {
   useUpdateCloudflareAccount,
   useDeleteCloudflareAccount,
   useTestCloudflareAccount,
+  useCloudflareZones,
   useCreateZone,
   useDnsRecords,
   usePurgeCache,
   useCreateDnsRecord,
   useUpdateDnsRecord,
   useDeleteDnsRecord,
-  useZoneNameservers,
-  type CreatedZone,
   type DnsRecord,
   type DnsRecordUpdate,
+  type Zone,
 } from "../api/cloudflare";
 import { useDomains, type Domain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
-import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
 
-/** Зона в UI. Полноценного списка зон нет — см. `zonesOfAccount`. */
+/** Зона в UI. `nameServers` приходит вместе со списком зон из `cf_list_zones`. */
 export interface CfZoneRef {
   id: string;
   name: string;
+  nameServers?: string[] | null;
 }
 
 /** Аккаунт в контексте зоны: id нужен командам, name — хлебным крошкам. */
@@ -57,10 +57,10 @@ const TYPES_WITH_PRIORITY = new Set(["MX", "SRV", "URI"]);
 const DESKTOP_ONLY_NOTE = "DNS changes run in the SDMP desktop app.";
 
 /**
- * Зоны аккаунта. Единственный доступный источник — домены: связку
- * домен↔зона ставит синхронизация аккаунта, и она лежит на бэкенде
- * (`domains.cloudflare_zone_id`). Списка зон из Cloudflare у веба нет, см.
- * комментарий у `useCloudflareZones`.
+ * Резервный список зон — из доменов (`domains.cloudflare_zone_id`). Нужен
+ * только вебу: настоящий список зон отдаёт `cf_list_zones`, а он требует
+ * расшифрованный токен, то есть десктоп. Веб при этом остаётся способен
+ * дойти до зоны и посмотреть её — ровно то, что ему и положено.
  */
 export function zonesOfAccount(domains: Domain[], accountId: number): CfZoneRef[] {
   const seen = new Map<string, CfZoneRef>();
@@ -79,8 +79,7 @@ function AccountCard({
   onDelete,
   onTest,
   testStatus,
-  zones,
-  zonesLoading,
+  domainZones,
   onOpenZone,
   onAddZone,
 }: {
@@ -89,11 +88,19 @@ function AccountCard({
   onDelete: () => void;
   onTest: () => void;
   testStatus?: { state: "idle" | "loading" | "success" | "error"; message?: string };
-  zones: CfZoneRef[];
-  zonesLoading: boolean;
+  domainZones: CfZoneRef[];
   onOpenZone: (zone: CfZoneRef) => void;
   onAddZone: () => void;
 }) {
+  const canExecute = isTauri();
+  // Источник правды — сам Cloudflare: только он знает про зону, созданную
+  // минуту назад, и только он отдаёт её name_servers. Домены остаются
+  // резервом для веба, у которого токена нет и быть не должно.
+  const liveZones = useCloudflareZones(acc.id);
+  const zones: CfZoneRef[] = liveZones.data
+    ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers }))
+    : domainZones;
+  const zonesLoading = canExecute && liveZones.isPending;
 
   return (
     <Card style={{marginBottom:16}}>
@@ -104,13 +111,18 @@ function AccountCard({
           <Badge variant={acc.is_active?"green":"gray"}>{acc.is_active?"Active":"Inactive"}</Badge>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <OpenInDesktop
+          {/* Был OpenInDesktop с action `test-cloudflare` — хостом, которого
+              parseDeepLinkAction не знает: ссылка вела в {handled:false} и
+              только тостила. Проверка токена идёт в cf_verify_token, а веб,
+              как и с DNS, просто не выполняет. */}
+          <Btn
             size="sm"
-            action={`test-cloudflare?accountId=${acc.id}`}
-            label={testStatus?.state === "loading" ? "Testing..." : "Test connection"}
-            desktopOnClick={onTest}
-            disabled={testStatus?.state === "loading"}
-          />
+            variant="secondary"
+            onClick={onTest}
+            disabled={!canExecute || testStatus?.state === "loading"}
+          >
+            {testStatus?.state === "loading" ? "Testing..." : "Test connection"}
+          </Btn>
           <Btn size="sm" variant="secondary" onClick={onEdit}>✎ Edit</Btn>
           <Btn size="sm" variant="danger" onClick={onDelete}>✕</Btn>
         </div>
@@ -147,8 +159,18 @@ function AccountCard({
           <div style={{fontSize:12,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px"}}>
             Zones ({zones.length})
           </div>
-          <Btn size="sm" variant="secondary" onClick={onAddZone} disabled={!isTauri()}>+ Add Zone</Btn>
+          <Btn size="sm" variant="secondary" onClick={onAddZone} disabled={!canExecute}>+ Add Zone</Btn>
         </div>
+        {canExecute && liveZones.error ? (
+          <div role="alert" style={{ fontSize: 12.5, color: "#dc2626", marginBottom: 8 }}>
+            {String((liveZones.error as any)?.message || "Could not list zones")}
+            {domainZones.length ? " — showing zones known from your domains." : ""}
+          </div>
+        ) : !canExecute ? (
+          <div style={{ fontSize: 12.5, color: "#92400e", marginBottom: 8 }}>
+            Zones as known from your domains. {DESKTOP_ONLY_NOTE}
+          </div>
+        ) : null}
         {zonesLoading ? (
           <div style={{ fontSize: 12.5, color: "#9ca3af" }}>Loading zones…</div>
         ) : zones.length === 0 ? (
@@ -175,7 +197,7 @@ function AccountCard({
 
 export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) => void }){
   const { data: cfAccountsData, isPending, isError, error } = useCloudflareAccounts();
-  const { data: domainsData, isPending: domainsPending } = useDomains();
+  const { data: domainsData } = useDomains();
   const createAcc = useCreateCloudflareAccount();
   const deleteAcc = useDeleteCloudflareAccount();
   const testAcc = useTestCloudflareAccount();
@@ -317,8 +339,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onDelete={() => { if (!confirm(`Delete account ${acc.name}?`)) return; deleteAcc.mutate(acc.id); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
-        zones={zonesOfAccount(domains, acc.id)}
-        zonesLoading={domainsPending}
+        domainZones={zonesOfAccount(domains, acc.id)}
         onOpenZone={(zone) => setSel({ acc: { id: acc.id, name: acc.name }, zone })}
         onAddZone={() => setAddZoneFor({ id: acc.id, name: acc.name })}
       />
@@ -359,7 +380,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
 function AddZoneModal({ acc, onClose }: { acc: CfAccountRef; onClose: () => void }) {
   const [name, setName] = useState("");
   const createZone = useCreateZone(acc.id);
-  const created: CreatedZone | undefined = createZone.data;
+  const created: Zone | undefined = createZone.data;
   return (
     <Modal title={`Add zone to ${acc.name}`} onClose={onClose} width={460}>
       {created ? (
@@ -412,7 +433,9 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
 }) {
   const { acc, zone } = sel;
   const { data: recsData, isLoading, error: recsError } = useDnsRecords(acc.id, zone.id);
-  const { data: nameserversData, error: nsError } = useZoneNameservers(acc.id, zone.id);
+  // NS уже приехали вместе со списком зон (`Zone.name_servers`): отдельный
+  // запрос под них был бы тем же ответом второй раз.
+  const nameServers = zone.nameServers ?? [];
   const purge = usePurgeCache(acc.id, zone.id);
   const createRecord = useCreateDnsRecord(acc.id, zone.id);
   const updateRecord = useUpdateDnsRecord(acc.id, zone.id);
@@ -504,8 +527,8 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
         <div style={{ padding: "14px 20px", borderTop: "1px solid #f3f4f6" }}>
           <ErrorState
             title="Не удалось загрузить DNS-записи"
-            message={String((recsError as any)?.message ?? "Read endpoint unavailable.")}
-            hint="Чтения зон/записей нет ни на бэкенде, ни в Tauri-командах — см. комментарий у useCloudflareZones."
+            message={String((recsError as any)?.message ?? "cf_list_dns_records failed.")}
+            hint={canExecute ? "Проверьте токен аккаунта: Test connection на странице Cloudflare." : undefined}
             style={{ marginBottom: 0 }}
           />
         </div>
@@ -518,7 +541,7 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
               <td style={{padding:"11px 16px"}}><span style={{display:"inline-flex",alignItems:"center",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700,background:"#f3f4f6",color:DNS_TYPE_COLORS[r.type]||"#374151",fontFamily:"monospace"}}>{r.type}</span></td>
               <td style={{padding:"11px 16px",fontFamily:"monospace",fontSize:13,fontWeight:600,color:"#111"}}>{r.name}</td>
               <td style={{padding:"11px 16px",fontFamily:"monospace",fontSize:12.5,color:"#374151",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.content}</td>
-              <td style={{padding:"11px 16px",fontSize:13,color:"#6b7280"}}>{r.ttl===1?"Auto":`${r.ttl}s`}</td>
+              <td style={{padding:"11px 16px",fontSize:13,color:"#6b7280"}}>{r.ttl==null?"—":r.ttl===1?"Auto":`${r.ttl}s`}</td>
               <td style={{padding:"11px 16px",fontSize:18}}>{r.proxied?"🟠":"⚫"}</td>
               <td style={{padding:"11px 16px"}}><RowActions actions={[
                 { icon: "✎", title: "Edit DNS record", disabled: !canExecute, onClick: () => setEditingRecord(r) },
@@ -553,12 +576,12 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
     </Modal>}
     {showNs && <Modal title={`Nameservers for ${zone.name}`} onClose={()=>setShowNs(false)} width={460}>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {(nameserversData?.name_servers || []).map((ns: string) => <div key={ns} style={{padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontFamily:"monospace",fontSize:13}}>{ns}</div>)}
-        {nsError ? (
-          <div style={{fontSize:13,color:"#dc2626"}}>{String((nsError as any)?.message ?? "Nameservers unavailable.")}</div>
-        ) : (!nameserversData?.name_servers || nameserversData.name_servers.length === 0) ? (
-          <div style={{fontSize:13,color:"#6b7280"}}>No nameservers returned for this zone.</div>
-        ) : null}
+        {nameServers.map((ns: string) => <div key={ns} style={{padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontFamily:"monospace",fontSize:13}}>{ns}</div>)}
+        {nameServers.length === 0 && (
+          <div style={{fontSize:13,color:"#6b7280"}}>
+            {canExecute ? "No nameservers returned for this zone." : `Nameservers come from Cloudflare. ${DESKTOP_ONLY_NOTE}`}
+          </div>
+        )}
       </div>
     </Modal>}
     {editingRecord && <EditDnsRecordModal record={editingRecord} onClose={()=>setEditingRecord(null)} onSave={(payload) => updateRecord.mutate({ recordId: editingRecord.id, data: payload }, { onSuccess: () => setEditingRecord(null) })} isSaving={updateRecord.isPending} />}

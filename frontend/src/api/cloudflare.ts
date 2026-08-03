@@ -45,23 +45,32 @@ export interface CloudflareAccountUpdate {
   is_active?: boolean;
 }
 
+/** Зона так, как её отдаёт `cf_list_zones` (`cloudflare::client::Zone`). */
 export interface Zone {
   id: string;
   name: string;
-  status: string | null;
-  name_servers: string[];
-  original_name_servers: string[];
-  paused: boolean | null;
+  name_servers: string[] | null;
+  /**
+   * Cloudflare шлёт `status` в JSON, но `client::Zone` в Rust его не
+   * десериализует, поэтому до UI он не доезжает и всегда `null`. Поле оставлено
+   * ради бейджа «CF Zone Status» в `Domains.tsx`; чинится добавлением поля в
+   * `desktop/src-tauri/src/cloudflare/client.rs`.
+   */
+  status?: string | null;
 }
 
+/** Запись так, как её отдают `cf_list_dns_records` и мутации. */
 export interface DnsRecord {
   id: string;
   type: string;
   name: string;
   content: string;
-  ttl: number;
+  /** `Option<u32>` в Rust: у записи может не быть TTL. */
+  ttl: number | null;
   proxied: boolean;
   zone_id: string | null;
+  // priority здесь намеренно нет: `client::DnsRecord` его не десериализует,
+  // так что в ответе на create/update приоритет не возвращается.
 }
 
 export interface DnsRecordCreate {
@@ -87,16 +96,6 @@ export interface Nameservers {
   name_servers: string[];
 }
 
-/**
- * Зона, вернувшаяся из `cf_create_zone` (`cloudflare::client::Zone`). Полей
- * `status`/`paused` там нет — это не `Zone` выше.
- */
-export interface CreatedZone {
-  id: string;
-  name: string;
-  name_servers: string[] | null;
-}
-
 function requireUserId(): string {
   const userId = useAuthStore.getState().userId;
   if (!userId) throw new Error("Desktop: unlock session (user id missing)");
@@ -115,12 +114,25 @@ function requireDesktop(what: string): void {
 export const cloudflareKeys = {
   accounts: ["cloudflare", "accounts"] as const,
   zones: (accountId: number) => ["cloudflare", accountId, "zones"] as const,
-  zone: (accountId: number, zoneId: string) =>
-    ["cloudflare", accountId, "zones", zoneId] as const,
   dns: (accountId: number, zoneId: string) => ["cloudflare", accountId, "zones", zoneId, "dns"] as const,
-  nameservers: (accountId: number, zoneId: string) =>
-    ["cloudflare", accountId, "zones", zoneId, "nameservers"] as const,
 };
+
+/**
+ * Один запрос `cf_list_zones` на аккаунт — на нём стоят и список зон, и детали
+ * зоны, и её nameservers: Cloudflare отдаёт `name_servers` прямо в списке, так
+ * что отдельные команды под зону и NS были бы лишними походами с тем же
+ * ответом. Три хука ниже — три `select` над одной записью кэша.
+ */
+function zonesQuery(accountId: number | null | undefined) {
+  return {
+    queryKey: accountId ? cloudflareKeys.zones(accountId) : (["cloudflare", "zones", "disabled"] as const),
+    queryFn: async (): Promise<Zone[]> => {
+      requireDesktop("Reading Cloudflare zones");
+      const userId = requireUserId();
+      return invokeSynced<Zone[]>("cf_list_zones", { userId, accountId: String(accountId) });
+    },
+  };
+}
 
 export function useCloudflareAccounts() {
   return useQuery({
@@ -155,36 +167,26 @@ export function useDeleteCloudflareAccount() {
 export function useTestCloudflareAccount() {
   return useMutation({
     mutationFn: async (id: number) => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        const ok = await invokeSynced<boolean>("cf_verify_token", {
-          userId,
-          accountId: String(id),
-        });
-        return {
-          success: ok,
-          message: ok ? "OK" : "invalid token",
-          account_email: null,
-        } satisfies CloudflareTestResponse;
-      }
-      return apiPost<CloudflareTestResponse>(`/cloudflare/accounts/${id}/test`);
+      // Проверка токена — тоже «десктоп выполняет»: токен расшифровывается на
+      // клиенте, а роута `/accounts/{id}/test` на бэкенде нет.
+      requireDesktop("Testing a Cloudflare token");
+      const userId = requireUserId();
+      const ok = await invokeSynced<boolean>("cf_verify_token", {
+        userId,
+        accountId: String(id),
+      });
+      return {
+        success: ok,
+        message: ok ? "OK" : "invalid token",
+        account_email: null,
+      } satisfies CloudflareTestResponse;
     },
   });
 }
 
-/**
- * ⚠️ Чтения ниже (зоны, детали зоны, DNS-записи, nameservers) бьются в роуты,
- * которых на бэкенде НЕТ: `routes/cloudflare.py` знает только CRUD аккаунтов.
- * Tauri-команд на чтение тоже нет (в Rust есть `client::list_zones` и
- * `client::list_dns_records`, но они не выставлены как `#[tauri::command]`).
- * Пока read-путь не построен, эти хуки честно возвращают ошибку, и UI её
- * показывает — молча пустой таблицы быть не должно. Список зон страница
- * поэтому строит из `/domains` (`cloudflare_zone_id`), а не отсюда.
- */
 export function useCloudflareZones(accountId: number | null | undefined) {
   return useQuery({
-    queryKey: accountId ? cloudflareKeys.zones(accountId) : ["cloudflare", "zones", "disabled"],
-    queryFn: () => apiGet<Zone[]>(`/cloudflare/accounts/${accountId}/zones`),
+    ...zonesQuery(accountId),
     enabled: !!accountId,
   });
 }
@@ -194,12 +196,23 @@ export function useZoneDetails(
   zoneId: string | null | undefined
 ) {
   return useQuery({
-    queryKey:
-      accountId && zoneId
-        ? cloudflareKeys.zone(accountId, zoneId)
-        : ["cloudflare", "zone", "disabled"],
-    queryFn: () => apiGet<Zone>(`/cloudflare/accounts/${accountId}/zones/${zoneId}`),
+    ...zonesQuery(accountId),
     enabled: !!accountId && !!zoneId,
+    select: (zones: Zone[]) => zones.find((z) => z.id === zoneId) ?? null,
+  });
+}
+
+export function useZoneNameservers(
+  accountId: number | null | undefined,
+  zoneId: string | null | undefined
+) {
+  return useQuery({
+    ...zonesQuery(accountId),
+    enabled: !!accountId && !!zoneId,
+    select: (zones: Zone[]): Nameservers => ({
+      zone_id: String(zoneId),
+      name_servers: zones.find((z) => z.id === zoneId)?.name_servers ?? [],
+    }),
   });
 }
 
@@ -212,8 +225,15 @@ export function useDnsRecords(
       accountId && zoneId
         ? cloudflareKeys.dns(accountId, zoneId)
         : ["cloudflare", "dns", "disabled"],
-    queryFn: () =>
-      apiGet<DnsRecord[]>(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns`),
+    queryFn: async () => {
+      requireDesktop("Reading DNS records");
+      const userId = requireUserId();
+      return invokeSynced<DnsRecord[]>("cf_list_dns_records", {
+        userId,
+        accountId: String(accountId),
+        zoneId: String(zoneId),
+      });
+    },
     enabled: !!accountId && !!zoneId,
   });
 }
@@ -227,7 +247,7 @@ export function useCreateZone(accountId: number) {
     mutationFn: async (zoneName: string) => {
       requireDesktop("Creating a Cloudflare zone");
       const userId = requireUserId();
-      return invokeSynced<CreatedZone>("cf_create_zone", {
+      return invokeSynced<Zone>("cf_create_zone", {
         userId,
         accountId: String(accountId),
         zoneName,
@@ -322,19 +342,3 @@ export function usePurgeCache(accountId: number, zoneId: string) {
   });
 }
 
-export function useZoneNameservers(
-  accountId: number | null | undefined,
-  zoneId: string | null | undefined
-) {
-  return useQuery({
-    queryKey:
-      accountId && zoneId
-        ? cloudflareKeys.nameservers(accountId, zoneId)
-        : ["cloudflare", "nameservers", "disabled"],
-    queryFn: () =>
-      apiGet<Nameservers>(
-        `/cloudflare/accounts/${accountId}/zones/${zoneId}/nameservers`
-      ),
-    enabled: !!accountId && !!zoneId,
-  });
-}

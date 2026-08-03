@@ -114,6 +114,39 @@ pub async fn cf_verify_token(
         .map_err(|e| CommandError::Api(e.to_string()))
 }
 
+/// Зоны аккаунта — вместе с их name_servers: отдельной команды под NS не надо,
+/// `Zone.name_servers` приходит прямо здесь.
+///
+/// Аудита нет намеренно: это чтение, а audit_log в проекте пишут только
+/// мутации (ср. `cf_verify_token` и `registrar_get_domains` — тоже без него).
+#[tauri::command]
+pub async fn cf_list_zones(
+    user_id: String,
+    account_id: String,
+    handle: State<'_, SyncHandle>,
+    api: State<'_, ApiClient>,
+) -> Result<Vec<Zone>, CommandError> {
+    let ctx = cf_ctx(&api, &user_id, &handle, &account_id).await?;
+    client::list_zones(&ctx.token)
+        .await
+        .map_err(|e| CommandError::Api(e.to_string()))
+}
+
+/// DNS-записи зоны. Чтение — без аудита, см. `cf_list_zones`.
+#[tauri::command]
+pub async fn cf_list_dns_records(
+    user_id: String,
+    account_id: String,
+    zone_id: String,
+    handle: State<'_, SyncHandle>,
+    api: State<'_, ApiClient>,
+) -> Result<Vec<DnsRecord>, CommandError> {
+    let ctx = cf_ctx(&api, &user_id, &handle, &account_id).await?;
+    client::list_dns_records(&ctx.token, &zone_id)
+        .await
+        .map_err(|e| CommandError::Api(e.to_string()))
+}
+
 #[tauri::command]
 pub async fn cf_create_zone(
     app: AppHandle,
