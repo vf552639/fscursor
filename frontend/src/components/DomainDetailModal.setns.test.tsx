@@ -232,6 +232,24 @@ describe("Set NS — десктоп выполняет", () => {
     expect(nsField().value).toBe("   ");
   });
 
+  it("даёт вернуть nameservers зоны после того, как поле стёрли", async () => {
+    setTauri(true);
+
+    renderModal();
+    await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+
+    // Стирание больше не воскрешает NS под курсором — но и вернуть их было
+    // нечем: списка зоны в этой модалке нет, помогало только закрыть и открыть
+    // карточку. Явное действие вместо неявного побочного эффекта.
+    fireEvent.change(nsField(), { target: { value: "" } });
+    await act(async () => {});
+    expect(nsField().value).toBe("");
+
+    fireEvent.click(screen.getByText(/Restore from Cloudflare/i));
+    expect(nsField().value).toBe("ada.ns.cloudflare.com\nbob.ns.cloudflare.com");
+  });
+
   it("не шлёт регистратору дубли и требует хотя бы два nameserver'а", async () => {
     setTauri(true);
     mocks.mutate.mockResolvedValue(true);
@@ -367,6 +385,88 @@ describe("Set NS — пустые и ошибочные случаи", () => {
 
     await waitFor(() => expect(setNsCalls().length).toBe(1));
     await waitFor(() => expect(screen.queryByText(/rate limited/)).toBeNull());
+  });
+
+  /**
+   * Пара обязана быть симметричной. Прошлый круг закрыл только направление
+   * «чужая ошибка → успех Set NS» и тем же движением открыл обратное: отказ
+   * Set NS живёт в MutationCache, `runAction` до него не дотягивается, и он
+   * повисал над удавшимся Create DB. Непарный тест — причина, по которой этот
+   * дефект дожил до третьего круга.
+   */
+  it("отказ Set NS не переживает удавшийся Request SSL", async () => {
+    setTauri(true);
+    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
+    mocks.apiPost.mockResolvedValue({});
+
+    renderModal();
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.click(btn);
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("SSL"));
+    fireEvent.click(screen.getByText("Request SSL"));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
+    // Красное «failed» над успешным действием толкает повторять операцию.
+    await waitFor(() => expect(screen.queryByText(/Invalid nameserver/)).toBeNull());
+  });
+
+  it("отказ Set NS не переживает удавшийся Create DB", async () => {
+    setTauri(true);
+    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
+    mocks.apiPost.mockResolvedValue({});
+
+    renderModal();
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.click(btn);
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("DB"));
+    fireEvent.click(screen.getByText("Create DB"));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText(/Invalid nameserver/)).toBeNull());
+  });
+
+  it("не встречает красным на Overview того, кто в этой сессии ничего не жал", async () => {
+    setTauri(true);
+    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
+
+    const first = renderModal();
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.click(btn);
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+    first.unmount();
+
+    // Карточка открывается на Overview. Красное про NS там — отчёт о том, чего
+    // пользователь в этой сессии не делал; долговременный след отказа это
+    // бейдж «NS: Error» в строке таблицы, а не баннер поверх другой вкладки.
+    renderModal();
+    expect(screen.queryByText(/Invalid nameserver/)).toBeNull();
+    // Но на своей вкладке он никуда не делся — это и задумано.
+    fireEvent.click(screen.getByText("NS"));
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+  });
+
+  it("чужая ошибка не показывается на вкладке NS", async () => {
+    setTauri(true);
+    mocks.apiPost.mockRejectedValue(new Error("Create DB failed: no space left"));
+
+    renderModal();
+    fireEvent.click(screen.getByText("DB"));
+    fireEvent.click(screen.getByText("Create DB"));
+    expect(await screen.findByText(/no space left/)).toBeTruthy();
+
+    // Дыра варианта «скоупить только setNsError»: сам `actionError` тоже живёт
+    // между вкладками и переезжает на NS, где такого действия вообще нет — и
+    // там ещё и заслоняет собой ошибку Set NS. Баннер принадлежит вкладке,
+    // на которой запущено действие.
+    await openNsTab();
+    expect(screen.queryByText(/no space left/)).toBeNull();
   });
 
   it("не теряет отказ, прилетевший после закрытия карточки", async () => {

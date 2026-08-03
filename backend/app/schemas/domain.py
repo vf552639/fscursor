@@ -143,10 +143,6 @@ class NginxOverrideResponse(BaseModel):
     presets: dict
 
 
-class MarkNsSetRequest(BaseModel):
-    set: bool = True
-
-
 class RefreshSslResponse(BaseModel):
     domain_id: int
     has_certificate: bool

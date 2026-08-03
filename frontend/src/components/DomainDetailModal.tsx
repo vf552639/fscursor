@@ -61,14 +61,25 @@ export default function DomainDetailModal({
   const [actionError, setActionError] = useState<string | null>(null);
 
   /**
-   * Баннер один на всю модалку и живёт между попытками: `key` меняется только
-   * при смене домена, переключение вкладок его не трогает. Без явного сброса
-   * красное про прошлый отказ висело бы над удавшейся следующей попыткой — а
-   * повтор на месте здесь основной сценарий. Поэтому каждое действие начинается
-   * с чистого баннера.
+   * Вкладка, которой принадлежит текущая ошибка. Баннер один на всю модалку и
+   * живёт между попытками (`key` меняется только при смене домена), поэтому
+   * одного лишь сброса в начале действия мало: ошибка Create DB переезжала на
+   * вкладку NS, где такого действия нет вовсе, и там ещё и заслоняла ошибку
+   * Set NS. Каждое действие живёт ровно на одной вкладке (`overview` — Create
+   * Site, `db` — Create DB, `ssl` — три кнопки SSL, `nginx` — override, `ns` —
+   * Set NS), так что «показывать отчёт только там, где нажимали» — это и есть
+   * правило.
+   */
+  const [actionErrorTab, setActionErrorTab] = useState<Tab | null>(null);
+
+  /**
+   * Каждое действие начинается с чистого баннера: без сброса красное про
+   * прошлый отказ висело бы над удавшейся следующей попыткой, а повтор на
+   * месте здесь основной сценарий.
    */
   const runAction = (fn: () => void) => {
     setActionError(null);
+    setActionErrorTab(tab);
     fn();
   };
 
@@ -91,7 +102,24 @@ export default function DomainDetailModal({
     lastSetNs?.status === "error"
       ? String((lastSetNs.error as any)?.message || "Set NS failed")
       : null;
-  const banner = actionError ?? setNsError;
+
+  /**
+   * Баннер принадлежит вкладке, на которой запущено действие, — по одной и той
+   * же причине для обеих половин.
+   *
+   * `setNsError` живёт в MutationCache и `runAction` его не касается: без
+   * скоупа отказ Set NS висел бы красным над удавшимся Create DB на соседней
+   * вкладке и встречал бы на Overview пользователя, который в этой сессии
+   * ничего не нажимал. `actionError` живёт в стейте модалки и переживает
+   * переключение вкладок: без скоупа он показывался бы на NS, где такого
+   * действия нет, да ещё и заслонял бы собой `setNsError`.
+   *
+   * Скоуп не прячет отказ Set NS насовсем: на своей вкладке он по-прежнему
+   * виден и после закрытия и повторного открытия карточки (это задумано —
+   * ответ регистратора может прийти уже после закрытия). Долговременный след
+   * — `ns_status: error` в строке таблицы.
+   */
+  const banner = (actionErrorTab === tab ? actionError : null) ?? (tab === "ns" ? setNsError : null);
 
   // NS зоны Cloudflare — источник по умолчанию: в этом продукте «Set NS» почти
   // всегда значит «прописать регистратору те NS, что выдал Cloudflare». Но поле
@@ -114,6 +142,7 @@ export default function DomainDetailModal({
   // стирали уже их.
   const [nsEdited, setNsEdited] = useState(false);
   const [nsPrefilled, setNsPrefilled] = useState(false);
+  const zoneNsList = zoneNs.data?.name_servers ?? [];
   // Нормализуем ТУТ же, а не только внутри хука: кнопка гасится по числу NS, и
   // без схлопывания дублей «ns1 + NS1» выглядели бы как два — кнопка живая,
   // мутация падает. Гейт и отправка обязаны считать одинаково; в хуке
@@ -262,9 +291,24 @@ export default function DomainDetailModal({
               DNS-резолв, которого в десктопе нет. Вкладка честно осталась с тем
               одним действием, которое работает. */}
           <div style={{ display: "grid", gap: 6 }}>
-            <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
-              Nameservers (one per line)
-            </label>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
+                Nameservers (one per line)
+              </label>
+              {/* Подстановка теперь одноразовая, поэтому вернуть NS зоны после
+                  правки нечем: их списка в этой модалке нет. Явная ссылка
+                  вместо прежнего неявного «очистка = сброс», который воскрешал
+                  NS прямо под курсором при стирании backspace'ом. */}
+              {zoneNsList.length > 0 && nsText !== zoneNsList.join("\n") ? (
+                <button
+                  type="button"
+                  onClick={() => { setNsEdited(true); setNsText(zoneNsList.join("\n")); }}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11.5, color: "#2563eb", textDecoration: "underline" }}
+                >
+                  ↺ Restore from Cloudflare
+                </button>
+              ) : null}
+            </div>
             <textarea
               id="ns-list"
               value={nsText}
