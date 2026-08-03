@@ -401,6 +401,25 @@ describe("Domains — provision: два домена подряд", () => {
 });
 
 describe("Domains — provision: deep link", () => {
+  it("не запускает вторую операцию по домену, который уже провижинится", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    renderPage();
+    await openProvisionDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // Парная сторона гейта: кнопку блокирует страница, а ссылка приходит извне
+    // и о летящей операции не знает. Rust здесь не страхует — `site_exists` и
+    // `ssl_exists` проверяются в начале прогона, то есть до того, как первая
+    // попытка что-то создала.
+    await expect(
+      handleSdmpDeepLinkInTauri("sdmp://provision?domainId=42", "user-1", () => true),
+    ).rejects.toThrow(/already running/i);
+    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+
   it("provision из deep link виден странице и блокирует ⚙ той же строки", async () => {
     setTauri(true);
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));

@@ -488,6 +488,20 @@ export function useProvisionDomain(onResult: (outcome: ProvisionOutcome) => void
  * только возврат `mutationFn`, то есть `{ domain_id }`.
  */
 export async function runProvisionDomain(vars: ProvisionDomainVars): Promise<ProvisionOutcome> {
+  // Парная сторона того же гейта. Кнопку ⚙ блокирует страница, читая этот же
+  // кэш; ссылка приходит извне и о летящей операции не знает, а Rust на этом
+  // пути не страхует: `site_exists`/`ssl_exists` проверяются в начале прогона,
+  // то есть до того, как первая попытка что-то создала. Без проверки ссылка
+  // открывала бы вторую SSH-сессию по домену, который уже провижинится.
+  const running = queryClient.getMutationCache().find({
+    mutationKey: PROVISION_DOMAIN_KEY,
+    status: "pending",
+    predicate: (m) =>
+      (m.state.variables as ProvisionDomainVars | undefined)?.domainId === vars.domainId,
+  });
+  if (running) {
+    throw new Error(`Provisioning of domain #${vars.domainId} is already running.`);
+  }
   let outcome: ProvisionOutcome | null = null;
   const mutation = queryClient
     .getMutationCache()
