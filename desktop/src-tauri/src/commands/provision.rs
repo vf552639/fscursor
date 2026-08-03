@@ -1387,17 +1387,27 @@ mod tests {
         assert_eq!(body, "{\"fastpanel_status\":\"installed\"}");
     }
 
-    // Write-back — best-effort: работа на сервере уже сделана, и уронить из-за
-    // не записанных метаданных команду (а с ней — пароли из ответа) нельзя.
-    // Функция возвращает bool, а не Result, — свалиться просто нечему.
+    // Здесь проверяется ровно одно: КАЖДЫЙ вид провала write-back'а (и не-2xx,
+    // и сработавший ZK-guard) сворачивается в флаг «сообщить», а не в ошибку.
+    //
+    // То, что команда после этого действительно доживает до `Ok(result)`, тест
+    // проверить не может: `run_provision_domain` и `install_fastpanel` требуют
+    // AppHandle, keychain и живой SSH. Гарантия там структурная — оба вызова
+    // (`if write_back_failed(...)` в `run_provision_domain` и в
+    // `install_fastpanel`) не содержат `?`, а из `bool` его и не сделать.
+    // Поэтому важно, чтобы функция не начала возвращать `Result`.
     #[test]
-    fn write_back_failure_is_reported_but_not_propagated() {
+    fn every_write_back_failure_collapses_to_a_flag() {
         assert!(write_back_failed(
             "domain",
-            Err(crate::sync::http::ApiError::Status {
+            Err(ApiError::Status {
                 status: 500,
                 body: "boom".into()
             })
+        ));
+        assert!(write_back_failed(
+            "domain",
+            Err(ApiError::Secret("db_password".into()))
         ));
         assert!(!write_back_failed("domain", Ok(())));
     }

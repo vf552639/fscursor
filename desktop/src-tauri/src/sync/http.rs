@@ -18,10 +18,10 @@ pub enum ApiError {
     Json(#[from] serde_json::Error),
     #[error("api error {status}: {body}")]
     Status { status: u16, body: String },
-    /// Тело не отправлено: в нём нашёлся секретоподобный ключ. Не сетевая
-    /// ошибка, а сработавший инвариант zero-knowledge.
-    #[error("refusing to send a body containing {0}")]
-    Secret(&'static str),
+    /// Тело не отправлено: в нём нашлось поле с секретоподобным именем. Не
+    /// сетевая ошибка, а сработавший инвариант zero-knowledge.
+    #[error("refusing to send a body with the field {0}")]
+    Secret(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,12 +506,16 @@ impl ApiClient {
     ///
     /// В отличие от аудита, тело здесь собирается из данных, пришедших с чужого
     /// сервера (имена сайта, БД, URL панели), поэтому `debug_assert` мало:
-    /// нашли секретоподобный ключ — не отправляем вовсе и говорим об этом
-    /// вызывающему. `request_raw` на не-2xx не падает, статус разбираем сами.
+    /// нашли поле с секретоподобным ИМЕНЕМ — не отправляем вовсе и говорим об
+    /// этом вызывающему. Значения не проверяются намеренно: домен
+    /// `password.com` не делает тело секретным, а отказ по нему навсегда лишил
+    /// бы такие домены write-back'а (см. `audit_redact`).
+    ///
+    /// `request_raw` на не-2xx не падает, статус разбираем сами.
     async fn put_metadata<T: Serialize>(&self, path: &str, patch: &T) -> Result<(), ApiError> {
         let body = serde_json::to_value(patch)?;
-        if let Err(marker) = crate::audit_redact::ensure_no_secrets(&body) {
-            return Err(ApiError::Secret(marker));
+        if let Err(field) = crate::audit_redact::ensure_no_secrets(&body) {
+            return Err(ApiError::Secret(field));
         }
         let (status, text) = self.request_raw("PUT", path, Some(&body)).await?;
         if (200..300).contains(&status) {
@@ -880,11 +884,15 @@ mod tests {
         assert!(matches!(err, ApiError::Status { status: 500, .. }));
     }
 
-    /// Инвариант ZK: тело с секретоподобным ключом не уходит в сеть вообще.
-    /// `.expect(0)` проверяется на drop сервера — то есть отказ настоящий, а не
-    /// «отправили и получили ошибку».
+    /// Инвариант ZK: тело с секретоподобным ИМЕНЕМ поля не уходит в сеть
+    /// вообще. `.expect(0)` проверяется на drop сервера — то есть отказ
+    /// настоящий, а не «отправили и получили ошибку».
+    ///
+    /// Идём через приватную `put_metadata` с сырым телом: в `DomainWriteBack`
+    /// поля под пароль нет вовсе, и собрать через неё плохое тело невозможно —
+    /// это первая линия обороны, а тест проверяет вторую.
     #[tokio::test]
-    async fn write_back_refuses_to_send_a_body_with_a_secret() {
+    async fn put_metadata_refuses_to_send_a_body_with_a_secret_field() {
         let srv = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path("/api/domains/42"))
@@ -895,16 +903,51 @@ mod tests {
 
         let c = ApiClient::new(format!("{}/api", srv.uri()));
         let err = c
-            .domain_write_back(
-                "42",
-                &DomainWriteBack {
-                    site_user: Some("password".into()),
-                    ..Default::default()
-                },
+            .put_metadata(
+                "domains/42",
+                &json!({"site_user": "u1", "db_password": "s3cret"}),
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ApiError::Secret("password")), "{err}");
+        assert!(
+            matches!(&err, ApiError::Secret(f) if f == "db_password"),
+            "{err}"
+        );
+    }
+
+    /// Обратная сторона того же инварианта: `site_path` домена `password.com`
+    /// содержит «password» в значении, и это НЕ повод не записать результат.
+    /// Иначе такие домены навсегда остались бы без `site_user` на сервере, а
+    /// проверка `site_exists` для них не сработала бы никогда.
+    #[tokio::test]
+    async fn domain_write_back_sends_a_password_shaped_domain() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .and(body_json(json!({
+                "site_user": "password_com",
+                "site_path": "/var/www/password_com/data/www/password.com",
+                "ssl_status": "active",
+                "last_provision_error": null,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 42})))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.domain_write_back(
+            "42",
+            &DomainWriteBack {
+                site_user: Some("password_com".into()),
+                site_path: Some("/var/www/password_com/data/www/password.com".into()),
+                ssl_status: Some("active".into()),
+                last_provision_error: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
