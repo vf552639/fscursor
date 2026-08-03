@@ -17,19 +17,32 @@ from datetime import datetime, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import update
 
 from app.auth.models import User
 from app.core.database import AsyncSessionLocal
 from app.main import app
+from app.models.domain import Domain
+from app.models.server import Server
 
 
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 
+async def _login(client: AsyncClient, email: str, key: bytes = b"\x01" * 32) -> None:
+    """Залогиниться уже существующим пользователем."""
+    r = await client.post(
+        "/api/auth/login/finish",
+        json={"email": email, "auth_key_b64": b64(key)},
+    )
+    assert r.status_code == 200, r.text
+
+
 async def _register_and_login(client: AsyncClient, email: str, key: bytes = b"\x01" * 32) -> None:
-    await client.post(
+    """Зарегистрировать нового пользователя, подтвердить почту и войти."""
+    r = await client.post(
         "/api/auth/register",
         json={
             "email": email,
@@ -39,6 +52,10 @@ async def _register_and_login(client: AsyncClient, email: str, key: bytes = b"\x
             "recovery_auth_key_b64": b64(b"\x03" * 32),
         },
     )
+    # 409 — почта уже занята: тесты берут случайные адреса, так что это
+    # практически невозможно, но повторный прогон с тем же адресом должен
+    # доехать до логина, а не падать здесь. Всё остальное — настоящая ошибка.
+    assert r.status_code in (201, 409), r.text
     async with AsyncSessionLocal() as s:
         await s.execute(
             update(User)
@@ -46,10 +63,20 @@ async def _register_and_login(client: AsyncClient, email: str, key: bytes = b"\x
             .values(email_confirmed_at=datetime.now(timezone.utc), email_confirm_token_hash=None)
         )
         await s.commit()
-    await client.post(
-        "/api/auth/login/finish",
-        json={"email": email, "auth_key_b64": b64(key)},
-    )
+    await _login(client, email, key)
+
+
+async def _purge(model: type, entity_id: int) -> None:
+    """Удалить строку напрямую в БД, не завися от того, кто сейчас залогинен.
+
+    Тесты с двумя пользователями заканчиваются в сессии произвольного из них,
+    а падение load-bearing-ассерта может оборвать их на середине. Удаление
+    через API в таком случае само получило бы 404, и строка навсегда осталась
+    бы в общей dev-базе.
+    """
+    async with AsyncSessionLocal() as s:
+        await s.execute(sa_delete(model).where(model.id == entity_id))
+        await s.commit()
 
 
 @pytest.mark.asyncio
@@ -94,7 +121,51 @@ async def test_domain_update_accepts_provision_result_fields():
                 assert body[key] == payload[key], f"{key}: {body[key]!r} != {payload[key]!r}"
             assert datetime.fromisoformat(body["ssl_expires_at"]) == expires
         finally:
-            await c.delete(f"/api/domains/{domain_id}")
+            await _purge(Domain, domain_id)
+
+
+@pytest.mark.asyncio
+async def test_domain_update_clears_last_provision_error_with_explicit_null():
+    """Явный `null` сбрасывает `last_provision_error` в NULL.
+
+    `domain_service.update` берёт `model_dump(exclude_unset=True)`, поэтому
+    явный `null` и опущенное поле — разные вещи: первое пишет NULL, второе не
+    трогает колонку вовсе. Десктоп на этом и держится — после успешного
+    повтора он обязан погасить прошлую ошибку, иначе домен навсегда остаётся
+    с протухшим текстом в UI. Пустая строка (её ставит соседний тест) — это не
+    NULL и такой проверкой не считается.
+    """
+    dom = f"{uuid.uuid4().hex[:8]}.example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"wb-err-{uuid.uuid4().hex[:8]}@example.com")
+        r = await c.post("/api/domains", json={"domain_name": dom})
+        assert r.status_code == 201, r.text
+        domain_id = r.json()["id"]
+        try:
+            # 1. провалившийся provision записал ошибку
+            r = await c.put(
+                f"/api/domains/{domain_id}",
+                json={"last_provision_error": "ssh: connection refused", "status": "failed"},
+            )
+            assert r.status_code == 200, r.text
+            r = await c.get(f"/api/domains/{domain_id}")
+            assert r.json()["last_provision_error"] == "ssh: connection refused"
+
+            # 2. поле, которого нет в запросе, не затирается
+            r = await c.put(f"/api/domains/{domain_id}", json={"status": "provisioning"})
+            assert r.status_code == 200, r.text
+            r = await c.get(f"/api/domains/{domain_id}")
+            assert r.json()["last_provision_error"] == "ssh: connection refused"
+
+            # 3. явный null гасит ошибку
+            r = await c.put(f"/api/domains/{domain_id}", json={"last_provision_error": None})
+            assert r.status_code == 200, r.text
+            assert r.json()["last_provision_error"] is None
+            r = await c.get(f"/api/domains/{domain_id}")
+            assert r.status_code == 200, r.text
+            assert r.json()["last_provision_error"] is None
+        finally:
+            await _purge(Domain, domain_id)
 
 
 @pytest.mark.asyncio
@@ -129,7 +200,7 @@ async def test_domain_update_ignores_plaintext_password_fields():
             assert secret not in r.text
             assert r.json()["db_user"] == "dbu"
         finally:
-            await c.delete(f"/api/domains/{domain_id}")
+            await _purge(Domain, domain_id)
 
 
 @pytest.mark.asyncio
@@ -159,7 +230,7 @@ async def test_server_update_accepts_fastpanel_result_fields():
             for key, value in payload.items():
                 assert body[key] == value, f"{key}: {body[key]!r} != {value!r}"
         finally:
-            await c.delete(f"/api/servers/{server_id}")
+            await _purge(Server, server_id)
 
 
 @pytest.mark.asyncio
@@ -185,12 +256,12 @@ async def test_user_b_cannot_write_back_to_user_a_domain():
 
             # владелец видит домен нетронутым
             await c.post("/api/auth/logout")
-            await _register_and_login(c, a_email)
+            await _login(c, a_email)
             r = await c.get(f"/api/domains/{domain_id}")
             assert r.status_code == 200, r.text
             assert r.json()["site_user"] is None
         finally:
-            await c.delete(f"/api/domains/{domain_id}")
+            await _purge(Domain, domain_id)
 
 
 @pytest.mark.asyncio
@@ -217,10 +288,10 @@ async def test_user_b_cannot_write_back_to_user_a_server():
             assert r.status_code == 404, r.text
 
             await c.post("/api/auth/logout")
-            await _register_and_login(c, a_email)
+            await _login(c, a_email)
             r = await c.get(f"/api/servers/{server_id}")
             assert r.status_code == 200, r.text
             assert r.json()["fastpanel_status"] == "not_installed"
             assert r.json()["fastpanel_user"] is None
         finally:
-            await c.delete(f"/api/servers/{server_id}")
+            await _purge(Server, server_id)
