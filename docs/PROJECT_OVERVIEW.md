@@ -34,9 +34,11 @@ SDMP is an internal panel for centralized management of servers and domains with
      - `POST /api/domains/{id}/ssl-cancel`,
      - `POST /api/domains/{id}/refresh-ssl`,
      - `GET/POST /api/domains/{id}/nginx-override`,
-     - `POST /api/domains/{id}/mark-ns-set`,
-     - `POST /api/domains/{id}/check-ns`,
      - `POST /api/domains/bulk-full-setup`.
+     - `mark-ns-set` и `check-ns` здесь были перечислены ошибочно: таких роутов
+       в `api/routes/domains.py` нет и не было. Кнопки, которые их звали, удалены
+       (спринт 3, фаза 5); смену NS выполняет десктоп командой
+       `registrar_set_nameservers`.
    - Added DB/SSL/Nginx metadata fields on `domains`: `db_name`, `db_user`, `ssl_expires_at`, `ssl_issuer`, `ns_check_mode`, `nginx_override`, `nginx_presets`.
 3. **Notifications**
    - Dedicated notifications entity and API

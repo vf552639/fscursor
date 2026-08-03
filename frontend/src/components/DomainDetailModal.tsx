@@ -31,6 +31,15 @@ function parseNameservers(text: string): string[] {
   return text.split(/[\s,]+/).filter(Boolean);
 }
 
+/** Один и тот же список NS? Регистр и порядок записи в поле роли не играют. */
+function sameNameservers(a: string[], b: string[]): boolean {
+  const norm = (list: string[]) =>
+    normalizeNameservers(list)
+      .map((ns) => ns.toLowerCase())
+      .join("\n");
+  return norm(a) === norm(b);
+}
+
 type Tab = "overview" | "db" | "ssl" | "nginx" | "ns";
 
 export default function DomainDetailModal({
@@ -58,29 +67,35 @@ export default function DomainDetailModal({
   const setNs = useSetNameservers();
   const setNginx = useSetNginxOverride();
   const nginxOverride = useGetNginxOverride(domain.id);
-  const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Ошибка вместе с вкладкой, которой она принадлежит — ОДНИМ стейтом. Баннер
+   * один на всю модалку и живёт между попытками (`key` меняется только при
+   * смене домена), поэтому одного сброса в начале действия мало: ошибка Create
+   * DB переезжала на вкладку NS, где такого действия нет вовсе, и там ещё и
+   * заслоняла ошибку Set NS. Каждое действие живёт ровно на одной вкладке
+   * (`overview` — Create Site, `db` — Create DB, `ssl` — три кнопки SSL,
+   * `nginx` — override, `ns` — Set NS), так что «показывать отчёт только там,
+   * где нажимали» — это и есть правило.
+   *
+   * Два отдельных `useState` под текст и вкладку разъезжались ровно там, где и
+   * должны были: слот вкладки был глобальный и перезаписывался следующим
+   * кликом, а текст дописывался, когда вернётся ответ.
+   */
+  const [actionError, setActionError] = useState<{ tab: Tab; message: string } | null>(null);
 
   /**
-   * Вкладка, которой принадлежит текущая ошибка. Баннер один на всю модалку и
-   * живёт между попытками (`key` меняется только при смене домена), поэтому
-   * одного лишь сброса в начале действия мало: ошибка Create DB переезжала на
-   * вкладку NS, где такого действия нет вовсе, и там ещё и заслоняла ошибку
-   * Set NS. Каждое действие живёт ровно на одной вкладке (`overview` — Create
-   * Site, `db` — Create DB, `ssl` — три кнопки SSL, `nginx` — override, `ns` —
-   * Set NS), так что «показывать отчёт только там, где нажимали» — это и есть
-   * правило.
+   * Владелец берётся на момент КЛИКА и уезжает в замыкание, а не читается из
+   * стейта на момент ответа: между кликом и ответом пользователь успевает уйти
+   * на другую вкладку и нажать там что-то ещё. Дело не в действиях, которые
+   * можно запустить с двух вкладок, — асинхронно завершается любое.
+   *
+   * Гасим при старте только СВОЙ слот: чужая ошибка не видна на этой вкладке,
+   * и стирать её отсюда значит терять её у того, кто на неё ещё не смотрел.
    */
-  const [actionErrorTab, setActionErrorTab] = useState<Tab | null>(null);
-
-  /**
-   * Каждое действие начинается с чистого баннера: без сброса красное про
-   * прошлый отказ висело бы над удавшейся следующей попыткой, а повтор на
-   * месте здесь основной сценарий.
-   */
-  const runAction = (fn: () => void) => {
-    setActionError(null);
-    setActionErrorTab(tab);
-    fn();
+  const runAction = (fn: (fail: (message: string) => void) => void) => {
+    const owner = tab;
+    setActionError((prev) => (prev?.tab === owner ? null : prev));
+    fn((message) => setActionError({ tab: owner, message }));
   };
 
   /**
@@ -119,7 +134,7 @@ export default function DomainDetailModal({
    * ответ регистратора может прийти уже после закрытия). Долговременный след
    * — `ns_status: error` в строке таблицы.
    */
-  const banner = (actionErrorTab === tab ? actionError : null) ?? (tab === "ns" ? setNsError : null);
+  const banner = (actionError?.tab === tab ? actionError.message : null) ?? (tab === "ns" ? setNsError : null);
 
   // NS зоны Cloudflare — источник по умолчанию: в этом продукте «Set NS» почти
   // всегда значит «прописать регистратору те NS, что выдал Cloudflare». Но поле
@@ -206,7 +221,7 @@ export default function DomainDetailModal({
           <div style={{ marginTop: 10 }}>
             <Btn
               variant="secondary"
-              onClick={() => runAction(() => createSite.mutate({ domainId: domain.id, site_only: true }, { onError: (e: any) => setActionError(e?.message || "Create site failed") }))}
+              onClick={() => runAction((fail) => createSite.mutate({ domainId: domain.id, site_only: true }, { onError: (e: any) => fail(e?.message || "Create site failed") }))}
               disabled={createSite.isPending}
             >
               {createSite.isPending ? "Starting..." : "Create Site"}
@@ -220,7 +235,7 @@ export default function DomainDetailModal({
           <div><b>DB name:</b> {dbCreds.data?.db_name ?? domain.db_name ?? "—"}</div>
           <div><b>DB user:</b> {dbCreds.data?.db_user ?? domain.db_user ?? "—"}</div>
           <div><b>DB password:</b> {dbCreds.data?.db_password ?? "—"}</div>
-          <Btn variant="secondary" onClick={() => runAction(() => createDb.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Create DB failed") }))} disabled={createDb.isPending}>
+          <Btn variant="secondary" onClick={() => runAction((fail) => createDb.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Create DB failed") }))} disabled={createDb.isPending}>
             {createDb.isPending ? "Creating..." : "Create DB"}
           </Btn>
         </div>
@@ -231,13 +246,13 @@ export default function DomainDetailModal({
           <div><b>Status:</b> {sslLabel}</div>
           <div><b>Issuer:</b> {domain.ssl_issuer ?? "—"}</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn variant="secondary" onClick={() => runAction(() => requestSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Request SSL failed") }))} disabled={requestSsl.isPending}>
+            <Btn variant="secondary" onClick={() => runAction((fail) => requestSsl.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Request SSL failed") }))} disabled={requestSsl.isPending}>
               Request SSL
             </Btn>
-            <Btn variant="secondary" onClick={() => runAction(() => refreshSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Refresh SSL failed") }))} disabled={refreshSsl.isPending}>
+            <Btn variant="secondary" onClick={() => runAction((fail) => refreshSsl.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Refresh SSL failed") }))} disabled={refreshSsl.isPending}>
               Refresh SSL
             </Btn>
-            <Btn variant="danger" onClick={() => runAction(() => cancelSsl.mutate(domain.id, { onError: (e: any) => setActionError(e?.message || "Cancel SSL failed") }))} disabled={cancelSsl.isPending}>
+            <Btn variant="danger" onClick={() => runAction((fail) => cancelSsl.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Cancel SSL failed") }))} disabled={cancelSsl.isPending}>
               Cancel SSL
             </Btn>
           </div>
@@ -266,10 +281,10 @@ export default function DomainDetailModal({
           <Btn
             variant="secondary"
             onClick={() =>
-              runAction(() =>
+              runAction((fail) =>
                 setNginx.mutate(
                   { domainId: domain.id, data: { snippet, presets } },
-                  { onError: (e: any) => setActionError(e?.message || "Save nginx override failed") }
+                  { onError: (e: any) => fail(e?.message || "Save nginx override failed") }
                 )
               )
             }
@@ -299,7 +314,10 @@ export default function DomainDetailModal({
                   правки нечем: их списка в этой модалке нет. Явная ссылка
                   вместо прежнего неявного «очистка = сброс», который воскрешал
                   NS прямо под курсором при стирании backspace'ом. */}
-              {zoneNsList.length > 0 && nsText !== zoneNsList.join("\n") ? (
+              {/* Сравниваем НОРМАЛИЗОВАННЫЕ списки, а не текст посимвольно:
+                  лишний перевод строки в конце — не повод предлагать
+                  восстановление того, что и так уже в поле. */}
+              {zoneNsList.length > 0 && !sameNameservers(nameservers, zoneNsList) ? (
                 <button
                   type="button"
                   onClick={() => { setNsEdited(true); setNsText(zoneNsList.join("\n")); }}

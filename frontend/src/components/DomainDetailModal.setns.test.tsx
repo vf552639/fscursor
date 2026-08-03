@@ -250,6 +250,29 @@ describe("Set NS — десктоп выполняет", () => {
     expect(nsField().value).toBe("ada.ns.cloudflare.com\nbob.ns.cloudflare.com");
   });
 
+  it("не предлагает восстановить то, что и так в поле", async () => {
+    setTauri(true);
+
+    renderModal();
+    await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    // Свежая подстановка совпадает с зоной — предлагать нечего.
+    expect(screen.queryByText(/Restore from Cloudflare/i)).toBeNull();
+
+    // Посимвольное сравнение считало бы это отличием: лишний перевод строки в
+    // конце и другой регистр — то же содержимое.
+    fireEvent.change(nsField(), {
+      target: { value: "ADA.ns.cloudflare.com\nbob.ns.cloudflare.com\n" },
+    });
+    await act(async () => {});
+    expect(screen.queryByText(/Restore from Cloudflare/i)).toBeNull();
+
+    // А вот настоящее отличие — предлагаем.
+    fireEvent.change(nsField(), { target: { value: "ns1.hoster.net\nns2.hoster.net" } });
+    await act(async () => {});
+    expect(screen.getByText(/Restore from Cloudflare/i)).toBeTruthy();
+  });
+
   it("не шлёт регистратору дубли и требует хотя бы два nameserver'а", async () => {
     setTauri(true);
     mocks.mutate.mockResolvedValue(true);
@@ -450,6 +473,94 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     // Но на своей вкладке он никуда не делся — это и задумано.
     fireEvent.click(screen.getByText("NS"));
     expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+  });
+
+  /**
+   * Владелец баннера обязан определяться моментом КЛИКА, а не моментом ответа.
+   * `actionErrorTab` был глобальным слотом: `runAction` переписывал его на
+   * каждом клике, а `onError` дописывал текст когда вернётся ответ, — и между
+   * этими двумя моментами пользователь успевает нажать что-то на другой
+   * вкладке. Любое действие завершается асинхронно, так что дело не в
+   * действиях, запускаемых с двух вкладок.
+   */
+  it("поздний отказ не приписывается вкладке, на которой всё удалось", async () => {
+    setTauri(true);
+    let failSsl: (e: Error) => void = () => {};
+    mocks.apiPost.mockImplementation(async (url: string) => {
+      if (String(url).includes("ssl-request")) {
+        return new Promise((_res, rej) => { failSsl = rej; });
+      }
+      return {};
+    });
+
+    renderModal();
+    fireEvent.click(screen.getByText("SSL"));
+    fireEvent.click(screen.getByText("Request SSL"));
+
+    // Пока SSL летит, уходим на DB и делаем там удачное действие.
+    fireEvent.click(screen.getByText("DB"));
+    fireEvent.click(screen.getByText("Create DB"));
+    await act(async () => {});
+
+    await act(async () => { failSsl(new Error("SSL request failed: rate limited")); });
+
+    // Красное от чужого действия над удавшимся Create DB — та же ложь, только
+    // приехавшая с задержкой.
+    expect(screen.queryByText(/rate limited/)).toBeNull();
+    // А на своей вкладке отказ на месте: он не потерян, он на месте.
+    fireEvent.click(screen.getByText("SSL"));
+    expect(await screen.findByText(/rate limited/)).toBeTruthy();
+  });
+
+  it("поздний чужой отказ не заслоняет ошибку Set NS", async () => {
+    setTauri(true);
+    let failSsl: (e: Error) => void = () => {};
+    mocks.apiPost.mockImplementation(async (url: string) => {
+      if (String(url).includes("ssl-request")) {
+        return new Promise((_res, rej) => { failSsl = rej; });
+      }
+      return {};
+    });
+    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
+
+    renderModal();
+    fireEvent.click(screen.getByText("SSL"));
+    fireEvent.click(screen.getByText("Request SSL"));
+
+    const btn = await openNsTab();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.click(btn);
+    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+
+    await act(async () => { failSsl(new Error("SSL request failed: rate limited")); });
+
+    // Ровно та дыра, которую закрывал прошлый круг: чужая ошибка на вкладке NS
+    // маскирует собой отказ Set NS. Через задержку она открывалась снова.
+    expect(screen.queryByText(/rate limited/)).toBeNull();
+    expect(screen.getByText(/Invalid nameserver/)).toBeTruthy();
+  });
+
+  it("не теряет чужую ошибку из-за действия на другой вкладке", async () => {
+    setTauri(true);
+    mocks.apiPost.mockImplementation(async (url: string) => {
+      if (String(url).includes("create-db")) throw new Error("Create DB failed: no space left");
+      return {};
+    });
+
+    renderModal();
+    fireEvent.click(screen.getByText("DB"));
+    fireEvent.click(screen.getByText("Create DB"));
+    expect(await screen.findByText(/no space left/)).toBeTruthy();
+
+    // Удачное действие на СОСЕДНЕЙ вкладке гасило слот целиком, и вернувшийся
+    // на DB видел пустоту вместо своей ошибки. Это не дезинформация, а потеря
+    // информации, но исправлять её всё равно должен он.
+    fireEvent.click(screen.getByText("SSL"));
+    fireEvent.click(screen.getByText("Refresh SSL"));
+    await act(async () => {});
+
+    fireEvent.click(screen.getByText("DB"));
+    expect(screen.getByText(/no space left/)).toBeTruthy();
   });
 
   it("чужая ошибка не показывается на вкладке NS", async () => {
