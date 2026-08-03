@@ -16,7 +16,7 @@ use crate::provision::fastpanel_install::{
     parse_fastpanel_credentials, update_command, FpCredentials, INSTALL_CMD,
 };
 use crate::ssh::client::{SshError, SshSession};
-use crate::ssh::fastpanel::{self, CreateDbResult, CreateSiteResult};
+use crate::ssh::fastpanel::{self, CreateDbResult, CreateSiteResult, SslInfo};
 use crate::sync::cache;
 use crate::sync::http::ApiClient;
 
@@ -90,6 +90,31 @@ fn db_error(e: SshError) -> CommandError {
                 .into(),
         ),
         other => CommandError::from(other),
+    }
+}
+
+/// Сколько сертификату должно оставаться до истечения, чтобы считать его
+/// пригодным и не выпускать заново.
+///
+/// certbot продлевает за 30 дней до конца. Если осталось меньше суток, значит
+/// продление уже не работает, и пропустить выпуск — значит оставить сайт без
+/// SSL. Брать порог в те же 30 дней нельзя: тогда любой повторный provision в
+/// последний месяц жизни сертификата жёг бы лимит дубликатов Let's Encrypt.
+const SSL_REUSE_MIN_REMAINING_HOURS: i64 = 24;
+
+/// Годится ли найденный сертификат, чтобы пропустить выпуск.
+///
+/// Само наличие файла ничего не доказывает: `/etc/letsencrypt/live/{domain}`
+/// переживает удаление сайта, а срок действия в имени файла не написан.
+/// Не смогли разобрать `notAfter` — считаем, что не знаем, и выпускаем: лишний
+/// выпуск переживём, а сайт, навсегда оставшийся на голом HTTP, — нет.
+fn cert_good_enough(info: &SslInfo, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if !info.has_certificate {
+        return false;
+    }
+    match info.expires_at {
+        Some(exp) => exp > now + chrono::Duration::hours(SSL_REUSE_MIN_REMAINING_HOURS),
+        None => false,
     }
 }
 
@@ -183,7 +208,7 @@ async fn run_provision_steps(
 
     // Переиспользование существующего сайта и его создание — разные события, и
     // аудит не должен называть первое вторым.
-    let (site, site_step) = if let Some(ref u) = plan.site_user_existing {
+    let (site, site_reused) = if let Some(ref u) = plan.site_user_existing {
         if fastpanel::site_exists(session, u, domain_name).await? {
             (
                 CreateSiteResult {
@@ -191,21 +216,26 @@ async fn run_provision_steps(
                     site_path: format!("/var/www/{u}/data/www/{domain_name}"),
                     output: "already exists".into(),
                 },
-                "site_exists",
+                true,
             )
         } else {
             (
                 fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?,
-                "create_site",
+                false,
             )
         }
     } else {
         (
             fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?,
-            "create_site",
+            false,
         )
     };
 
+    let site_step = if site_reused {
+        "site_exists"
+    } else {
+        "create_site"
+    };
     let mut done = ProvisionSteps {
         site_user: site.site_user,
         site_path: site.site_path,
@@ -233,18 +263,32 @@ async fn run_provision_steps(
         //
         // Идемпотентность (принцип 4): у Let's Encrypt лимит дубликатов — 5
         // одинаковых сертификатов в неделю, он выгорает куда быстрее прочих, а
-        // повторный provision домена штука обычная. Уже выпущенный сертификат
-        // не перевыпускаем. Продление — забота certbot-таймера, не provision.
-        let has_cert = match fastpanel::cert_exists(session, domain_name).await {
-            Ok(v) => v,
-            // Не смогли проверить — не повод падать: пойдём обычным путём, и
-            // если сессия действительно мертва, это поймает ветка issue ниже.
-            Err(e) => {
-                tracing::warn!(target: "provision", "cert_exists check failed: {e}");
-                false
+        // повторный provision домена штука обычная. Поэтому рабочий сертификат
+        // не перевыпускаем.
+        //
+        // Но пропускать выпуск можно только там, где сайт переиспользован. Если
+        // мы сейчас создали vhost заново, он про старый сертификат ничего не
+        // знает, а файлы в /etc/letsencrypt/live переживают удаление сайта:
+        // «файл есть» означало бы `ssl_issued: true` на сайте, который навсегда
+        // остался бы на голом HTTP, причём повторный provision это не чинил бы.
+        //
+        // Известный зазор: certbot кладёт дубликаты в `live/{domain}-0001`, а
+        // смотрим мы только на `live/{domain}` — то есть на самый старый набор.
+        // Для решения «перевыпускать ли» это безопасная сторона ошибки.
+        let reuse_existing_cert = if site_reused {
+            match fastpanel::read_ssl_info(session, domain_name).await {
+                Ok(info) => cert_good_enough(&info, chrono::Utc::now()),
+                // Не смогли проверить — не повод падать: пойдём обычным путём, и
+                // если сессия действительно мертва, это поймает ветка issue ниже.
+                Err(e) => {
+                    tracing::warn!(target: "provision", "ssl info check failed: {e}");
+                    false
+                }
             }
+        } else {
+            false
         };
-        if has_cert {
+        if reuse_existing_cert {
             let _ = app.emit(
                 "provision:progress",
                 serde_json::json!({ "step": "ssl_exists", "domain_id": domain_id }),
@@ -549,10 +593,14 @@ pub async fn provision_bulk(
 ) -> Result<String, CommandError> {
     let key = idempotency_key("provision_bulk", &domain_ids);
     let cache_path = cache_path(&handle)?;
-    let mk = keychain::load_master_key(&user_id)
+    let mut mk = keychain::load_master_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let conn = cache::open(&cache_path, &mk).map_err(|e| CommandError::Api(e.to_string()))?;
+    // Ключ нужен ровно на открытие кэша. Дальше идёт цикл на N × минуты (для
+    // настоящего bulk — часы), а `run_provision_domain` внутри гасит свою копию
+    // за секунды — держать здесь ещё одну всё это время бессмысленно.
+    mk.zeroize();
 
     if let Some((st, _)) =
         cache::bulk_run_status(&conn, &key).map_err(|e| CommandError::Api(e.to_string()))?
@@ -598,7 +646,16 @@ pub async fn provision_bulk(
             return Err(e);
         }
     }
-    cache::bulk_run_complete(&conn, &key, "ok").map_err(|e| CommandError::Api(e.to_string()))?;
+    if let Err(e) = cache::bulk_run_complete(&conn, &key, "ok") {
+        // Тот же капкан, что и в цикле: не записав финальный статус, мы оставим
+        // строку в `running`, и повтор вернёт ключ, ничего не сделав. Все домены
+        // при этом отработали — помечаем прогон failed сознательно: повторный
+        // прогон по большей части идемпотентен (site_exists, ssl_exists), а
+        // навсегда залипший `running` не чинится ничем.
+        tracing::warn!(target: "provision", "could not mark bulk run done: {e}");
+        let _ = cache::bulk_run_fail(&conn, &key, "all domains done, status write failed");
+        return Err(CommandError::Api(e.to_string()));
+    }
     Ok(key)
 }
 
@@ -903,19 +960,73 @@ mod tests {
         assert!(m.to_lowercase().contains("cloudflare"), "{m}");
     }
 
-    // Инвариант таймаутов: exec выпуска SSL (300s в ssh/fastpanel.rs) обязан
-    // истечь раньше, чем russh закроет сессию по молчанию. Иначе умирает
-    // сессия, а не команда, и следующий шаг падает уже фатально.
+    // Инвариант таймаутов: самый долгий отрезок тишины в сессии — exec выпуска
+    // SSL плюс пауза сразу за ним — обязан уложиться в inactivity-таймаут.
+    // Иначе умирает сессия, а не команда, и следующий шаг падает фатально.
+    //
+    // Ссылаемся на настоящие значения из ssh/fastpanel.rs, а не на копии: тест
+    // должен падать и когда кто-то поднимет exec, а не только когда урежут
+    // сессию. Второе — очевидная правка, первое — вероятная.
     #[test]
-    fn session_timeout_outlives_the_longest_exec() {
-        const SSL_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+    fn session_timeout_outlives_the_longest_silence() {
+        let longest_silence = fastpanel::SSL_ISSUE_EXEC_TIMEOUT + fastpanel::SSL_ISSUE_SETTLE;
         assert!(
-            PROVISION_SESSION_TIMEOUT > SSL_EXEC_TIMEOUT,
-            "session {:?} must exceed ssl exec {:?}",
-            PROVISION_SESSION_TIMEOUT,
-            SSL_EXEC_TIMEOUT
+            PROVISION_SESSION_TIMEOUT > longest_silence,
+            "session {PROVISION_SESSION_TIMEOUT:?} must exceed longest silence {longest_silence:?}"
         );
-        assert!(PROVISION_SESSION_TIMEOUT - SSL_EXEC_TIMEOUT >= Duration::from_secs(60));
+        assert!(
+            PROVISION_SESSION_TIMEOUT - longest_silence >= Duration::from_secs(60),
+            "margin too thin: {PROVISION_SESSION_TIMEOUT:?} vs {longest_silence:?}"
+        );
+    }
+
+    fn ssl_info(has: bool, expires_at: Option<chrono::DateTime<chrono::Utc>>) -> SslInfo {
+        SslInfo {
+            has_certificate: has,
+            expires_at,
+            issuer: None,
+            is_letsencrypt: true,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn cert_good_enough_accepts_a_certificate_with_time_left() {
+        let now = chrono::Utc::now();
+        let info = ssl_info(true, Some(now + chrono::Duration::days(60)));
+        assert!(cert_good_enough(&info, now));
+    }
+
+    // Просроченный сертификат — не «SSL уже есть»: пропустить выпуск значит
+    // оставить сайт на нерабочем HTTPS.
+    #[test]
+    fn cert_good_enough_rejects_an_expired_certificate() {
+        let now = chrono::Utc::now();
+        let info = ssl_info(true, Some(now - chrono::Duration::days(1)));
+        assert!(!cert_good_enough(&info, now));
+    }
+
+    // certbot продлевает за 30 дней; если осталось меньше суток, продление уже
+    // сломано и выпускать надо сейчас.
+    #[test]
+    fn cert_good_enough_rejects_a_certificate_expiring_within_the_margin() {
+        let now = chrono::Utc::now();
+        let info = ssl_info(true, Some(now + chrono::Duration::hours(12)));
+        assert!(!cert_good_enough(&info, now));
+    }
+
+    // Файл есть, а notAfter не разобрался — «не знаем» трактуем как «выпускать».
+    #[test]
+    fn cert_good_enough_rejects_a_certificate_with_unreadable_expiry() {
+        let now = chrono::Utc::now();
+        assert!(!cert_good_enough(&ssl_info(true, None), now));
+    }
+
+    #[test]
+    fn cert_good_enough_rejects_a_missing_certificate() {
+        let now = chrono::Utc::now();
+        let info = ssl_info(false, Some(now + chrono::Duration::days(60)));
+        assert!(!cert_good_enough(&info, now));
     }
 
     // Варианты без вывода команды диагностику терять не должны.

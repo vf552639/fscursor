@@ -15,6 +15,16 @@ use crate::ssh::client::{SshError, SshSession};
 
 pub const FASTPANEL_FALLBACK_PATH: &str = "/usr/local/fastpanel2/fastpanel";
 
+/// Предел на `certificates create-le` — самый долгий exec во всём провижининге.
+///
+/// Публичный, потому что задаёт нижнюю границу для inactivity-таймаута сессии:
+/// если russh закроет канал раньше, чем истечёт этот exec, умрёт вся сессия, а
+/// не одна команда. Связь проверяется тестом в `commands::provision`.
+pub const SSL_ISSUE_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+/// Пауза после выпуска, пока FastPanel разложит файлы сертификата. Идёт вслед
+/// за exec'ом выше, поэтому в бюджет тишины сессии входит вместе с ним.
+pub const SSL_ISSUE_SETTLE: Duration = Duration::from_secs(5);
+
 #[derive(Serialize)]
 pub struct CreateSiteResult {
     pub site_user: String,
@@ -221,11 +231,11 @@ pub async fn issue_ssl_certificate(
         q(domain),
         q(email),
     );
-    let (code, output) = s.exec(&cmd, Duration::from_secs(300), false).await?;
+    let (code, output) = s.exec(&cmd, SSL_ISSUE_EXEC_TIMEOUT, false).await?;
     if code != 0 {
         return Err(SshError::Session(format!("issue_ssl exit {code}: {output}")));
     }
-    sleep(Duration::from_secs(5)).await;
+    sleep(SSL_ISSUE_SETTLE).await;
     if !cert_exists(s, domain).await? {
         return Err(SshError::Session("SSL certificate file check failed".into()));
     }
@@ -834,22 +844,14 @@ mod tests {
     }
 
     // Вывод этих команд повторяет argv (а там `--password=`) или сам SQL с
-    // IDENTIFIED BY. Наружу должен уходить только код возврата.
+    // IDENTIFIED BY. Наружу должен уходить только код возврата — поэтому текст
+    // пинается целиком: дописать к нему `: {output}` без падения теста нельзя.
     #[test]
-    fn opaque_exit_keeps_only_the_exit_code() {
-        let e = opaque_exit("create_database", 1);
-        let msg = e.to_string();
-        assert!(msg.contains("create_database"), "{msg}");
-        assert!(msg.contains("exit 1"), "{msg}");
-        assert!(msg.contains("withheld"), "{msg}");
-    }
-
-    // Пароль генерируется здесь же — убеждаемся, что ему просто некуда попасть
-    // в текст ошибки.
-    #[test]
-    fn opaque_exit_has_no_room_for_command_output() {
-        let pw = generate_password(18);
-        let e = opaque_exit("create_ftp_account", 2);
-        assert!(!e.to_string().contains(&pw));
+    fn opaque_exit_message_is_exactly_step_and_code() {
+        assert_eq!(
+            opaque_exit("create_database", 1).to_string(),
+            "session: create_database exit 1 \
+             (output withheld: it echoes the generated password)"
+        );
     }
 }
