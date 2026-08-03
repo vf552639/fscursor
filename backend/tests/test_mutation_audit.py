@@ -1,10 +1,11 @@
 import base64
 import uuid as uuid_mod
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app.auth.models import User
 from app.core.database import AsyncSessionLocal
@@ -101,55 +102,30 @@ async def test_blob_mutations_are_audited():
         assert "blob.delete" in actions
 
 
-@pytest.mark.asyncio
-async def test_settings_config_update_is_audited():
+@asynccontextmanager
+async def _unowned_config_row(key: str):
+    """Освободить глобальную строку `system_config` на время теста и вернуть как было.
+
+    Первичный ключ `system_config` — один только `key`, то есть строка на ключ
+    одна на всю установку, а `user_id` — отметка владельца. В общей (не
+    эфемерной) dev-базе все ключи по умолчанию уже принадлежат ранее
+    зарегистрированному пользователю, поэтому свежий тестовый пользователь
+    получил бы на них честный 403.
+
+    Это не обход бага, а подготовка условия: ставим `user_id = NULL`
+    («ничья строка»), чтобы тест мог легально занять ключ ровно тем же путём,
+    что и первый пользователь на чистой установке. Значение и владелец
+    восстанавливаются в любом случае, чтобы не портить реальный конфиг.
     """
-    `system_config` rows are keyed globally by `key` (no per-user column in
-    the primary key), and `system_config_service.upsert` unconditionally sets
-    `row.user_id = user_id` on every PUT with no ownership/authorization
-    check. In this shared, non-ephemeral dev database that means:
-
-    - `GET /api/settings/config` returns an *empty list* for a freshly
-      registered user (not just zero *editable* items) whenever any config
-      row is already owned by a different user — which is the case here (13
-      rows, all owned by one pre-existing user). The plan's original
-      "pick an editable item from the GET response" approach therefore always
-      fails, not flakily but deterministically, for any user other than the
-      current owner.
-    - Naively PUTting to a known editable key (to work around the above)
-      would silently steal ownership of, and overwrite, that other user's
-      real config value.
-
-    Both are pre-existing bugs in `system_config_service`/`settings.py`
-    unrelated to the audit-logging change this test targets. To exercise the
-    audit call end-to-end without corrupting real state, we bypass the broken
-    GET, target a known key from `EDITABLE_KEYS` directly, and restore the
-    row's original value/owner afterwards regardless of outcome.
-    """
-    key = "Webhook Secret"
-    assert key in system_config_service.EDITABLE_KEYS
-
     async with AsyncSessionLocal() as s:
         before = await s.get(SystemConfig, key)
         before_value = before.value if before else None
         before_owner = before.user_id if before else None
-
+        if before is not None:
+            before.user_id = None
+            await s.commit()
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            await _register_confirm_login(c, f"maud-set-{uuid_mod.uuid4().hex[:8]}@example.com")
-            marker = f"super-secret-value-{uuid_mod.uuid4().hex}"
-            r = await c.put(
-                f"/api/settings/config/{key}",
-                json={"value": marker},
-            )
-            assert r.status_code == 200
-            rows = await _audit_rows(c)
-            _assert_no_secret_keys(rows)
-            # само значение (не ключ), которое мы только что записали, не
-            # должно попасть в metadata аудита
-            _assert_values_do_not_contain(rows, {marker})
-            actions = {row["action"] for row in rows}
-            assert "settings.config_update" in actions
+        yield
     finally:
         async with AsyncSessionLocal() as s:
             row = await s.get(SystemConfig, key)
@@ -160,6 +136,97 @@ async def test_settings_config_update_is_audited():
                     row.value = before_value
                     row.user_id = before_owner
                 await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_settings_config_update_is_audited():
+    """`PUT /api/settings/config/{key}` владельцем ключа пишет запись в аудит.
+
+    Тест занимает свободный (`user_id IS NULL`) ключ — это разрешённый путь, —
+    затем перезаписывает уже свой ключ ещё раз, чтобы обе ветки `upsert`
+    (захват ничьей строки и запись в собственную) были покрыты. Проверяем, что
+    `settings.config_update` доходит до аудита и что само значение секрета в
+    metadata не попадает.
+    """
+    key = "Webhook Secret"
+    assert key in system_config_service.EDITABLE_KEYS
+
+    async with _unowned_config_row(key):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            await _register_confirm_login(c, f"maud-set-{uuid_mod.uuid4().hex[:8]}@example.com")
+            marker = f"super-secret-value-{uuid_mod.uuid4().hex}"
+            # 1. ничья строка достаётся тому, кто первым за ней пришёл
+            r = await c.put(f"/api/settings/config/{key}", json={"value": marker})
+            assert r.status_code == 200
+            # 2. свою собственную строку владелец может переписывать дальше
+            marker2 = f"super-secret-value-{uuid_mod.uuid4().hex}"
+            r = await c.put(f"/api/settings/config/{key}", json={"value": marker2})
+            assert r.status_code == 200
+            assert r.json()["value"] == marker2
+
+            rows = await _audit_rows(c)
+            _assert_no_secret_keys(rows)
+            # само значение (не ключ), которое мы только что записали, не
+            # должно попасть в metadata аудита
+            _assert_values_do_not_contain(rows, {marker, marker2})
+            actions = {row["action"] for row in rows}
+            assert "settings.config_update" in actions
+
+
+@pytest.mark.asyncio
+async def test_config_key_owned_by_another_user_cannot_be_overwritten():
+    """Чужой ключ конфигурации не переписывается и не переприсваивается.
+
+    `Webhook URL`/`Webhook Secret` определяют, куда и с какой подписью уходят
+    вебхуки. Раз строка в `system_config` одна на всю установку, отсутствие
+    проверки владельца означало бы, что любой аутентифицированный пользователь
+    перенаправляет чужие вебхуки на себя — и попутно делает строку невидимой
+    для настоящего владельца (`get_all` фильтрует по `user_id`).
+    """
+    key = "Webhook URL"
+    assert key in system_config_service.EDITABLE_KEYS
+    owner_email = f"maud-own-{uuid_mod.uuid4().hex[:8]}@example.com"
+    owner_value = f"https://owner-{uuid_mod.uuid4().hex}.example.com/hook"
+
+    async with _unowned_config_row(key):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as owner:
+            await _register_confirm_login(owner, owner_email)
+            r = await owner.put(f"/api/settings/config/{key}", json={"value": owner_value})
+            assert r.status_code == 200
+
+        async with AsyncSessionLocal() as s:
+            owner_id = (
+                await s.execute(select(User.id).where(User.email == owner_email))
+            ).scalar_one()
+            row = await s.get(SystemConfig, key)
+            assert row is not None and row.user_id == owner_id
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as other:
+            await _register_confirm_login(other, f"maud-oth-{uuid_mod.uuid4().hex[:8]}@example.com")
+            r = await other.put(
+                f"/api/settings/config/{key}",
+                json={"value": "https://attacker.example.com/hook"},
+            )
+            assert r.status_code == 403, r.text
+
+            # отказ должен быть полным: ни значения, ни владельца
+            async with AsyncSessionLocal() as s:
+                row = await s.get(SystemConfig, key)
+                assert row is not None
+                assert row.value == owner_value
+                assert row.user_id == owner_id
+
+            # и в аудит чужого пользователя ничего не записалось
+            assert "settings.config_update" not in await _audit_actions(other)
+
+        # владелец по-прежнему видит своё значение
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as owner:
+            await _register_confirm_login(owner, owner_email)
+            r = await owner.get("/api/settings/config")
+            assert r.status_code == 200
+            assert any(
+                item["key"] == key and item["value"] == owner_value for item in r.json()
+            )
 
 
 @pytest.mark.asyncio

@@ -61,7 +61,17 @@ async def update_config(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Config key '{key}' is not editable",
         )
-    item = await system_config_service.upsert(db, key, payload.value, user.id)
+    try:
+        item = await system_config_service.upsert(db, key, payload.value, user.id)
+    except system_config_service.ConfigOwnershipError:
+        # Строка `system_config` одна на ключ на всю установку. Если её уже
+        # занял другой пользователь — отказываем, а не переписываем значение
+        # и не переприсваиваем владельца (иначе можно было бы, например,
+        # перенаправить чужой Webhook URL на себя).
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Config key '{key}' belongs to another user",
+        )
     await audit_service.log(
         db,
         user_id=user.id,

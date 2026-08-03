@@ -12,13 +12,23 @@ from app.models.domain import Domain
 from app.models.notification import Notification
 from app.models.registrar_account import RegistrarAccount
 from app.models.server import Server
-from app.models.system_config import SystemConfig
 from app.models.task_log import TaskLog
 from app.sync import schemas
 from app.sync.service import current_version
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
+# Таблицы, которые целиком отдаются клиенту в открытом виде. Добавлять сюда
+# что-либо можно, только если *все* столбцы модели безопасно положить в
+# локальный кеш каждого клиента: `_to_row` сериализует их generic-ом.
+#
+# `system_config` здесь намеренно НЕТ: её столбец `value` хранит `Webhook
+# Secret` плейнтекстом (HMAC-ключ для подписи вебхуков), а сериализатор
+# выгружал бы его в кеш каждого клиента. Тот же класс утечки, что и у
+# `servers.notes`, убранной ранее в этом же спринте. Конфигурация читается
+# через `GET /api/settings/config` — своим владельцем и по требованию,
+# а сервер продолжает читать секрет из БД для подписи (см.
+# `app/services/notification_providers/dispatcher.py`).
 SCOPED_MODELS = {
     "domains": Domain,
     "servers": Server,
@@ -26,14 +36,11 @@ SCOPED_MODELS = {
     "registrar_accounts": RegistrarAccount,
     "notifications": Notification,
     "task_logs": TaskLog,
-    "system_config": SystemConfig,
     "activity_logs": ActivityLog,
 }
 
 
 def _row_id(table: str, obj: object) -> str:
-    if table == "system_config":
-        return str(getattr(obj, "key"))
     return str(getattr(obj, "id"))
 
 

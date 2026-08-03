@@ -40,6 +40,31 @@ DEFAULT_SYSTEM_CONFIG: Mapping[str, str] = {
 }
 
 
+class ConfigOwnershipError(PermissionError):
+    """Попытка записать ключ конфигурации, принадлежащий другому пользователю.
+
+    Таблица `system_config` имеет первичный ключ из одного столбца `key`, то
+    есть строка на ключ ровно одна на всю установку. Столбец `user_id` — это
+    не «шардирование по пользователю» (оно невозможно без смены PK), а отметка
+    владельца: кто первым занял глобальную строку, тот ей и распоряжается.
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"Config key '{key}' belongs to another user")
+
+
+def _is_writable_by(row: SystemConfig, user_id: UUID) -> bool:
+    """Строку можно писать, если она ничья (`user_id IS NULL`) или наша.
+
+    Единственная точка, где решается вопрос «можно ли трогать эту строку».
+    И `upsert`, и `ensure_defaults` обязаны спрашивать именно её, иначе
+    `ensure_defaults` (он вызывается из `get_all`, то есть с обычного GET)
+    превратился бы в обход проверки из `upsert`.
+    """
+    return row.user_id is None or row.user_id == user_id
+
+
 async def ensure_defaults(db: AsyncSession, user_id: UUID) -> None:
     for key, value in DEFAULT_SYSTEM_CONFIG.items():
         existing = await db.get(SystemConfig, key)
@@ -47,7 +72,11 @@ async def ensure_defaults(db: AsyncSession, user_id: UUID) -> None:
             row = SystemConfig(key=key, value=value, user_id=user_id)
             await touch_entity_sync(db, user_id, row)
             db.add(row)
-        elif existing.user_id is None:
+        elif _is_writable_by(existing, user_id) and existing.user_id is None:
+            # Ничья строка достаётся тому, кто первым за ней пришёл. Чужую —
+            # `_is_writable_by` вернёт False — не забираем и не трогаем вовсе:
+            # иначе обычный GET /api/settings/config был бы обходом 403 из
+            # `upsert`. Своя строка уже размечена, второй раз её не трогаем.
             existing.user_id = user_id
             await touch_entity_sync(db, user_id, existing)
     await db.commit()
@@ -80,8 +109,11 @@ async def upsert(db: AsyncSession, key: str, value: str, user_id: UUID) -> Syste
         await touch_entity_sync(db, user_id, config)
         db.add(config)
     else:
+        if not _is_writable_by(config, user_id):
+            raise ConfigOwnershipError(key)
         config.value = value
-        config.user_id = user_id
+        if config.user_id is None:
+            config.user_id = user_id
         await touch_entity_sync(db, user_id, config)
     await db.commit()
     await db.refresh(config)
