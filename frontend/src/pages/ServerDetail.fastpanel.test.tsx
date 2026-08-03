@@ -21,6 +21,11 @@ const mocks = vi.hoisted(() => ({
 // Подменяем только то, что действительно перехватываем: перечислять экспорты
 // модуля целиком значит ловить `No "…" export is defined on the mock` в тот
 // день, когда где-то в поддереве ServerDetail появится новый экспорт.
+//
+// Обратная сторона: всё неперечисленное здесь — настоящее. `apiPut`,
+// `apiDelete` и `http` реально пойдут в сеть через jsdom. Сегодня безопасно
+// (тесты жмут только Install), но тест на удаление/редактирование сервера
+// обязан застабить их явно.
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   apiGet: mocks.apiGet,
@@ -231,6 +236,25 @@ describe("ServerDetail — Install FastPanel", () => {
     expect(btn.disabled).toBe(true);
     fireEvent.click(btn);
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+
+  it("после успешной повторной попытки не показывает ошибку прошлой", async () => {
+    setTauri(true);
+    mocks.invokeSynced
+      .mockRejectedValueOnce(new Error("ssh: connection refused"))
+      .mockResolvedValueOnce({ server_id: "7", url: null, user: "fastuser", password: "pw" });
+
+    renderDetail();
+    fireEvent.click(await screen.findByText("Install FastPanel"));
+    expect(await screen.findByText(/ssh: connection refused/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Install FastPanel"));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(2));
+
+    // Провалившаяся мутация остаётся в кэше рядом с успешной ещё gcTime. Поиск
+    // «последней ошибки» вместо «последней попытки» оставлял бы это красное
+    // сообщение под кнопкой уже установленной панели.
+    await waitFor(() => expect(screen.queryByText(/ssh: connection refused/)).toBeNull());
   });
 
   it("после возврата на страницу показывает ошибку, случившуюся в её отсутствие", async () => {

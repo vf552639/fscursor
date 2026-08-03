@@ -51,6 +51,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // Mutations
   const delSrv = useDeleteServer();
   const testSsh = useTestSsh(server?.id || 0);
+  // Проп передаём напрямую, без обёртки. Опции мутации это не стабилизирует —
+  // `mutationFn` всё равно инлайновое замыкание, а ключ всё равно новый массив,
+  // так что shallowEqualObjects ложна на каждом рендере (безвредно: setOptions
+  // не роняет hashKey и не перерендеривает). Стабильна становится идентичность
+  // коллбэка, который захватывает замыкание, — а вот это и важно.
   const installFp = useInstallFastPanel(server?.id || 0, onFastpanelCreds);
   // Состояние установки читаем из MutationCache, а не из локального observer:
   // установка идёт 30-40 минут и переживает уход со страницы, а observer при
@@ -58,15 +63,29 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // кнопка снова активна (второй `install_fastpanel` поверх первого), нет
   // признака идущей установки и не видно ошибки, случившейся в отсутствие
   // страницы.
+  //
+  // Тонкость на будущее: `useMutationState` пересчитывает результат только
+  // внутри подписки на MutationCache, а новые options попадают в его
+  // `optionsRef` через `useEffect`. Пока смена сервера всегда идёт через
+  // размонтирование (в `server-detail` попадают с другой страницы, а
+  // DesktopWorkspace рендерит его условно), это неважно; но переход
+  // сервер→сервер без размонтирования начнёт показывать состояние предыдущего
+  // сервера до ближайшего события кэша. У самого observer'а мутации такой
+  // проблемы нет — он сбрасывается на другом hashKey.
   const fpStates = useMutationState({
     filters: { mutationKey: installFastPanelKey(server?.id || 0) },
     select: (m) => m.state,
   });
-  const fpRunning = fpStates.some((st) => st.status === "pending");
-  // Свежая ошибка — последняя в кэше; во время новой попытки её не показываем.
-  const fpError = fpRunning
-    ? null
-    : [...fpStates].reverse().find((st) => st.status === "error")?.error;
+  // Именно ПОСЛЕДНЯЯ попытка, а не «последняя ошибка в истории»: провалившаяся
+  // мутация живёт в кэше ещё gcTime после того, как её сменила успешная, и
+  // поиск по всей истории вытаскивал бы получасовой давности ошибку из-под
+  // кнопки уже установленной панели. Особенно на пути `writeback_failed`, где
+  // карточка не исчезает: сервер так и не узнал, что панель установлена.
+  // Последняя запись = последняя попытка: getAll() отдаёт Set в порядке
+  // создания, findAll этот порядок сохраняет.
+  const fpLast = fpStates[fpStates.length - 1];
+  const fpRunning = fpLast?.status === "pending";
+  const fpError = fpLast?.status === "error" ? fpLast.error : null;
   const refreshMetrics = useRefreshMetrics(server?.id || 0);
   const syncDomains = useSyncServerDomains(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
