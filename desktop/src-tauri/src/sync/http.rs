@@ -86,6 +86,8 @@ struct RegisterBody<'a> {
     salt_b64: String,
     auth_key_b64: String,
     recovery_blob_b64: String,
+    /// Argon2id(phrase, salt=b"sdmp-recovery-v1", ctx="sdmp-recovery-key-v1"); required.
+    recovery_auth_key_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,9 +106,23 @@ struct LoginFinishBody<'a> {
 #[derive(Debug, Serialize)]
 struct RecoveryFinishBody<'a> {
     email: &'a str,
+    /// Proof of phrase ownership. Wrong key (or unknown email) => 401.
+    recovery_auth_key_b64: String,
     new_salt_b64: String,
     new_auth_key_b64: String,
     new_recovery_blob_b64: String,
+    /// Only when recovery issued a NEW phrase; null keeps the stored hash. Sending the
+    /// wrong thing here (or nothing, after a rotation) makes the account unrecoverable.
+    new_recovery_auth_key_b64: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecoverySetupBody {
+    /// Current password's auth key — step-up so a stolen cookie alone cannot
+    /// overwrite the recovery blob.
+    auth_key_b64: String,
+    recovery_blob_b64: String,
+    recovery_auth_key_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -157,12 +173,14 @@ impl ApiClient {
         salt: &[u8; 16],
         auth_key: &[u8; 32],
         recovery_blob: &[u8],
+        recovery_auth_key: &[u8; 32],
     ) -> Result<RegisterResponse, ApiError> {
         let body = RegisterBody {
             email,
             salt_b64: B64.encode(salt),
             auth_key_b64: B64.encode(auth_key),
             recovery_blob_b64: B64.encode(recovery_blob),
+            recovery_auth_key_b64: B64.encode(recovery_auth_key),
         };
         let resp = self
             .http
@@ -263,18 +281,24 @@ impl ApiClient {
         Ok(serde_json::from_str(&text)?)
     }
 
+    /// `new_recovery_auth_key` must be `Some` exactly when the caller issued a new
+    /// recovery phrase; otherwise the stored hash would stop matching the phrase.
     pub async fn recovery_finish(
         &self,
         email: &str,
+        recovery_auth_key: &[u8; 32],
         new_salt: &[u8; 16],
         new_auth_key: &[u8; 32],
         new_recovery_blob: &[u8],
+        new_recovery_auth_key: Option<&[u8; 32]>,
     ) -> Result<RecoveryFinishResponse, ApiError> {
         let body = RecoveryFinishBody {
             email,
+            recovery_auth_key_b64: B64.encode(recovery_auth_key),
             new_salt_b64: B64.encode(new_salt),
             new_auth_key_b64: B64.encode(new_auth_key),
             new_recovery_blob_b64: B64.encode(new_recovery_blob),
+            new_recovery_auth_key_b64: new_recovery_auth_key.map(|k| B64.encode(k)),
         };
         let resp = self
             .http
@@ -291,6 +315,29 @@ impl ApiClient {
             });
         }
         Ok(serde_json::from_str(&text)?)
+    }
+
+    /// (Re)configure recovery from a live session. The only way an account whose
+    /// `recovery_auth_key_hash` is NULL (registered before migration 014) can regain the
+    /// right to use `/auth/recovery/finish`. Requires the session cookie.
+    pub async fn recovery_setup(
+        &self,
+        auth_key: &[u8; 32],
+        recovery_blob: &[u8],
+        recovery_auth_key: &[u8; 32],
+    ) -> Result<(), ApiError> {
+        let body = RecoverySetupBody {
+            auth_key_b64: B64.encode(auth_key),
+            recovery_blob_b64: B64.encode(recovery_blob),
+            recovery_auth_key_b64: B64.encode(recovery_auth_key),
+        };
+        let resp = self
+            .http
+            .post(self.url("auth/recovery/setup"))
+            .json(&body)
+            .send()
+            .await?;
+        self.expect_ok(resp).await
     }
 
     pub async fn sync_snapshot(&self) -> Result<SyncChangesResponse, ApiError> {
@@ -431,6 +478,7 @@ mod tests {
                 "salt_b64": B64.encode([1u8;16]),
                 "auth_key_b64": B64.encode([2u8;32]),
                 "recovery_blob_b64": B64.encode(b"blob"),
+                "recovery_auth_key_b64": B64.encode([3u8;32]),
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"user_id": "u-1"})))
             .mount(&srv)
@@ -438,10 +486,141 @@ mod tests {
 
         let c = ApiClient::new(format!("{}/api", srv.uri()));
         let r = c
-            .register("a@b.c", &[1u8; 16], &[2u8; 32], b"blob")
+            .register("a@b.c", &[1u8; 16], &[2u8; 32], b"blob", &[3u8; 32])
             .await
             .unwrap();
         assert_eq!(r.user_id, "u-1");
+    }
+
+    /// The proof key must be on the wire; without it the backend answers 422 and
+    /// recovery is dead. The exact-body matcher makes a dropped field a 404 -> failure.
+    #[tokio::test]
+    async fn recovery_finish_sends_proof_and_no_rotation_by_default() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/recovery/finish"))
+            .and(body_json(&json!({
+                "email": "a@b.c",
+                "recovery_auth_key_b64": B64.encode([4u8;32]),
+                "new_salt_b64": B64.encode([1u8;16]),
+                "new_auth_key_b64": B64.encode([2u8;32]),
+                "new_recovery_blob_b64": B64.encode(b"blob"),
+                "new_recovery_auth_key_b64": null,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "user_id": "u-1"})),
+            )
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let r = c
+            .recovery_finish("a@b.c", &[4u8; 32], &[1u8; 16], &[2u8; 32], b"blob", None)
+            .await
+            .unwrap();
+        assert_eq!(r.user_id.as_deref(), Some("u-1"));
+    }
+
+    #[tokio::test]
+    async fn recovery_finish_rotates_hash_when_a_new_phrase_was_issued() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/recovery/finish"))
+            .and(body_json(&json!({
+                "email": "a@b.c",
+                "recovery_auth_key_b64": B64.encode([4u8;32]),
+                "new_salt_b64": B64.encode([1u8;16]),
+                "new_auth_key_b64": B64.encode([2u8;32]),
+                "new_recovery_blob_b64": B64.encode(b"blob"),
+                "new_recovery_auth_key_b64": B64.encode([5u8;32]),
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "user_id": "u-1"})),
+            )
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.recovery_finish(
+            "a@b.c",
+            &[4u8; 32],
+            &[1u8; 16],
+            &[2u8; 32],
+            b"blob",
+            Some(&[5u8; 32]),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_finish_surfaces_wrong_key_401() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/recovery/finish"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"detail": "invalid recovery key"})),
+            )
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let err = c
+            .recovery_finish("a@b.c", &[4u8; 32], &[1u8; 16], &[2u8; 32], b"blob", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Status { status: 401, .. }));
+    }
+
+    #[tokio::test]
+    async fn recovery_setup_sends_step_up_auth_key_and_uses_session_cookie() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/login/finish"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("Set-Cookie", "sdmp_session=tok; Path=/")
+                    .set_body_json(json!({"user_id": "u-1"})),
+            )
+            .mount(&srv)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/recovery/setup"))
+            .and(header_exists("cookie"))
+            .and(body_json(&json!({
+                "auth_key_b64": B64.encode([2u8;32]),
+                "recovery_blob_b64": B64.encode(b"blob"),
+                "recovery_auth_key_b64": B64.encode([3u8;32]),
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.login_finish("a@b.c", &[9u8; 32], None).await.unwrap();
+        c.recovery_setup(&[2u8; 32], b"blob", &[3u8; 32])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_setup_surfaces_wrong_password_401() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/recovery/setup"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({"detail": "invalid current password"})),
+            )
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let err = c
+            .recovery_setup(&[2u8; 32], b"blob", &[3u8; 32])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Status { status: 401, .. }));
     }
 
     #[tokio::test]

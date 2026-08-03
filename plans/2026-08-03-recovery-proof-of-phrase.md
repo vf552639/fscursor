@@ -3,7 +3,7 @@
 > Найдено ZK-sweep'ом Спринта 2. Вариант починки выбран пользователем: **доказательство
 > recovery-фразы** (не почтовый токен, не отключение эндпоинта).
 
-**Статус:** [~] фазы 1–3 (backend) сделаны, фазы 4–5 (клиенты, приёмка) — нет
+**Статус:** [~] фазы 1–4 сделаны, фаза 5 — автотесты прогнаны, ручной прогон не выполнен
 
 ## Проблема
 
@@ -55,14 +55,34 @@ ciphertext recovery-блоба, затем удаляет все сессии.
       `test_auth_recovery.py` переписан: успех, 401 на неверный ключ с проверкой, что
       salt/auth_key_hash/блоб/сессии не изменились, 422 без ключа, 401 на чужой email,
       409 на NULL-хеш, ротация хеша через `new_recovery_auth_key_b64`, setup-флоу.
-- [ ] **Фаза 4 — клиенты.** `frontend/src/lib/crypto.ts` (вывод recovery-ключа),
-      `RecoverySetup.tsx`, `RecoveryRestore.tsx`; Rust — `crypto/kdf.rs` и команда
-      `auth_recovery` в `commands/auth.rs`. Помнить про ключи аргументов Tauri: **camelCase**
-      (`newPassword`, а не `new_password`) — на этом уже обжигались.
-- [ ] **Фаза 5 — приёмка.** `pytest -q`, `npx tsc --noEmit` (не добавлять к преэкзистующему
-      долгу), `npx vitest run`, `cargo test`. Плюс ручной прогон: настроить recovery → выйти →
-      восстановиться по фразе → войти новым паролем.
+- [x] **Фаза 4 — клиенты.** Вывод ключа: `kdf::derive_recovery_auth_key` +
+      `normalize_recovery_phrase` (Rust) и `deriveRecoveryAuthKey` +
+      `normalizeRecoveryPhrase` (TS) — Argon2id, фиксированная соль `sdmp-recovery-v1`,
+      контекст `sdmp-recovery-key-v1`. Паритет зафиксирован фикстурой в обоих тестах:
+      фраза `abandon ×23 art` → `reJBXXNBI6uFBH1umkSAzylaw8qSkV8PA2GPnlSBa+k=`.
+      `http.rs`: `recovery_auth_key_b64` в register и recovery/finish (+
+      `new_recovery_auth_key_b64: null`, фраза при восстановлении не меняется), новый
+      `recovery_setup()`. `commands/auth.rs`: `auth_register`/`auth_recovery` шлют ключ,
+      добавлена команда `auth_recovery_setup(password)` (зарегистрирована в `lib.rs`).
+      Коды 401/404+409/429 переводятся в понятный текст в Rust
+      (`describe_recovery_error`) и в TS (`lib/recoveryError.ts`); там же чинится
+      `[object Object]` — Tauri отдаёт `CommandError` как `{"Api": "…"}`, а страницы
+      печатали `String(e)`.
+      **UI-пути для `recovery/setup` нет**: `RecoverySetup.tsx` — экран «запишите фразу»
+      после регистрации, серверных вызовов не делает; команда `auth_recovery_setup`
+      готова, но её никто не вызывает — экран для ~360 легаси-аккаунтов (NULL-хеш) ещё
+      нужно сделать, иначе текст 409 «настройте recovery заново» некуда вести.
+- [~] **Фаза 5 — приёмка.** Автотесты: `cargo test` 75 passed / 1 ignored (было 67/1),
+      `npx vitest run` 61 passed в 10 файлах (было 53 в 9), `npx tsc --noEmit` 51 ошибка
+      (ровно преэкзистующий долг), backend не трогали (45 passed). Ручной прогон
+      (настроить recovery → выйти → восстановиться по фразе → войти новым паролем)
+      **не выполнен**.
 
 ## Итоговый блок
 
-_(заполнить по завершении)_
+Реализовано целиком по бэкенду и клиентам (фазы 1–4). Осталось:
+
+1. UI для `POST /auth/recovery/setup` — без него легаси-аккаунты с NULL-хешем не могут
+   вернуть себе право на восстановление, а команда `auth_recovery_setup` остаётся
+   невызванной.
+2. Ручной сквозной прогон восстановления (фаза 5).

@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
+import { describeCommandError } from "../lib/recoveryError";
 
 interface RegisterResult {
   user_id: string;
@@ -37,10 +38,12 @@ export default function Register() {
     }
     setBusy(true);
     try {
+      // The recovery proof key is derived in Rust (`auth_register`) from the phrase it
+      // mints, and posted alongside the blob — see `commands/auth.rs`.
       const res = await invokeIfTauri<RegisterResult>("auth_register", { email, password });
       navigate("/recovery-setup", { state: { phrase: res.recovery_phrase, email } });
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : String(e));
+      setErr(describeCommandError(e));
     } finally {
       setBusy(false);
     }

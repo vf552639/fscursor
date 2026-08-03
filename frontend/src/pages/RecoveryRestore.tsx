@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
+import { describeRecoveryError } from "../lib/recoveryError";
+import { normalizeRecoveryPhrase } from "../lib/crypto";
 
 export default function RecoveryRestore() {
   const navigate = useNavigate();
@@ -29,13 +31,14 @@ export default function RecoveryRestore() {
     try {
       await invokeIfTauri<string>("auth_recovery", {
         email,
-        phrase: phrase.trim().replace(/\s+/g, " "),
+        // Desktop re-normalizes before deriving the proof key; same rule either way.
+        phrase: normalizeRecoveryPhrase(phrase),
         // Ключи аргументов Tauri v2 — camelCase.
         newPassword: password,
       });
       navigate("/login", { state: { notice: "Recovery complete. Sign in with your new password." } });
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : String(e));
+      setErr(describeRecoveryError(e));
     } finally {
       setBusy(false);
     }

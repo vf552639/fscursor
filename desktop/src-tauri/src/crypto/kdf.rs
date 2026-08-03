@@ -4,9 +4,18 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Per-context labels keep auth and encryption keys derivationally distinct.
 const CONTEXT_AUTH: &[u8] = b"sdmp-auth-key-v1";
 const CONTEXT_ENC: &[u8] = b"sdmp-master-key-v1";
+/// Proof-of-phrase sent to `/auth/recovery/*`. Deliberately NOT the BIP-39 key from
+/// `bip39_recovery::derive_recovery_key` — that one opens the recovery blob, so handing
+/// it to the server would hand over the master key.
+const CONTEXT_RECOVERY: &[u8] = b"sdmp-recovery-key-v1";
 
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
+
+/// Fixed salt for the recovery auth key. Not `user.salt`: both `password/change` and
+/// `recovery/finish` rotate it, so a salt-bound recovery key would invalidate itself
+/// on every password change.
+const RECOVERY_SALT: &[u8; SALT_LEN] = b"sdmp-recovery-v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum KdfError {
@@ -25,6 +34,26 @@ pub fn derive_auth_key(password: &[u8], salt: &[u8]) -> Result<DerivedKey, KdfEr
 
 pub fn derive_master_key(password: &[u8], salt: &[u8]) -> Result<DerivedKey, KdfError> {
     derive_with_context(password, salt, CONTEXT_ENC)
+}
+
+/// Trim, collapse whitespace runs to a single space, ASCII-lowercase.
+/// Must stay byte-identical to `normalizeRecoveryPhrase` in `frontend/src/lib/crypto.ts`.
+pub fn normalize_recovery_phrase(phrase: &str) -> String {
+    let mut out = String::with_capacity(phrase.len());
+    for (i, word) in phrase.split_whitespace().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out.make_ascii_lowercase();
+    out
+}
+
+/// Proof that the caller holds the recovery phrase. The server stores only its bcrypt hash.
+pub fn derive_recovery_auth_key(phrase: &str) -> Result<DerivedKey, KdfError> {
+    let normalized = normalize_recovery_phrase(phrase);
+    derive_with_context(normalized.as_bytes(), RECOVERY_SALT, CONTEXT_RECOVERY)
 }
 
 fn derive_with_context(password: &[u8], salt: &[u8], context: &[u8]) -> Result<DerivedKey, KdfError> {
@@ -87,6 +116,43 @@ mod tests {
     fn rejects_wrong_salt_length() {
         let r = derive_auth_key(b"x", &[0u8; 8]);
         assert!(matches!(r, Err(KdfError::Salt(8))));
+    }
+
+    /// The 24-word fixture used on both sides of the parity check.
+    const FIXTURE_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    #[test]
+    fn recovery_auth_key_is_not_the_blob_key() {
+        // The BIP-39 seed key decrypts the recovery blob; sending it to the server would
+        // hand over the master key. These two must never coincide.
+        let bip39 = crate::crypto::bip39_recovery::derive_recovery_key(FIXTURE_PHRASE).unwrap();
+        let proof = derive_recovery_auth_key(FIXTURE_PHRASE).unwrap();
+        assert_ne!(bip39, proof.0);
+    }
+
+    #[test]
+    fn recovery_phrase_normalization_is_case_and_whitespace_insensitive() {
+        assert_eq!(
+            normalize_recovery_phrase("  Abandon\tABANDON\n  art  "),
+            "abandon abandon art"
+        );
+        let a = derive_recovery_auth_key(FIXTURE_PHRASE).unwrap();
+        let messy = format!("  {}  ", FIXTURE_PHRASE.replace(' ', "\n  ").to_uppercase());
+        let b = derive_recovery_auth_key(&messy).unwrap();
+        assert_eq!(a.0, b.0);
+    }
+
+    /// Base64(recovery auth key) for the fixture phrase.
+    /// Keep in sync with `frontend/src/lib/crypto.test.ts` — a browser that derives a
+    /// different key locks the user out of the account they set up on the desktop.
+    #[test]
+    fn recovery_auth_key_fixture_for_browser_tests() {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        let k = derive_recovery_auth_key(FIXTURE_PHRASE).unwrap();
+        assert_eq!(
+            B64.encode(k.0),
+            "reJBXXNBI6uFBH1umkSAzylaw8qSkV8PA2GPnlSBa+k="
+        );
     }
 
     /// Hex(master key) for `hunter2` + zero salt; keep in sync with `frontend/src/lib/crypto.test.ts`.

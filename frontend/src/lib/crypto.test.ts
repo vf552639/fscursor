@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { decryptBlob, deriveMasterKey, encryptBlob } from "./crypto";
+import {
+  decryptBlob,
+  deriveMasterKey,
+  deriveRecoveryAuthKey,
+  encryptBlob,
+  normalizeRecoveryPhrase,
+} from "./crypto";
+
+/** Same fixture as `desktop/src-tauri/src/crypto/kdf.rs`. */
+const FIXTURE_PHRASE =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
 describe("browser crypto", () => {
   it(
@@ -13,6 +23,19 @@ describe("browser crypto", () => {
     60_000
   );
 
+  it(
+    "derives the same recovery auth key as desktop for the fixture phrase",
+    async () => {
+      const key = await deriveRecoveryAuthKey(FIXTURE_PHRASE);
+      expect(b64(key)).toBe("reJBXXNBI6uFBH1umkSAzylaw8qSkV8PA2GPnlSBa+k=");
+    },
+    60_000
+  );
+
+  it("normalizes case and whitespace before deriving the recovery auth key", async () => {
+    expect(normalizeRecoveryPhrase("  Abandon\tABANDON\n  art  ")).toBe("abandon abandon art");
+  });
+
   it("roundtrips secretbox framing compatible with desktop", async () => {
     const key = new Uint8Array(32);
     key.fill(7);
@@ -25,4 +48,8 @@ describe("browser crypto", () => {
 
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
+}
+
+function b64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
 }

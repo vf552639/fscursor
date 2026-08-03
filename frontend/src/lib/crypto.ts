@@ -6,6 +6,18 @@ const TAG_LEN = 16;
 
 const CONTEXT_AUTH = "sdmp-auth-key-v1";
 const CONTEXT_ENC = "sdmp-master-key-v1";
+/**
+ * Proof-of-phrase sent to `/auth/recovery/*`. Deliberately NOT the BIP-39 seed key that
+ * opens the recovery blob — that one would hand the master key to the server.
+ */
+const CONTEXT_RECOVERY = "sdmp-recovery-key-v1";
+
+/**
+ * Fixed salt for the recovery auth key. Not the user's salt: `password/change` and
+ * `recovery/finish` both rotate it, so a salt-bound recovery key would invalidate
+ * itself on every password change.
+ */
+const RECOVERY_SALT = "sdmp-recovery-v1";
 
 let sodiumReady: Promise<void> | null = null;
 let argon2Mod: typeof import("argon2-browser") | null = null;
@@ -65,6 +77,27 @@ export async function deriveAuthKey(password: string, salt: Uint8Array): Promise
 
 export async function deriveMasterKey(password: string, salt: Uint8Array): Promise<Uint8Array> {
   return deriveKey(password, salt, CONTEXT_ENC);
+}
+
+/**
+ * Trim, collapse whitespace runs to a single space, ASCII-lowercase.
+ * Must stay byte-identical to `normalize_recovery_phrase` in
+ * `desktop/src-tauri/src/crypto/kdf.rs` (ASCII-only lowering on purpose: a locale-aware
+ * `toLowerCase` would diverge from Rust's `make_ascii_lowercase` on exotic input).
+ */
+export function normalizeRecoveryPhrase(phrase: string): string {
+  return phrase
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/**
+ * Proof that the caller holds the recovery phrase; the server keeps only its bcrypt hash.
+ * Sent to `/auth/register`, `/auth/recovery/setup` and `/auth/recovery/finish`.
+ */
+export async function deriveRecoveryAuthKey(phrase: string): Promise<Uint8Array> {
+  return deriveKey(normalizeRecoveryPhrase(phrase), utf8Bytes(RECOVERY_SALT), CONTEXT_RECOVERY);
 }
 
 /** Layout matches desktop `crypto::aead`: nonce (24) || secretbox_easy (mac || ciphertext). */
