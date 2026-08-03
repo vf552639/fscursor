@@ -31,12 +31,16 @@ class DomainUpdate(BaseModel):
     purchase_date: Optional[date] = None
     ns_status: Optional[str] = None
     ns_check_mode: Optional[str] = None
+    site_user: Optional[str] = None
+    site_path: Optional[str] = None
+    ssl_status: Optional[str] = None
     ssl_expires_at: Optional[datetime] = None
     ssl_issuer: Optional[str] = None
     db_name: Optional[str] = None
     db_user: Optional[str] = None
     nginx_override: Optional[str] = None
     nginx_presets: Optional[dict] = None
+    last_provision_error: Optional[str] = None
 
 
 class DomainResponse(DomainBase):
