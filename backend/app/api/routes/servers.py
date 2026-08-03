@@ -18,6 +18,8 @@ from app.services.bulk_import_service import get_errors_csv, process_server_bulk
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
+MAX_LOGGED_FILENAME = 255
+
 
 @router.get("", response_model=ServerListResponse)
 async def list_servers(
@@ -116,6 +118,25 @@ async def bulk_import_servers(
         content=raw,
         has_header=has_header,
     )
+    # Здесь дисциплина по метаданным жёстче, чем где-либо: разбираемый CSV по
+    # документированному формату содержит колонку ssh_password. В аудит идут
+    # только счётчики и имя файла — ни одной ячейки строки. Список `errors`
+    # тоже не логируем: он echo-ит имена/IP серверов и текст исключений (в них
+    # может просочиться содержимое строки), а `csv_url` содержит токен
+    # неаутентифицированной выдачи того же CSV.
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="server.bulk_import",
+        target_type="server",
+        metadata={
+            "filename": (file.filename or "servers.csv")[:MAX_LOGGED_FILENAME],
+            "created": created,
+            "skipped": skipped,
+            "errors": len(errors),
+        },
+    )
+    await db.commit()
     return ServerBulkImportResponse(
         created=created, skipped=skipped, errors=errors, errors_csv_url=csv_url
     )

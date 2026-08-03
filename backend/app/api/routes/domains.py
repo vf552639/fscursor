@@ -31,6 +31,11 @@ from app.services.bulk_import_service import get_errors_csv, process_bulk_import
 
 router = APIRouter(prefix="/domains", tags=["domains"])
 
+# Имя файла приходит от пользователя и в аудит попадает обрезанным: это
+# единственный полезный идентификатор события импорта, но не повод класть в
+# JSONB строку произвольной длины.
+MAX_LOGGED_FILENAME = 255
+
 
 @router.get("", response_model=list[DomainResponse])
 async def list_domains(
@@ -97,6 +102,22 @@ async def bulk_create(
     created, skipped = await domain_service.bulk_create(
         db, user.id, data.domains_text, data.registrar_id
     )
+    # Пишем счётчики, а не список имён: массовая заливка — это сотни доменов,
+    # им не место в JSONB-поле аудита. `mode` отличает этот маршрут от
+    # /bulk-structured, которое логируется тем же действием.
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.bulk_create",
+        target_type="domain",
+        metadata={
+            "mode": "text",
+            "created": len(created),
+            "skipped": len(skipped),
+            "registrar_id": data.registrar_id,
+        },
+    )
+    await db.commit()
     return DomainBulkCreateResponse(
         created=[DomainResponse.model_validate(d) for d in created],
         skipped=skipped,
@@ -114,6 +135,19 @@ async def bulk_create_structured(
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkCreateResponse:
     created, skipped = await domain_service.bulk_create_structured(db, user.id, data.items)
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.bulk_create",
+        target_type="domain",
+        metadata={
+            "mode": "structured",
+            "requested": len(data.items),
+            "created": len(created),
+            "skipped": len(skipped),
+        },
+    )
+    await db.commit()
     return DomainBulkCreateResponse(
         created=[DomainResponse.model_validate(d) for d in created],
         skipped=skipped,
@@ -169,6 +203,21 @@ async def bulk_assign_server(
     updated = await domain_service.bulk_assign_server(
         db, user.id, data.domain_ids, data.server_id
     )
+    # Полезная запись здесь — цель переноса (сервер) и объём, а не перечень
+    # доменов: 500-элементный массив id в аудите бесполезен и раздувает JSONB.
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.bulk_assign_server",
+        target_type="server",
+        target_id=str(data.server_id) if data.server_id is not None else None,
+        metadata={
+            "server_id": data.server_id,
+            "domains_requested": len(data.domain_ids),
+            "domains_updated": updated,
+        },
+    )
+    await db.commit()
     return DomainBulkAssignResponse(updated=updated)
 
 
@@ -181,6 +230,23 @@ async def bulk_assign_cloudflare(
     updated = await domain_service.bulk_assign_cloudflare(
         db, user.id, data.domain_ids, data.cloudflare_account_id
     )
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.bulk_assign_cloudflare",
+        target_type="cloudflare_account",
+        target_id=(
+            str(data.cloudflare_account_id)
+            if data.cloudflare_account_id is not None
+            else None
+        ),
+        metadata={
+            "cloudflare_account_id": data.cloudflare_account_id,
+            "domains_requested": len(data.domain_ids),
+            "domains_updated": updated,
+        },
+    )
+    await db.commit()
     return DomainBulkAssignResponse(updated=updated)
 
 
@@ -232,6 +298,24 @@ async def bulk_import_domains(
         has_header=has_header,
         default_registrar_id=default_registrar_id,
     )
+    # Логируем только исход: количество ошибок, но не сам список `errors` —
+    # он построчно повторяет содержимое загруженного файла. И тем более не
+    # `csv_url`: в нём токен, по которому CSV с ошибками отдаётся без
+    # аутентификации, класть такой токен в долгоживущую запись нельзя.
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.bulk_import",
+        target_type="domain",
+        metadata={
+            "filename": (file.filename or "domains.csv")[:MAX_LOGGED_FILENAME],
+            "created": created,
+            "skipped": skipped,
+            "errors": len(errors),
+            "default_registrar_id": default_registrar_id,
+        },
+    )
+    await db.commit()
     return DomainBulkImportResponse(
         created=created, skipped=skipped, errors=errors, errors_csv_url=csv_url
     )
