@@ -525,14 +525,13 @@ impl ApiClient {
         }
     }
 
-    /// Generic authenticated proxy with two callers.
+    /// Generic authenticated proxy. Callers:
     ///
-    /// Первый — вебвью десктопа: своей сессионной куки у него нет, поэтому оно
-    /// ходит через этот клиент, а сырой статус + тело возвращаются, чтобы фронт
-    /// сохранил 401/403 и прочее как есть.
-    ///
-    /// Второй — внутрипроцессная [`ApiClient::put_metadata`]: ей нужен ровно тот
-    /// же «не падать на не-2xx» — статус она разбирает сама.
+    /// * вебвью десктопа — своей сессионной куки у него нет, поэтому оно ходит
+    ///   через этот клиент, а сырой статус + тело возвращаются, чтобы фронт
+    ///   сохранил 401/403 и прочее как есть;
+    /// * внутрипроцессная [`ApiClient::put_metadata`] — ей нужно то же самое
+    ///   «не падать на не-2xx»: статус она разбирает сама.
     pub async fn request_raw(
         &self,
         method: &str,
@@ -896,14 +895,37 @@ mod tests {
         assert!(matches!(err, ApiError::Status { status: 500, .. }));
     }
 
+    /// Пустой патч — пустое тело: `exclude_unset` на сервере не тронет ничего.
+    /// Отдельным тестом, а не первой строкой три-стейта: он держит ВСЕ поля
+    /// структуры, и тот, кто однажды добавит поле с непустым `Default`, должен
+    /// получить падение с именем, ведущим туда, где правда.
+    #[test]
+    fn default_write_back_body_serializes_to_nothing() {
+        assert_eq!(
+            serde_json::to_string(&DomainWriteBack::default()).unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerWriteBack::default()).unwrap(),
+            "{}"
+        );
+    }
+
     /// Три состояния `last_provision_error` — три разные операции на сервере
     /// (`exclude_unset`): не трогать, погасить, записать. Сегодня провижининг
     /// пользуется первыми двумя, но `Some(Some(_))` — половина этого договора,
     /// и молчаливо сломаться она не должна.
     #[test]
     fn last_provision_error_tri_state_serializes_as_three_operations() {
-        let omit = DomainWriteBack::default();
-        assert_eq!(serde_json::to_string(&omit).unwrap(), "{}");
+        let omit = DomainWriteBack {
+            site_user: Some("u1".into()),
+            last_provision_error: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&omit).unwrap(),
+            "{\"site_user\":\"u1\"}"
+        );
 
         let clear = DomainWriteBack {
             last_provision_error: Some(None),

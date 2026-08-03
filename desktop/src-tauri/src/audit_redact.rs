@@ -16,19 +16,30 @@
 //!   аудита не стоит того, чтобы падать в бою.
 //! * [`ensure_no_secrets`] — работает и в release, для write-back'а: возвращает
 //!   `Err`, и тело не уходит в сеть вовсе.
+//!
+//! Цена решения: секрет, положенный под безобидным именем (`{"note": "<пароль
+//! от панели>"}`), обе проверки пропустят — они смотрят имена, а имя тут
+//! честное. Поэтому первая линия обороны не здесь, а в типах: у
+//! `DomainWriteBack` и `ServerWriteBack` полей под пароли просто нет, положить
+//! их туда некуда. Эти две проверки — вторая линия, на случай сырых тел и
+//! будущих полей; добавляя поле в write-back-структуру, полагаться на них как
+//! на единственную защиту нельзя.
 
 /// Секретоподобные ИМЕНА полей. Сравниваются как подстрока имени в нижнем
 /// регистре, поэтому `db_password` и `ftp_password` ловятся одним маркером.
 const SECRET_KEY_MARKERS: [&str; 3] = ["password", "auth_key", "api_key"];
 
-/// Суффикс имён, которые секретом не являются по построению: `*_blob_id` — это
+/// Суффиксы имён, которые секретом не являются по построению: `*_blob_id` — это
 /// ссылка на зашифрованный блоб, а не его содержимое.
 ///
 /// Исключение не косметическое: `fastpanel_password_blob_id` уже есть в схеме
 /// `ServerUpdate`, и в тот день, когда его добавят в `ServerWriteBack`, без
 /// этой строчки каждый `server_write_back` начал бы возвращать `Secret` — молча,
 /// одним варнингом, — и FastPanel переустанавливался бы поверх рабочего.
-const NOT_A_SECRET_SUFFIX: &str = "_blob_id";
+///
+/// Именно суффикс, а не подстрока: `password_blob_id_extra` исключением не
+/// является и обязан отвергаться (на это есть тест).
+const NOT_A_SECRET_SUFFIXES: [&str; 1] = ["_blob_id"];
 
 /// Первое секретоподобное ИМЯ поля — рекурсивно по объектам и массивам.
 /// Скалярные значения не проверяются вовсе (см. модульный комментарий).
@@ -37,9 +48,8 @@ fn find_secret_key(v: &serde_json::Value) -> Option<String> {
         serde_json::Value::Object(map) => {
             for (key, value) in map {
                 let lower = key.to_lowercase();
-                if !lower.ends_with(NOT_A_SECRET_SUFFIX)
-                    && SECRET_KEY_MARKERS.iter().any(|m| lower.contains(m))
-                {
+                let exempt = NOT_A_SECRET_SUFFIXES.iter().any(|s| lower.ends_with(s));
+                if !exempt && SECRET_KEY_MARKERS.iter().any(|m| lower.contains(m)) {
                     return Some(key.clone());
                 }
                 if let Some(found) = find_secret_key(value) {
@@ -107,6 +117,17 @@ mod tests {
             "ssh_password_blob_id": "8c2b1d77-1c4b-4b2f-8d8d-3f0b5e2b88f2",
         });
         assert_eq!(ensure_no_secrets(&v), Ok(()));
+    }
+
+    // Безопасность исключения держится на `ends_with`, а не на `contains`:
+    // «почти блоб-id» обязан отвергаться, иначе исключение станет дырой,
+    // через которую пройдёт что угодно с `_blob_id` в середине имени.
+    #[test]
+    fn ensure_no_secrets_rejects_a_near_miss_of_the_blob_id_exemption() {
+        assert_eq!(
+            ensure_no_secrets(&json!({"password_blob_id_extra": "x"})),
+            Err("password_blob_id_extra".to_string())
+        );
     }
 
     #[test]
