@@ -18,6 +18,10 @@ pub enum ApiError {
     Json(#[from] serde_json::Error),
     #[error("api error {status}: {body}")]
     Status { status: u16, body: String },
+    /// Тело не отправлено: в нём нашёлся секретоподобный ключ. Не сетевая
+    /// ошибка, а сработавший инвариант zero-knowledge.
+    #[error("refusing to send a body containing {0}")]
+    Secret(&'static str),
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +139,47 @@ struct RecoverySetupBody {
 struct BlobUpsertBody<'a> {
     blob_kind: &'a str,
     ciphertext_b64: String,
+}
+
+/// Несекретный результат провижининга, уезжающий обратно в `domains.*`.
+///
+/// Сервер применяет патч через `model_dump(exclude_unset=True)`: опущенное поле
+/// он не трогает, а явный `null` — затирает. Поэтому все поля `Option` и все
+/// пропускаются при `None`; там, где `null` осмыслен (гашение прошлой ошибки),
+/// стоит `Option<Option<_>>`, и `Some(None)` даёт именно `null`.
+///
+/// Паролей здесь нет и быть не может: полей под них не существует.
+#[derive(Debug, Default, Serialize)]
+pub struct DomainWriteBack {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_path: Option<String>,
+    /// Из словаря `SslStatus` бэкенда (`none` | `pending` | `active` | `error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssl_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_user: Option<String>,
+    /// `Some(None)` — погасить прошлую ошибку явным `null`; `None` — не трогать.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_provision_error: Option<Option<String>>,
+}
+
+/// Несекретный результат установки FastPanel, уезжающий обратно в `servers.*`.
+///
+/// `fastpanel_status` в БД `NOT NULL`, а в схеме `Optional[str]`: явный `null`
+/// тут — не 422, а 500. Поэтому поле именно опускается, когда сказать нечего.
+#[derive(Debug, Default, Serialize)]
+pub struct ServerWriteBack {
+    /// Из словаря `FastPanelStatus` бэкенда.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fastpanel_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fastpanel_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fastpanel_user: Option<String>,
 }
 
 impl ApiClient {
@@ -434,6 +479,48 @@ impl ApiClient {
         self.expect_ok(resp).await
     }
 
+    /// Записать несекретный результат провижининга в домен (`PUT /domains/{id}`).
+    ///
+    /// Без этого серверные поля (`site_user`, `ssl_status`, `db_name`, …) вечно
+    /// пусты, и проверки идемпотентности, которые их читают, сработать не могут.
+    pub async fn domain_write_back(
+        &self,
+        domain_id: &str,
+        patch: &DomainWriteBack,
+    ) -> Result<(), ApiError> {
+        self.put_metadata(&format!("domains/{domain_id}"), patch)
+            .await
+    }
+
+    /// Записать несекретный результат установки FastPanel (`PUT /servers/{id}`).
+    pub async fn server_write_back(
+        &self,
+        server_id: &str,
+        patch: &ServerWriteBack,
+    ) -> Result<(), ApiError> {
+        self.put_metadata(&format!("servers/{server_id}"), patch)
+            .await
+    }
+
+    /// PUT несекретных метаданных с проверкой, работающей и в release.
+    ///
+    /// В отличие от аудита, тело здесь собирается из данных, пришедших с чужого
+    /// сервера (имена сайта, БД, URL панели), поэтому `debug_assert` мало:
+    /// нашли секретоподобный ключ — не отправляем вовсе и говорим об этом
+    /// вызывающему. `request_raw` на не-2xx не падает, статус разбираем сами.
+    async fn put_metadata<T: Serialize>(&self, path: &str, patch: &T) -> Result<(), ApiError> {
+        let body = serde_json::to_value(patch)?;
+        if let Err(marker) = crate::audit_redact::ensure_no_secrets(&body) {
+            return Err(ApiError::Secret(marker));
+        }
+        let (status, text) = self.request_raw("PUT", path, Some(&body)).await?;
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            Err(ApiError::Status { status, body: text })
+        }
+    }
+
     /// Generic authenticated proxy used by the desktop webview, which has no
     /// session cookie of its own. Reuses this client's cookie jar and returns
     /// the raw status + body so the frontend can preserve 401/403/etc.
@@ -707,6 +794,117 @@ mod tests {
         let (status, body) = c.request_raw("GET", "/servers", None).await.unwrap();
         assert_eq!(status, 200);
         assert!(body.contains("s1"));
+    }
+
+    /// Write-back шлёт PUT (не PATCH) и ровно те поля, которые знает: сервер
+    /// применяет `exclude_unset`, поэтому лишний ключ затёр бы чужие данные.
+    #[tokio::test]
+    async fn domain_write_back_puts_only_the_known_fields() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .and(body_json(json!({
+                "site_user": "u1",
+                "site_path": "/var/www/u1/data/www/example.com",
+                "ssl_status": "active",
+                "last_provision_error": null,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 42})))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.domain_write_back(
+            "42",
+            &DomainWriteBack {
+                site_user: Some("u1".into()),
+                site_path: Some("/var/www/u1/data/www/example.com".into()),
+                ssl_status: Some("active".into()),
+                last_provision_error: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_write_back_puts_fastpanel_metadata() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/servers/7"))
+            .and(body_json(json!({
+                "fastpanel_status": "installed",
+                "fastpanel_url": "https://1.2.3.4:8888",
+                "fastpanel_user": "fastuser",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 7})))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.server_write_back(
+            "7",
+            &ServerWriteBack {
+                fastpanel_status: Some("installed".into()),
+                fastpanel_url: Some("https://1.2.3.4:8888".into()),
+                fastpanel_user: Some("fastuser".into()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Не-2xx обязан дойти до вызывающего: он решает, что делать (у нас —
+    /// варнинг и событие прогресса), а молча «успешно» отвечать нельзя.
+    #[tokio::test]
+    async fn domain_write_back_surfaces_a_server_error() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({"detail": "boom"})))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let err = c
+            .domain_write_back(
+                "42",
+                &DomainWriteBack {
+                    site_user: Some("u1".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Status { status: 500, .. }));
+    }
+
+    /// Инвариант ZK: тело с секретоподобным ключом не уходит в сеть вообще.
+    /// `.expect(0)` проверяется на drop сервера — то есть отказ настоящий, а не
+    /// «отправили и получили ошибку».
+    #[tokio::test]
+    async fn write_back_refuses_to_send_a_body_with_a_secret() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let err = c
+            .domain_write_back(
+                "42",
+                &DomainWriteBack {
+                    site_user: Some("password".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Secret("password")), "{err}");
     }
 
     #[tokio::test]
