@@ -79,6 +79,13 @@ export const ACTION_LABELS: Record<string, string> = {
   "auth.password_change": "Password changed",
   "auth.recovery": "Account recovered",
   "auth.totp_enable": "Two-factor enabled",
+  "blob.upsert": "Secret saved",
+  "blob.delete": "Secret deleted",
+  "settings.config_update": "Setting changed",
+  "settings.notification_test": "Notification test sent",
+  "notification.mark_read": "Notifications marked read",
+  "notification.delete": "Notification deleted",
+  "notification.check_renewals": "Renewal check started",
 };
 
 // Matches the target_type strings audit.log callers actually pass (backend

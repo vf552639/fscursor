@@ -162,8 +162,8 @@ describe("auditRowToActivity", () => {
     expect(a.ts).toBe("2026-01-01T00:00:00Z");
   });
 
-  it("has exactly one label per SAFE_ACTIONS entry (bump to 27 -> N when backend/app/audit/service.py::SAFE_ACTIONS changes)", () => {
-    expect(Object.keys(ACTION_LABELS).length).toBe(27);
+  it("has exactly one label per SAFE_ACTIONS entry (bump to 34 -> N when backend/app/audit/service.py::SAFE_ACTIONS changes)", () => {
+    expect(Object.keys(ACTION_LABELS).length).toBe(34);
   });
 
   it("falls back to target_id alone when target_type is null", () => {
