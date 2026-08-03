@@ -525,9 +525,14 @@ impl ApiClient {
         }
     }
 
-    /// Generic authenticated proxy used by the desktop webview, which has no
-    /// session cookie of its own. Reuses this client's cookie jar and returns
-    /// the raw status + body so the frontend can preserve 401/403/etc.
+    /// Generic authenticated proxy with two callers.
+    ///
+    /// Первый — вебвью десктопа: своей сессионной куки у него нет, поэтому оно
+    /// ходит через этот клиент, а сырой статус + тело возвращаются, чтобы фронт
+    /// сохранил 401/403 и прочее как есть.
+    ///
+    /// Второй — внутрипроцессная [`ApiClient::put_metadata`]: ей нужен ровно тот
+    /// же «не падать на не-2xx» — статус она разбирает сама.
     pub async fn request_raw(
         &self,
         method: &str,
@@ -814,6 +819,11 @@ mod tests {
                 "last_provision_error": null,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 42})))
+            // Без `.expect(1)` расхождение в теле выглядело бы как 404 от
+            // незамэтченного запроса, упавший через `.unwrap()`, — ни диффа,
+            // ни намёка, что дело в теле.
+            .expect(1)
+            .named("PUT /domains/42 with exactly the known fields")
             .mount(&srv)
             .await;
 
@@ -843,6 +853,8 @@ mod tests {
                 "fastpanel_user": "fastuser",
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 7})))
+            .expect(1)
+            .named("PUT /servers/7 with fastpanel metadata")
             .mount(&srv)
             .await;
 
@@ -882,6 +894,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::Status { status: 500, .. }));
+    }
+
+    /// Три состояния `last_provision_error` — три разные операции на сервере
+    /// (`exclude_unset`): не трогать, погасить, записать. Сегодня провижининг
+    /// пользуется первыми двумя, но `Some(Some(_))` — половина этого договора,
+    /// и молчаливо сломаться она не должна.
+    #[test]
+    fn last_provision_error_tri_state_serializes_as_three_operations() {
+        let omit = DomainWriteBack::default();
+        assert_eq!(serde_json::to_string(&omit).unwrap(), "{}");
+
+        let clear = DomainWriteBack {
+            last_provision_error: Some(None),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&clear).unwrap(),
+            "{\"last_provision_error\":null}"
+        );
+
+        let set = DomainWriteBack {
+            last_provision_error: Some(Some("ssh: auth failed".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&set).unwrap(),
+            "{\"last_provision_error\":\"ssh: auth failed\"}"
+        );
     }
 
     /// Инвариант ZK: тело с секретоподобным ИМЕНЕМ поля не уходит в сеть
@@ -932,6 +972,7 @@ mod tests {
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 42})))
             .expect(1)
+            .named("PUT /domains/42 for a password-shaped domain")
             .mount(&srv)
             .await;
 

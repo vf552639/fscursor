@@ -433,7 +433,8 @@ const SSL_STATUS_ACTIVE: &str = "active";
 const SSL_STATUS_ERROR: &str = "error";
 const FASTPANEL_STATUS_INSTALLED: &str = "installed";
 
-/// Ширины колонок в моделях бэкенда. Перелив там даёт не 422, а ошибку БД.
+/// Ширины колонок из `backend/app/models/domain.py` и
+/// `backend/app/models/server.py`. Перелив там даёт не 422, а ошибку БД.
 const MAX_SITE_USER: usize = 64;
 const MAX_SITE_PATH: usize = 255;
 const MAX_DB_NAME: usize = 64;
@@ -446,11 +447,14 @@ const MAX_FASTPANEL_USER: usize = 128;
 /// Обрезать нельзя: обрезанный `site_user` или путь читались бы дальше как
 /// правда — и провижининг по ним промахнулся бы мимо реального сайта. Роняя
 /// одно поле, мы сохраняем остальные: 500 от БД утопил бы весь write-back.
-fn fit(field: &str, value: &str, max: usize) -> Option<String> {
+///
+/// `id` — домена или сервера: в bulk-прогоне на 200 доменов варнинг без него
+/// не говорит, у кого именно поле не записалось.
+fn fit_or_omit(id: &str, field: &str, value: &str, max: usize) -> Option<String> {
     if value.chars().count() > max {
         tracing::warn!(
             target: "provision",
-            "write-back: {field} longer than {max} chars, field omitted"
+            "write-back for {id}: {field} longer than {max} chars, field omitted"
         );
         None
     } else {
@@ -477,9 +481,10 @@ fn fit(field: &str, value: &str, max: usize) -> Option<String> {
 /// `ssl_error` на сервер не отправляем — это вывод certbot, ровно как и в
 /// метаданных аудита, который его тоже не берёт.
 fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
+    let id = r.domain_id.as_str();
     DomainWriteBack {
-        site_user: fit("site_user", &r.site_user, MAX_SITE_USER),
-        site_path: fit("site_path", &r.site_path, MAX_SITE_PATH),
+        site_user: fit_or_omit(id, "site_user", &r.site_user, MAX_SITE_USER),
+        site_path: fit_or_omit(id, "site_path", &r.site_path, MAX_SITE_PATH),
         ssl_status: r.ssl_issued.map(|ok| {
             if ok {
                 SSL_STATUS_ACTIVE.to_string()
@@ -490,11 +495,11 @@ fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
         db_name: r
             .db
             .as_ref()
-            .and_then(|d| fit("db_name", &d.db_name, MAX_DB_NAME)),
+            .and_then(|d| fit_or_omit(id, "db_name", &d.db_name, MAX_DB_NAME)),
         db_user: r
             .db
             .as_ref()
-            .and_then(|d| fit("db_user", &d.db_user, MAX_DB_USER)),
+            .and_then(|d| fit_or_omit(id, "db_user", &d.db_user, MAX_DB_USER)),
         last_provision_error: Some(None),
     }
 }
@@ -511,21 +516,22 @@ fn server_write_back_body(r: &InstallFastpanelResult) -> ServerWriteBack {
         fastpanel_url: r
             .url
             .as_deref()
-            .and_then(|v| fit("fastpanel_url", v, MAX_FASTPANEL_URL)),
+            .and_then(|v| fit_or_omit(&r.server_id, "fastpanel_url", v, MAX_FASTPANEL_URL)),
         fastpanel_user: r
             .user
             .as_deref()
-            .and_then(|v| fit("fastpanel_user", v, MAX_FASTPANEL_USER)),
+            .and_then(|v| fit_or_omit(&r.server_id, "fastpanel_user", v, MAX_FASTPANEL_USER)),
     }
 }
 
-/// Разбор результата write-back'а: `true` — не записалось, надо сообщить.
+/// Записать провал write-back'а в лог и сказать вызывающему, надо ли сообщать
+/// о нём наружу: `true` — не записалось.
 ///
 /// Возвращает `bool`, а не `Result`, намеренно: работа на сервере уже сделана,
 /// а пароли БД/FTP/панели существуют только в ответе команды. Уронить её из-за
 /// незаписанных метаданных значило бы потерять их навсегда из-за сетевого сбоя
 /// на последнем шаге. Не превращать в `?`.
-fn write_back_failed(kind: &str, r: Result<(), ApiError>) -> bool {
+fn log_write_back_failure(kind: &str, r: Result<(), ApiError>) -> bool {
     match r {
         Ok(()) => false,
         Err(e) => {
@@ -666,13 +672,17 @@ pub async fn run_provision_domain(
 
     // Write-back несекретных результатов — раньше аудита, и намеренно: аудит
     // фиксирует, что действие было, а write-back делает состояние сервера
-    // правдой. Именно его читают проверки идемпотентности следующего прогона
-    // (`site_user` → `site_exists`), поэтому при частичном сбое ценнее записать
-    // состояние, чем строчку в журнале. К тому же сам PUT оставляет на сервере
-    // запись `domain.update`, так что действие не пропадёт из аудита совсем.
+    // правдой. Из неё и вырастает идемпотентность следующего прогона: сам он
+    // читает не сервер, а локальный SQLCipher-кэш (`get_row_fields` выше, где
+    // берётся `site_user` для `site_exists`), но фронт зовёт провижининг через
+    // `invokeSynced`, а тот перед каждым вызовом подтягивает изменения с
+    // сервера. Не записав — не увидим и в кэше. Поэтому при частичном сбое
+    // ценнее записать состояние, чем строчку в журнале. К тому же сам PUT
+    // оставляет на сервере запись `domain.update`, так что действие не пропадёт
+    // из аудита совсем.
     //
-    // Как и аудит, write-back — best-effort: см. `write_back_failed`.
-    if write_back_failed(
+    // Как и аудит, write-back — best-effort: см. `log_write_back_failure`.
+    if log_write_back_failure(
         "domain",
         api.domain_write_back(domain_id, &domain_write_back_body(&result))
             .await,
@@ -1018,11 +1028,14 @@ pub async fn install_fastpanel(
         password: creds.password,
     };
 
-    // Write-back раньше аудита — по той же причине, что и в провижининге:
+    // Write-back раньше аудита — по той же причине, что и в провижининге.
     // `fastpanel_status = installed` читает проверка идемпотентности в начале
-    // этой самой команды, и без записи повторный запуск переустановил бы панель
-    // поверх рабочей. Best-effort: см. `write_back_failed`.
-    if write_back_failed(
+    // этой самой команды; читает она локальный кэш (`get_row_fields` выше), но
+    // значение попадает туда только из серверной колонки, которую заполняет вот
+    // этот PUT, а подтягивает её `invokeSynced` перед каждым вызовом. Не
+    // записав, мы получили бы переустановку панели поверх рабочей.
+    // Best-effort: см. `log_write_back_failure`.
+    if log_write_back_failure(
         "server",
         api.server_write_back(&result.server_id, &server_write_back_body(&result))
             .await,
@@ -1393,23 +1406,23 @@ mod tests {
     // То, что команда после этого действительно доживает до `Ok(result)`, тест
     // проверить не может: `run_provision_domain` и `install_fastpanel` требуют
     // AppHandle, keychain и живой SSH. Гарантия там структурная — оба вызова
-    // (`if write_back_failed(...)` в `run_provision_domain` и в
+    // (`if log_write_back_failure(...)` в `run_provision_domain` и в
     // `install_fastpanel`) не содержат `?`, а из `bool` его и не сделать.
     // Поэтому важно, чтобы функция не начала возвращать `Result`.
     #[test]
     fn every_write_back_failure_collapses_to_a_flag() {
-        assert!(write_back_failed(
+        assert!(log_write_back_failure(
             "domain",
             Err(ApiError::Status {
                 status: 500,
                 body: "boom".into()
             })
         ));
-        assert!(write_back_failed(
+        assert!(log_write_back_failure(
             "domain",
             Err(ApiError::Secret("db_password".into()))
         ));
-        assert!(!write_back_failed("domain", Ok(())));
+        assert!(!log_write_back_failure("domain", Ok(())));
     }
 
     // Пароль FTP генерируется на сервере и нигде не хранится: если он не уедет
