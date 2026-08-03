@@ -87,10 +87,29 @@ export interface Nameservers {
   name_servers: string[];
 }
 
+/**
+ * Зона, вернувшаяся из `cf_create_zone` (`cloudflare::client::Zone`). Полей
+ * `status`/`paused` там нет — это не `Zone` выше.
+ */
+export interface CreatedZone {
+  id: string;
+  name: string;
+  name_servers: string[] | null;
+}
+
 function requireUserId(): string {
   const userId = useAuthStore.getState().userId;
   if (!userId) throw new Error("Desktop: unlock session (user id missing)");
   return userId;
+}
+
+/**
+ * Мутации Cloudflare живут только в десктопе: токен аккаунта расшифровывается
+ * на клиенте, и HTTP-роутов под них на бэкенде нет и не будет (в
+ * `routes/cloudflare.py` только CRUD аккаунтов). Веб — «только смотрит».
+ */
+function requireDesktop(what: string): void {
+  if (!isTauri()) throw new Error(`${what} runs in the SDMP desktop app.`);
 }
 
 export const cloudflareKeys = {
@@ -153,6 +172,15 @@ export function useTestCloudflareAccount() {
   });
 }
 
+/**
+ * ⚠️ Чтения ниже (зоны, детали зоны, DNS-записи, nameservers) бьются в роуты,
+ * которых на бэкенде НЕТ: `routes/cloudflare.py` знает только CRUD аккаунтов.
+ * Tauri-команд на чтение тоже нет (в Rust есть `client::list_zones` и
+ * `client::list_dns_records`, но они не выставлены как `#[tauri::command]`).
+ * Пока read-путь не построен, эти хуки честно возвращают ошибку, и UI её
+ * показывает — молча пустой таблицы быть не должно. Список зон страница
+ * поэтому строит из `/domains` (`cloudflare_zone_id`), а не отсюда.
+ */
 export function useCloudflareZones(accountId: number | null | undefined) {
   return useQuery({
     queryKey: accountId ? cloudflareKeys.zones(accountId) : ["cloudflare", "zones", "disabled"],
@@ -190,27 +218,46 @@ export function useDnsRecords(
   });
 }
 
+/**
+ * Создание зоны в Cloudflare. Возвращает name_servers — их надо прописать у
+ * регистратора, иначе зона так и останется pending.
+ */
+export function useCreateZone(accountId: number) {
+  return useMutation({
+    mutationFn: async (zoneName: string) => {
+      requireDesktop("Creating a Cloudflare zone");
+      const userId = requireUserId();
+      return invokeSynced<CreatedZone>("cf_create_zone", {
+        userId,
+        accountId: String(accountId),
+        zoneName,
+      });
+    },
+    // Список зон страница строит из доменов: связку зоны с доменом ставит
+    // серверная синхронизация, поэтому перечитываем именно домены.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["domains"] }),
+  });
+}
+
 export function useCreateDnsRecord(accountId: number, zoneId: string) {
   return useMutation({
     mutationFn: async (data: DnsRecordCreate) => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        return invokeSynced<DnsRecord>("cf_create_dns_record", {
-          userId,
-          accountId: String(accountId),
-          zoneId,
-          record: {
-            type: data.type,
-            name: data.name,
-            content: data.content,
-            ttl: data.ttl,
-            proxied: data.proxied,
-            // MX/SRV/URI без приоритета уезжали в Cloudflare сломанными.
-            priority: data.priority,
-          },
-        });
-      }
-      return apiPost<DnsRecord>(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns`, data);
+      requireDesktop("Creating a DNS record");
+      const userId = requireUserId();
+      return invokeSynced<DnsRecord>("cf_create_dns_record", {
+        userId,
+        accountId: String(accountId),
+        zoneId,
+        record: {
+          type: data.type,
+          name: data.name,
+          content: data.content,
+          ttl: data.ttl,
+          proxied: data.proxied,
+          // MX/SRV/URI без приоритета уезжали в Cloudflare сломанными.
+          priority: data.priority,
+        },
+      });
     },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: cloudflareKeys.dns(accountId, zoneId) }),
@@ -220,29 +267,24 @@ export function useCreateDnsRecord(accountId: number, zoneId: string) {
 export function useUpdateDnsRecord(accountId: number, zoneId: string) {
   return useMutation({
     mutationFn: async ({ recordId, data }: { recordId: string; data: DnsRecordUpdate }) => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        return invokeSynced<DnsRecord>("cf_update_dns_record", {
-          userId,
-          accountId: String(accountId),
-          zoneId,
-          recordId,
-          patch: {
-            // Форма правки даёт менять тип записи, и веб-путь его шлёт —
-            // десктопный молча терял и type, и priority.
-            type: data.type,
-            name: data.name,
-            content: data.content,
-            ttl: data.ttl,
-            proxied: data.proxied,
-            priority: data.priority,
-          },
-        });
-      }
-      return apiPut<DnsRecord>(
-        `/cloudflare/accounts/${accountId}/zones/${zoneId}/dns/${recordId}`,
-        data
-      );
+      requireDesktop("Editing a DNS record");
+      const userId = requireUserId();
+      return invokeSynced<DnsRecord>("cf_update_dns_record", {
+        userId,
+        accountId: String(accountId),
+        zoneId,
+        recordId,
+        patch: {
+          // Форма правки даёт менять тип записи — без этого поля смена типа
+          // молча не доезжала. `undefined` serde видит как «не менять».
+          type: data.type,
+          name: data.name,
+          content: data.content,
+          ttl: data.ttl,
+          proxied: data.proxied,
+          priority: data.priority,
+        },
+      });
     },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: cloudflareKeys.dns(accountId, zoneId) }),
@@ -252,16 +294,14 @@ export function useUpdateDnsRecord(accountId: number, zoneId: string) {
 export function useDeleteDnsRecord(accountId: number, zoneId: string) {
   return useMutation({
     mutationFn: async (recordId: string) => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        return invokeSynced<void>("cf_delete_dns_record", {
-          userId,
-          accountId: String(accountId),
-          zoneId,
-          recordId,
-        });
-      }
-      return apiDelete(`/cloudflare/accounts/${accountId}/zones/${zoneId}/dns/${recordId}`);
+      requireDesktop("Deleting a DNS record");
+      const userId = requireUserId();
+      return invokeSynced<void>("cf_delete_dns_record", {
+        userId,
+        accountId: String(accountId),
+        zoneId,
+        recordId,
+      });
     },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: cloudflareKeys.dns(accountId, zoneId) }),
@@ -271,18 +311,13 @@ export function useDeleteDnsRecord(accountId: number, zoneId: string) {
 export function usePurgeCache(accountId: number, zoneId: string) {
   return useMutation({
     mutationFn: async () => {
-      if (isTauri()) {
-        const userId = requireUserId();
-        await invokeSynced<void>("cf_purge_cache", {
-          userId,
-          accountId: String(accountId),
-          zoneId,
-        });
-        return { success: true, message: null } as { success: boolean; message: string | null };
-      }
-      return apiPost<{ success: boolean; message: string | null }>(
-        `/cloudflare/accounts/${accountId}/zones/${zoneId}/purge`
-      );
+      requireDesktop("Purging the Cloudflare cache");
+      const userId = requireUserId();
+      await invokeSynced<void>("cf_purge_cache", {
+        userId,
+        accountId: String(accountId),
+        zoneId,
+      });
     },
   });
 }

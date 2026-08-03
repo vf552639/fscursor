@@ -6,16 +6,72 @@ import {
   useUpdateCloudflareAccount,
   useDeleteCloudflareAccount,
   useTestCloudflareAccount,
+  useCreateZone,
   useDnsRecords,
   usePurgeCache,
   useCreateDnsRecord,
   useUpdateDnsRecord,
   useDeleteDnsRecord,
   useZoneNameservers,
+  type CreatedZone,
+  type DnsRecord,
+  type DnsRecordUpdate,
 } from "../api/cloudflare";
+import { useDomains, type Domain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
+
+/** Зона в UI. Полноценного списка зон нет — см. `zonesOfAccount`. */
+export interface CfZoneRef {
+  id: string;
+  name: string;
+}
+
+/** Аккаунт в контексте зоны: id нужен командам, name — хлебным крошкам. */
+export interface CfAccountRef {
+  id: number;
+  name: string;
+}
+
+export interface CfZoneSelection {
+  acc: CfAccountRef;
+  zone: CfZoneRef;
+}
+
+const DNS_TYPE_COLORS: Record<string, string> = {
+  A: "#2563eb",
+  AAAA: "#7c3aed",
+  CNAME: "#059669",
+  MX: "#d97706",
+  TXT: "#6b7280",
+  NS: "#dc2626",
+  SRV: "#0891b2",
+};
+
+const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV"];
+
+/** Типы, у которых Cloudflare принимает priority. Для прочих поле слать нельзя. */
+const TYPES_WITH_PRIORITY = new Set(["MX", "SRV", "URI"]);
+
+const DESKTOP_ONLY_NOTE = "DNS changes run in the SDMP desktop app.";
+
+/**
+ * Зоны аккаунта. Единственный доступный источник — домены: связку
+ * домен↔зона ставит синхронизация аккаунта, и она лежит на бэкенде
+ * (`domains.cloudflare_zone_id`). Списка зон из Cloudflare у веба нет, см.
+ * комментарий у `useCloudflareZones`.
+ */
+export function zonesOfAccount(domains: Domain[], accountId: number): CfZoneRef[] {
+  const seen = new Map<string, CfZoneRef>();
+  for (const d of domains) {
+    if (d.cloudflare_account_id !== accountId || !d.cloudflare_zone_id) continue;
+    if (!seen.has(d.cloudflare_zone_id)) {
+      seen.set(d.cloudflare_zone_id, { id: d.cloudflare_zone_id, name: d.domain_name });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 
 function AccountCard({
   acc,
@@ -23,12 +79,20 @@ function AccountCard({
   onDelete,
   onTest,
   testStatus,
+  zones,
+  zonesLoading,
+  onOpenZone,
+  onAddZone,
 }: {
   acc: any;
   onEdit: () => void;
   onDelete: () => void;
   onTest: () => void;
   testStatus?: { state: "idle" | "loading" | "success" | "error"; message?: string };
+  zones: CfZoneRef[];
+  zonesLoading: boolean;
+  onOpenZone: (zone: CfZoneRef) => void;
+  onAddZone: () => void;
 }) {
 
   return (
@@ -78,21 +142,51 @@ function AccountCard({
           <RevealSecret blobId={acc.api_token_blob_id} label="Reveal API token" />
         ) : null}
       </div>
+      <div style={{ borderTop: "1px solid #e5e7eb", padding: "12px 20px" }}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:zones.length?10:0}}>
+          <div style={{fontSize:12,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px"}}>
+            Zones ({zones.length})
+          </div>
+          <Btn size="sm" variant="secondary" onClick={onAddZone} disabled={!isTauri()}>+ Add Zone</Btn>
+        </div>
+        {zonesLoading ? (
+          <div style={{ fontSize: 12.5, color: "#9ca3af" }}>Loading zones…</div>
+        ) : zones.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "#9ca3af" }}>
+            No zones linked to this account yet.
+          </div>
+        ) : (
+          zones.map((z) => (
+            <div
+              key={z.id}
+              data-zone-row=""
+              style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderTop:"1px solid #f3f4f6"}}
+            >
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#111", flex: 1 }}>{z.name}</span>
+              <span style={{ fontFamily: "monospace", fontSize: 11.5, color: "#9ca3af" }}>{z.id}</span>
+              <Btn size="sm" variant="secondary" onClick={() => onOpenZone(z)}>Open DNS</Btn>
+            </div>
+          ))
+        )}
+      </div>
     </Card>
   );
 }
 
 export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) => void }){
   const { data: cfAccountsData, isPending, isError, error } = useCloudflareAccounts();
+  const { data: domainsData, isPending: domainsPending } = useDomains();
   const createAcc = useCreateCloudflareAccount();
   const deleteAcc = useDeleteCloudflareAccount();
   const testAcc = useTestCloudflareAccount();
   const cfAccounts = cfAccountsData || [];
-  
+  const domains = domainsData || [];
+
   const [showAddAcc,setShowAcc]=useState(false);
   const [showDns,setShowDns]=useState(false);
-  const dnsTypes: Record<string, string>={A:"#2563eb",AAAA:"#7c3aed",CNAME:"#059669",MX:"#d97706",TXT:"#6b7280",NS:"#dc2626"};
-  
+  const [sel, setSel] = useState<CfZoneSelection | null>(null);
+  const [addZoneFor, setAddZoneFor] = useState<CfAccountRef | null>(null);
+
   const [accName, setAccName] = useState("");
   const [accId, setAccId] = useState("");
   const [accToken, setAccToken] = useState("");
@@ -174,6 +268,19 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
 
   if (isPending) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading Cloudflare accounts...</div>;
 
+  // Выбранная зона занимает всю страницу: DNS-редактор — самостоятельный экран,
+  // а не блок под списком аккаунтов.
+  if (sel) {
+    return (
+      <CloudflareZoneView
+        sel={sel}
+        onBack={() => { setSel(null); setShowDns(false); }}
+        showDns={showDns}
+        setShowDns={setShowDns}
+      />
+    );
+  }
+
   return <>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
       <div><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Cloudflare</h1><div style={{fontSize:13,color:"#6b7280"}}>{cfAccounts.length} accounts connected</div></div>
@@ -210,6 +317,10 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onDelete={() => { if (!confirm(`Delete account ${acc.name}?`)) return; deleteAcc.mutate(acc.id); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
+        zones={zonesOfAccount(domains, acc.id)}
+        zonesLoading={domainsPending}
+        onOpenZone={(zone) => setSel({ acc: { id: acc.id, name: acc.name }, zone })}
+        onAddZone={() => setAddZoneFor({ id: acc.id, name: acc.name })}
       />
     )))}
 
@@ -237,25 +348,96 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       </div>
     </Modal>}
     {editingAcc && <EditCfAccountModal account={editingAcc} onClose={() => setEditingAcc(null)} />}
+    {addZoneFor && <AddZoneModal acc={addZoneFor} onClose={() => setAddZoneFor(null)} />}
   </>;
 }
 
-function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { sel: any, onBack: ()=>void, dnsTypes: any, showDns: boolean, setShowDns: any }) {
+/**
+ * Создание зоны. Nameservers показываем прямо здесь и не закрываем модалку
+ * сами: без них зона бесполезна, а второй раз Cloudflare их уже не отдаст.
+ */
+function AddZoneModal({ acc, onClose }: { acc: CfAccountRef; onClose: () => void }) {
+  const [name, setName] = useState("");
+  const createZone = useCreateZone(acc.id);
+  const created: CreatedZone | undefined = createZone.data;
+  return (
+    <Modal title={`Add zone to ${acc.name}`} onClose={onClose} width={460}>
+      {created ? (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{fontSize:13,color:"#166534"}}>
+            Zone <b>{created.name}</b> is ready (<span style={{fontFamily:"monospace"}}>{created.id}</span>).
+            Point the domain at these nameservers at your registrar:
+          </div>
+          {(created.name_servers || []).map((ns) => (
+            <div key={ns} style={{padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontFamily:"monospace",fontSize:13}}>{ns}</div>
+          ))}
+          {!created.name_servers?.length && (
+            <div style={{ fontSize: 13, color: "#6b7280" }}>Cloudflare returned no nameservers.</div>
+          )}
+          <Btn variant="primary" onClick={onClose} style={{justifyContent:"center"}}>Done</Btn>
+        </div>
+      ) : (
+        <>
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Zone name</label>
+            <Inp value={name} onChange={(e: any)=>setName(e.target.value)} placeholder="example.com" />
+          </div>
+          {createZone.isError && (
+            <div role="alert" style={{marginTop:10,fontSize:12.5,color:"#dc2626"}}>
+              {String((createZone.error as any)?.message || "Zone creation failed")}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,marginTop:20}}>
+            <Btn
+              variant="primary"
+              disabled={createZone.isPending || !name.trim() || !isTauri()}
+              onClick={() => createZone.mutate(name.trim())}
+              style={{flex:1,justifyContent:"center"}}
+            >
+              {createZone.isPending ? "Creating..." : "Create Zone"}
+            </Btn>
+            <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
+  sel: CfZoneSelection;
+  onBack: () => void;
+  showDns: boolean;
+  setShowDns: (v: boolean) => void;
+}) {
   const { acc, zone } = sel;
-  const { data: recsData, isLoading } = useDnsRecords(acc.id, zone.id);
-  const { data: nameserversData } = useZoneNameservers(acc.id, zone.id);
+  const { data: recsData, isLoading, error: recsError } = useDnsRecords(acc.id, zone.id);
+  const { data: nameserversData, error: nsError } = useZoneNameservers(acc.id, zone.id);
   const purge = usePurgeCache(acc.id, zone.id);
   const createRecord = useCreateDnsRecord(acc.id, zone.id);
   const updateRecord = useUpdateDnsRecord(acc.id, zone.id);
   const deleteRecord = useDeleteDnsRecord(acc.id, zone.id);
-  const recs = recsData || [];
+  const recs: DnsRecord[] = recsData || [];
+  // «Веб только смотрит»: sdmp://-ссылок для DNS нет (parseDeepLinkAction знает
+  // три хоста), и выдумывать их ради кнопки нельзя — они вели бы в никуда.
+  // Поэтому в вебе редактор просто read-only.
+  const canExecute = isTauri();
   const [showNs, setShowNs] = useState(false);
-  const [editingRecord, setEditingRecord] = useState<any | null>(null);
+  const [editingRecord, setEditingRecord] = useState<DnsRecord | null>(null);
   const [recordType, setRecordType] = useState("A");
   const [recordName, setRecordName] = useState("");
   const [recordContent, setRecordContent] = useState("");
   const [recordTtl, setRecordTtl] = useState("1");
   const [recordProxied, setRecordProxied] = useState(true);
+  const [recordPriority, setRecordPriority] = useState("");
+  const needsPriority = TYPES_WITH_PRIORITY.has(recordType);
+  // Итог ПОСЛЕДНЕГО действия, а не «первой найденной ошибки»: провалившаяся
+  // мутация держит свой error до следующего вызова, и логика «покажем любую»
+  // оставляла бы красное сообщение от purge поверх успешно добавленной записи.
+  const lastAction = [purge, createRecord, updateRecord, deleteRecord]
+    .map((m) => ({ submittedAt: m.submittedAt, error: m.error as Error | null }))
+    .reduce((a, b) => (b.submittedAt > a.submittedAt ? b : a));
+  const actionError = lastAction.error;
   const handleCreateRecord = () => {
     if (!recordName.trim() || !recordContent.trim()) return;
     createRecord.mutate({
@@ -264,6 +446,8 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
       content: recordContent.trim(),
       ttl: Number(recordTtl),
       proxied: recordProxied,
+      // Для A/CNAME/TXT priority слать нельзя — Cloudflare ругается.
+      priority: needsPriority && recordPriority.trim() ? Number(recordPriority) : undefined,
     }, {
       onSuccess: () => {
         setShowDns(false);
@@ -272,6 +456,7 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
         setRecordContent("");
         setRecordTtl("1");
         setRecordProxied(true);
+        setRecordPriority("");
       }
     });
   };
@@ -281,13 +466,12 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
       <Btn variant="ghost" size="sm" onClick={onBack}>← Back</Btn>
       <span style={{color:"#e5e7eb"}}>/</span><span style={{fontSize:13,color:"#6b7280"}}>{acc.name}</span>
       <span style={{color:"#e5e7eb"}}>/</span><span style={{fontSize:14,fontWeight:700,color:"#111"}}>{zone.name}</span>
-      <Badge variant={zone.status==="active"?"green":"gray"}>{zone.status}</Badge>
+      <Badge variant={canExecute?"green":"gray"}>{canExecute ? "Desktop" : "Read-only"}</Badge>
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:20}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:20}}>
       {[
-        ["DNS Records",recs.length,"#2563eb"],
-        ["Plan","Free","#7c3aed"],
-        ["Status",zone.status,zone.status==="active"?"#16a34a":"#9ca3af"],
+        ["Records",recs.length,"#2563eb"],
+        ["Account",acc.name,"#7c3aed"],
         ["Zone ID",zone.id,"#374151"]
       ].map(([l,v,c])=>(
         <Card key={l as string}><div style={{padding:"14px 16px"}}><div style={{fontSize:11.5,color:"#9ca3af",marginBottom:4,fontWeight:500}}>{l as string}</div><div style={{fontSize:16,fontWeight:700,color:c as string,fontFamily:l==="Zone ID"?"monospace":"inherit"}}>{v as string}</div></div></Card>
@@ -296,24 +480,49 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
     <Card>
       <CHd><CTi>DNS Records <span style={{fontSize:12,fontWeight:400,color:"#9ca3af"}}>({recs.length})</span></CTi>
         <div style={{display:"flex",gap:8}}>
-          <Btn size="sm" variant="secondary" onClick={()=>purge.mutate()} disabled={purge.isPending}>🗑 Purge Cache</Btn>
+          <Btn size="sm" variant="secondary" onClick={()=>purge.mutate()} disabled={!canExecute || purge.isPending}>🗑 Purge Cache</Btn>
           <Btn size="sm" variant="secondary" onClick={()=>setShowNs(true)}>🔗 Nameservers</Btn>
-          <Btn size="sm" variant="primary" onClick={()=>setShowDns(true)}>+ Add Record</Btn>
+          <Btn size="sm" variant="primary" onClick={()=>setShowDns(true)} disabled={!canExecute}>+ Add Record</Btn>
         </div>
       </CHd>
+      {!canExecute && (
+        <div style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#92400e",background:"#fffbeb"}}>
+          Read-only here. {DESKTOP_ONLY_NOTE}
+        </div>
+      )}
+      {actionError && (
+        <div role="alert" style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#dc2626"}}>
+          {String((actionError as any)?.message || "Cloudflare command failed")}
+        </div>
+      )}
+      {purge.isSuccess && purge.submittedAt === lastAction.submittedAt && (
+        <div style={{padding:"10px 20px",borderTop:"1px solid #f3f4f6",fontSize:12.5,color:"#16a34a"}}>
+          ✓ Cache purged
+        </div>
+      )}
+      {recsError && (
+        <div style={{ padding: "14px 20px", borderTop: "1px solid #f3f4f6" }}>
+          <ErrorState
+            title="Не удалось загрузить DNS-записи"
+            message={String((recsError as any)?.message ?? "Read endpoint unavailable.")}
+            hint="Чтения зон/записей нет ни на бэкенде, ни в Tauri-командах — см. комментарий у useCloudflareZones."
+            style={{ marginBottom: 0 }}
+          />
+        </div>
+      )}
       <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}>
         <thead><tr style={{background:"#f9fafb"}}>{["Type","Name","Content","TTL","Proxied",""].map(h=><th key={h} style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",borderBottom:"1px solid #e5e7eb"}}>{h}</th>)}</tr></thead>
         <tbody>
-          {isLoading ? (<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af"}}>Loading DNS records...</td></tr>) : (recs.length ? recs : []).map((r: any)=>(
+          {isLoading ? (<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af"}}>Loading DNS records...</td></tr>) : recs.map((r)=>(
             <tr key={r.id} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
-              <td style={{padding:"11px 16px"}}><span style={{display:"inline-flex",alignItems:"center",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700,background:"#f3f4f6",color:dnsTypes[r.type]||"#374151",fontFamily:"monospace"}}>{r.type}</span></td>
+              <td style={{padding:"11px 16px"}}><span style={{display:"inline-flex",alignItems:"center",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700,background:"#f3f4f6",color:DNS_TYPE_COLORS[r.type]||"#374151",fontFamily:"monospace"}}>{r.type}</span></td>
               <td style={{padding:"11px 16px",fontFamily:"monospace",fontSize:13,fontWeight:600,color:"#111"}}>{r.name}</td>
               <td style={{padding:"11px 16px",fontFamily:"monospace",fontSize:12.5,color:"#374151",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.content}</td>
               <td style={{padding:"11px 16px",fontSize:13,color:"#6b7280"}}>{r.ttl===1?"Auto":`${r.ttl}s`}</td>
               <td style={{padding:"11px 16px",fontSize:18}}>{r.proxied?"🟠":"⚫"}</td>
               <td style={{padding:"11px 16px"}}><RowActions actions={[
-                { icon: "✎", title: "Edit DNS record", onClick: () => setEditingRecord(r) },
-                { icon: "✕", title: "Delete DNS record", variant: "danger", onClick: () => { if (!confirm(`Delete DNS record ${r.name}?`)) return; deleteRecord.mutate(r.id); } },
+                { icon: "✎", title: "Edit DNS record", disabled: !canExecute, onClick: () => setEditingRecord(r) },
+                { icon: "✕", title: "Delete DNS record", variant: "danger", disabled: !canExecute || deleteRecord.isPending, onClick: () => { if (!confirm(`Delete DNS record ${r.name}?`)) return; deleteRecord.mutate(r.id); } },
               ]}/></td>
             </tr>
           ))}
@@ -324,10 +533,17 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
     {showDns&&<Modal title="Add DNS Record" onClose={()=>setShowDns(false)} width={460}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:12}}>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={recordType} onChange={e=>setRecordType((e.target as any).value)} style={{width:"100%"}}>{["A","AAAA","CNAME","MX","TXT","NS"].map(t=><option key={t}>{t}</option>)}</Sel></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={recordType} onChange={e=>setRecordType((e.target as any).value)} style={{width:"100%"}}>{DNS_TYPES.map(t=><option key={t}>{t}</option>)}</Sel></div>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={recordName} onChange={e=>setRecordName((e.target as any).value)} placeholder="@ or subdomain"/></div>
         </div>
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Content</label><Inp value={recordContent} onChange={e=>setRecordContent((e.target as any).value)} placeholder="IP address or value"/></div>
+        {needsPriority && (
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Priority</label>
+            <Inp value={recordPriority} onChange={(e: any)=>setRecordPriority(e.target.value)} placeholder="10"/>
+            <div style={{fontSize:11.5,color:"#9ca3af",marginTop:4}}>Required by Cloudflare for {recordType} records.</div>
+          </div>
+        )}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={recordTtl} onChange={e=>setRecordTtl((e.target as any).value)} style={{width:"100%"}}><option value="1">Auto</option><option value="300">5 min</option><option value="3600">1 hour</option><option value="86400">1 day</option></Sel></div>
           <div style={{paddingTop:22}}><label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={recordProxied} onChange={e=>setRecordProxied((e.target as any).checked)}/><span>Proxied (orange cloud)</span></label></div>
@@ -338,7 +554,11 @@ function CloudflareZoneView({ sel, onBack, dnsTypes, showDns, setShowDns }: { se
     {showNs && <Modal title={`Nameservers for ${zone.name}`} onClose={()=>setShowNs(false)} width={460}>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {(nameserversData?.name_servers || []).map((ns: string) => <div key={ns} style={{padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontFamily:"monospace",fontSize:13}}>{ns}</div>)}
-        {(!nameserversData?.name_servers || nameserversData.name_servers.length === 0) && <div style={{fontSize:13,color:"#6b7280"}}>No nameservers returned for this zone.</div>}
+        {nsError ? (
+          <div style={{fontSize:13,color:"#dc2626"}}>{String((nsError as any)?.message ?? "Nameservers unavailable.")}</div>
+        ) : (!nameserversData?.name_servers || nameserversData.name_servers.length === 0) ? (
+          <div style={{fontSize:13,color:"#6b7280"}}>No nameservers returned for this zone.</div>
+        ) : null}
       </div>
     </Modal>}
     {editingRecord && <EditDnsRecordModal record={editingRecord} onClose={()=>setEditingRecord(null)} onSave={(payload) => updateRecord.mutate({ recordId: editingRecord.id, data: payload }, { onSuccess: () => setEditingRecord(null) })} isSaving={updateRecord.isPending} />}
@@ -363,26 +583,41 @@ function EditCfAccountModal({ account, onClose }: { account: any; onClose: () =>
   </Modal>;
 }
 
-function EditDnsRecordModal({ record, onClose, onSave, isSaving }: { record: any; onClose: () => void; onSave: (payload: any) => void; isSaving: boolean }) {
+function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
+  record: DnsRecord;
+  onClose: () => void;
+  onSave: (payload: DnsRecordUpdate) => void;
+  isSaving: boolean;
+}) {
   const [type, setType] = useState(record.type || "A");
   const [name, setName] = useState(record.name || "");
   const [content, setContent] = useState(record.content || "");
   const [ttl, setTtl] = useState(String(record.ttl || 1));
   const [proxied, setProxied] = useState(Boolean(record.proxied));
+  // Cloudflare не возвращает priority в DnsRecord, поэтому подставить текущее
+  // значение нечем: пустое поле = «не трогать» (serde видит undefined как None).
+  const [priority, setPriority] = useState("");
+  const needsPriority = TYPES_WITH_PRIORITY.has(type);
   return <Modal title={`Edit record ${record.name}`} onClose={onClose} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:12}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={type} onChange={e=>setType((e.target as any).value)} style={{width:"100%"}}>{["A","AAAA","CNAME","MX","TXT","NS"].map(t=><option key={t}>{t}</option>)}</Sel></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={type} onChange={e=>setType((e.target as any).value)} style={{width:"100%"}}>{DNS_TYPES.map(t=><option key={t}>{t}</option>)}</Sel></div>
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
       </div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Content</label><Inp value={content} onChange={e=>setContent((e.target as any).value)} /></div>
+      {needsPriority && (
+        <div>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Priority</label>
+          <Inp value={priority} onChange={(e: any)=>setPriority(e.target.value)} placeholder="leave empty to keep current" />
+        </div>
+      )}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={ttl} onChange={e=>setTtl((e.target as any).value)} style={{width:"100%"}}><option value="1">Auto</option><option value="300">5 min</option><option value="3600">1 hour</option><option value="86400">1 day</option></Sel></div>
         <div style={{paddingTop:22}}><label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={proxied} onChange={e=>setProxied((e.target as any).checked)} /><span>Proxied</span></label></div>
       </div>
     </div>
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      <Btn variant="primary" disabled={isSaving || !name.trim() || !content.trim()} onClick={() => onSave({ type, name: name.trim(), content: content.trim(), ttl: Number(ttl), proxied })} style={{flex:1,justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
+      <Btn variant="primary" disabled={isSaving || !name.trim() || !content.trim()} onClick={() => onSave({ type, name: name.trim(), content: content.trim(), ttl: Number(ttl), proxied, priority: needsPriority && priority.trim() ? Number(priority) : undefined })} style={{flex:1,justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
       <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;
