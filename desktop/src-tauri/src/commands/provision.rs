@@ -853,22 +853,34 @@ fn fit_or_omit(id: &str, field: &str, value: &str, max: usize) -> Option<String>
 /// `status` — по той же причине, что и `null` в ошибке: домен, помеченный
 /// `failed` прошлым прогоном, обязан перестать быть `failed`, иначе бейдж
 /// строки навсегда красный при пустой ошибке. `active` — только когда
-/// сертификат действительно есть; во всех прочих исходах `site_created`, в том
-/// числе когда SSL не пробовали (`site_only`): сайт создан — это правда, а
-/// правды про SSL у этого прогона нет. Цена — повторный `site_only` по живому
-/// домену опускает его статус с `active`; про SSL при этом продолжает
-/// говорить `ssl_status`, которого мы в этом случае не трогаем.
-fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
+/// сертификат действительно есть, `site_created` — когда SSL пробовали и не
+/// вышло.
+///
+/// Когда SSL не пробовали вовсе (`site_only`), статус разбирается по прошлому:
+/// `failed` гасим в `site_created`, а всё остальное не трогаем. Записывать
+/// `site_created` безусловно значило бы понижать живой `active` за один
+/// site-only повтор, а знания про SSL у этого прогона нет никакой — он его не
+/// запрашивал.
+///
+/// Прошлый статус берётся здесь же, из строки локального кэша (`domain_row` —
+/// та самая, откуда прочитаны `site_user` и `php_version`), а не приходит
+/// готовым аргументом: так всё решение «что делать со статусом» лежит внутри
+/// одной функции, которую можно поднять в тесте. Вынесенное к вызывающему
+/// чтение осталось бы в непокрываемой части (`provision_domain_inner` требует
+/// keychain и живого SSH), и мутация «читать не оттуда» была бы незаметна.
+fn domain_write_back_body(
+    r: &ProvisionResultOut,
+    domain_row: &serde_json::Value,
+) -> DomainWriteBack {
     let id = r.domain_id.as_str();
+    let previous_status = domain_row.get("status").and_then(json_str);
     DomainWriteBack {
-        status: Some(
-            if r.ssl_issued == Some(true) {
-                DOMAIN_STATUS_ACTIVE
-            } else {
-                DOMAIN_STATUS_SITE_CREATED
-            }
-            .to_string(),
-        ),
+        status: match r.ssl_issued {
+            Some(true) => Some(DOMAIN_STATUS_ACTIVE.to_string()),
+            Some(false) => Some(DOMAIN_STATUS_SITE_CREATED.to_string()),
+            None => (previous_status.as_deref() == Some(DOMAIN_STATUS_FAILED))
+                .then(|| DOMAIN_STATUS_SITE_CREATED.to_string()),
+        },
         site_user: fit_or_omit(id, "site_user", &r.site_user, MAX_SITE_USER),
         site_path: fit_or_omit(id, "site_path", &r.site_path, MAX_SITE_PATH),
         ssl_status: r.ssl_issued.map(|ok| {
@@ -965,11 +977,7 @@ fn log_write_back_failure(kind: &str, r: Result<(), ApiError>) -> bool {
 /// Без `AppHandle` намеренно: событие прогресса шлёт вызывающий, а сюда не
 /// приходит ничего, чего нельзя поднять в тесте, — и тогда проверяется ЭФФЕКТ
 /// (что реально ушло на сервер), а не факт вызова.
-async fn record_provision_failure(
-    api: &ApiClient,
-    domain_id: &str,
-    f: &ProvisionFailure,
-) -> bool {
+async fn record_provision_failure(api: &ApiClient, domain_id: &str, f: &ProvisionFailure) -> bool {
     log_write_back_failure(
         "domain failure",
         api.domain_write_back(domain_id, &domain_failure_write_back_body(f))
@@ -977,14 +985,40 @@ async fn record_provision_failure(
     )
 }
 
+/// Разбор исхода провижининга: что уходит на сервер и что — наружу.
+/// Второй элемент — `true`, если ошибку не удалось записать.
+///
+/// Отдельная функция и без `AppHandle` намеренно, по тому же правилу, что и
+/// `record_provision_failure`: именно ЗДЕСЬ живёт связка «прогон упал → ошибка
+/// уехала в домен», ради которой вся фаза. Оставшись строчкой внутри
+/// `run_provision_domain` (а та требует Tauri-харнесса, которого в крейте нет),
+/// она была бы непокрытой — и мутация «не звать запись» осталась бы зелёной,
+/// как это дважды случалось в фазах 3a и 3b.
+async fn finish_provision(
+    api: &ApiClient,
+    domain_id: &str,
+    outcome: Result<ProvisionResultOut, ProvisionFailure>,
+) -> (Result<ProvisionResultOut, CommandError>, bool) {
+    match outcome {
+        Ok(result) => (Ok(result), false),
+        Err(f) => {
+            let write_back_failed = record_provision_failure(api, domain_id, &f).await;
+            // Наружу — полный текст, включая вывод упавшей команды: он остаётся
+            // на этой машине, и чинить пользователю нечем, кроме него.
+            (Err(f.error), write_back_failed)
+        }
+    }
+}
+
 /// Провижининг домена целиком, с записью провала на сервер.
 ///
-/// Разделено на две функции не ради красоты: раньше `?` уносил управление ДО
-/// блока write-back, поэтому упавший прогон не записывал ничего — «Last error»
-/// в UI был вечным «—», а колонка `last_provision_error`, бейдж `FAILED` и
+/// Разделено на функции не ради красоты: раньше `?` уносил управление ДО блока
+/// write-back, поэтому упавший прогон не записывал ничего — «Last error» в UI
+/// был вечным «—», а колонка `last_provision_error`, бейдж `FAILED` и
 /// CSV-экспорт упавших не могли сработать в принципе. Теперь единственный выход
-/// с ошибкой проходит через `record_provision_failure`, и обойти его нельзя,
-/// не изменив тип.
+/// с ошибкой проходит через `finish_provision`, и обойти его нельзя, не изменив
+/// тип: `provision_domain_inner` отдаёт `ProvisionFailure`, а наружу нужен
+/// `CommandError`.
 pub async fn run_provision_domain(
     app: &AppHandle,
     user_id: &str,
@@ -994,21 +1028,16 @@ pub async fn run_provision_domain(
     cache_path: &Path,
     api: &ApiClient,
 ) -> Result<ProvisionResultOut, CommandError> {
-    match provision_domain_inner(app, user_id, domain_id, site_only, with_db, cache_path, api).await
-    {
-        Ok(result) => Ok(result),
-        Err(f) => {
-            if record_provision_failure(api, domain_id, &f).await {
-                let _ = app.emit(
-                    "provision:progress",
-                    serde_json::json!({ "step": "writeback_failed", "domain_id": domain_id }),
-                );
-            }
-            // Наружу — полный текст, включая вывод упавшей команды: он остаётся
-            // на этой машине, и чинить пользователю нечем, кроме него.
-            Err(f.error)
-        }
+    let outcome =
+        provision_domain_inner(app, user_id, domain_id, site_only, with_db, cache_path, api).await;
+    let (result, write_back_failed) = finish_provision(api, domain_id, outcome).await;
+    if write_back_failed {
+        let _ = app.emit(
+            "provision:progress",
+            serde_json::json!({ "step": "writeback_failed", "domain_id": domain_id }),
+        );
     }
+    result
 }
 
 async fn provision_domain_inner(
@@ -1154,7 +1183,7 @@ async fn provision_domain_inner(
     // Как и аудит, write-back — best-effort: см. `log_write_back_failure`.
     if log_write_back_failure(
         "domain",
-        api.domain_write_back(domain_id, &domain_write_back_body(&result))
+        api.domain_write_back(domain_id, &domain_write_back_body(&result, &domain_row))
             .await,
     ) {
         let _ = app.emit(
@@ -1728,6 +1757,14 @@ pub async fn install_fastpanel(
 mod tests {
     use super::*;
 
+    /// Строка домена из локального кэша с заданным прошлым статусом. Матрица
+    /// «что делать со статусом» — в `a_finished_run_takes_the_domain_out_of_failed`;
+    /// тестам, которым статус безразличен, достаётся `cached("new")` — свежий
+    /// домен, каким его создаёт `POST /domains`.
+    fn cached(status: &str) -> serde_json::Value {
+        serde_json::json!({ "status": status })
+    }
+
     #[test]
     fn tail_lines_returns_whole_output_when_shorter_than_limit() {
         assert_eq!(tail_lines("a\nb\nc", 30), "a\nb\nc");
@@ -1951,7 +1988,8 @@ mod tests {
     // сериализованное тело, а не поля структуры: в сеть уходит именно оно.
     #[test]
     fn domain_write_back_body_never_carries_passwords() {
-        let body = serde_json::to_string(&domain_write_back_body(&full_result())).unwrap();
+        let body =
+            serde_json::to_string(&domain_write_back_body(&full_result(), &cached("new"))).unwrap();
         assert!(!body.contains("dbP4ssw0rd"), "{body}");
         assert!(!body.contains("ftpP4ssw0rd"), "{body}");
         assert!(!body.to_lowercase().contains("password"), "{body}");
@@ -1968,14 +2006,14 @@ mod tests {
     fn domain_write_back_body_omits_db_fields_when_no_database() {
         let mut r = full_result();
         r.db = None;
-        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("new"))).unwrap();
         assert!(!body.contains("db_name"), "{body}");
         assert!(!body.contains("db_user"), "{body}");
     }
 
     #[test]
     fn domain_write_back_body_maps_issued_ssl_to_active() {
-        let b = domain_write_back_body(&full_result());
+        let b = domain_write_back_body(&full_result(), &cached("new"));
         assert_eq!(b.ssl_status.as_deref(), Some("active"));
     }
 
@@ -1984,7 +2022,7 @@ mod tests {
         let mut r = full_result();
         r.ssl_issued = Some(false);
         r.ssl_error = Some("dns gate".into());
-        let b = domain_write_back_body(&r);
+        let b = domain_write_back_body(&r, &cached("new"));
         assert_eq!(b.ssl_status.as_deref(), Some("error"));
     }
 
@@ -1995,7 +2033,7 @@ mod tests {
         let mut r = full_result();
         r.ssl_issued = None;
         r.ssl_error = None;
-        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("new"))).unwrap();
         assert!(!body.contains("ssl_status"), "{body}");
     }
 
@@ -2003,7 +2041,8 @@ mod tests {
     // надо погасить явным null (опущенное поле сервер не тронет).
     #[test]
     fn domain_write_back_body_clears_a_stale_provision_error() {
-        let body = serde_json::to_string(&domain_write_back_body(&full_result())).unwrap();
+        let body =
+            serde_json::to_string(&domain_write_back_body(&full_result(), &cached("new"))).unwrap();
         assert!(body.contains("\"last_provision_error\":null"), "{body}");
     }
 
@@ -2014,7 +2053,7 @@ mod tests {
     fn domain_write_back_body_drops_an_over_long_site_path() {
         let mut r = full_result();
         r.site_path = "/var/www/".to_string() + &"a".repeat(300);
-        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("new"))).unwrap();
         assert!(!body.contains("site_path"), "{body}");
         assert!(body.contains("site_user"), "{body}");
     }
@@ -2192,7 +2231,7 @@ mod tests {
         r.ftp = Some(FtpOut::Exists {
             ftp_user: "u1_ftp".into(),
         });
-        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("new"))).unwrap();
         assert!(body.contains("\"db_name\":\"u1_db\""), "{body}");
         assert!(body.contains("\"db_user\":\"u1_dbu\""), "{body}");
         assert!(!body.to_lowercase().contains("password"), "{body}");
@@ -2261,7 +2300,7 @@ mod tests {
             db_user: "u1_dbu".into(),
             database_exists: Some(false),
         });
-        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("new"))).unwrap();
         assert!(!body.contains("db_name"), "{body}");
         assert!(body.contains("\"db_user\":\"u1_dbu\""), "{body}");
     }
@@ -2276,7 +2315,7 @@ mod tests {
             db_user: "u1_dbu".into(),
             database_exists: None,
         });
-        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("new"))).unwrap();
         assert!(body.contains("\"db_name\":\"u1_db\""), "{body}");
     }
 
@@ -2749,9 +2788,15 @@ mod tests {
 
     // Без этого домен, помеченный `failed`, оставался бы красным навсегда:
     // ошибку удачный прогон гасит, а статус — нет.
+    //
+    // Четвёртый случай — обратная половина третьего, и без него зелёными
+    // остались бы обе мутации сразу: «при `None` всегда `site_created`» (тогда
+    // site-only повтор понижал бы живой `active`) и «при `None` не трогать
+    // никогда» (тогда `failed` не гасился бы). Пары «гасим»/«не трогаем»
+    // различают их поимённо.
     #[test]
     fn a_finished_run_takes_the_domain_out_of_failed() {
-        let b = domain_write_back_body(&full_result());
+        let b = domain_write_back_body(&full_result(), &cached("new"));
         assert_eq!(b.status.as_deref(), Some("active"));
         assert_eq!(b.last_provision_error, Some(None));
 
@@ -2759,18 +2804,27 @@ mod tests {
         let mut r = full_result();
         r.ssl_issued = Some(false);
         assert_eq!(
-            domain_write_back_body(&r).status.as_deref(),
+            domain_write_back_body(&r, &cached("new")).status.as_deref(),
             Some("site_created")
         );
 
-        // SSL не пробовали (`site_only`) — сказать про него нечего, но статус
-        // всё равно обязан перестать быть `failed`.
+        // SSL не пробовали (`site_only`), а домен помечен упавшим: гасим —
+        // ошибку этот прогон стирает, и красный бейдж при пустой ошибке лгал бы.
         let mut r = full_result();
         r.ssl_issued = None;
         assert_eq!(
-            domain_write_back_body(&r).status.as_deref(),
+            domain_write_back_body(&r, &cached("failed"))
+                .status
+                .as_deref(),
             Some("site_created")
         );
+
+        // Тот же site-only прогон по живому домену статус НЕ трогает: знания
+        // про SSL у него нет, а `site_created` понизил бы настоящий `active`.
+        // Ключ `"status"` целиком, а не подстрока: `ssl_status` содержит её и
+        // спрятал бы разницу, окажись он в теле.
+        let body = serde_json::to_string(&domain_write_back_body(&r, &cached("active"))).unwrap();
+        assert!(!body.contains("\"status\""), "{body}");
     }
 
     // ЭФФЕКТ ради которого фаза: упавший прогон реально уходит на сервер — в
@@ -2814,6 +2868,11 @@ mod tests {
     // это флаг наружу, а не подмена причины: `?` здесь превратил бы «ssh: auth
     // failed» в «write-back failed», то есть потерял бы ту самую ошибку, ради
     // которой всё.
+    //
+    // Через `finish_provision`, а не напрямую через `record_provision_failure`:
+    // флаг должен ДОЕХАТЬ до вызывающего (там он поднимает событие
+    // `writeback_failed`), и на прямом вызове мутация «вернуть `false` всегда»
+    // осталась бы зелёной — успешная запись тоже даёт `false`.
     #[tokio::test]
     async fn a_failed_write_back_of_the_failure_is_a_flag_not_a_new_error() {
         use wiremock::matchers::{method, path};
@@ -2827,8 +2886,80 @@ mod tests {
             .await;
 
         let api = ApiClient::new(format!("{}/api", srv.uri()));
-        let f = ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth);
+        let outcome = Err(ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth));
 
-        assert!(record_provision_failure(&api, "42", &f).await);
+        let (result, write_back_failed) = finish_provision(&api, "42", outcome).await;
+
+        assert!(write_back_failed, "провал записи не доехал до вызывающего");
+        // И причина осталась прежней: «write-back failed» её не заменил.
+        match result {
+            Err(e) => assert_eq!(e.to_string(), "ssh: auth failed"),
+            Ok(_) => panic!("провал прочитался как успех"),
+        }
+    }
+
+    // Та самая связка, ради которой фаза: ошибка из `provision_domain_inner`
+    // обязана превратиться в запись на сервере. Ревьюер заменил вызов на
+    // `if false && record_provision_failure(...)` — и все 176 тестов остались
+    // зелёными, потому что связка жила строчкой в функции, которую не поднять
+    // без Tauri-харнесса. Теперь она в `finish_provision`, и тест смотрит на
+    // ушедший запрос.
+    #[tokio::test]
+    async fn a_failed_outcome_turns_into_a_write_back_and_keeps_the_original_error() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .and(body_json(serde_json::json!({
+                "status": "failed",
+                "last_provision_error":
+                    "provision failed at create_site: the command failed on the server",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 42})))
+            .expect(1)
+            .named("провал прогона доезжает до PUT /domains/42")
+            .mount(&srv)
+            .await;
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        let outcome = Err(ProvisionFailure::at(
+            STEP_CREATE_SITE,
+            SshError::Session(format!("create_site exit 1: --password={LEAKED}")),
+        ));
+
+        let (result, write_back_failed) = finish_provision(&api, "42", outcome).await;
+
+        assert!(!write_back_failed);
+        // Наружу — исходная ошибка целиком: она нужна пользователю, чтобы
+        // чинить, и подменять её обезличенным серверным текстом нельзя.
+        match result {
+            Err(e) => assert!(e.to_string().contains(LEAKED), "{e}"),
+            Ok(_) => panic!("провал прочитался как успех"),
+        }
+    }
+
+    // Обратная половина: удачный прогон НИЧЕГО не пишет через этот путь (его
+    // write-back — свой, внутри `provision_domain_inner`). Без этого мутация
+    // «писать провал всегда» осталась бы зелёной.
+    #[tokio::test]
+    async fn a_finished_outcome_writes_no_failure_at_all() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .named("удачный прогон не шлёт запись провала")
+            .mount(&srv)
+            .await;
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        let (result, write_back_failed) = finish_provision(&api, "42", Ok(full_result())).await;
+
+        assert!(!write_back_failed);
+        assert!(result.is_ok());
     }
 }
