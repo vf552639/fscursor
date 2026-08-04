@@ -1,38 +1,47 @@
 """Путь записи секрета: плейнтекст → блоб → ссылка на блоб у сущности.
 
-Проверка идёт **по БД и по расшифровке**, а не по тексту ответа. В Спринте 3
-ZK-тест утверждал `secret not in response.text` и был зелёным только потому,
-что в схеме ответа не было поля под секрет: он остался бы зелёным и в мире, где
-рядом живёт плейнтекст-колонка и в неё только что записали пароль. Поэтому
-здесь: строка `blob_storage`, строка `servers` целиком (по всем колонкам
-маппера, а не по паре запомнившихся имён) и обратное расшифрование блоба.
+Проверка идёт **по БД**, а не по тексту ответа. В Спринте 3 ZK-тест утверждал
+`secret not in response.text` и был зелёным только потому, что в схеме ответа
+не было поля под секрет: он остался бы зелёным и в мире, где рядом живёт
+плейнтекст-колонка и в неё только что записали пароль. Поэтому здесь смотрим
+строку `blob_storage` и строку `servers` целиком — по всем колонкам маппера, а
+не по паре запомнившихся имён.
 
-Шифруем PyNaCl'ом — это та же libsodium `crypto_secretbox_easy`
-(XSalsa20-Poly1305) и та же раскладка `nonce (24) || mac (16) || ciphertext`,
-что у десктопа (`desktop/src-tauri/src/crypto/aead.rs`). Независимая
-реализация того же примитива заодно перепроверяет раскладку.
+Чтобы этот перебор мог провалиться, плейнтекст-пароль **кладётся в тело
+запроса**. Без него ни одна правка сервера физически не смогла бы посадить
+секрет в колонку, и ассерт был бы нефальсифицируем — в том числе ровно тогда,
+когда завтра заведут ту колонку, ради которой он написан.
+
+Криптографии здесь намеренно нет. Блоб — это `os.urandom` нужной длины: всё,
+что бэкенд-тест вправе утверждать, — что сервер хранит и отдаёт непрозрачные
+байты, ничего в них не понимая. Половина «расшифровывается обратно в исходный
+пароль» доказывается там, где ключ реально живёт, — в Rust
+(`commands/creds.rs`, `sync/http.rs`, `commands/vault.rs`). Тащить в бэкенд
+libsodium-биндинг было бы вдвойне плохо: ассерт вышел бы круговым (тест
+расшифровывает то, что сам же и зашифровал, о сервере не узнавая ничего), а
+`requirements.txt` кормит прод-образ — примитив расшифровки оказался бы в одном
+`import` от сервиса, чей весь контракт «он не умеет расшифровывать».
 
 Чего этот файл НЕ проверяет: что плейнтекст-поле `ssh_password` в теле запроса
-отвергается. Сегодня схемы живут с `extra="ignore"` и молча его глотают;
+**отвергается**. Сегодня схемы живут с `extra="ignore"` и молча его глотают;
 громкий отказ (`extra="forbid"`) — фаза 2 плана
-`plans/2026-08-04-sprint4-secret-write-path.md`.
+`plans/2026-08-04-sprint4-secret-write-path.md`. Здесь утверждается только, что
+поле никуда не приземляется.
 
 Где кончается автоматика: доказано всё до «десктоп получил обратно исходный
-пароль» (вторая половина — в Rust-тестах `sync/http.rs` и `commands/creds.rs`).
-Собственно **успешный SSH-коннект этим паролем** автотестом не проверяется —
-для него нужен живой сервер, это ручной шаг из чек-листа приёмки в конце
-`plans/2026-08-04-sprint4-secret-write-path.md`. Имитацию SSH за приёмку не
-выдаём.
+пароль». Собственно **успешный SSH-коннект этим паролем** автотестом не
+проверяется — для него нужен живой сервер, это ручной шаг из чек-листа приёмки
+в конце `plans/2026-08-04-sprint4-secret-write-path.md`. Имитацию SSH за
+приёмку не выдаём.
 """
 
 import base64
+import os
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from nacl.secret import SecretBox
-from nacl.utils import random as nacl_random
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select, update
@@ -45,20 +54,22 @@ from app.models.server import Server
 
 BLOB_KIND = "ssh_password"
 
+# Раскладка десктопного `crypto::aead`: nonce (24) || mac (16) || ciphertext.
+NONCE_LEN = 24
+TAG_LEN = 16
+
 
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 
-def seal(plaintext: str, key: bytes) -> bytes:
-    """Зашифровать так же, как это делает `vault_put_blob` в десктопе.
+def opaque_blob(plaintext: str) -> bytes:
+    """Блоб такого же размера, какой прислал бы десктоп, — и не более того.
 
-    `SecretBox.encrypt` возвращает `nonce || secretbox_easy(...)` — байт в байт
-    та раскладка, которую собирает `crypto::aead::encrypt`. Разойдись они —
-    десктоп не расшифровал бы то, что лежит на сервере, а тест бы этого не
-    заметил.
+    Случайные байты, а не шифротекст: бэкенду нечем их отличить, и в этом вся
+    суть — он обязан хранить и возвращать их байт в байт, не понимая ничего.
     """
-    return bytes(SecretBox(key).encrypt(plaintext.encode(), nacl_random(SecretBox.NONCE_SIZE)))
+    return os.urandom(NONCE_LEN + TAG_LEN + len(plaintext.encode()))
 
 
 async def _register_and_login(client: AsyncClient, email: str) -> None:
@@ -119,8 +130,7 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
     падала с «server has no ssh_password_blob_id».
     """
     secret = f"S3cr3t-{uuid.uuid4().hex}"
-    key = nacl_random(SecretBox.KEY_SIZE)
-    ciphertext = seal(secret, key)
+    ciphertext = opaque_blob(secret)
     blob_id = str(uuid.uuid4())
     server_ids: list[int] = []
 
@@ -139,6 +149,11 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
                     "name": f"srv-{uuid.uuid4().hex[:6]}",
                     "ip_address": "203.0.113.20",
                     "ssh_password_blob_id": blob_id,
+                    # Взводим ловушку: старые формы слали пароль вот так. Пока
+                    # схема `extra="ignore"`, сервер его молча глотает — и
+                    # перебор колонок ниже проверяет, что глотает бесследно.
+                    # Без этой строки ассерт нечем провалить.
+                    "ssh_password": secret,
                 },
             )
             assert r.status_code == 201, r.text
@@ -172,14 +187,12 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
                 ]
                 assert leaked == [], f"плейнтекст виден в колонках servers: {leaked}"
 
-            # Обратный ход: то, что сервер отдаёт по GET, расшифровывается
-            # тем же ключом в исходный пароль. Иначе хранилище «непрозрачно»
-            # и для владельца тоже.
+            # Обратный ход: GET отдаёт ровно те же байты. Переставь сервер в
+            # них хоть один байт «для нормализации» — десктоп получил бы
+            # `AeadError::Decrypt` вместо пароля.
             r = await c.get(f"/api/blobs/{blob_id}")
             assert r.status_code == 200, r.text
-            returned = base64.b64decode(r.json()["ciphertext_b64"])
-            assert returned == ciphertext
-            assert SecretBox(key).decrypt(returned).decode() == secret
+            assert base64.b64decode(r.json()["ciphertext_b64"]) == ciphertext
         finally:
             await _purge(server_ids, [blob_id])
 
@@ -194,7 +207,6 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
     расшифровывать.
     """
     secret = f"S3cr3t-{uuid.uuid4().hex}"
-    key = nacl_random(SecretBox.KEY_SIZE)
     blob_id = str(uuid.uuid4())
     server_ids: list[int] = []
 
@@ -203,13 +215,22 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
         try:
             r = await c.put(
                 f"/api/blobs/{blob_id}",
-                json={"blob_kind": BLOB_KIND, "ciphertext_b64": b64(seal(secret, key))},
+                json={"blob_kind": BLOB_KIND, "ciphertext_b64": b64(opaque_blob(secret))},
             )
             assert r.status_code == 200, r.text
 
             base = {"ip_address": "203.0.113.21"}
+            # Плейнтекст-пароль есть, ссылки на блоб нет: `has_ssh` обязан
+            # остаться False. Иначе UI пообещал бы SSH там, где десктопу
+            # нечего расшифровывать, — и пользователь узнал бы об этом на
+            # середине provision.
             r = await c.post(
-                "/api/servers", json={**base, "name": f"srv-no-{uuid.uuid4().hex[:6]}"}
+                "/api/servers",
+                json={
+                    **base,
+                    "name": f"srv-no-{uuid.uuid4().hex[:6]}",
+                    "ssh_password": secret,
+                },
             )
             assert r.status_code == 201, r.text
             without_blob = r.json()["id"]
@@ -229,7 +250,8 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
             server_ids.append(with_blob)
             assert r.json()["has_ssh"] is True
 
-            # Отличие между двумя серверами ровно одно — и оно в БД.
+            # Причина расхождения — в БД, а не в ответе: у одного ссылка на
+            # блоб есть, у другого NULL.
             async with AsyncSessionLocal() as s:
                 rows = {
                     row.id: row.ssh_password_blob_id

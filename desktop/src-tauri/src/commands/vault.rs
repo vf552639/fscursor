@@ -26,6 +26,27 @@ pub async fn vault_decrypt_blob(
     Ok(B64.encode(&plaintext))
 }
 
+/// Зашифровать секрет и отправить его блобом — единственное место, где
+/// плейнтекст становится шифротекстом перед выходом с машины.
+///
+/// Вынесено из `vault_put_blob` ровно затем, чтобы этот шаг можно было
+/// проверить тестом: сама команда приварена к keychain и `State<ApiClient>`, и
+/// пока связка `encrypt` → `blob_put` жила внутри неё, замена шифрования на
+/// `pt.clone()` не роняла ни одного теста — то есть SSH-пароли всех
+/// пользователей могли уехать на сервер плейнтекстом при зелёном наборе.
+pub(crate) async fn put_blob_encrypted(
+    api: &ApiClient,
+    key: &[u8; 32],
+    blob_id: &str,
+    blob_kind: &str,
+    plaintext: &[u8],
+) -> Result<(), CommandError> {
+    let ct = aead::encrypt(plaintext, key)?;
+    api.blob_put(blob_id, blob_kind, &ct)
+        .await
+        .map_err(|e| CommandError::Api(e.to_string()))
+}
+
 #[tauri::command]
 pub async fn vault_put_blob(
     user_id: String,
@@ -40,11 +61,7 @@ pub async fn vault_put_blob(
     let pt = B64
         .decode(plaintext_b64.as_bytes())
         .map_err(|_| CommandError::Aead("b64".into()))?;
-    let ct = aead::encrypt(&pt, &key)?;
-    api.blob_put(&blob_id, &blob_kind, &ct)
-        .await
-        .map_err(|e| CommandError::Api(e.to_string()))?;
-    Ok(())
+    put_blob_encrypted(&api, &key, &blob_id, &blob_kind, &pt).await
 }
 
 #[tauri::command]
@@ -52,4 +69,65 @@ pub async fn vault_delete_blob(blob_id: String, api: State<'_, ApiClient>) -> Re
     api.blob_delete(&blob_id)
         .await
         .map_err(|e| CommandError::Api(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Инвариант zero-knowledge, записанный как тест: на входе плейнтекст, на
+    /// проводе — шифротекст, и развернуть его может только держатель ключа.
+    ///
+    /// Смотрим не на форму вызова, а на то, что реально легло в тело запроса:
+    /// вытаскиваем body из `wiremock`, декодируем base64 и разбираем байты.
+    /// Тест вида «`blob_put` вызвался» остался бы зелёным и в мире, где в
+    /// `ciphertext_b64` уехал пароль открытым текстом, — а после этой ошибки
+    /// сервер видит секреты всех пользователей.
+    #[tokio::test]
+    async fn put_blob_encrypted_puts_ciphertext_on_the_wire_and_only_the_key_undoes_it() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/blobs/b-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "b-1",
+                "blob_kind": "ssh_password",
+                "ciphertext_b64": "",
+                "version": 1,
+                "updated_at": "2026-08-04T00:00:00Z",
+                "deleted": false,
+            })))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let key = [42u8; aead::KEY_LEN];
+        let plaintext = b"correct horse battery staple";
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        put_blob_encrypted(&api, &key, "b-1", "ssh_password", plaintext)
+            .await
+            .unwrap();
+
+        let reqs = srv.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["blob_kind"], "ssh_password");
+        let wire = B64
+            .decode(body["ciphertext_b64"].as_str().unwrap())
+            .expect("ciphertext_b64 must be base64");
+
+        assert!(
+            !wire.windows(plaintext.len()).any(|w| w == plaintext),
+            "плейнтекст найден в теле запроса"
+        );
+        // Длина ровно «плейнтекст + обвязка»: сойдись она с длиной плейнтекста
+        // — шифрования не было; разойдись с обвязкой — раскладка уехала, и
+        // десктоп не расшифрует то, что сам же и прислал.
+        assert_eq!(wire.len(), plaintext.len() + aead::NONCE_LEN + aead::TAG_LEN);
+        assert_eq!(aead::decrypt(&wire, &key).unwrap(), plaintext);
+        assert!(aead::decrypt(&wire, &[1u8; aead::KEY_LEN]).is_err());
+    }
 }
