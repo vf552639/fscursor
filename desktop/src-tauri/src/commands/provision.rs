@@ -58,6 +58,66 @@ pub struct FtpInfoOut {
     pub ftp_password: String,
 }
 
+/// Что стало с одним доменом массового прогона.
+///
+/// Три состояния, а не два: «не запускался» — это не «упал». Прогон, оборванный
+/// на середине, обязан сказать, какие домены уже сделаны (повторять их незачем),
+/// какой домен свалил прогон и до каких дело вообще не дошло — иначе повтор
+/// приходится запускать вслепую по всему набору.
+#[derive(Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum BulkItemOutcome {
+    /// Домен отработал. `result` несёт пароли FTP (и БД, если бы она была) —
+    /// они существуют ТОЛЬКО здесь, поэтому отбрасывать их нельзя.
+    Done { result: ProvisionResultOut },
+    /// Домен упал. Текст ошибки — тот же, что вернул бы одиночный provision.
+    Failed { error: String },
+    /// До домена прогон не дошёл: оборвался раньше либо не стартовал вовсе.
+    Skipped,
+}
+
+/// Строка отчёта массового прогона. `domain_id` дублирует `result.domain_id`
+/// намеренно: у `Failed`/`Skipped` результата нет, а назвать домен надо всё
+/// равно — иначе отчёт не сопоставить со списком, который просили провижинить.
+#[derive(Serialize)]
+pub struct BulkProvisionItem {
+    pub domain_id: String,
+    #[serde(flatten)]
+    pub outcome: BulkItemOutcome,
+}
+
+/// Исход массового прогона целиком.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkRunStatus {
+    /// Все домены отработали.
+    Ok,
+    /// Прогон оборвался (или не смог записать финальный статус). Часть доменов
+    /// при этом могла отработать — их результаты лежат в `items`.
+    Failed,
+    /// Прогон с этим ключом идёт или уже прошёл. Результатов у нас нет и быть
+    /// не может: пароли показываются один раз и нигде не сохраняются.
+    AlreadyRan,
+}
+
+/// Отчёт `provision_bulk`.
+///
+/// Раньше команда отдавала один `String` — ключ идемпотентности, — а `Ok`
+/// каждого домена отбрасывала. На каждом не-`site_only` прогоне создаётся
+/// FTP-аккаунт, пароль которого возвращается только в этом ответе, так что
+/// массовый прогон оставлял пользователя с N аккаунтами, войти в которые он не
+/// сможет никогда. Поэтому наружу уходит отчёт по каждому домену.
+#[derive(Serialize)]
+pub struct BulkProvisionOut {
+    pub idempotency_key: String,
+    pub status: BulkRunStatus,
+    /// Причина обрыва — только при `status: failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// По строке на каждый домен из запроса, в том же порядке.
+    pub items: Vec<BulkProvisionItem>,
+}
+
 #[derive(Serialize)]
 pub struct InstallFastpanelResult {
     pub server_id: String,
@@ -757,6 +817,144 @@ pub async fn provision_domain(
     .await
 }
 
+/// Массовый прогон поверх произвольного исполнителя одного домена.
+///
+/// Вынесено из команды не ради красоты: главный вопрос этой функции — «что
+/// вернуть, когда прогон оборвался на середине» — проверяется тестом по
+/// эффекту (что пришло наружу и что легло в `bulk_runs`), а поднять ради этого
+/// живой SSH нельзя.
+///
+/// Возвращает `Err` только там, где ничего ещё не выполнялось (не прочитали или
+/// не смогли открыть строку прогона). Как только первый домен запущен, любой
+/// исход — это `Ok(BulkProvisionOut)`: результаты уже созданных FTP-аккаунтов
+/// дороже, чем удобство `?` у вызывающего.
+async fn run_bulk_provision<F, Fut>(
+    conn: &mut rusqlite::Connection,
+    key: &str,
+    domain_ids: &[String],
+    mut run_one: F,
+    emit: impl Fn(&str, &str),
+) -> Result<BulkProvisionOut, CommandError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<ProvisionResultOut, CommandError>>,
+{
+    let skipped_all = || {
+        domain_ids
+            .iter()
+            .map(|d| BulkProvisionItem {
+                domain_id: d.clone(),
+                outcome: BulkItemOutcome::Skipped,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if let Some((st, _)) =
+        cache::bulk_run_status(conn, key).map_err(|e| CommandError::Api(e.to_string()))?
+    {
+        if st == "running" || st == "done" {
+            // Раньше здесь возвращался голый ключ, и вызывающий не мог отличить
+            // «всё прошло» от «прогон уже был, результатов у меня нет». Пароли
+            // показываются ровно один раз и нигде не хранятся, так что второй
+            // раз их не покажет никто — это надо сказать словами, а не выдать
+            // за пустой успех.
+            return Ok(BulkProvisionOut {
+                idempotency_key: key.to_string(),
+                status: BulkRunStatus::AlreadyRan,
+                error: None,
+                items: skipped_all(),
+            });
+        }
+    }
+    cache::bulk_run_upsert_start(
+        conn,
+        key,
+        "provision_bulk",
+        &serde_json::to_string(domain_ids).unwrap_or_default(),
+    )
+    .map_err(|e| CommandError::Api(e.to_string()))?;
+
+    let mut items: Vec<BulkProvisionItem> = Vec::with_capacity(domain_ids.len());
+    for (i, did) in domain_ids.iter().enumerate() {
+        emit("bulk_item", did);
+        // Массовый прогон — без БД: чекбокса «создать базу» у массового пути нет,
+        // а решить за пользователя значит создать артефакт, которого он не просил.
+        match run_one(did.clone()).await {
+            Ok(result) => items.push(BulkProvisionItem {
+                domain_id: did.clone(),
+                outcome: BulkItemOutcome::Done { result },
+            }),
+            Err(e) => {
+                // Останавливаемся на первой ошибке, а не идём по списку дальше.
+                // Причина: почти всякий провал массового прогона системный —
+                // запертый keychain, недоступный сервер, протухшие креды, — и
+                // тогда «идти дальше» означает N × минуты SSH-таймаутов, прежде
+                // чем пользователь узнает хоть что-то. Цена решения снята:
+                // оставшиеся домены помечены `Skipped` поимённо, а всё, что
+                // успело создаться, уезжает наружу вместе с ошибкой — повтор
+                // запускается ровно по нужному хвосту.
+                //
+                // Секретов в тексте нет: пароль БД гасит `db_error`, вывод
+                // команд с паролями в argv — `opaque_exit`, SSL до ошибки не
+                // доходит вовсе.
+                let detail = format!("failed on domain {did}: {e}");
+                items.push(BulkProvisionItem {
+                    domain_id: did.clone(),
+                    outcome: BulkItemOutcome::Failed {
+                        error: e.to_string(),
+                    },
+                });
+                for rest in &domain_ids[i + 1..] {
+                    items.push(BulkProvisionItem {
+                        domain_id: rest.clone(),
+                        outcome: BulkItemOutcome::Skipped,
+                    });
+                }
+                // Строку нельзя оставить в `running`: guard выше на повторе
+                // вернул бы `already_ran`, не сделав ничего, — пользователь жмёт
+                // «повторить» и не получает ничего. Помечаем прогон failed,
+                // чтобы повтор был возможен.
+                if let Err(ce) = cache::bulk_run_fail(conn, key, &detail) {
+                    tracing::warn!(target: "provision", "could not mark bulk run failed: {ce}");
+                }
+                emit("bulk_failed", did);
+                return Ok(BulkProvisionOut {
+                    idempotency_key: key.to_string(),
+                    status: BulkRunStatus::Failed,
+                    error: Some(detail),
+                    items,
+                });
+            }
+        }
+    }
+    if let Err(e) = cache::bulk_run_complete(conn, key, "ok") {
+        // Тот же капкан, что и в цикле: не записав финальный статус, мы оставим
+        // строку в `running`, и повтор вернёт `already_ran`, ничего не сделав.
+        // Все домены при этом отработали — помечаем прогон failed сознательно:
+        // повторный прогон по большей части идемпотентен (site_exists,
+        // ssl_exists), а навсегда залипший `running` не чинится ничем.
+        //
+        // Но результаты при этом НЕ теряем: раньше здесь стоял `return Err`, и
+        // сбой записи статуса уносил пароли всех отработавших доменов.
+        tracing::warn!(target: "provision", "could not mark bulk run done: {e}");
+        let _ = cache::bulk_run_fail(conn, key, "all domains done, status write failed");
+        return Ok(BulkProvisionOut {
+            idempotency_key: key.to_string(),
+            status: BulkRunStatus::Failed,
+            error: Some(format!(
+                "all domains finished, but the run status could not be saved: {e}"
+            )),
+            items,
+        });
+    }
+    Ok(BulkProvisionOut {
+        idempotency_key: key.to_string(),
+        status: BulkRunStatus::Ok,
+        error: None,
+        items,
+    })
+}
+
 #[tauri::command]
 pub async fn provision_bulk(
     app: AppHandle,
@@ -764,73 +962,40 @@ pub async fn provision_bulk(
     domain_ids: Vec<String>,
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
-) -> Result<String, CommandError> {
+) -> Result<BulkProvisionOut, CommandError> {
     let key = idempotency_key("provision_bulk", &domain_ids);
     let cache_path = cache_path(&handle)?;
     let mut mk = keychain::load_master_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
-    let conn = cache::open(&cache_path, &mk).map_err(|e| CommandError::Api(e.to_string()))?;
+    // `mut` и передача по `&mut` — не стиль: `&Connection` не `Send`, а фьючер
+    // Tauri-команды обязан быть `Send`. `&mut Connection` — `Send`, потому что
+    // `Connection: Send`.
+    let mut conn = cache::open(&cache_path, &mk).map_err(|e| CommandError::Api(e.to_string()))?;
     // Ключ нужен ровно на открытие кэша. Дальше идёт цикл на N × минуты (для
     // настоящего bulk — часы), а `run_provision_domain` внутри гасит свою копию
     // за секунды — держать здесь ещё одну всё это время бессмысленно.
     mk.zeroize();
 
-    if let Some((st, _)) =
-        cache::bulk_run_status(&conn, &key).map_err(|e| CommandError::Api(e.to_string()))?
-    {
-        if st == "running" || st == "done" {
-            return Ok(key);
-        }
-    }
-    cache::bulk_run_upsert_start(
-        &conn,
+    let app_ref = &app;
+    let user_ref = user_id.as_str();
+    let path_ref = cache_path.as_path();
+    let api_ref: &ApiClient = &api;
+    run_bulk_provision(
+        &mut conn,
         &key,
-        "provision_bulk",
-        &serde_json::to_string(&domain_ids).unwrap_or_default(),
-    )
-    .map_err(|e| CommandError::Api(e.to_string()))?;
-
-    for did in &domain_ids {
-        let _ = app.emit(
-            "provision:progress",
-            serde_json::json!({ "step": "bulk_item", "domain_id": did }),
-        );
-        // Массовый прогон — без БД: пароли БД возвращаются только в ответе на
-        // одиночный provision, а bulk отдаёт наружу лишь ключ идемпотентности.
-        //
-        // Ошибку нельзя просто пробросить: строка осталась бы в `running`, и
-        // guard выше на повторе вернул бы этот же ключ, не сделав ничего, —
-        // пользователь жмёт «повторить», видит успех и не получает ничего.
-        // Помечаем прогон failed, чтобы повтор был возможен, и только потом
-        // отдаём ошибку.
-        if let Err(e) =
-            run_provision_domain(&app, &user_id, did, false, false, &cache_path, &api).await
-        {
-            // Секретов в тексте нет: пароль БД гасит `db_error`, вывод команд с
-            // паролями в argv — `opaque_exit`, SSL до ошибки не доходит вовсе.
-            let detail = format!("failed on domain {did}: {e}");
-            if let Err(ce) = cache::bulk_run_fail(&conn, &key, &detail) {
-                tracing::warn!(target: "provision", "could not mark bulk run failed: {ce}");
-            }
+        &domain_ids,
+        move |did: String| async move {
+            run_provision_domain(app_ref, user_ref, &did, false, false, path_ref, api_ref).await
+        },
+        |step, did| {
             let _ = app.emit(
                 "provision:progress",
-                serde_json::json!({ "step": "bulk_failed", "domain_id": did }),
+                serde_json::json!({ "step": step, "domain_id": did }),
             );
-            return Err(e);
-        }
-    }
-    if let Err(e) = cache::bulk_run_complete(&conn, &key, "ok") {
-        // Тот же капкан, что и в цикле: не записав финальный статус, мы оставим
-        // строку в `running`, и повтор вернёт ключ, ничего не сделав. Все домены
-        // при этом отработали — помечаем прогон failed сознательно: повторный
-        // прогон по большей части идемпотентен (site_exists, ssl_exists), а
-        // навсегда залипший `running` не чинится ничем.
-        tracing::warn!(target: "provision", "could not mark bulk run done: {e}");
-        let _ = cache::bulk_run_fail(&conn, &key, "all domains done, status write failed");
-        return Err(CommandError::Api(e.to_string()));
-    }
-    Ok(key)
+        },
+    )
+    .await
 }
 
 fn idempotency_key(action: &str, domain_ids: &[String]) -> String {
@@ -1446,5 +1611,218 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["ftp"]["ftp_user"], "fu");
         assert_eq!(v["ftp"]["ftp_password"], "fp");
+    }
+
+    // ---- массовый прогон ----------------------------------------------------
+
+    /// Результат «как из настоящего прогона»: с FTP-аккаунтом и его паролем.
+    /// Именно он на каждом не-`site_only` домене создаётся на сервере и именно
+    /// он существует в единственном экземпляре.
+    fn fake_result(domain_id: &str) -> ProvisionResultOut {
+        ProvisionResultOut {
+            domain_id: domain_id.into(),
+            site_user: format!("site_{domain_id}"),
+            site_path: format!("/var/www/site_{domain_id}"),
+            ssl_issued: Some(true),
+            ssl_error: None,
+            db: None,
+            ftp: Some(FtpInfoOut {
+                ftp_user: format!("ftp_{domain_id}"),
+                ftp_password: format!("PW-{domain_id}"),
+            }),
+        }
+    }
+
+    fn open_cache(dir: &std::path::Path) -> rusqlite::Connection {
+        cache::open(&dir.join("cache.db"), &[9u8; 32]).unwrap()
+    }
+
+    /// Пароль FTP домена из отчёта — `None`, если домен не отработал.
+    fn ftp_password_of(out: &BulkProvisionOut, domain_id: &str) -> Option<String> {
+        out.items.iter().find(|i| i.domain_id == domain_id).and_then(
+            |i| match &i.outcome {
+                BulkItemOutcome::Done { result } => {
+                    result.ftp.as_ref().map(|f| f.ftp_password.clone())
+                }
+                _ => None,
+            },
+        )
+    }
+
+    fn outcome_name(out: &BulkProvisionOut, domain_id: &str) -> &'static str {
+        match out
+            .items
+            .iter()
+            .find(|i| i.domain_id == domain_id)
+            .map(|i| &i.outcome)
+        {
+            Some(BulkItemOutcome::Done { .. }) => "done",
+            Some(BulkItemOutcome::Failed { .. }) => "failed",
+            Some(BulkItemOutcome::Skipped) => "skipped",
+            None => "missing",
+        }
+    }
+
+    // Провал на пятом домене не имеет права унести пароли первых четырёх: их
+    // FTP-аккаунты на сервере УЖЕ созданы, а пароли существуют только в этих
+    // ответах. Раньше цикл делал `return Err(e)`, и всё созданное пропадало.
+    #[tokio::test]
+    async fn partial_failure_keeps_the_results_of_the_domains_that_already_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let ids: Vec<String> = (1..=5).map(|i| i.to_string()).collect();
+
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-partial",
+            &ids,
+            |did: String| async move {
+                if did == "3" {
+                    Err(CommandError::Api("ssh: connect: refused".into()))
+                } else {
+                    Ok(fake_result(&did))
+                }
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        // Пароли отработавших доменов — наружу, поимённо.
+        assert_eq!(ftp_password_of(&out, "1").as_deref(), Some("PW-1"));
+        assert_eq!(ftp_password_of(&out, "2").as_deref(), Some("PW-2"));
+        // Упавший домен назван, и назван причиной, а не пустотой.
+        assert_eq!(outcome_name(&out, "3"), "failed");
+        // «Не запускался» отличимо от «упал» — иначе повтор идёт вслепую.
+        assert_eq!(outcome_name(&out, "4"), "skipped");
+        assert_eq!(outcome_name(&out, "5"), "skipped");
+        assert_eq!(out.status, BulkRunStatus::Failed);
+        assert!(out.error.as_deref().unwrap().contains("domain 3"), "{:?}", out.error);
+
+        // И прогон остался перезапускаемым: `running`/`done` заставили бы повтор
+        // вернуть `already_ran`, не сделав ничего.
+        let (st, detail) = cache::bulk_run_status(&conn, "k-partial").unwrap().unwrap();
+        assert_eq!(st, "failed");
+        assert!(detail.contains("domain 3"), "{detail}");
+    }
+
+    // Прогон, который уже идёт (или прошёл), обязан сказать это словами.
+    // Пустой успех означал бы: пользователь видит «готово», FTP-аккаунты
+    // созданы, паролей нет, и второй раз их не покажет никто.
+    #[tokio::test]
+    async fn a_run_that_already_happened_says_so_and_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let ids: Vec<String> = vec!["1".into(), "2".into()];
+        cache::bulk_run_upsert_start(&conn, "k-dup", "provision_bulk", "[\"1\",\"2\"]").unwrap();
+
+        let mut ran = 0;
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-dup",
+            &ids,
+            |did: String| {
+                ran += 1;
+                async move { Ok(fake_result(&did)) }
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ran, 0, "второй прогон не имеет права лезть по SSH");
+        assert_eq!(out.status, BulkRunStatus::AlreadyRan);
+        assert_eq!(outcome_name(&out, "1"), "skipped");
+        assert_eq!(outcome_name(&out, "2"), "skipped");
+        // И ни одного «результата», который можно принять за показанный пароль.
+        assert!(out.items.iter().all(|i| ftp_password_of(&out, &i.domain_id).is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_clean_run_returns_every_password_and_marks_the_run_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let ids: Vec<String> = vec!["7".into(), "8".into()];
+
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-ok",
+            &ids,
+            |did: String| async move { Ok(fake_result(&did)) },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.status, BulkRunStatus::Ok);
+        assert_eq!(ftp_password_of(&out, "7").as_deref(), Some("PW-7"));
+        assert_eq!(ftp_password_of(&out, "8").as_deref(), Some("PW-8"));
+        assert_eq!(cache::bulk_run_status(&conn, "k-ok").unwrap().unwrap().0, "done");
+    }
+
+    // Последний шаг — запись финального статуса — тоже может упасть. Раньше он
+    // отвечал `Err`, то есть сбой SQLite уносил пароли ВСЕХ отработавших
+    // доменов. Домены при этом сделаны, аккаунты созданы.
+    #[tokio::test]
+    async fn a_failed_status_write_still_returns_the_passwords() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let saboteur = open_cache(dir.path());
+        let ids: Vec<String> = vec!["1".into()];
+
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-nostatus",
+            &ids,
+            |did: String| {
+                // Ломаем запись статуса ровно между последним доменом и
+                // финальным `bulk_run_complete`.
+                saboteur.execute_batch("DROP TABLE bulk_runs").unwrap();
+                async move { Ok(fake_result(&did)) }
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ftp_password_of(&out, "1").as_deref(), Some("PW-1"));
+        assert_eq!(out.status, BulkRunStatus::Failed);
+        assert!(out.error.is_some());
+    }
+
+    // Отчёт уезжает во фронт как JSON — форма должна быть разбираемой:
+    // у каждой строки есть `outcome`, а результат лежит там, где его ищут.
+    #[test]
+    fn bulk_report_serializes_with_a_readable_outcome_tag() {
+        let out = BulkProvisionOut {
+            idempotency_key: "k".into(),
+            status: BulkRunStatus::Failed,
+            error: Some("failed on domain 2: boom".into()),
+            items: vec![
+                BulkProvisionItem {
+                    domain_id: "1".into(),
+                    outcome: BulkItemOutcome::Done {
+                        result: fake_result("1"),
+                    },
+                },
+                BulkProvisionItem {
+                    domain_id: "2".into(),
+                    outcome: BulkItemOutcome::Failed {
+                        error: "boom".into(),
+                    },
+                },
+                BulkProvisionItem {
+                    domain_id: "3".into(),
+                    outcome: BulkItemOutcome::Skipped,
+                },
+            ],
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["status"], "failed");
+        assert_eq!(v["items"][0]["outcome"], "done");
+        assert_eq!(v["items"][0]["result"]["ftp"]["ftp_password"], "PW-1");
+        assert_eq!(v["items"][1]["outcome"], "failed");
+        assert_eq!(v["items"][1]["error"], "boom");
+        assert_eq!(v["items"][2]["outcome"], "skipped");
     }
 }
