@@ -1,12 +1,20 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 
 import { AddServerModal } from "./Servers";
 import { b64ToU8 } from "../lib/b64";
-import { useAuthStore } from "../store/auth";
-import { setTauri, UUID_V4, putBlobArgs, putBlobCalls } from "../test/secretBlobKit";
+import {
+  setTauri,
+  UUID_V4,
+  putBlobArgs,
+  putBlobCalls,
+  renderWithClient,
+  setBlobUser,
+  clearBlobUser,
+  BLOB_USER_ID,
+  DESKTOP_NOTE,
+} from "../test/secretBlobKit";
 
 /**
  * Форма слала `ssh_password` плейнтекстом — поля, которого нет в `ServerCreate`
@@ -40,20 +48,9 @@ vi.mock("../components/ServerBulkImportDialog", () => ({ default: () => null }))
 
 const SSH_PW = "s3cret-ssh-pw";
 const FP_PW = "fastpanel-pw";
-const DESKTOP_NOTE = "Saving secrets runs in the SDMP desktop app.";
 
 function renderModal(onClose = vi.fn()) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-  return {
-    onClose,
-    ...render(
-      <QueryClientProvider client={client}>
-        <AddServerModal onClose={onClose} />
-      </QueryClientProvider>,
-    ),
-  };
+  return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} />) };
 }
 
 function fillInstallTab(password?: string) {
@@ -71,13 +68,13 @@ function fillInstallTab(password?: string) {
 describe("AddServerModal — SSH-пароль через блоб", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
+    setBlobUser();
   });
 
   afterEach(() => {
     cleanup();
     setTauri(false);
-    useAuthStore.getState().clear();
+    clearBlobUser();
   });
 
   it("в десктопе шлёт ssh_password_blob_id и НЕ шлёт ssh_password", async () => {
@@ -91,7 +88,7 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
 
     const blob = putBlobArgs(mocks.invokeIfTauri);
-    expect(blob.userId).toBe("user-1");
+    expect(blob.userId).toBe(BLOB_USER_ID);
     expect(blob.blobKind).toBe("server_ssh_password");
     expect(blob.blobId).toMatch(UUID_V4);
     // Именно набранный пароль, байт в байт: kind и plaintext — два соседних
@@ -166,8 +163,10 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
 
     expect((screen.getByPlaceholderText("••••••••") as HTMLInputElement).value).toBe("");
 
-    // И обратно: теперь у обеих вкладок пароль уходит в блоб, так что забытый
-    // на install SSH-пароль был бы записан как пароль панели.
+    // И обратно — эта половина пришпиливает `fastpanelPassword.reset()`: чужой
+    // секрет в блоб не уедет и без него (у вкладок разные инстансы хука), но
+    // поле панели вернуло бы набранное до ухода на install, и сохранение взяло
+    // бы пароль, который пользователь считает забытым.
     fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: SSH_PW } });
     fireEvent.click(screen.getByRole("button", { name: /Connect Existing Fastpanel/ }));
     expect((screen.getByPlaceholderText("Enter password") as HTMLInputElement).value).toBe("");

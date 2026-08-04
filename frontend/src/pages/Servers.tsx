@@ -22,11 +22,14 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   // панели в блоб под `blobKind: server_ssh_password`.
   const sshPassword = useSecretSave("SSH password");
   const fastpanelPassword = useSecretSave("FastPanel password");
-  // Вкладка на экране одна, и ошибка с флагом «сохраняю» показываются от её
-  // хука: у соседней они про поле, которого сейчас нет.
-  const secret = tab === "install" ? sshPassword : fastpanelPassword;
 
   const create = useCreateServer();
+  // Вкладка на экране одна, поэтому и ошибка показывается от её хука: она про
+  // поле, к которому пользователь вернётся. ТОЛЬКО ошибка: `saving` привязан не
+  // к полю, а к модалке — `reset()` его не трогает, и по видимому хуку нельзя
+  // ни гасить кнопку, ни решать, можно ли уйти со вкладки.
+  const secret = tab === "install" ? sshPassword : fastpanelPassword;
+  const saving = sshPassword.saving || fastpanelPassword.saving || create.isPending;
 
   const validate = () => {
     const newErrors: Record<string, string> = {};
@@ -48,6 +51,11 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   };
 
   const handleTabChange = (newTab: string) => {
+    // Пока сохранение летит — не пускаем: `setError` упавшей записи приземлился
+    // бы на хук уже скрытой вкладки, а плейнтекст, который хук держит для
+    // повтора, стёр бы `reset` ниже. Окно не мгновенное: `vault_put_blob` —
+    // это сетевой PUT на бэкенд, то есть round-trip целиком.
+    if (saving) return;
     setTab(newTab);
     setErrors({});
     // Набранный секрет не переезжает между вкладками: поля называются
@@ -110,10 +118,9 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       });
       if (ok) onClose();
     } else {
-      // Тот же порядок «блоб → сервер». Ошибка теперь в форме, а не в `alert`:
-      // она про поле, к которому пользователь сейчас вернётся. И провал так же
-      // не создаёт сервер: запись с `fastpanel_password_blob_id = NULL` — это
-      // подключение к уже стоящей панели, к которой нечем подключиться.
+      // Тот же порядок «блоб → сервер», и провал так же не создаёт сервер:
+      // запись с `fastpanel_password_blob_id = NULL` — это подключение к уже
+      // стоящей панели, к которой нечем подключиться.
       const ok = await fastpanelPassword.save({
         blobKind: BLOB_KIND.serverFastpanelPassword,
         existingBlobId: null,
@@ -206,15 +213,13 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
           </div>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Password</label>
-            {/* Как и на install, в вебе поля нет вовсе: записать секрет из
-                браузера физически невозможно (шифрует Rust мастер-ключом из
-                keychain). Разница в том, что здесь пароль обязателен — сервер
-                у уже стоящей панели без него нерабочий, поэтому создавать его
-                из браузера нельзя вообще, и кнопки сохранения там нет: ниже
-                вместо неё OpenInDesktop. */}
+            {/* Как на install выше: в вебе поля нет вовсе — шифрует Rust
+                мастер-ключом из keychain. Кнопки сохранения в вебе нет ни на
+                одной вкладке (ниже вместо неё OpenInDesktop), так что сервер
+                без пароля панели отсюда и не завести. */}
             {isTauri() ? (
               <>
-                <Inp type="password" value={fastpanelPassword.value} onChange={e=>{fastpanelPassword.setValue((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
+                <Inp type="password" value={fastpanelPassword.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{fastpanelPassword.setValue(e.target.value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
                 {errors.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.password}</div>}
               </>
             ) : (
@@ -232,7 +237,7 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
         <div role="alert" style={{padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secret.error}</div>
       )}
       {isTauri() ? (
-        <Btn variant="primary" onClick={handleAdd} disabled={secret.saving || create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{secret.saving || create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
+        <Btn variant="primary" onClick={handleAdd} disabled={saving} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{saving ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
       ) : (
         <OpenInDesktop
           variant="primary"

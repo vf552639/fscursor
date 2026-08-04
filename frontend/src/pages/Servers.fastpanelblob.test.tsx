@@ -1,12 +1,20 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 
 import { AddServerModal } from "./Servers";
 import { b64ToU8 } from "../lib/b64";
-import { useAuthStore } from "../store/auth";
-import { setTauri, UUID_V4, putBlobArgs } from "../test/secretBlobKit";
+import {
+  setTauri,
+  UUID_V4,
+  putBlobArgs,
+  putBlobCalls,
+  renderWithClient,
+  setBlobUser,
+  clearBlobUser,
+  BLOB_USER_ID,
+  DESKTOP_NOTE,
+} from "../test/secretBlobKit";
 
 /**
  * Вкладка connect теряла пароль панели ровно так же, как install терял
@@ -15,6 +23,9 @@ import { setTauri, UUID_V4, putBlobArgs } from "../test/secretBlobKit";
  * отвечает 200 OK. Отличие одно и оно важно для веба: сервер, подключаемый к
  * УЖЕ стоящей панели, без её пароля бесполезен целиком — поэтому здесь же
  * проверяется, что из браузера такой сервер не завести никак.
+ *
+ * Сброс поля панели при смене вкладки лежит в `Servers.sshblob.test.tsx`: там
+ * обе вкладки в одном сценарии, и красный тест придёт оттуда.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -39,27 +50,16 @@ vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
 vi.mock("../components/ServerBulkImportDialog", () => ({ default: () => null }));
 
 const FP_PW = "fastpanel-pw";
-const DESKTOP_NOTE = "Saving secrets runs in the SDMP desktop app.";
 
 function renderModal(onClose = vi.fn()) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-  return {
-    onClose,
-    ...render(
-      <QueryClientProvider client={client}>
-        <AddServerModal onClose={onClose} />
-      </QueryClientProvider>,
-    ),
-  };
+  return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} />) };
 }
 
 function openConnectTab() {
   fireEvent.click(screen.getByRole("button", { name: /Connect Existing Fastpanel/ }));
 }
 
-function fillConnectTab(password?: string) {
+function fillConnectTab(password: string) {
   fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
     target: { value: "srv-fp" },
   });
@@ -69,23 +69,21 @@ function fillConnectTab(password?: string) {
   fireEvent.change(screen.getByPlaceholderText("Enter login"), {
     target: { value: "fastuser" },
   });
-  if (password !== undefined) {
-    fireEvent.change(screen.getByPlaceholderText("Enter password"), {
-      target: { value: password },
-    });
-  }
+  fireEvent.change(screen.getByPlaceholderText("Enter password"), {
+    target: { value: password },
+  });
 }
 
 describe("AddServerModal — пароль FastPanel через блоб", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
+    setBlobUser();
   });
 
   afterEach(() => {
     cleanup();
     setTauri(false);
-    useAuthStore.getState().clear();
+    clearBlobUser();
   });
 
   it("в десктопе шлёт fastpanel_password_blob_id и НЕ шлёт fastpanel_password", async () => {
@@ -100,7 +98,7 @@ describe("AddServerModal — пароль FastPanel через блоб", () => 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
 
     const blob = putBlobArgs(mocks.invokeIfTauri);
-    expect(blob.userId).toBe("user-1");
+    expect(blob.userId).toBe(BLOB_USER_ID);
     // Вид секрета — не косметика: под ним блоб лежит в хранилище и по нему его
     // ищут 26 команд. Пароль панели под `server_ssh_password` — это ссылка,
     // которую откроет не тот потребитель.
@@ -139,6 +137,30 @@ describe("AddServerModal — пароль FastPanel через блоб", () => 
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("во время записи блоба уйти на соседнюю вкладку нельзя", async () => {
+    // Иначе `setError` упавшей записи приземлится на хук скрытой вкладки:
+    // ни сообщения, ни сервера, а плейнтекст для повтора уже стёрт `reset`.
+    // Окно — весь round-trip `vault_put_blob` (это PUT на бэкенд, а не
+    // локальное шифрование), то есть ровно столько, сколько человек скучает.
+    setTauri(true);
+    let failBlob: (e: Error) => void = () => {};
+    mocks.invokeIfTauri.mockReturnValue(new Promise<void>((_, reject) => { failBlob = reject; }));
+
+    renderModal();
+    openConnectTab();
+    fillConnectTab(FP_PW);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /Install New Fastpanel/ }));
+
+    failBlob(new Error("keychain locked"));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "keychain locked");
+    // Остались на connect, и набранный пароль цел: повтор не требует набирать
+    // его заново — ради этого хук и держит плейнтекст до успеха.
+    expect((screen.getByPlaceholderText("Enter password") as HTMLInputElement).value).toBe(FP_PW);
+  });
+
   it("в вебе connect не даёт ни поля, ни кнопки — только путь в десктоп", async () => {
     setTauri(false);
     const { container } = renderModal();
@@ -149,15 +171,12 @@ describe("AddServerModal — пароль FastPanel через блоб", () => 
     expect(screen.queryByPlaceholderText("Enter password")).toBeNull();
     expect(screen.getByText(DESKTOP_NOTE)).toBeTruthy();
 
-    // И создать сервер отсюда нельзя: в отличие от install, где сервер без SSH
-    // ещё имеет смысл, connect без пароля панели даёт заведомо нерабочую
-    // запись. Единственное действие — тот же deep link, что у прочих
+    // Кнопки сохранения в вебе нет ни на одной вкладке — это общее поведение
+    // формы, не связанное с паролем. Здесь оно нужно как гарантия: без поля
+    // пароля connect создавал бы сервер, к панели которого нечем подключиться,
+    // поэтому единственное действие — тот же deep link, что у прочих
     // исполняющих действий.
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(container.querySelector('a[href^="sdmp://add-server"]')).toBeTruthy();
-
-    fillConnectTab();
-    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
-    expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 });
