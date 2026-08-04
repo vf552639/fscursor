@@ -114,6 +114,14 @@ pub struct BulkProvisionOut {
     /// Причина обрыва — только при `status: failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Статус ПРЕДЫДУЩЕГО прогона с этим ключом — только при `already_ran`.
+    ///
+    /// `running` и `done` — совершенно разные новости, и слепив их в одно
+    /// «прогон уже был», мы врём в половине случаев: `running` означает, что
+    /// прогон могли и оборвать на середине (краш, `Cmd+Q`, ребут), и тогда
+    /// «пароли уже показаны» — неправда, их никто не видел.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_status: Option<String>,
     /// По строке на каждый домен из запроса, в том же порядке.
     pub items: Vec<BulkProvisionItem>,
 }
@@ -817,6 +825,52 @@ pub async fn provision_domain(
     .await
 }
 
+/// Массовый прогон создаёт сайт ЦЕЛИКОМ, а не только каталог.
+///
+/// Именованная константа, а не литерал в вызове: `site_only` и `with_db` стоят
+/// в сигнатуре `run_provision_domain` соседними позиционными `bool`, и
+/// перепутать их местами нечем. При этом `site_only: true` означал бы, что
+/// FTP-аккаунты не создаются вообще — то есть весь массовый прогон делает вид,
+/// что работает. Тестового харнесса на прод-проводку команды нет (нужен Tauri
+/// `State`), так что единственная защита — читаемость диффа.
+const BULK_SITE_ONLY: bool = false;
+
+/// Базу массовый прогон не создаёт: у ссылки `sdmp://bulk-provision` нет
+/// параметра «создавать ли базу», а решить за пользователя значит создать
+/// артефакт, которого он не просил.
+const BULK_WITH_DB: bool = false;
+
+/// Через сколько часов строку `running` считаем осиротевшей.
+///
+/// `running` снимается только двумя явными ветками ВНУТРИ процесса, поэтому его
+/// смерть (краш, `Cmd+Q`, ребут — а на сотне доменов прогон идёт часами)
+/// оставляет строку навсегда, и повтор того же набора до скончания века
+/// упирается в `already_ran`. Восстановиться было нельзя ничем, кроме как
+/// изменить набор доменов.
+///
+/// Порог обязан быть заведомо больше самого долгого правдоподобного прогона:
+/// снять его рано — значит запустить второй прогон параллельно живому первому.
+/// Сутки означают, что приложение должно простоять 24 часа с незакрытым
+/// прогоном, чтобы это стало ложным срабатыванием. Цена ошибки при этом
+/// ограничена: `site_exists`/`ssl_exists` делают повтор в основном холостым —
+/// но НЕ полностью, см. предупреждение про `create_ftp_account` ниже.
+const BULK_RUN_STALE_AFTER_HOURS: i64 = 24;
+
+/// Осиротела ли строка `running`.
+///
+/// Не смогли разобрать дату — считаем, что НЕ осиротела. Ошибка в эту сторону
+/// оставляет пользователя с застрявшим ключом (чинится сменой набора), а в
+/// обратную — запускает второй прогон поверх живого первого.
+fn bulk_run_is_stale(run: &cache::BulkRun, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match chrono::NaiveDateTime::parse_from_str(&run.created_at, "%Y-%m-%d %H:%M:%S") {
+        Ok(started) => {
+            let started = started.and_utc();
+            now - started > chrono::Duration::hours(BULK_RUN_STALE_AFTER_HOURS)
+        }
+        Err(_) => false,
+    }
+}
+
 /// Массовый прогон поверх произвольного исполнителя одного домена.
 ///
 /// Вынесено из команды не ради красоты: главный вопрос этой функции — «что
@@ -849,19 +903,24 @@ where
             .collect::<Vec<_>>()
     };
 
-    if let Some((st, _)) =
+    if let Some(run) =
         cache::bulk_run_status(conn, key).map_err(|e| CommandError::Api(e.to_string()))?
     {
-        if st == "running" || st == "done" {
+        // `done` блокирует всегда: этот набор действительно прошёл целиком.
+        // `running` — только пока не осиротел (см. `bulk_run_is_stale`).
+        let blocks = run.status == "done"
+            || (run.status == "running" && !bulk_run_is_stale(&run, chrono::Utc::now()));
+        if blocks {
             // Раньше здесь возвращался голый ключ, и вызывающий не мог отличить
             // «всё прошло» от «прогон уже был, результатов у меня нет». Пароли
             // показываются ровно один раз и нигде не хранятся, так что второй
             // раз их не покажет никто — это надо сказать словами, а не выдать
-            // за пустой успех.
+            // за пустой успех. И сказать РАЗНЫМИ словами про `running` и `done`.
             return Ok(BulkProvisionOut {
                 idempotency_key: key.to_string(),
                 status: BulkRunStatus::AlreadyRan,
                 error: None,
+                previous_status: Some(run.status),
                 items: skipped_all(),
             });
         }
@@ -877,8 +936,6 @@ where
     let mut items: Vec<BulkProvisionItem> = Vec::with_capacity(domain_ids.len());
     for (i, did) in domain_ids.iter().enumerate() {
         emit("bulk_item", did);
-        // Массовый прогон — без БД: чекбокса «создать базу» у массового пути нет,
-        // а решить за пользователя значит создать артефакт, которого он не просил.
         match run_one(did.clone()).await {
             Ok(result) => items.push(BulkProvisionItem {
                 domain_id: did.clone(),
@@ -922,6 +979,7 @@ where
                     idempotency_key: key.to_string(),
                     status: BulkRunStatus::Failed,
                     error: Some(detail),
+                    previous_status: None,
                     items,
                 });
             }
@@ -931,8 +989,18 @@ where
         // Тот же капкан, что и в цикле: не записав финальный статус, мы оставим
         // строку в `running`, и повтор вернёт `already_ran`, ничего не сделав.
         // Все домены при этом отработали — помечаем прогон failed сознательно:
-        // повторный прогон по большей части идемпотентен (site_exists,
-        // ssl_exists), а навсегда залипший `running` не чинится ничем.
+        // залипший `running` чинится только временем (`BULK_RUN_STALE_AFTER_HOURS`),
+        // а повторный прогон в основном холостой: `site_exists` и `ssl_exists`
+        // пропускают уже сделанное.
+        //
+        // ВАЖНО, «в основном» — не «полностью»: `create_ftp_account`
+        // (`ssh/fastpanel.rs`) зовётся БЕЗУСЛОВНО на каждом не-`site_only`
+        // прогоне, парной проверки `ftp_exists` не существует, логин
+        // детерминирован, а пароль генерируется заново. Повтор по уже сделанному
+        // домену либо упрётся в дубликат аккаунта, либо молча сменит пароль,
+        // который пользователь записал из модалки часом раньше. Проверку
+        // существования FTP-аккаунта и БД ставит фаза 3b спринта 4 (долг №5) —
+        // до неё повтор безопасен только по хвосту `skipped`.
         //
         // Но результаты при этом НЕ теряем: раньше здесь стоял `return Err`, и
         // сбой записи статуса уносил пароли всех отработавших доменов.
@@ -944,6 +1012,7 @@ where
             error: Some(format!(
                 "all domains finished, but the run status could not be saved: {e}"
             )),
+            previous_status: None,
             items,
         });
     }
@@ -951,6 +1020,7 @@ where
         idempotency_key: key.to_string(),
         status: BulkRunStatus::Ok,
         error: None,
+        previous_status: None,
         items,
     })
 }
@@ -986,7 +1056,16 @@ pub async fn provision_bulk(
         &key,
         &domain_ids,
         move |did: String| async move {
-            run_provision_domain(app_ref, user_ref, &did, false, false, path_ref, api_ref).await
+            run_provision_domain(
+                app_ref,
+                user_ref,
+                &did,
+                BULK_SITE_ONLY,
+                BULK_WITH_DB,
+                path_ref,
+                api_ref,
+            )
+            .await
         },
         |step, did| {
             let _ = app.emit(
@@ -1637,6 +1716,17 @@ mod tests {
         cache::open(&dir.join("cache.db"), &[9u8; 32]).unwrap()
     }
 
+    /// Состарить строку прогона на `hours` часов — так же, как её состарило бы
+    /// реальное время. Часы правим в БД, а не подменяем часы в коде: проверяем
+    /// то, что прочитает настоящий `bulk_run_status`.
+    fn age_run(conn: &rusqlite::Connection, key: &str, hours: i64) {
+        conn.execute(
+            "UPDATE bulk_runs SET created_at = datetime('now', ?2) WHERE idempotency_key = ?1",
+            rusqlite::params![key, format!("-{hours} hours")],
+        )
+        .unwrap();
+    }
+
     /// Пароль FTP домена из отчёта — `None`, если домен не отработал.
     fn ftp_password_of(out: &BulkProvisionOut, domain_id: &str) -> Option<String> {
         out.items.iter().find(|i| i.domain_id == domain_id).and_then(
@@ -1701,9 +1791,9 @@ mod tests {
 
         // И прогон остался перезапускаемым: `running`/`done` заставили бы повтор
         // вернуть `already_ran`, не сделав ничего.
-        let (st, detail) = cache::bulk_run_status(&conn, "k-partial").unwrap().unwrap();
-        assert_eq!(st, "failed");
-        assert!(detail.contains("domain 3"), "{detail}");
+        let run = cache::bulk_run_status(&conn, "k-partial").unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.detail.contains("domain 3"), "{}", run.detail);
     }
 
     // Прогон, который уже идёт (или прошёл), обязан сказать это словами.
@@ -1732,6 +1822,9 @@ mod tests {
 
         assert_eq!(ran, 0, "второй прогон не имеет права лезть по SSH");
         assert_eq!(out.status, BulkRunStatus::AlreadyRan);
+        // `running` и `done` — разные новости: у первого прогон могли оборвать,
+        // и тогда «пароли уже показаны» было бы неправдой.
+        assert_eq!(out.previous_status.as_deref(), Some("running"));
         assert_eq!(outcome_name(&out, "1"), "skipped");
         assert_eq!(outcome_name(&out, "2"), "skipped");
         // И ни одного «результата», который можно принять за показанный пароль.
@@ -1755,9 +1848,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.status, BulkRunStatus::Ok);
+        assert!(out.previous_status.is_none());
         assert_eq!(ftp_password_of(&out, "7").as_deref(), Some("PW-7"));
         assert_eq!(ftp_password_of(&out, "8").as_deref(), Some("PW-8"));
-        assert_eq!(cache::bulk_run_status(&conn, "k-ok").unwrap().unwrap().0, "done");
+        assert_eq!(
+            cache::bulk_run_status(&conn, "k-ok").unwrap().unwrap().status,
+            "done"
+        );
     }
 
     // Последний шаг — запись финального статуса — тоже может упасть. Раньше он
@@ -1790,6 +1887,112 @@ mod tests {
         assert!(out.error.is_some());
     }
 
+    // Прогон, завершившийся честно, блокирует повтор всегда: этот набор
+    // действительно прошёл целиком, и его пароли действительно показаны.
+    #[tokio::test]
+    async fn a_finished_run_keeps_blocking_no_matter_how_old_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let ids: Vec<String> = vec!["1".into()];
+        cache::bulk_run_upsert_start(&conn, "k-old-done", "provision_bulk", "[\"1\"]").unwrap();
+        cache::bulk_run_complete(&conn, "k-old-done", "ok").unwrap();
+        age_run(&conn, "k-old-done", 400);
+
+        let mut ran = 0;
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-old-done",
+            &ids,
+            |did: String| {
+                ran += 1;
+                async move { Ok(fake_result(&did)) }
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ran, 0);
+        assert_eq!(out.status, BulkRunStatus::AlreadyRan);
+        assert_eq!(out.previous_status.as_deref(), Some("done"));
+    }
+
+    // А вот `running` снимается только явными ветками ВНУТРИ процесса: краш,
+    // `Cmd+Q` или ребут посреди многочасового прогона оставляли строку навсегда,
+    // и повтор того же набора упирался в `already_ran` до скончания века —
+    // притом что пароли недопровиженных доменов никто никогда не видел.
+    #[tokio::test]
+    async fn an_orphaned_running_row_stops_blocking_after_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let ids: Vec<String> = vec!["1".into()];
+        cache::bulk_run_upsert_start(&conn, "k-orphan", "provision_bulk", "[\"1\"]").unwrap();
+        age_run(&conn, "k-orphan", BULK_RUN_STALE_AFTER_HOURS + 1);
+
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-orphan",
+            &ids,
+            |did: String| async move { Ok(fake_result(&did)) },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        // Прогон действительно состоялся: домен отработал и его пароль пришёл.
+        assert_eq!(out.status, BulkRunStatus::Ok);
+        assert_eq!(ftp_password_of(&out, "1").as_deref(), Some("PW-1"));
+    }
+
+    // Порог должен быть заведомо больше самого долгого правдоподобного прогона:
+    // снять `running` рано — значит пустить второй прогон поверх живого первого.
+    #[tokio::test]
+    async fn a_running_row_younger_than_the_threshold_still_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_cache(dir.path());
+        let ids: Vec<String> = vec!["1".into()];
+        cache::bulk_run_upsert_start(&conn, "k-fresh", "provision_bulk", "[\"1\"]").unwrap();
+        age_run(&conn, "k-fresh", BULK_RUN_STALE_AFTER_HOURS - 1);
+
+        let mut ran = 0;
+        let out = run_bulk_provision(
+            &mut conn,
+            "k-fresh",
+            &ids,
+            |did: String| {
+                ran += 1;
+                async move { Ok(fake_result(&did)) }
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ran, 0, "живой прогон нельзя дублировать");
+        assert_eq!(out.status, BulkRunStatus::AlreadyRan);
+    }
+
+    // Неразобранная дата = «не знаем, когда начался». Перезапустить вслепую
+    // опаснее, чем оставить ключ занятым: FTP-аккаунт создаётся заново.
+    #[test]
+    fn an_unreadable_start_time_is_never_treated_as_stale() {
+        let run = cache::BulkRun {
+            status: "running".into(),
+            detail: String::new(),
+            created_at: "who knows".into(),
+        };
+        assert!(!bulk_run_is_stale(&run, chrono::Utc::now()));
+    }
+
+    // Прод-проводка команды тестового харнесса не имеет (нужен Tauri `State`),
+    // поэтому подмена `site_only` на `true` не роняет ничего — а она отменяет
+    // создание FTP-аккаунтов, то есть весь смысл массового прогона.
+    #[test]
+    fn bulk_runs_a_full_provision_and_never_a_site_only_one() {
+        assert!(!BULK_SITE_ONLY, "site_only отменяет создание FTP-аккаунтов");
+        assert!(!BULK_WITH_DB, "у ссылки нет параметра «создавать ли базу»");
+    }
+
     // Отчёт уезжает во фронт как JSON — форма должна быть разбираемой:
     // у каждой строки есть `outcome`, а результат лежит там, где его ищут.
     #[test]
@@ -1798,6 +2001,7 @@ mod tests {
             idempotency_key: "k".into(),
             status: BulkRunStatus::Failed,
             error: Some("failed on domain 2: boom".into()),
+            previous_status: None,
             items: vec![
                 BulkProvisionItem {
                     domain_id: "1".into(),

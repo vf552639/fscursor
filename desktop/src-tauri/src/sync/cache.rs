@@ -120,15 +120,30 @@ pub fn bulk_run_fail(conn: &Connection, key: &str, detail: &str) -> rusqlite::Re
     Ok(())
 }
 
-pub fn bulk_run_status(conn: &Connection, key: &str) -> rusqlite::Result<Option<(String, String)>> {
+/// Строка массового прогона.
+///
+/// `created_at` отдаётся наружу не для украшения: `running` снимается только
+/// явными ветками внутри процесса, поэтому по одному статусу нельзя отличить
+/// живой прогон от осиротевшего после краша. Дату записи читает
+/// `bulk_run_is_stale` в `commands/provision.rs`.
+pub struct BulkRun {
+    pub status: String,
+    pub detail: String,
+    /// UTC в формате SQLite `datetime('now')`: `YYYY-MM-DD HH:MM:SS`.
+    pub created_at: String,
+}
+
+pub fn bulk_run_status(conn: &Connection, key: &str) -> rusqlite::Result<Option<BulkRun>> {
     let mut stmt = conn.prepare(
-        "SELECT status, IFNULL(detail, '') FROM bulk_runs WHERE idempotency_key = ?1",
+        "SELECT status, IFNULL(detail, ''), created_at FROM bulk_runs WHERE idempotency_key = ?1",
     )?;
     let mut rows = stmt.query(params![key])?;
     if let Some(row) = rows.next()? {
-        let st: String = row.get(0)?;
-        let d: String = row.get(1)?;
-        return Ok(Some((st, d)));
+        return Ok(Some(BulkRun {
+            status: row.get(0)?,
+            detail: row.get(1)?,
+            created_at: row.get(2)?,
+        }));
     }
     Ok(None)
 }
@@ -167,17 +182,32 @@ mod tests {
         let dir = tempdir().unwrap();
         let conn = open(&dir.path().join("cache.db"), &[7u8; 32]).unwrap();
         bulk_run_upsert_start(&conn, "k1", "provision_bulk", "[\"1\"]").unwrap();
-        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().0, "running");
+        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().status, "running");
 
         bulk_run_fail(&conn, "k1", "failed on domain 1: boom").unwrap();
-        let (status, detail) = bulk_run_status(&conn, "k1").unwrap().unwrap();
-        assert_ne!(status, "running");
-        assert_ne!(status, "done");
-        assert!(detail.contains("boom"));
+        let run = bulk_run_status(&conn, "k1").unwrap().unwrap();
+        assert_ne!(run.status, "running");
+        assert_ne!(run.status, "done");
+        assert!(run.detail.contains("boom"));
 
         // И повторный старт с тем же ключом снова переводит его в running.
         bulk_run_upsert_start(&conn, "k1", "provision_bulk", "[\"1\"]").unwrap();
-        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().0, "running");
+        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().status, "running");
+    }
+
+    // Без даты старта живой прогон неотличим от осиротевшего после краша: и то,
+    // и другое — строка `running`.
+    #[test]
+    fn a_started_run_records_when_it_started() {
+        let dir = tempdir().unwrap();
+        let conn = open(&dir.path().join("cache.db"), &[7u8; 32]).unwrap();
+        bulk_run_upsert_start(&conn, "k2", "provision_bulk", "[\"1\"]").unwrap();
+        let run = bulk_run_status(&conn, "k2").unwrap().unwrap();
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(&run.created_at, "%Y-%m-%d %H:%M:%S").is_ok(),
+            "created_at не разбирается: {:?}",
+            run.created_at
+        );
     }
 
     #[test]
