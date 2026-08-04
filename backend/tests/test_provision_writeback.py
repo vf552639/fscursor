@@ -169,6 +169,69 @@ async def test_domain_update_clears_last_provision_error_with_explicit_null():
 
 
 @pytest.mark.asyncio
+async def test_failed_provision_is_visible_and_keeps_the_earlier_result():
+    """Провал провижининга виден в списке доменов и не стирает прошлую правду.
+
+    Ровно те два тела, которые шлёт десктоп (`domain_failure_write_back_body` и
+    `domain_write_back_body` в `commands/provision.rs`). До фазы 4 первого не
+    существовало: `?` уносил управление до write-back, и упавший прогон не
+    писал ничего — «Last error» в UI был вечным «—».
+
+    Проверяется по СПИСКУ (`GET /api/domains`), а не по одиночному домену:
+    именно его читает страница доменов, и именно в нём поле обязано доехать.
+    """
+    dom = f"{uuid.uuid4().hex[:8]}.example.com"
+    err = "provision failed at create_site: the command failed on the server"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"wb-fail-{uuid.uuid4().hex[:8]}@example.com")
+        r = await c.post("/api/domains", json={"domain_name": dom})
+        assert r.status_code == 201, r.text
+        domain_id = r.json()["id"]
+        try:
+            # 1. удачный прогон записал результат
+            r = await c.put(
+                f"/api/domains/{domain_id}",
+                json={
+                    "status": "active",
+                    "site_user": "example_usr",
+                    "site_path": f"/var/www/example_usr/data/www/{dom}",
+                    "ssl_status": "active",
+                    "last_provision_error": None,
+                },
+            )
+            assert r.status_code == 200, r.text
+
+            # 2. следующий прогон упал — тело провала ровно из двух полей
+            r = await c.put(
+                f"/api/domains/{domain_id}",
+                json={"status": "failed", "last_provision_error": err},
+            )
+            assert r.status_code == 200, r.text
+
+            rows = (await c.get("/api/domains")).json()
+            row = next(d for d in rows if d["id"] == domain_id)
+            assert row["last_provision_error"] == err
+            assert row["status"] == "failed"
+            # Упавший прогон не вправе стирать добытое удачным: этих полей в
+            # его теле нет, и `exclude_unset` их не трогает.
+            assert row["site_user"] == "example_usr"
+            assert row["ssl_status"] == "active"
+
+            # 3. удавшийся повтор гасит и ошибку, и статус `failed`
+            r = await c.put(
+                f"/api/domains/{domain_id}",
+                json={"status": "active", "last_provision_error": None},
+            )
+            assert r.status_code == 200, r.text
+            rows = (await c.get("/api/domains")).json()
+            row = next(d for d in rows if d["id"] == domain_id)
+            assert row["last_provision_error"] is None
+            assert row["status"] == "active"
+        finally:
+            await _purge(Domain, domain_id)
+
+
+@pytest.mark.asyncio
 async def test_domain_update_ignores_plaintext_password_fields():
     """Инвариант ZK: плейнтекст-пароль в `PUT` не сохраняется и не возвращается.
 
