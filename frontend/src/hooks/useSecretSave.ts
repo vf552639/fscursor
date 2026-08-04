@@ -53,10 +53,19 @@ export interface SecretSave {
        * очевидную композицию для формы регистратора, — и она молча ломалась:
        * внутренний `save` на ошибке ВОЗВРАЩАЕТ `false`, а не бросает, так что
        * внешний видел успешный промис, стирал свой плейнтекст и рапортовал
-       * форме успех, не сохранив ничего. С `Promise<void>` такая вложенность
-       * не компилируется; для нескольких секретов есть `saveAll`. Расширишь
-       * тип обратно — вернёшь зелёный путь без записанного секрета.
-       * Вызов платит за это одной строкой: `async (id) => { await m(id); }`.
+       * форме успех, не сохранив ничего. Расширишь тип обратно — вернёшь этот
+       * зелёный путь без записанного секрета.
+       *
+       * Но закрывает сужение ровно одну запись — короткую стрелку
+       * `persist: (id) => inner.save(…)`. Блочное тело
+       * (`async (id) => { await inner.save(…); }`), брошенный промис и
+       * `.then(() => {})` типом не ловятся в принципе: `async`-функция
+       * возвращает `Promise<void>`, что бы внутри ни было. Их добивает
+       * рантайм-гвард на переиспользование (`saveInFlight` ниже), а
+       * правильный инструмент для нескольких секретов — `saveAll`.
+       *
+       * Вызов платит за сужение одной строкой: `async (id) => { await m(id); }`,
+       * где `m` — мутация СУЩНОСТИ, а не ещё один `save`.
        */
       persist: (blobId: string) => Promise<void>;
     },
@@ -78,7 +87,8 @@ export interface MultiSecretSave<K extends string> {
    * Записать все блобы и только потом сохранить сущность разом.
    *
    * Альтернатива — вложить `save` одного секрета в `persist` другого — тихо
-   * ломается (см. `SecretSave["save"]`), поэтому она и не компилируется.
+   * ломается (см. `SecretSave["save"]`): очевидная короткая запись не
+   * компилируется, любая другая падает рантайм-гвардом на первом же прогоне.
    *
    * Правила те же, что у одиночного пути, но на N полей: `persist` не
    * вызывается, если хоть одна запись блоба упала; уже записанные блобы НЕ
@@ -95,6 +105,30 @@ export interface MultiSecretSave<K extends string> {
 function blanked<K extends string>(keyed: Record<K, unknown>): Record<K, string> {
   return Object.fromEntries(Object.keys(keyed).map((k) => [k, ""])) as Record<K, string>;
 }
+
+/**
+ * Идёт сохранение секрета. Флаг МОДУЛЬНЫЙ, а не по инстансу, потому что
+ * вложенность — это всегда два разных инстанса хука: форма регистратора,
+ * попытавшаяся сохранить `api_secret` внутри `persist` от `api_key`.
+ *
+ * Тип такое не выразит: блочное тело `async` возвращает `Promise<void>`, что бы
+ * внутри ни было. А повторный вход — выразим.
+ *
+ * Побочный эффект: два секрета нельзя сохранять и буквально параллельно
+ * (`Promise.all` двух форм). Это осознанно — форма сохранения секрета в
+ * продукте всегда одна модалка, и ложное срабатывание тут громкое и мгновенное,
+ * тогда как пропущенная вложенность тихая и уносит секрет.
+ */
+let saveInFlight = false;
+
+/**
+ * Сообщение разработчику, а не пользователю: диагноз и лечение в одной строке.
+ * По-английски, потому что через `catch` внешнего вызова оно попадает в тот же
+ * `error`, что и остальные тексты хука.
+ */
+const NESTED_SAVE =
+  "useSecretSave: another secret save is already in flight — do not nest save() inside persist(); " +
+  "use useMultiSecretSave/saveAll to write several secrets before one entity save";
 
 /**
  * `labels` — как поля называются пользователю (`{ apiKey: "API key" }`): из них
@@ -126,7 +160,7 @@ export function useMultiSecretSave<K extends string>(labels: Record<K, string>):
     setError(null);
   }, []);
 
-  const saveAll = useCallback<MultiSecretSave<K>["saveAll"]>(async ({ secrets, persist }) => {
+  const run = useCallback<MultiSecretSave<K>["saveAll"]>(async ({ secrets, persist }) => {
     setError(null);
     const labels = labelsRef.current;
     const values = valuesRef.current;
@@ -166,6 +200,28 @@ export function useMultiSecretSave<K extends string>(labels: Record<K, string>):
       setSaving(false);
     }
   }, []);
+
+  const saveAll = useCallback<MultiSecretSave<K>["saveAll"]>(
+    (args) => {
+      // Бросаем СИНХРОННО, а не отдаём отклонённый промис. Вложенный вызов
+      // часто роняют на пол (`inner.save(…)` без `await`) — отказ промиса до
+      // внешнего вызова тогда не долетит, он досидит до конца и отрапортует
+      // успех, стерев плейнтекст. Синхронное исключение вылетает из тела
+      // `persist` при ЛЮБОЙ форме записи (await, брошенный промис, `void`,
+      // `.then`) и роняет внешний `saveAll` в его собственный catch.
+      //
+      // Именно исключение, а не `return false`: это ошибка разработчика на
+      // этапе сборки формы, а не отказ пользователю, и молчать о ней нельзя.
+      if (saveInFlight) throw new Error(NESTED_SAVE);
+      saveInFlight = true;
+      // Снимаем на ВСЕХ путях, включая исключения: иначе одна упавшая запись
+      // заблокировала бы формы до перезагрузки приложения.
+      return run(args).finally(() => {
+        saveInFlight = false;
+      });
+    },
+    [run],
+  );
 
   return { values, setValue, saving, error, reset, saveAll };
 }

@@ -216,12 +216,15 @@ describe("useSecretSave", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("компилятор не пускает вложенный save внутрь persist", async () => {
+  it("компилятор не пускает короткую стрелку с вложенным save", async () => {
     // Проверку делает `tsc --noEmit`: ослабнет `persist` обратно до
     // `Promise<unknown>` — директива станет неиспользованной (TS2578) и сборка
     // упадёт. Дыра была реальной и тихой: внутренний `save` на ошибке
     // возвращает `false`, а не бросает, поэтому внешний видел успешный промис,
     // стирал свой плейнтекст и закрывал форму, не сохранив ничего.
+    //
+    // Тип закрывает ТОЛЬКО эту запись; блочное тело и брошенный промис
+    // компилируются — их ловит рантайм-гвард, см. блок ниже.
     const { result } = renderHook(() => useSecretSave("API key"));
     const inner = result.current;
     const args: Parameters<SecretSave["save"]>[0] = {
@@ -236,5 +239,106 @@ describe("useSecretSave", () => {
         }),
     };
     expect(typeof args.persist).toBe("function");
+  });
+});
+
+/**
+ * Всё, что типом не выражается. `async (id) => { … }` возвращает
+ * `Promise<void>` независимо от содержимого, поэтому четыре записи ниже
+ * компилируются — и каждая даёт тот же тихий провал: внутренний `save` отдаёт
+ * `false` вместо броска, внешний рапортует успех, второй секрет не записан.
+ * Подстраховки от линтера нет: eslint во фронте отсутствует, `no-floating-
+ * promises` не сработает. Ловит только рантайм-гвард на переиспользование.
+ */
+describe("гвард на вложенный save", () => {
+  function nesting() {
+    const outer = renderHook(() => useSecretSave("API key")).result;
+    const inner = renderHook(() => useSecretSave("API secret")).result;
+    act(() => {
+      outer.current.setValue("k3y");
+      inner.current.setValue("s3cr3t");
+    });
+    const nested = () =>
+      inner.current.save({
+        blobKind: BLOB_KIND.registrarApiSecret,
+        existingBlobId: null,
+        persist: async () => {},
+      });
+    return { outer, inner, nested };
+  }
+
+  it.each([
+    // Первая — ровно та запись, которую JSDoc `persist` советует как лечение
+    // от ошибки компиляции: человек применит её и вернётся в баг.
+    "блочное тело с await",
+    "брошенный промис",
+    "void",
+    ".then(() => {})",
+  ])("%s: внешний save падает, а не рапортует успех", async (form) => {
+    const { outer, nested } = nesting();
+    const persist = async () => {
+      if (form === "блочное тело с await") await nested();
+      else if (form === "брошенный промис") nested();
+      else if (form === "void") void nested();
+      else await nested().then(() => {});
+    };
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await outer.current.save({
+        blobKind: BLOB_KIND.registrarApiKey,
+        existingBlobId: null,
+        persist,
+      });
+    });
+
+    expect(ok).toBe(false);
+    expect(outer.current.error).toMatch(/do not nest save\(\) inside persist\(\)/);
+    // Плейнтекст внешнего поля цел: провал не притворился успехом.
+    expect(outer.current.value).toBe("k3y");
+    // Блоб записан только внешний — до вложенного дело не дошло.
+    expect(mocks.putSecretBlob).toHaveBeenCalledTimes(1);
+  });
+
+  it("две формы подряд (не вложенно) сохраняются обе", async () => {
+    // Флаг модульный, и снимать его надо на всех путях: иначе первая же
+    // успешная форма заблокировала бы все остальные до перезагрузки.
+    const { outer, inner } = nesting();
+    const args = (kind: (typeof BLOB_KIND)[keyof typeof BLOB_KIND]) => ({
+      blobKind: kind,
+      existingBlobId: null,
+      persist: async () => {},
+    });
+
+    let first: boolean | undefined;
+    let second: boolean | undefined;
+    await act(async () => {
+      first = await outer.current.save(args(BLOB_KIND.registrarApiKey));
+      second = await inner.current.save(args(BLOB_KIND.registrarApiSecret));
+    });
+
+    expect([first, second]).toEqual([true, true]);
+  });
+
+  it("повтор после ошибки не заблокирован", async () => {
+    // `finally` снимает флаг и на исключении — иначе одна упавшая запись
+    // блоба навсегда закрывала бы форму.
+    const { outer } = nesting();
+    mocks.putSecretBlob.mockRejectedValueOnce(new Error("keychain locked"));
+    const args = {
+      blobKind: BLOB_KIND.registrarApiKey,
+      existingBlobId: null,
+      persist: async () => {},
+    };
+
+    let failed: boolean | undefined;
+    let retried: boolean | undefined;
+    await act(async () => {
+      failed = await outer.current.save(args);
+      retried = await outer.current.save(args);
+    });
+
+    expect(failed).toBe(false);
+    expect(retried).toBe(true);
   });
 });
