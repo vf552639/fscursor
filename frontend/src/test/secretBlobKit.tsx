@@ -140,8 +140,15 @@ export async function expectBlobsGoneAfterEntity(args: {
   const { apiDelete, invokeIfTauri, url, blobIds } = args;
   await waitFor(() => expect(deletedBlobIds(invokeIfTauri)).toEqual(blobIds));
   expect(apiDelete).toHaveBeenCalledWith(url);
+  // Именно первый `vault_delete_blob`, а не первый вызов Tauri вообще: страница
+  // ходит в Tauri и по другим поводам (локальный кэш, список зон), и «первый
+  // любой» сравнивал бы DELETE с чужим вызовом — утверждение о порядке уборки
+  // выполнялось бы само собой.
+  const firstForget = invokeIfTauri.mock.calls.findIndex(
+    (c: unknown[]) => c[0] === "vault_delete_blob",
+  );
   expect(apiDelete.mock.invocationCallOrder[0]).toBeLessThan(
-    invokeIfTauri.mock.invocationCallOrder[0],
+    invokeIfTauri.mock.invocationCallOrder[firstForget],
   );
 }
 
@@ -151,7 +158,11 @@ export async function expectBlobsGoneAfterEntity(args: {
  * держит и её.
  */
 export async function expectDeleteIgnoresBlobFailure<E>(
-  useDeleteEntity: () => { mutateAsync: (e: E) => Promise<unknown>; isError: boolean },
+  useDeleteEntity: () => {
+    mutateAsync: (e: E) => Promise<unknown>;
+    isError: boolean;
+    error: unknown;
+  },
   entity: E,
 ): Promise<void> {
   const { result } = renderHookWithClient(useDeleteEntity);
@@ -159,4 +170,7 @@ export async function expectDeleteIgnoresBlobFailure<E>(
     await result.current.mutateAsync(entity);
   });
   expect(result.current.isError).toBe(false);
+  // И показывать нечего: провал уборки блоба не должен доехать до пользователя
+  // под видом ошибки удаления сущности — она-то удалена.
+  expect(result.current.error).toBeNull();
 }
