@@ -17,6 +17,11 @@
 верное при любой реализации, — это не проверка. Вместо него — перебор всех
 колонок маппера `Domain` (переживёт добавление новой колонки) плюс перебор
 строк аудита, которые породил тот же `PUT`.
+
+Кросс-юзерные 404 здесь снабжены **позитивным контролем URL**: тот же метод по
+тому же пути под владельцем обязан вернуть 200. Без него опечатка в пути
+(`/api/domain/{id}`, переставленный роут) давала бы тот же 404, и тест
+«чужому нельзя» зеленел бы там, где эндпоинта нет вовсе.
 """
 
 import asyncio
@@ -394,7 +399,15 @@ async def test_server_update_accepts_fastpanel_result_fields():
 
 @pytest.mark.asyncio
 async def test_user_b_cannot_write_back_to_user_a_domain():
-    """Чужой домен не обновляется через `PUT` — 404, значения не меняются."""
+    """Чужой домен не обновляется через `PUT` — 404, значения не меняются.
+
+    С позитивным контролем URL: ровно тот же метод, путь и тело под владельцем
+    обязаны дать 200. Без него 404 у чужого не доказывает ничего — его же
+    вернула бы опечатка в пути или переставленный роут, и тест «чужому нельзя»
+    был бы зелен в мире, где эндпоинта нет вовсе. `GET` вместо `PUT` в этой
+    роли не годится: у него свой обработчик, и он живёт даже когда `PUT` не
+    зарегистрирован.
+    """
     dom = f"{uuid.uuid4().hex[:8]}.example.com"
     a_email = f"wb-a-{uuid.uuid4().hex[:8]}@example.com"
     hijack = {"site_user": "hijack", "ssl_status": "active"}
@@ -417,13 +430,24 @@ async def test_user_b_cannot_write_back_to_user_a_domain():
             r = await c.get(f"/api/domains/{domain_id}")
             assert r.status_code == 200, r.text
             assert r.json()["site_user"] is None
+
+            # позитивный контроль: путь настоящий и запрос рабочий
+            r = await c.put(f"/api/domains/{domain_id}", json=hijack)
+            assert r.status_code == 200, (
+                f"этот же PUT не работает и у владельца — 404 у чужого "
+                f"ничего не доказывает: {r.text}"
+            )
+            assert r.json()["site_user"] == "hijack"
         finally:
             await _purge(Domain, domain_id)
 
 
 @pytest.mark.asyncio
 async def test_user_b_cannot_write_back_to_user_a_server():
-    """Чужой сервер не обновляется через `PUT` — 404, значения не меняются."""
+    """Чужой сервер не обновляется через `PUT` — 404, значения не меняются.
+
+    С позитивным контролем URL — по тем же соображениям, что и у домена выше.
+    """
     a_email = f"wb-sa-{uuid.uuid4().hex[:8]}@example.com"
     hijack = {"fastpanel_status": "installed", "fastpanel_user": "hijack"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -448,5 +472,13 @@ async def test_user_b_cannot_write_back_to_user_a_server():
             assert r.status_code == 200, r.text
             assert r.json()["fastpanel_status"] == "not_installed"
             assert r.json()["fastpanel_user"] is None
+
+            # позитивный контроль: путь настоящий и запрос рабочий
+            r = await c.put(f"/api/servers/{server_id}", json=hijack)
+            assert r.status_code == 200, (
+                f"этот же PUT не работает и у владельца — 404 у чужого "
+                f"ничего не доказывает: {r.text}"
+            )
+            assert r.json()["fastpanel_user"] == "hijack"
         finally:
             await _purge(Server, server_id)

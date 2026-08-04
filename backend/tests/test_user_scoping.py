@@ -42,9 +42,16 @@ async def _register_and_login(client: AsyncClient, email: str, key: bytes = b"\x
 
 @pytest.mark.asyncio
 async def test_user_a_cannot_see_user_b_domains():
+    """Чужой домен не виден ни в списке, ни поштучно.
+
+    404 у чужого подпёрт позитивным контролем URL: тот же путь под владельцем
+    обязан дать 200. Иначе опечатка в пути (или переставленный роут) вернула бы
+    ровно тот же 404, и тест зеленел бы там, где эндпоинта вовсе нет.
+    """
     dom = f"{uuid.uuid4().hex[:8]}.example.com"
+    a_email = f"a-{uuid.uuid4().hex[:8]}@example.com"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, f"a-{uuid.uuid4().hex[:8]}@example.com")
+        await _register_and_login(c, a_email)
         r = await c.post("/api/domains", json={"domain_name": dom})
         assert r.status_code == 201
         a_domain_id = r.json()["id"]
@@ -56,3 +63,12 @@ async def test_user_a_cannot_see_user_b_domains():
             assert item["id"] != a_domain_id
         r = await c.get(f"/api/domains/{a_domain_id}")
         assert r.status_code == 404
+
+        await c.post("/api/auth/logout")
+        await _register_and_login(c, a_email)
+        r = await c.get(f"/api/domains/{a_domain_id}")
+        assert r.status_code == 200, (
+            f"этот же GET не работает и у владельца — 404 у чужого "
+            f"ничего не доказывает: {r.text}"
+        )
+        assert r.json()["domain_name"] == dom
