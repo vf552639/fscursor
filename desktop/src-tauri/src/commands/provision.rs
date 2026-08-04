@@ -16,7 +16,10 @@ use crate::provision::fastpanel_install::{
     parse_fastpanel_credentials, update_command, FpCredentials, INSTALL_CMD,
 };
 use crate::ssh::client::{SshError, SshSession};
-use crate::ssh::fastpanel::{self, CreateDbResult, CreateFtpResult, CreateSiteResult, SslInfo};
+use crate::ssh::fastpanel::{
+    self, CreateDbResult, CreateFtpResult, CreateSiteResult, DbCreation, ExistingDb, FtpCreation,
+    SslInfo,
+};
 use crate::sync::cache;
 use crate::sync::http::{ApiClient, ApiError, DomainWriteBack, ServerWriteBack};
 
@@ -30,32 +33,68 @@ pub struct ProvisionResultOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssl_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub db: Option<DbInfoOut>,
+    pub db: Option<DbOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ftp: Option<FtpInfoOut>,
+    pub ftp: Option<FtpOut>,
 }
 
-/// Реквизиты созданной БД. Намеренно без `Debug`: `db_password` существует
+/// Что стало с базой домена. Намеренно без `Debug`: `db_password` существует
 /// только здесь, и случайный `{:?}` не должен уносить его в лог.
+///
+/// Состояний три, и вместе с `Option` они все различимы: `None` — базу не
+/// просили (`with_db: false`), `Created` — создали этим прогоном, `Exists` — уже
+/// была. Свалить последние два в одно нельзя: у существующей базы пароль выдан
+/// прошлым прогоном и больше нигде не хранится, а `CreateDbResult` с
+/// придуманным паролем модалка честно показала бы под подписью «скопируйте
+/// сейчас» — ровно тот дефект, который здесь и чинится. Отдельный вариант без
+/// поля пароля делает такую подмену невозможной по типу — как `ssl_issued`
+/// рядом, где «не выпускали» и «не вышло» тоже разведены.
 #[derive(Serialize)]
-pub struct DbInfoOut {
-    pub db_name: String,
-    pub db_user: String,
-    /// Пароль БД: чувствительно, показывать по образцу RevealSecret.
-    pub db_password: String,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DbOut {
+    Created {
+        db_name: String,
+        db_user: String,
+        /// Пароль БД: чувствительно, показывать по образцу RevealSecret.
+        db_password: String,
+    },
+    Exists {
+        db_name: String,
+        db_user: String,
+    },
 }
 
-/// Реквизиты созданного FTP-аккаунта. Намеренно без `Debug` — по той же причине,
-/// что и `DbInfoOut`.
+/// Что стало с FTP-аккаунтом домена. Без `Debug` — по той же причине, что и
+/// `DbOut`, и с тем же разделением «создали» / «уже было».
 ///
 /// `output` из `CreateFtpResult` сюда не переносится: это сырой вывод команды,
 /// пользы в нём нет, а гарантий, что FastPanel не повторит в нём пароль, — тоже.
 #[derive(Serialize)]
-pub struct FtpInfoOut {
-    pub ftp_user: String,
-    /// Пароль FTP: генерируется на сервере и больше нигде не хранится —
-    /// показывать по образцу RevealSecret, как пароль БД и пароль панели.
-    pub ftp_password: String,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FtpOut {
+    Created {
+        ftp_user: String,
+        /// Пароль FTP: генерируется на сервере и больше нигде не хранится —
+        /// показывать по образцу RevealSecret, как пароль БД и пароль панели.
+        ftp_password: String,
+    },
+    Exists {
+        ftp_user: String,
+    },
+}
+
+impl DbOut {
+    /// Имена базы и пользователя — они одинаково правдивы в обоих вариантах,
+    /// и write-back обязан записать их даже там, где ничего не создавал:
+    /// прошлый прогон мог не дописать их на сервер.
+    fn names(&self) -> (&str, &str) {
+        match self {
+            DbOut::Created {
+                db_name, db_user, ..
+            }
+            | DbOut::Exists { db_name, db_user } => (db_name, db_user),
+        }
+    }
 }
 
 /// Что стало с одним доменом массового прогона.
@@ -245,8 +284,8 @@ struct ProvisionSteps {
     firewall_ok: bool,
     ssl_issued: Option<bool>,
     ssl_error: Option<String>,
-    db: Option<DbInfoOut>,
-    ftp: Option<FtpInfoOut>,
+    db: Option<DbOut>,
+    ftp: Option<FtpOut>,
 }
 
 /// Шаги провижининга внутри уже открытой сессии.
@@ -344,16 +383,31 @@ async fn run_provision_steps(
         // `output` (сырой вывод команды) отбрасываем прямо в деструктуризации,
         // как и у `create_database`: пользы в нём нет, а гарантий, что FastPanel
         // не повторит в нём пароль, — тоже.
-        let CreateFtpResult {
-            ftp_user,
-            ftp_password,
-            ..
-        } = fastpanel::create_ftp_account(session, &fp_path, domain_name).await?;
-        done.ftp = Some(FtpInfoOut {
-            ftp_user,
-            ftp_password,
-        });
-        done.steps.push("ftp");
+        //
+        // Существующий аккаунт — не создание: у `FtpCreation::AlreadyExists`
+        // пароля нет физически, и выдать его за созданный нечем. Пароль такого
+        // аккаунта был показан один раз тем прогоном, который его создал.
+        match fastpanel::create_ftp_account(session, &fp_path, domain_name).await? {
+            FtpCreation::Created(CreateFtpResult {
+                ftp_user,
+                ftp_password,
+                ..
+            }) => {
+                done.ftp = Some(FtpOut::Created {
+                    ftp_user,
+                    ftp_password,
+                });
+                done.steps.push("ftp");
+            }
+            FtpCreation::AlreadyExists { ftp_user } => {
+                let _ = app.emit(
+                    "provision:progress",
+                    serde_json::json!({ "step": "ftp_exists", "domain_id": domain_id }),
+                );
+                done.ftp = Some(FtpOut::Exists { ftp_user });
+                done.steps.push("ftp_exists");
+            }
+        }
 
         // SSL. Ни один путь этого блока не возвращает Err: сайт и FTP уже
         // созданы, и провалить из-за них весь provision значило бы отрапортовать
@@ -475,20 +529,36 @@ async fn run_provision_steps(
         );
         // `output` из CreateDbResult отбрасываем здесь же: в fallback-ветке это
         // вывод mysql, в котором повторён CREATE USER ... IDENTIFIED BY.
-        let CreateDbResult {
-            db_name,
-            db_user,
-            db_password,
-            ..
-        } = fastpanel::create_database(session, &fp_path, domain_name, None, None)
+        //
+        // Существующая пара «база + пользователь» приходит отдельным вариантом и
+        // без пароля: у уже созданного пользователя он свой, выданный тем
+        // прогоном, и `CREATE USER` его не меняет.
+        match fastpanel::create_database(session, &fp_path, domain_name, None, None)
             .await
-            .map_err(db_error)?;
-        done.steps.push("db");
-        done.db = Some(DbInfoOut {
-            db_name,
-            db_user,
-            db_password,
-        });
+            .map_err(db_error)?
+        {
+            DbCreation::Created(CreateDbResult {
+                db_name,
+                db_user,
+                db_password,
+                ..
+            }) => {
+                done.steps.push("db");
+                done.db = Some(DbOut::Created {
+                    db_name,
+                    db_user,
+                    db_password,
+                });
+            }
+            DbCreation::AlreadyExists(ExistingDb { db_name, db_user }) => {
+                let _ = app.emit(
+                    "provision:progress",
+                    serde_json::json!({ "step": "db_exists", "domain_id": domain_id }),
+                );
+                done.steps.push("db_exists");
+                done.db = Some(DbOut::Exists { db_name, db_user });
+            }
+        }
     }
 
     Ok(done)
@@ -560,14 +630,17 @@ fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
                 SSL_STATUS_ERROR.to_string()
             }
         }),
+        // Имена базы уезжают и тогда, когда она уже существовала: это правда о
+        // домене, а не отчёт о работе. Прошлый прогон мог их не записать —
+        // write-back best-effort, — и повтор обязан эту дыру закрывать.
         db_name: r
             .db
             .as_ref()
-            .and_then(|d| fit_or_omit(id, "db_name", &d.db_name, MAX_DB_NAME)),
+            .and_then(|d| fit_or_omit(id, "db_name", d.names().0, MAX_DB_NAME)),
         db_user: r
             .db
             .as_ref()
-            .and_then(|d| fit_or_omit(id, "db_user", &d.db_user, MAX_DB_USER)),
+            .and_then(|d| fit_or_omit(id, "db_user", d.names().1, MAX_DB_USER)),
         // Провижининг NS не трогает: их ставит `registrar_set_nameservers`.
         ns_status: None,
         last_provision_error: Some(None),
@@ -852,8 +925,8 @@ const BULK_WITH_DB: bool = false;
 /// снять его рано — значит запустить второй прогон параллельно живому первому.
 /// Сутки означают, что приложение должно простоять 24 часа с незакрытым
 /// прогоном, чтобы это стало ложным срабатыванием. Цена ошибки при этом
-/// ограничена: `site_exists`/`ssl_exists` делают повтор в основном холостым —
-/// но НЕ полностью, см. предупреждение про `create_ftp_account` ниже.
+/// ограничена: `site_exists`/`ssl_exists`/`ftp_exists`/`db_exists` делают повтор
+/// по уже сделанному домену холостым.
 const BULK_RUN_STALE_AFTER_HOURS: i64 = 24;
 
 /// Осиротела ли строка `running`.
@@ -990,17 +1063,12 @@ where
         // строку в `running`, и повтор вернёт `already_ran`, ничего не сделав.
         // Все домены при этом отработали — помечаем прогон failed сознательно:
         // залипший `running` чинится только временем (`BULK_RUN_STALE_AFTER_HOURS`),
-        // а повторный прогон в основном холостой: `site_exists` и `ssl_exists`
-        // пропускают уже сделанное.
-        //
-        // ВАЖНО, «в основном» — не «полностью»: `create_ftp_account`
-        // (`ssh/fastpanel.rs`) зовётся БЕЗУСЛОВНО на каждом не-`site_only`
-        // прогоне, парной проверки `ftp_exists` не существует, логин
-        // детерминирован, а пароль генерируется заново. Повтор по уже сделанному
-        // домену либо упрётся в дубликат аккаунта, либо молча сменит пароль,
-        // который пользователь записал из модалки часом раньше. Проверку
-        // существования FTP-аккаунта и БД ставит фаза 3b спринта 4 (долг №5) —
-        // до неё повтор безопасен только по хвосту `skipped`.
+        // а повторный прогон холостой: каждый создающий шаг сперва проверяет,
+        // не сделано ли уже, — `site_exists`, `ssl_exists`, `ftp_exists`,
+        // `db_exists` (`ssh/fastpanel.rs`). Повторно созданного не будет, а
+        // пароли уже существующих аккаунтов повтор не выдумывает: они приходят
+        // как `status: exists` без пароля, потому что настоящий выдан один раз
+        // тем прогоном, который аккаунт создал.
         //
         // Но результаты при этом НЕ теряем: раньше здесь стоял `return Err`, и
         // сбой записи статуса уносил пароли всех отработавших доменов.
@@ -1511,7 +1579,7 @@ mod tests {
             site_path: "/p".into(),
             ssl_issued: Some(true),
             ssl_error: None,
-            db: Some(DbInfoOut {
+            db: Some(DbOut::Created {
                 db_name: "d".into(),
                 db_user: "du".into(),
                 db_password: "dp".into(),
@@ -1530,12 +1598,12 @@ mod tests {
             site_path: "/var/www/u1/data/www/example.com".into(),
             ssl_issued: Some(true),
             ssl_error: None,
-            db: Some(DbInfoOut {
+            db: Some(DbOut::Created {
                 db_name: "u1_db".into(),
                 db_user: "u1_dbu".into(),
                 db_password: "dbP4ssw0rd".into(),
             }),
-            ftp: Some(FtpInfoOut {
+            ftp: Some(FtpOut::Created {
                 ftp_user: "u1_ftp".into(),
                 ftp_password: "ftpP4ssw0rd".into(),
             }),
@@ -1682,7 +1750,7 @@ mod tests {
             ssl_issued: Some(true),
             ssl_error: None,
             db: None,
-            ftp: Some(FtpInfoOut {
+            ftp: Some(FtpOut::Created {
                 ftp_user: "fu".into(),
                 ftp_password: "fp".into(),
             }),
@@ -1690,6 +1758,68 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["ftp"]["ftp_user"], "fu");
         assert_eq!(v["ftp"]["ftp_password"], "fp");
+    }
+
+    // ---- «уже существовало» отдельно от «создано» и от «не делали» ----------
+
+    // Фронт различает исходы по `status`, и без тега `created`/`exists` он
+    // отличал бы их только по наличию поля пароля — то есть «пароль не пришёл»
+    // читалось бы как «пароля нет», а это и есть ошибка, из которой вырос
+    // весь долг №5.
+    #[test]
+    fn a_pre_existing_database_is_reported_as_such_and_carries_no_password() {
+        let mut r = full_result();
+        r.db = Some(DbOut::Exists {
+            db_name: "u1_db".into(),
+            db_user: "u1_dbu".into(),
+        });
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["db"]["status"], "exists");
+        assert_eq!(v["db"]["db_name"], "u1_db");
+        // Поля пароля нет вовсе — не пустая строка, которую фронт показал бы под
+        // подписью «скопируйте сейчас».
+        assert!(v["db"].get("db_password").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_pre_existing_ftp_account_is_reported_as_such_and_carries_no_password() {
+        let mut r = full_result();
+        r.ftp = Some(FtpOut::Exists {
+            ftp_user: "u1_ftp".into(),
+        });
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["ftp"]["status"], "exists");
+        assert_eq!(v["ftp"]["ftp_user"], "u1_ftp");
+        assert!(v["ftp"].get("ftp_password").is_none(), "{v}");
+    }
+
+    // «Создали» тоже помечено тегом: без него фронт не смог бы сузить тип и
+    // добраться до пароля вообще.
+    #[test]
+    fn a_created_database_is_tagged_created() {
+        let v: serde_json::Value = serde_json::to_value(&full_result()).unwrap();
+        assert_eq!(v["db"]["status"], "created");
+        assert_eq!(v["db"]["db_password"], "dbP4ssw0rd");
+        assert_eq!(v["ftp"]["status"], "created");
+    }
+
+    // Существующая база — не повод не записать её имя: write-back best-effort,
+    // и прошлый прогон мог до сервера не доехать. Метаданные правдивы в обоих
+    // вариантах, а пароля в теле нет ни в одном.
+    #[test]
+    fn domain_write_back_body_records_the_names_of_a_pre_existing_database() {
+        let mut r = full_result();
+        r.db = Some(DbOut::Exists {
+            db_name: "u1_db".into(),
+            db_user: "u1_dbu".into(),
+        });
+        r.ftp = Some(FtpOut::Exists {
+            ftp_user: "u1_ftp".into(),
+        });
+        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        assert!(body.contains("\"db_name\":\"u1_db\""), "{body}");
+        assert!(body.contains("\"db_user\":\"u1_dbu\""), "{body}");
+        assert!(!body.to_lowercase().contains("password"), "{body}");
     }
 
     // ---- массовый прогон ----------------------------------------------------
@@ -1705,7 +1835,7 @@ mod tests {
             ssl_issued: Some(true),
             ssl_error: None,
             db: None,
-            ftp: Some(FtpInfoOut {
+            ftp: Some(FtpOut::Created {
                 ftp_user: format!("ftp_{domain_id}"),
                 ftp_password: format!("PW-{domain_id}"),
             }),
@@ -1727,13 +1857,15 @@ mod tests {
         .unwrap();
     }
 
-    /// Пароль FTP домена из отчёта — `None`, если домен не отработал.
+    /// Пароль FTP домена из отчёта — `None`, если домен не отработал или его
+    /// аккаунт уже существовал (у `FtpOut::Exists` пароля нет по устройству).
     fn ftp_password_of(out: &BulkProvisionOut, domain_id: &str) -> Option<String> {
         out.items.iter().find(|i| i.domain_id == domain_id).and_then(
             |i| match &i.outcome {
-                BulkItemOutcome::Done { result } => {
-                    result.ftp.as_ref().map(|f| f.ftp_password.clone())
-                }
+                BulkItemOutcome::Done { result } => match result.ftp.as_ref() {
+                    Some(FtpOut::Created { ftp_password, .. }) => Some(ftp_password.clone()),
+                    _ => None,
+                },
                 _ => None,
             },
         )

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use dryoc::rng::randombytes_buf;
 use regex::Regex;
 use serde::Serialize;
@@ -12,6 +13,30 @@ use shell_escape::escape;
 use tokio::time::sleep;
 
 use crate::ssh::client::{SshError, SshSession};
+
+/// «Выполнить команду на сервере» — ровно то, чем пользуются функции создания
+/// БД и FTP-аккаунта.
+///
+/// Существует ради проверяемости, а не ради абстракции: единственный
+/// прод-реализатор — `SshSession`. Но решения этих функций («создавать или уже
+/// есть») стоят пароля, который существует в одном экземпляре, а поднять живой
+/// SSH в тесте нельзя. С трейтом сценарий «на сервере уже есть такой
+/// пользователь» разыгрывается фейковым сервером, и тест проверяет ЭФФЕКТ —
+/// какие команды ушли на сервер и что вернулось наружу, — а не текст собранной
+/// строки.
+#[async_trait]
+pub trait Exec: Send {
+    async fn run(&mut self, cmd: &str, timeout: Duration) -> Result<(i32, String), SshError>;
+}
+
+#[async_trait]
+impl Exec for SshSession {
+    async fn run(&mut self, cmd: &str, timeout: Duration) -> Result<(i32, String), SshError> {
+        // `pty: false` — как у всех вызовов этого модуля: вывод машинный, а pty
+        // подмешал бы в него управляющие последовательности.
+        self.exec(cmd, timeout, false).await
+    }
+}
 
 pub const FASTPANEL_FALLBACK_PATH: &str = "/usr/local/fastpanel2/fastpanel";
 
@@ -194,12 +219,138 @@ pub async fn create_site(
     })
 }
 
+/// Признаки того, что команда упала именно на дубликате.
+///
+/// Вторая линия обороны там, где первая (`ftp_exists`/`db_exists`) не смогла
+/// ответить: CLI не знает подкоманды `list`, mysql не пустил к `mysql.user`.
+/// Без неё повтор упирался бы в безликий `opaque_exit` с одним кодом возврата,
+/// и пользователь читал бы «ошибка на сервере» там, где на самом деле всё уже
+/// сделано.
+///
+/// `does not exist` мимо: подстрока `exist` есть и в нём, поэтому маркеры
+/// точные, а не «содержит exist».
+const ALREADY_EXISTS_MARKERS: [&str; 5] = [
+    "already exists",
+    "already exist",
+    "already in use",
+    "duplicate",
+    // MySQL/MariaDB: ER_CANNOT_USER от `CREATE USER` по занятому имени.
+    "error 1396",
+];
+
+/// Похоже ли, что команда упала на «уже существует».
+///
+/// Принимает вывод, но НИКОГДА его не возвращает: у `create`-команд в argv
+/// стоит сгенерированный пароль, и утилиты повторяют его в тексте ошибки
+/// (см. `opaque_exit`). Наружу отсюда уходит один `bool`.
+fn looks_like_already_exists(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    ALREADY_EXISTS_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Логины FTP-аккаунтов из JSON-вывода `ftp_account list --json`.
+///
+/// `None` — «разобрать не удалось», и это НЕ то же самое, что «аккаунтов нет».
+/// Непустой список, из которого не достался ни один логин, тоже `None`: формат
+/// вывода FastPanel не документирован, и молча решить «аккаунта нет» значило бы
+/// пойти создавать поверх существующего.
+fn ftp_logins_from_json(raw: &str) -> Option<Vec<String>> {
+    let mut v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if let Some(obj) = v.as_object_mut() {
+        for key in ["result", "ftp_accounts", "accounts", "data"] {
+            if let Some(inner) = obj.get(key).cloned() {
+                v = inner;
+                break;
+            }
+        }
+    }
+    let arr = v.as_array()?;
+    let mut logins = Vec::new();
+    for item in arr {
+        let login = first_non_empty(&[
+            item.get("login").and_then(|x| x.as_str()),
+            item.get("username").and_then(|x| x.as_str()),
+            item.get("user").and_then(|x| x.as_str()),
+            item.get("name").and_then(|x| x.as_str()),
+        ]);
+        if let Some(l) = login {
+            logins.push(l.trim().to_string());
+        }
+    }
+    if logins.is_empty() && !arr.is_empty() {
+        return None;
+    }
+    Some(logins)
+}
+
+/// Есть ли в текстовой таблице колонка, равная логину.
+///
+/// Сравнение по целой колонке, а не `contains`: логин вида `ftp_shop` входит
+/// подстрокой и в `ftp_shop_old`, и в путь `/var/www/ftp_shop`, и «нашли»
+/// означало бы не создать аккаунт вовсе.
+fn text_lists_login(output: &str, login: &str) -> bool {
+    let sep = Regex::new(r"[\s|,]+").unwrap();
+    output
+        .lines()
+        .any(|line| sep.split(line).map(str::trim).any(|cell| cell == login))
+}
+
+/// Существует ли FTP-аккаунт с таким логином. `None` — ответить не смогли.
+///
+/// Парная к `site_exists`/`cert_exists`, но механика другая: у FTP-аккаунта нет
+/// ни каталога, ни файла, по которому его видно, — FastPanel держит их в своей
+/// базе. Читаем единственным доступным способом, `ftp_account list`, и читать
+/// его вывод безопасно: в argv этой команды пароля нет (в отличие от `create`,
+/// ради которого и написан `opaque_exit`).
+///
+/// Три состояния, а не два: «не знаем» — не «нет». Логин детерминирован
+/// (`make_ftp_login`), пароль генерируется заново на каждом прогоне, и ошибка в
+/// сторону «нет» стоит либо провала на дубликате, либо сменённого пароля у
+/// живого аккаунта.
+pub async fn ftp_exists(
+    s: &mut impl Exec,
+    fp_path: &str,
+    login: &str,
+) -> Result<Option<bool>, SshError> {
+    let json_cmd = format!("{} ftp_account list --json", q(fp_path));
+    let (code, out) = s.run(&json_cmd, Duration::from_secs(30)).await?;
+    if code == 0 {
+        if let Some(logins) = ftp_logins_from_json(&out) {
+            return Ok(Some(logins.iter().any(|l| l == login)));
+        }
+    }
+    let text_cmd = format!("{} ftp_account list", q(fp_path));
+    let (c2, o2) = s.run(&text_cmd, Duration::from_secs(30)).await?;
+    if c2 == 0 && !o2.trim().is_empty() {
+        return Ok(Some(text_lists_login(&o2, login)));
+    }
+    Ok(None)
+}
+
+/// Исход `create_ftp_account`.
+///
+/// Enum, а не `CreateFtpResult` с пустым паролем: вызывающий обязан разобрать
+/// оба варианта, и «уже было» физически нечем принять за успешное создание — у
+/// этого варианта нет поля с паролем.
+pub enum FtpCreation {
+    Created(CreateFtpResult),
+    /// Аккаунт уже есть. Пароля здесь нет и быть не может: его выдал тот
+    /// прогон, который аккаунт создал, и больше он не хранится нигде.
+    AlreadyExists { ftp_user: String },
+}
+
 pub async fn create_ftp_account(
-    s: &mut SshSession,
+    s: &mut impl Exec,
     fp_path: &str,
     domain: &str,
-) -> Result<CreateFtpResult, SshError> {
+) -> Result<FtpCreation, SshError> {
     let ftp_user = make_ftp_login(domain);
+    // Проверка ДО генерации пароля: сгенерировать его для существующего аккаунта
+    // значило бы показать пользователю в модалке пароль, который никуда не
+    // подходит (`ftp_account create` пароль существующему логину не меняет).
+    if ftp_exists(s, fp_path, &ftp_user).await? == Some(true) {
+        return Ok(FtpCreation::AlreadyExists { ftp_user });
+    }
     let password = generate_password(14);
     let cmd = format!(
         "{} ftp_account create --login={} --password={} --site={}",
@@ -208,15 +359,19 @@ pub async fn create_ftp_account(
         q(&password),
         q(domain),
     );
-    let (code, output) = s.exec(&cmd, Duration::from_secs(120), false).await?;
+    let (code, output) = s.run(&cmd, Duration::from_secs(120)).await?;
     if code != 0 {
+        // Вывод читаем, но наружу не отдаём — в нём повторён argv с паролем.
+        if looks_like_already_exists(&output) {
+            return Ok(FtpCreation::AlreadyExists { ftp_user });
+        }
         return Err(opaque_exit("create_ftp_account", code));
     }
-    Ok(CreateFtpResult {
+    Ok(FtpCreation::Created(CreateFtpResult {
         ftp_user,
         ftp_password: password,
         output,
-    })
+    }))
 }
 
 pub async fn issue_ssl_certificate(
@@ -262,19 +417,148 @@ fn safe_mysql_name(value: &str, fallback: &str) -> String {
     base.chars().take(32).collect()
 }
 
+/// Что из пары «база + пользователь» уже есть на сервере.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DbPresence {
+    pub database: bool,
+    pub user: bool,
+}
+
+/// Команда проверки существования базы и её пользователя.
+///
+/// Пароля в ней нет ни в argv, ни в самом запросе — поэтому её вывод, в отличие
+/// от `database create` и `CREATE USER ... IDENTIFIED BY`, читать безопасно
+/// (см. `opaque_exit`).
+///
+/// Пользователя ищем именно `@'localhost'` — ровно того, кого создаём ниже.
+/// Одноимённый `@'%'` нашей команде `CREATE USER 'u'@'localhost'` не мешает: это
+/// другая учётка, и пароль у неё свой.
+///
+/// `-N -B`: без заголовков, колонки табом — чтобы разбирать, а не угадывать.
+/// Имена уже прошли `safe_mysql_name` (только `[a-z0-9_]`), так что внутри
+/// кавычек им взяться неоткуда.
+fn build_db_exists_cmd(database_name: &str, database_user: &str) -> String {
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM information_schema.SCHEMATA \
+         WHERE SCHEMA_NAME='{database_name}'), \
+         (SELECT COUNT(*) FROM mysql.user WHERE User='{database_user}' AND Host='localhost')"
+    );
+    format!("mysql -N -B -e {}", q(&sql))
+}
+
+/// Разбор ответа проверки. `None` — строку с двумя числами найти не удалось.
+///
+/// Ищем первую подходящую строку, а не первую вообще: mysql пишет в тот же
+/// поток предупреждения вроде «Using a password on the command line…», и
+/// разбирать вслепую первую строку значило бы получить `None` на живом сервере.
+fn parse_db_exists_output(output: &str) -> Option<DbPresence> {
+    for line in output.lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(db), Some(user)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        if let (Ok(db), Ok(user)) = (db.parse::<i64>(), user.parse::<i64>()) {
+            return Some(DbPresence {
+                database: db > 0,
+                user: user > 0,
+            });
+        }
+    }
+    None
+}
+
+/// Существуют ли база и её пользователь. `None` — проверку выполнить не смогли.
+///
+/// Парная к `site_exists`/`cert_exists`. Механика — запрос к mysql, потому что
+/// файла или каталога, по которому видно базу, не существует; ходим тем же
+/// способом, что и fallback создания (`mysql -e` без учётных данных, то есть
+/// сокет-авторизацией root'а), — если он не работает, не работает и создание.
+///
+/// Тройка «есть/нет/не знаем» обязательна: «не знаем» нельзя трактовать как
+/// «нет». Имена детерминированы (`{slug}_db`, `{slug}_usr`), а
+/// `CREATE USER` существующему пользователю пароль не меняет — ошибка в сторону
+/// «нет» и есть тот самый дефект, ради которого написана эта функция.
+pub async fn db_exists(
+    s: &mut impl Exec,
+    database_name: &str,
+    database_user: &str,
+) -> Result<Option<DbPresence>, SshError> {
+    let cmd = build_db_exists_cmd(database_name, database_user);
+    let (code, out) = s.run(&cmd, Duration::from_secs(30)).await?;
+    if code != 0 {
+        return Ok(None);
+    }
+    Ok(parse_db_exists_output(&out))
+}
+
+/// База и пользователь, которые уже были на сервере.
+pub struct ExistingDb {
+    pub db_name: String,
+    pub db_user: String,
+}
+
+/// Исход `create_database`. Enum по той же причине, что и `FtpCreation`:
+/// у варианта «уже было» нет поля с паролем, и принять его за создание нечем.
+pub enum DbCreation {
+    Created(CreateDbResult),
+    AlreadyExists(ExistingDb),
+}
+
+/// SQL fallback-создания.
+///
+/// `CREATE USER` — БЕЗ `IF NOT EXISTS`, и это не мелочь стиля. С ним занятое имя
+/// давало команде код 0, а функция возвращала свежесгенерированный пароль,
+/// которого у существующего пользователя нет: модалка показывала «скопируйте
+/// сейчас, второй раз не покажем» строку, не подходящую ни к чему. Без него тот
+/// же случай — громкая ошибка `ER_CANNOT_USER` (1396), которую разбирает
+/// `looks_like_already_exists`.
+///
+/// У базы `IF NOT EXISTS` остаётся намеренно: существующая база с отсутствующим
+/// пользователем — это недоделанная прошлым прогоном пара, и её надо доделать,
+/// а не отбить. Данных существующей базы `CREATE DATABASE IF NOT EXISTS` не
+/// трогает.
+fn build_create_db_sql(
+    database_name: &str,
+    database_user: &str,
+    database_password: &str,
+) -> String {
+    format!(
+        "CREATE DATABASE IF NOT EXISTS `{database_name}`;\
+         CREATE USER '{database_user}'@'localhost' IDENTIFIED BY '{database_password}';\
+         GRANT ALL PRIVILEGES ON `{database_name}`.* TO '{database_user}'@'localhost';\
+         FLUSH PRIVILEGES;"
+    )
+}
+
 pub async fn create_database(
-    s: &mut SshSession,
+    s: &mut impl Exec,
     fp_path: &str,
     domain: &str,
     db_name: Option<&str>,
     db_user: Option<&str>,
-) -> Result<CreateDbResult, SshError> {
+) -> Result<DbCreation, SshError> {
     let slug = domain.split_once('.').map(|(a, _)| a).unwrap_or(domain);
     let database_name = safe_mysql_name(
         db_name.unwrap_or(&format!("{slug}_db")),
         "site_db",
     );
     let database_user = safe_mysql_name(db_user.unwrap_or(&format!("{slug}_usr")), "site_usr");
+
+    // Смотрит на ПОЛЬЗОВАТЕЛЯ, а не на базу: пароль принадлежит ему. База без
+    // пользователя — недоделанная пара, её нижняя ветка доводит до конца и
+    // отдаёт настоящий рабочий пароль; пользователь без пароля, который мы могли
+    // бы показать, — это ложь, и вот её мы и отсекаем.
+    if let Some(present) = db_exists(s, &database_name, &database_user).await? {
+        if present.user {
+            return Ok(DbCreation::AlreadyExists(ExistingDb {
+                db_name: database_name,
+                db_user: database_user,
+            }));
+        }
+    }
+
+    // Пароль генерируем только теперь: для существующего пользователя он был бы
+    // мусором, который модалка выдала бы за рабочий.
     let database_password = generate_password(18);
 
     let fp_cmd = format!(
@@ -284,37 +568,39 @@ pub async fn create_database(
         q(&database_user),
         q(&database_password),
     );
-    let (code, out) = s.exec(&fp_cmd, Duration::from_secs(60), false).await?;
+    let (code, out) = s.run(&fp_cmd, Duration::from_secs(60)).await?;
     if code == 0 {
-        return Ok(CreateDbResult {
+        return Ok(DbCreation::Created(CreateDbResult {
             db_name: database_name,
             db_user: database_user,
             db_password: database_password,
             output: out,
-        });
+        }));
     }
 
-    let sql = format!(
-        "CREATE DATABASE IF NOT EXISTS `{database_name}`;\
-         CREATE USER IF NOT EXISTS '{database_user}'@'localhost' IDENTIFIED BY '{database_password}';\
-         GRANT ALL PRIVILEGES ON `{database_name}`.* TO '{database_user}'@'localhost';\
-         FLUSH PRIVILEGES;"
-    );
+    let sql = build_create_db_sql(&database_name, &database_user, &database_password);
     let fallback_cmd = format!("mysql -e {}", q(&sql));
-    let (fb_code, fb_out) = s
-        .exec(&fallback_cmd, Duration::from_secs(60), false)
-        .await?;
+    let (fb_code, fb_out) = s.run(&fallback_cmd, Duration::from_secs(60)).await?;
     if fb_code != 0 {
         // Ни `out` (вывод fastpanel с `--password=` в argv), ни `fb_out` (mysql
         // повторяет в ошибке весь запрос, включая IDENTIFIED BY) наружу нельзя.
+        // Но прочитать `fb_out` мы имеем право: сюда попадает и случай, когда
+        // проверка выше не отработала (`None`), а пользователь на самом деле
+        // есть, — и тогда это не ошибка, а «уже было».
+        if looks_like_already_exists(&fb_out) {
+            return Ok(DbCreation::AlreadyExists(ExistingDb {
+                db_name: database_name,
+                db_user: database_user,
+            }));
+        }
         return Err(opaque_exit("create_database", fb_code));
     }
-    Ok(CreateDbResult {
+    Ok(DbCreation::Created(CreateDbResult {
         db_name: database_name,
         db_user: database_user,
         db_password: database_password,
         output: if fb_out.is_empty() { out } else { fb_out },
-    })
+    }))
 }
 
 pub async fn revoke_ssl_certificate(
@@ -853,5 +1139,339 @@ mod tests {
             "session: create_database exit 1 \
              (output withheld: it echoes the generated password)"
         );
+    }
+
+    // ---- существование БД и FTP-аккаунта -----------------------------------
+
+    /// Сервер, которому расписано, что отвечать на какую команду.
+    ///
+    /// Нужен ровно затем, чтобы проверять ЭФФЕКТ: какие команды ушли на сервер
+    /// (в частности — ушла ли создающая команда) и что вернулось наружу. По
+    /// строке собранной команды этого не видно, а живой SSH в тесте не поднять.
+    struct FakeServer {
+        /// `(подстрока команды, код, вывод)`; выигрывает первое совпадение.
+        replies: Vec<(&'static str, i32, String)>,
+        seen: Vec<String>,
+    }
+
+    impl FakeServer {
+        fn new(replies: &[(&'static str, i32, &str)]) -> Self {
+            FakeServer {
+                replies: replies
+                    .iter()
+                    .map(|(p, c, o)| (*p, *c, (*o).to_string()))
+                    .collect(),
+                seen: Vec::new(),
+            }
+        }
+
+        fn ran(&self, needle: &str) -> bool {
+            self.seen.iter().any(|c| c.contains(needle))
+        }
+    }
+
+    #[async_trait]
+    impl Exec for FakeServer {
+        async fn run(&mut self, cmd: &str, _t: Duration) -> Result<(i32, String), SshError> {
+            self.seen.push(cmd.to_string());
+            for (pat, code, out) in &self.replies {
+                if cmd.contains(pat) {
+                    return Ok((*code, out.clone()));
+                }
+            }
+            // Нерасписанная команда = сервер её не знает. Именно так выглядит
+            // отсутствующая подкоманда CLI, и именно этот случай не должен
+            // молча читаться как «объекта нет».
+            Ok((127, format!("command not found: {cmd}")))
+        }
+    }
+
+    const FP: &str = "/usr/local/fastpanel2/fastpanel";
+
+    // Тот самый дефект долга №5: имя пользователя детерминированно, `CREATE USER`
+    // существующему пароль не меняет, и функция возвращала свежий пароль, который
+    // ни к чему не подходит. Теперь до создания дело не доходит вовсе.
+    #[tokio::test]
+    async fn create_database_never_invents_a_password_for_an_existing_user() {
+        let mut s = FakeServer::new(&[("information_schema", 0, "1\t1")]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+
+        match out {
+            DbCreation::AlreadyExists(e) => {
+                assert_eq!(e.db_name, "example_db");
+                assert_eq!(e.db_user, "example_usr");
+            }
+            DbCreation::Created(_) => panic!("выдал пароль существующему пользователю"),
+        }
+        // Эффект, ради которого всё: ни одной создающей команды на сервере.
+        assert!(!s.ran("database create"), "{:?}", s.seen);
+        assert!(!s.ran("CREATE USER"), "{:?}", s.seen);
+        // И ни одного пароля в argv — даже сгенерированного «на всякий случай».
+        assert!(!s.ran("--password="), "{:?}", s.seen);
+    }
+
+    #[tokio::test]
+    async fn create_database_creates_when_neither_database_nor_user_exists() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            ("database create", 0, "ok"),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+
+        match out {
+            DbCreation::Created(r) => {
+                assert_eq!(r.db_name, "example_db");
+                assert_eq!(r.db_user, "example_usr");
+                assert_eq!(r.db_password.len(), 18);
+            }
+            DbCreation::AlreadyExists(_) => panic!("свободное имя объявлено занятым"),
+        }
+    }
+
+    // База есть, пользователя нет — это недоделанная прошлым прогоном пара, и
+    // отбить её значило бы оставить сайт без доступа к своей же базе навсегда.
+    // Пароль здесь настоящий: пользователь создаётся именно сейчас.
+    #[tokio::test]
+    async fn create_database_finishes_a_half_made_pair() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "1\t0"),
+            ("database create", 1, "database already exists"),
+            ("mysql -e", 0, ""),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+
+        assert!(matches!(out, DbCreation::Created(_)));
+        assert!(s.ran("CREATE USER"), "{:?}", s.seen);
+    }
+
+    // Проверка могла не отработать (нет доступа к `mysql.user`, другой сервер
+    // БД). Тогда единственный сигнал — ошибка самого `CREATE USER`, и она
+    // существует только потому, что `IF NOT EXISTS` из него убран.
+    #[tokio::test]
+    async fn an_unverifiable_check_still_refuses_to_report_a_created_user() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 1, "ERROR 1045: Access denied"),
+            ("database create", 1, "failed"),
+            (
+                "mysql -e",
+                1,
+                "ERROR 1396 (HY000) at line 1: Operation CREATE USER failed for 'example_usr'@'localhost'",
+            ),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+
+        assert!(matches!(out, DbCreation::AlreadyExists(_)));
+    }
+
+    // Настоящий провал остаётся провалом, и его вывод по-прежнему не выходит
+    // наружу: mysql повторяет в ошибке весь запрос вместе с IDENTIFIED BY.
+    #[tokio::test]
+    async fn a_genuine_database_failure_still_hides_its_output() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            ("database create", 1, "failed"),
+            (
+                "mysql -e",
+                1,
+                "ERROR 1064: near \"IDENTIFIED BY 'leakedPassword'\"",
+            ),
+        ]);
+
+        // Не `unwrap_err()`: он требует `Debug` у Ok-варианта, а `DbCreation`
+        // несёт пароль и `Debug` не выводит намеренно — иначе случайный `{:?}`
+        // унёс бы его в лог.
+        let msg = match create_database(&mut s, FP, "example.com", None, None).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("настоящий провал выдан за результат"),
+        };
+        assert!(!msg.contains("leakedPassword"), "{msg}");
+        assert!(!msg.contains("IDENTIFIED BY"), "{msg}");
+    }
+
+    // Пароль существующему FTP-аккаунту `ftp_account create` не меняет: показать
+    // свежесгенерированный значило бы выдать за рабочий тот, что никуда не
+    // подходит, — и затереть в голове пользователя настоящий.
+    #[tokio::test]
+    async fn create_ftp_account_leaves_an_existing_account_alone() {
+        let mut s = FakeServer::new(&[(
+            "ftp_account list --json",
+            0,
+            r#"[{"login":"ftp_example","site":"example.com"}]"#,
+        )]);
+
+        let out = create_ftp_account(&mut s, FP, "example.com").await.unwrap();
+
+        match out {
+            FtpCreation::AlreadyExists { ftp_user } => assert_eq!(ftp_user, "ftp_example"),
+            FtpCreation::Created(_) => panic!("создал поверх существующего аккаунта"),
+        }
+        assert!(!s.ran("ftp_account create"), "{:?}", s.seen);
+        assert!(!s.ran("--password="), "{:?}", s.seen);
+    }
+
+    #[tokio::test]
+    async fn create_ftp_account_creates_when_the_login_is_free() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 0, r#"[{"login":"ftp_other"}]"#),
+            ("ftp_account create", 0, "created"),
+        ]);
+
+        let out = create_ftp_account(&mut s, FP, "example.com").await.unwrap();
+
+        match out {
+            FtpCreation::Created(r) => {
+                assert_eq!(r.ftp_user, "ftp_example");
+                assert_eq!(r.ftp_password.len(), 14);
+            }
+            FtpCreation::AlreadyExists { .. } => panic!("свободный логин объявлен занятым"),
+        }
+    }
+
+    // Ни одна из подкоманд `list` не поддерживается (её наличие в FastPanel CLI
+    // ничем не гарантировано). Тогда «уже существует» распознаётся по ошибке
+    // самого создания — но именно как «уже есть», а не как безликий exit-код.
+    #[tokio::test]
+    async fn create_ftp_account_recognizes_a_duplicate_even_without_a_list_command() {
+        let mut s = FakeServer::new(&[(
+            "ftp_account create",
+            1,
+            "error: ftp account with this login already exists",
+        )]);
+
+        let out = create_ftp_account(&mut s, FP, "example.com").await.unwrap();
+
+        assert!(matches!(out, FtpCreation::AlreadyExists { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_genuine_ftp_failure_still_hides_its_output() {
+        let mut s = FakeServer::new(&[(
+            "ftp_account create",
+            2,
+            "usage: ftp_account create --login=L --password=leakedPassword",
+        )]);
+
+        // Про `unwrap_err` — см. соседний тест про БД.
+        let msg = match create_ftp_account(&mut s, FP, "example.com").await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("настоящий провал выдан за результат"),
+        };
+        assert!(!msg.contains("leakedPassword"), "{msg}");
+        assert!(msg.contains("create_ftp_account exit 2"), "{msg}");
+    }
+
+    // Пустой список — это ответ «аккаунтов нет», а не «не смогли прочитать».
+    #[tokio::test]
+    async fn an_empty_ftp_list_means_the_login_is_free() {
+        let mut s = FakeServer::new(&[("ftp_account list --json", 0, "[]")]);
+        assert_eq!(
+            ftp_exists(&mut s, FP, "ftp_example").await.unwrap(),
+            Some(false)
+        );
+    }
+
+    // А вот непонятный вывод — «не знаем», и трактовать его как «нет» нельзя.
+    #[tokio::test]
+    async fn an_unreadable_ftp_list_answers_dont_know() {
+        let mut s = FakeServer::new(&[("ftp_account list", 0, "   ")]);
+        assert_eq!(ftp_exists(&mut s, FP, "ftp_example").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn ftp_exists_falls_back_to_the_text_table() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 127, "unknown option --json"),
+            (
+                "ftp_account list",
+                0,
+                "LOGIN       | SITE        | PATH\nftp_example | example.com | /var/www/x",
+            ),
+        ]);
+        assert_eq!(
+            ftp_exists(&mut s, FP, "ftp_example").await.unwrap(),
+            Some(true)
+        );
+    }
+
+    // Список непустой, но логинов из него не достаётся — формат вывода не тот,
+    // что мы ждём. «Не знаем» вместо «нет»: иначе создадим поверх живого.
+    #[test]
+    fn a_list_without_recognizable_logins_is_not_an_empty_list() {
+        assert!(ftp_logins_from_json(r#"[{"unexpected":"shape"}]"#).is_none());
+        assert_eq!(
+            ftp_logins_from_json(r#"{"result":[{"username":"ftp_a"}]}"#),
+            Some(vec!["ftp_a".to_string()])
+        );
+    }
+
+    // Логин сравнивается целой колонкой: `ftp_shop` — подстрока и `ftp_shop_old`,
+    // и пути, а ложное «нашли» означает не создать аккаунт вовсе.
+    #[test]
+    fn text_list_matches_a_whole_column_not_a_substring() {
+        assert!(!text_lists_login("ftp_shop_old | site.com", "ftp_shop"));
+        assert!(!text_lists_login("/var/www/ftp_shop/data", "ftp_shop"));
+        assert!(text_lists_login("ftp_shop | site.com", "ftp_shop"));
+    }
+
+    // mysql пишет предупреждения в тот же поток; разбор первой строки вслепую
+    // давал бы «не знаем» на живом сервере.
+    #[test]
+    fn db_presence_is_read_past_warning_lines() {
+        assert_eq!(
+            parse_db_exists_output("mysql: [Warning] Using a password on the CLI\n0\t1\n"),
+            Some(DbPresence {
+                database: false,
+                user: true
+            })
+        );
+        assert_eq!(parse_db_exists_output("ERROR 1045: Access denied"), None);
+    }
+
+    // Проверка ходит за пользователем `@'localhost'` — ровно за тем, кого потом
+    // создаёт. Одноимённый `@'%'` — другая учётка с другим паролем.
+    #[test]
+    fn db_exists_check_carries_no_password_and_targets_the_localhost_user() {
+        let cmd = build_db_exists_cmd("example_db", "example_usr");
+        assert!(cmd.contains("information_schema"), "{cmd}");
+        assert!(cmd.contains("Host='\\''localhost'\\''") || cmd.contains("Host='localhost'"), "{cmd}");
+        assert!(!cmd.to_lowercase().contains("identified by"), "{cmd}");
+        assert!(!cmd.contains("--password"), "{cmd}");
+    }
+
+    // Ядро дефекта №5 одной строкой: `CREATE USER IF NOT EXISTS` для занятого
+    // имени — no-op с кодом 0, после которого функция отдавала свежий пароль,
+    // не подходящий ни к чему. У базы `IF NOT EXISTS` остаётся: недоделанную
+    // пару надо доделать, а не отбить.
+    #[test]
+    fn create_user_sql_must_fail_loudly_on_a_taken_name() {
+        let sql = build_create_db_sql("example_db", "example_usr", "pw");
+        assert!(
+            !sql.contains("CREATE USER IF NOT EXISTS"),
+            "IF NOT EXISTS молча оставляет старый пароль: {sql}"
+        );
+        assert!(sql.contains("CREATE USER 'example_usr'@'localhost'"), "{sql}");
+        assert!(sql.contains("CREATE DATABASE IF NOT EXISTS"), "{sql}");
+    }
+
+    // `does not exist` содержит подстроку `exist` — маркеры обязаны быть точными,
+    // иначе «объекта нет» читалось бы как «объект уже есть».
+    #[test]
+    fn a_not_found_message_is_not_an_already_exists_message() {
+        assert!(!looks_like_already_exists("ERROR: site does not exist"));
+        assert!(!looks_like_already_exists("no such ftp account"));
+        assert!(looks_like_already_exists("ERROR 1396 (HY000) Operation CREATE USER failed"));
+        assert!(looks_like_already_exists("Login already exists"));
     }
 }
