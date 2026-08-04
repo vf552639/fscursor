@@ -206,17 +206,18 @@ describe("Cloudflare — api_token через блоб", () => {
     expect(body).not.toHaveProperty("api_token_blob_id");
   });
 
-  it("в вебе форма не даёт ни поля токена, ни кнопки — только объяснение", async () => {
+  it("в вебе форма не открывается вовсе — объяснение стоит на месте кнопки", async () => {
     setTauri(false);
     renderPage([]);
-    await openAddModal();
 
-    // Поля нет вовсе: шифрует Rust мастер-ключом из keychain, и поле, в которое
-    // дали набрать токен, обещало бы сохранение уже после того, как он набран.
+    // Объяснение ДО клика, а не после: кнопка, за которой окно без единого
+    // действия кроме Cancel, — это тупик, в который человека сначала завели.
+    expect(await screen.findByText(DESKTOP_NOTE)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "+ Add Account" })).toBeNull();
+    // Ни поля токена, ни кнопки сохранения: без входа в модалку их и не
+    // отрисовать, но проверяем именно отсутствие на экране — это то, что видит
+    // пользователь.
     expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
-    expect(screen.getByText(DESKTOP_NOTE)).toBeTruthy();
-    // Без токена аккаунт бесполезен целиком, поэтому и кнопки создания в вебе
-    // нет: она завела бы ровно ту запись, из-за которой затевался спринт.
     expect(screen.queryByRole("button", { name: "Add Account" })).toBeNull();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });

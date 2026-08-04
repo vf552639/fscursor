@@ -181,6 +181,12 @@ function AccountCard({
           flexWrap: "wrap",
         }}
       >
+        {/* ВНИМАНИЕ: это НЕ хвост токена. С переездом на блобы плейнтекстовой
+            колонки не стало, и `build_account_response` собирает
+            `api_token_masked` из хвоста `api_token_blob_id` — то есть под
+            подписью «Token» показан хвост непрозрачной ссылки. Сверять его с
+            токеном в панели Cloudflare бесполезно. Поле подлежит вычистке
+            отдельной задачей (записано в долг), здесь его не трогаем. */}
         <span>Token: {acc.api_token_masked || "—"}</span>
         {!isTauri() && acc.api_token_blob_id ? (
           <RevealSecret blobId={acc.api_token_blob_id} label="Reveal API token" />
@@ -360,7 +366,18 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   return <>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
       <div><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Cloudflare</h1><div style={{fontSize:13,color:"#6b7280"}}>{cfAccounts.length} accounts connected</div></div>
-      <Btn variant="primary" onClick={()=>setShowAcc(true)}>+ Add Account</Btn>
+      {/* В вебе объяснение стоит НА МЕСТЕ кнопки, а не за ней: аккаунт без
+          токена бесполезен целиком, поэтому в браузере форма не открывается
+          вовсе. Кнопка, открывающая окно, где нет ничего кроме Cancel, — это
+          тупик, о котором узнаёшь после клика. Дип-линка не заводим: хоста
+          `add-cloudflare` `parseDeepLinkAction` не знает, ссылка вернула бы
+          {handled:false} и только тостила бы — ровно то, что уже делает
+          предсуществующий `add-server` в `Servers.tsx` и что записано в долг. */}
+      {isTauri() ? (
+        <Btn variant="primary" onClick={()=>setShowAcc(true)}>+ Add Account</Btn>
+      ) : (
+        <DesktopOnlyNote what="Saving secrets" />
+      )}
     </div>
     {statusMessage && (
       <Card style={{marginBottom:14}}>
@@ -381,7 +398,9 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
           title="No Cloudflare accounts yet"
           description="Connect an account to manage DNS and zones from this panel."
         >
-          <Btn variant="primary" onClick={() => setShowAcc(true)}>+ Add Account</Btn>
+          {/* Второй вход в ту же форму — и в вебе он закрыт по той же причине;
+              объяснение уже стоит в шапке, повторять его тут незачем. */}
+          {isTauri() ? <Btn variant="primary" onClick={() => setShowAcc(true)}>+ Add Account</Btn> : null}
         </EmptyState>
       </Card>
     ) : (
@@ -431,11 +450,11 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{accToken.error}</div>
       )}
       <div style={{display:"flex",gap:8,marginTop:20}}>
-        {/* Кнопки создания в вебе нет: без токена аккаунт бесполезен целиком, а
-            завести его без токена — это ровно та запись, из-за которой
-            затевался спринт. Дип-линка на «добавить аккаунт» тоже нет
-            (parseDeepLinkAction такого хоста не знает), поэтому объяснение
-            остаётся заметкой у поля. */}
+        {/* Из веба сюда не попасть: кнопка, открывающая форму, там заменена
+            заметкой. Флаг оставлен именно поэтому — вход в модалку задаёт один
+            стейт, и второй его источник вернул бы в браузер и поле секрета, и
+            кнопку сохранения. Последний рубеж дешевле, чем разбор, кто ещё
+            зовёт `setShowAcc`. */}
         {isTauri() && (
           <Btn variant="primary" disabled={accToken.saving || !accName.trim() || !accToken.value.trim()} onClick={handleAddAcc} style={{flex:1,justifyContent:"center"}}>{accToken.saving ? "Adding..." : "Add Account"}</Btn>
         )}

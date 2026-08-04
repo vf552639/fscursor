@@ -17,6 +17,15 @@ import RecoveryPhraseCard from "./RecoveryPhraseCard";
  *
  * `apiSecret` — это НЕ второй ключ: десктоп отдаёт его Namecheap как
  * whitelisted client IP (`commands/registrars.rs`), поэтому и подпись про IP.
+ *
+ * ИЗМЕНЕНИЕ ПОВЕДЕНИЯ: на создании Namecheap-аккаунта IP теперь ОБЯЗАТЕЛЕН —
+ * ключ всегда объявлен в `saveAll`, а пустое значение хук отбивает. Раньше
+ * аккаунт заводился вообще без IP, и это была ловушка: поле было нарисовано,
+ * но никуда не вело, а десктоп подставлял `127.0.0.1` (`make_service`), после
+ * чего Namecheap отбивал вызовы по whitelist. Отказ формы честнее, чем
+ * заведённый аккаунт, который не работает и не говорит почему. У Hostiq поля
+ * нет, ключ не объявляется, `api_secret_blob_id` остаётся NULL — и это верно:
+ * этот параметр Hostiq не получает вовсе.
  */
 const REGISTRAR_SECRETS = { apiKey: "API key", apiSecret: "Client IP" } as const;
 
@@ -133,7 +142,18 @@ export default function Settings(){
     {tab==="registrars"&&<>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
         <div style={{fontSize:14,fontWeight:600,color:"#111"}}>Registrar Accounts <span style={{fontSize:13,fontWeight:400,color:"#9ca3af"}}>({registrars.length})</span></div>
-        <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Registrar</Btn>
+        {/* В вебе объяснение стоит НА МЕСТЕ кнопки, а не за ней: аккаунт без
+            ключа бесполезен целиком, поэтому в браузере форма не открывается
+            вовсе. Кнопка, открывающая окно, где нет ничего кроме Cancel, — это
+            тупик, о котором узнаёшь после клика. Дип-линка не заводим: хоста
+            `add-registrar` `parseDeepLinkAction` не знает, ссылка вернула бы
+            {handled:false} и только тостила бы — ровно то, что уже делает
+            предсуществующий `add-server` в `Servers.tsx` и что записано в долг. */}
+        {isTauri() ? (
+          <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Registrar</Btn>
+        ) : (
+          <DesktopOnlyNote what="Saving secrets" />
+        )}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:20}}>
         {[
@@ -155,7 +175,9 @@ export default function Settings(){
             title="No registrar accounts yet"
             description="Add Hostiq or Namecheap credentials to assign domains to registrars."
           >
-            <Btn variant="primary" onClick={() => setSA(true)}>+ Add Registrar</Btn>
+            {/* Второй вход в ту же форму — и в вебе он закрыт по той же причине;
+                объяснение уже стоит в шапке, повторять его тут незачем. */}
+            {isTauri() ? <Btn variant="primary" onClick={() => setSA(true)}>+ Add Registrar</Btn> : null}
           </EmptyState>
         </Card>
       ) : registrars.map((r: any)=>{
@@ -239,9 +261,11 @@ export default function Settings(){
         {secrets.error && (
           <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
         )}
-        {/* Кнопки создания в вебе нет: без ключа аккаунт регистратора бесполезен
-            целиком, а завести его без ключа — ровно та запись, из-за которой
-            затевался спринт. */}
+        {/* Из веба сюда не попасть: кнопка, открывающая форму, там заменена
+            заметкой. Флаг оставлен именно поэтому — вход в модалку задаёт один
+            стейт, и второй его источник вернул бы в браузер и поля секретов, и
+            кнопку сохранения. Последний рубеж дешевле, чем разбор, кто ещё
+            зовёт `setSA`. */}
         {isTauri() && (
           <div style={{display:"flex",gap:8,marginTop:22}}>
             <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>

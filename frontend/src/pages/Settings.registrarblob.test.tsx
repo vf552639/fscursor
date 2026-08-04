@@ -242,16 +242,17 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body).not.toHaveProperty("api_secret_blob_id");
   });
 
-  it("в вебе форма не даёт ни полей секретов, ни кнопки — только объяснение", async () => {
+  it("в вебе форма не открывается вовсе — объяснение стоит на месте кнопки", async () => {
     setTauri(false);
     renderPage([]);
-    await openAddModal("namecheap");
 
-    // Полей нет вовсе: шифрует Rust мастер-ключом из keychain, и поле, в
-    // которое дали набрать ключ, обещало бы сохранение уже после набора.
+    // Объяснение ДО клика, а не после: кнопка, за которой окно без единого
+    // действия кроме Cancel, — это тупик, в который человека сначала завели.
+    expect(await screen.findByText(DESKTOP_NOTE)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "+ Add Registrar" })).toBeNull();
+    // Ни полей секретов, ни кнопки сохранения на экране.
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
     expect(screen.queryByPlaceholderText("127.0.0.1")).toBeNull();
-    expect(screen.getAllByText(DESKTOP_NOTE).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Add Account" })).toBeNull();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
