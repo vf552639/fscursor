@@ -2,7 +2,7 @@ import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { screen, fireEvent, waitFor, act } from "@testing-library/react";
 
-import Cloudflare from "./Cloudflare";
+import Cloudflare, { AddCfAccountModal } from "./Cloudflare";
 import { useDeleteCloudflareAccount } from "../api/cloudflare";
 import { b64ToU8 } from "../lib/b64";
 import {
@@ -219,6 +219,30 @@ describe("Cloudflare — api_token через блоб", () => {
     // пользователь.
     expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
     expect(screen.queryByRole("button", { name: "Add Account" })).toBeNull();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+
+  it("сама форма в вебе не даёт ни поля токена, ни кнопки сохранения", async () => {
+    // Через страницу это уже не проверить: в вебе туда нет входа, и любое
+    // утверждение о содержимом формы выполнялось бы вакуумно — гвард внутри
+    // модалки перестал бы удерживаться хоть чем-то. Поэтому рендерим форму
+    // НАПРЯМУЮ, как `Servers.sshblob` рендерит `AddServerModal`: этот тест
+    // держит последний рубеж независимо от того, как страница гейтит вход.
+    setTauri(false);
+    const onClose = vi.fn();
+    renderWithClient(<AddCfAccountModal onClose={onClose} onStatus={vi.fn()} />);
+
+    fireEvent.change(screen.getByPlaceholderText("e.g., Main CF Account"), {
+      target: { value: "cf-new" },
+    });
+    expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
+    expect(screen.getByText(DESKTOP_NOTE)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add Account" })).toBeNull();
+    // Выход у формы есть всегда — окно без единого действия было бы тупиком.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalled();
+
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 

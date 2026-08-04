@@ -36,7 +36,6 @@ function usesClientIp(provider: string): boolean {
 
 export default function Settings(){
   const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
-  const createReg = useCreateRegistrarAccount();
   const testReg = useTestRegistrarConnection();
   const deleteReg = useDeleteRegistrarAccount();
   const { data: systemConfigData } = useSystemConfig();
@@ -46,13 +45,7 @@ export default function Settings(){
   const registrars = registrarsData || [];
 
   const [tab,setTab]=useState("registrars"); const [showAdd,setSA]=useState(false);
-  const [provider,setProvider]=useState<RegistrarProvider>("hostiq");
   
-  const [accName, setAccName] = useState("");
-  const [apiUser, setApiUser] = useState("");
-  // Плейнтексты обоих секретов держит хук, а не страница: он же знает, когда их
-  // стереть, и он же гарантирует «оба блоба → один POST» (см. useSecretSave).
-  const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
 
   const [testing,setTest]=useState<any>({}); const [testRes,setRes]=useState<any>({});
   const [editingRegistrar, setEditingRegistrar] = useState<any | null>(null);
@@ -96,42 +89,6 @@ export default function Settings(){
     });
   };
 
-  const handleAdd = async () => {
-    // На СОЗДАНИИ ключи объявляются всегда: пропущенный ключ значит
-    // `*_blob_id = NULL` — тот самый 200 OK и «registrar account has no
-    // api_key_blob_id» в каждой команде. «Не меняем» бывает только на правке.
-    // Client IP объявляем ровно тогда, когда у формы есть его поле.
-    const ok = await secrets.saveAll({
-      secrets: {
-        apiKey: { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: null },
-        ...(usesClientIp(provider)
-          ? { apiSecret: { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: null } }
-          : {}),
-      },
-      persist: async (blobIds) => {
-        await createReg.mutateAsync({
-          provider,
-          name: accName,
-          api_user: apiUser,
-          api_key_blob_id: blobIds.apiKey,
-          // Спредом, а не `api_secret_blob_id: undefined`: у Hostiq поля быть
-          // не должно вовсе, а ключ со значением undefined — это уже поле.
-          ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
-        });
-      },
-    });
-    if (!ok) return;
-    setSA(false);
-    setAccName(""); setApiUser("");
-  };
-
-  // Закрытие формы — единственное место, где набранные секреты надо забыть:
-  // страница смонтирована, модалку она только прячет.
-  const closeAdd = () => {
-    secrets.reset();
-    setSA(false);
-  };
-  
   return <>
     <div style={{marginBottom:24}}><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Settings</h1><div style={{fontSize:13,color:"#6b7280"}}>Manage integrations and system configuration</div></div>
     <div style={{display:"flex",gap:0,borderBottom:"1px solid #e5e7eb",marginBottom:24}}>
@@ -200,79 +157,7 @@ export default function Settings(){
           </div>
         </Card>;
       })}
-      {showAdd&&<Modal title="Add Registrar Account" onClose={closeAdd} width={480}>
-        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={e=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              {[
-                ["hostiq","Hostiq","H","#fff7ed","#ea580c"],
-                ["namecheap","Namecheap","N","#fef2f2","#dc2626"]
-              ].map(([k,l,ic,bg,c])=>(
-                <div key={k} onClick={()=>setProvider(k as any)} style={{padding:"12px 16px",border:`2px solid ${provider===k?"#2563eb":"#e5e7eb"}`,borderRadius:9,cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"all 0.15s",background:provider===k?"#eff4ff":"#fff"}}>
-                  <div style={{width:32,height:32,borderRadius:7,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:c,fontSize:14}}>{ic}</div>
-                  <span style={{fontSize:13.5,fontWeight:600,color:provider===k?"#2563eb":"#374151"}}>{l}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-          {/* В вебе полей секретов нет вовсе, а не «есть, но не сохранятся»:
-              шифрует Rust мастер-ключом из keychain, так что записать их из
-              браузера физически невозможно. Поле, в которое дали набрать ключ,
-              обещало бы сохранение — и обмануло бы уже после того, как ключ
-              набран. */}
-          {provider==="hostiq"?<>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
-            <div>
-              <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
-              {isTauri() ? (
-                <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••••••••••"/>
-              ) : (
-                <DesktopOnlyNote what="Saving secrets" />
-              )}
-            </div>
-          </>:<>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="your_namecheap_username"/></div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-              <div>
-                <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
-                {isTauri() ? (
-                  <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••"/>
-                ) : (
-                  <DesktopOnlyNote what="Saving secrets" />
-                )}
-              </div>
-              <div>
-                {/* Поле было нарисовано, но ни к чему не подключено: набранный
-                    IP никуда не уезжал, и аккаунт Namecheap нельзя было
-                    настроить до конца — десктоп шлёт вместо него 127.0.0.1, а
-                    Namecheap отвечает отказом по whitelist. */}
-                <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP</label>
-                {isTauri() ? (
-                  <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value)} placeholder="127.0.0.1"/>
-                ) : (
-                  <DesktopOnlyNote what="Saving secrets" />
-                )}
-              </div>
-            </div>
-            <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
-          </>}
-        </div>
-        {secrets.error && (
-          <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
-        )}
-        {/* Из веба сюда не попасть: кнопка, открывающая форму, там заменена
-            заметкой. Флаг оставлен именно поэтому — вход в модалку задаёт один
-            стейт, и второй его источник вернул бы в браузер и поля секретов, и
-            кнопку сохранения. Последний рубеж дешевле, чем разбор, кто ещё
-            зовёт `setSA`. */}
-        {isTauri() && (
-          <div style={{display:"flex",gap:8,marginTop:22}}>
-            <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>
-          </div>
-        )}
-        <div style={{marginTop:8}}><Btn variant="secondary" onClick={closeAdd} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
-      </Modal>}
+      {showAdd && <AddRegistrarModal onClose={()=>setSA(false)} />}
     </>}
     {tab==="system"&&<Card>
       <CHd><CTi>⚙ System Configuration</CTi></CHd>
@@ -350,6 +235,131 @@ export default function Settings(){
       </div>
     </Modal>}
   </>;
+}
+
+/**
+ * Добавление аккаунта регистратора. Отдельный экспортируемый компонент, а не
+ * блок внутри страницы, ровно по той же причине, что и `AddServerModal`:
+ * гварды `isTauri()` на трёх полях секретов и кнопке сохранения — это
+ * последний рубеж на случай второго вызывающего, и проверить его можно, только
+ * отрендерив форму НАПРЯМУЮ. Пока она была инлайном, веб-тест мог лишь кликнуть
+ * кнопку, которой в вебе нет, и все утверждения о содержимом выполнялись
+ * вакуумно — мутация «все гварды в `true`» проходила зелёной.
+ *
+ * Плейнтексты стирать при закрытии больше не нужно: страница монтирует форму
+ * условно, и `useMultiSecretSave` уезжает вместе с ней.
+ */
+export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
+  const [provider,setProvider]=useState<RegistrarProvider>("hostiq");
+  const [accName, setAccName] = useState("");
+  const [apiUser, setApiUser] = useState("");
+  // Плейнтексты обоих секретов держит хук, а не форма: он же знает, когда их
+  // стереть, и он же гарантирует «оба блоба → один POST» (см. useSecretSave).
+  const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
+  const createReg = useCreateRegistrarAccount();
+
+  const handleAdd = async () => {
+    // На СОЗДАНИИ ключи объявляются всегда: пропущенный ключ значит
+    // `*_blob_id = NULL` — тот самый 200 OK и «registrar account has no
+    // api_key_blob_id» в каждой команде. «Не меняем» бывает только на правке.
+    // Client IP объявляем ровно тогда, когда у формы есть его поле.
+    const ok = await secrets.saveAll({
+      secrets: {
+        apiKey: { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: null },
+        ...(usesClientIp(provider)
+          ? { apiSecret: { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: null } }
+          : {}),
+      },
+      persist: async (blobIds) => {
+        await createReg.mutateAsync({
+          provider,
+          name: accName,
+          api_user: apiUser,
+          api_key_blob_id: blobIds.apiKey,
+          // Спредом, а не `api_secret_blob_id: undefined`: у Hostiq поля быть
+          // не должно вовсе, а ключ со значением undefined — это уже поле.
+          ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
+        });
+      },
+    });
+    if (ok) onClose();
+  };
+
+  return <Modal title="Add Registrar Account" onClose={onClose} width={480}>
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={e=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          {[
+            ["hostiq","Hostiq","H","#fff7ed","#ea580c"],
+            ["namecheap","Namecheap","N","#fef2f2","#dc2626"]
+          ].map(([k,l,ic,bg,c])=>(
+            <div key={k} onClick={()=>setProvider(k as any)} style={{padding:"12px 16px",border:`2px solid ${provider===k?"#2563eb":"#e5e7eb"}`,borderRadius:9,cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"all 0.15s",background:provider===k?"#eff4ff":"#fff"}}>
+              <div style={{width:32,height:32,borderRadius:7,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:c,fontSize:14}}>{ic}</div>
+              <span style={{fontSize:13.5,fontWeight:600,color:provider===k?"#2563eb":"#374151"}}>{l}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* В вебе полей секретов нет вовсе, а не «есть, но не сохранятся»:
+          шифрует Rust мастер-ключом из keychain, так что записать их из
+          браузера физически невозможно. Поле, в которое дали набрать ключ,
+          обещало бы сохранение — и обмануло бы уже после того, как ключ
+          набран. */}
+      {provider==="hostiq"?<>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
+        <div>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
+          {isTauri() ? (
+            <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••••••••••"/>
+          ) : (
+            <DesktopOnlyNote what="Saving secrets" />
+          )}
+        </div>
+      </>:<>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="your_namecheap_username"/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
+            {isTauri() ? (
+              <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••"/>
+            ) : (
+              <DesktopOnlyNote what="Saving secrets" />
+            )}
+          </div>
+          <div>
+            {/* Поле было нарисовано, но ни к чему не подключено: набранный
+                IP никуда не уезжал, и аккаунт Namecheap нельзя было
+                настроить до конца — десктоп шлёт вместо него 127.0.0.1, а
+                Namecheap отвечает отказом по whitelist. */}
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP</label>
+            {isTauri() ? (
+              <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value)} placeholder="127.0.0.1"/>
+            ) : (
+              <DesktopOnlyNote what="Saving secrets" />
+            )}
+          </div>
+        </div>
+        <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
+      </>}
+    </div>
+    {secrets.error && (
+      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
+    )}
+    {/* Из веба сюда не попасть: кнопка, открывающая форму, там заменена
+        заметкой. Флаг оставлен именно поэтому — вход в модалку задаёт один
+        стейт, и второй его источник вернул бы в браузер и поля секретов, и
+        кнопку сохранения. Последний рубеж дешевле, чем разбор, кто ещё
+        зовёт `setSA`. Страница в вебе сюда и не пускает (на месте кнопки
+        заметка), но это ПЕРВЫЙ рубеж, а этот — последний. */}
+    {isTauri() && (
+      <div style={{display:"flex",gap:8,marginTop:22}}>
+        <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>
+      </div>
+    )}
+    {/* Cancel остаётся всегда: форма обязана иметь выход. */}
+    <div style={{marginTop:8}}><Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
+  </Modal>;
 }
 
 function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: () => void }) {

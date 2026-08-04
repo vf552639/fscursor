@@ -237,7 +237,6 @@ function AccountCard({
 export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) => void }){
   const { data: cfAccountsData, isPending, isError, error } = useCloudflareAccounts();
   const { data: domainsData } = useDomains();
-  const createAcc = useCreateCloudflareAccount();
   const deleteAcc = useDeleteCloudflareAccount();
   const testAcc = useTestCloudflareAccount();
   const cfAccounts = cfAccountsData || [];
@@ -248,69 +247,10 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [sel, setSel] = useState<CfZoneSelection | null>(null);
   const [addZoneFor, setAddZoneFor] = useState<CfAccountRef | null>(null);
 
-  const [accName, setAccName] = useState("");
-  const [accId, setAccId] = useState("");
-  // Плейнтекст токена держит хук, а не страница: он же знает, когда его стереть
-  // (порядок «блоб → сущность» и запрет отката — в `useSecretSave`).
-  const accToken = useSecretSave("API token");
-  const [errors, setErrors] = useState<Record<string, string>>({});
   const [editingAcc, setEditingAcc] = useState<any | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ kind: "success" | "warning"; text: string } | null>(null);
   const [testState, setTestState] = useState<Record<number, { state: "idle" | "loading" | "success" | "error"; message?: string }>>({});
 
-  const validate = () => {
-    const newErrors: Record<string, string> = {};
-    if (!accName.trim()) newErrors.name = "Account Name is required";
-    // Пустой токен своего сообщения здесь не получает: кнопка на нём выключена,
-    // а если до сохранения всё же дойдёт — откажет `save` своей формулировкой.
-    // Две копии одной фразы разъезжаются, а поймать это некому.
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  };
-
-  const handleAddAcc = async () => {
-    if (!validate()) return;
-
-    // Порядок «блоб → аккаунт» и то, почему плейнтекст не едет в аргументы
-    // мутации, — внутри `useSecretSave`. Провал не создаёт аккаунт вовсе:
-    // аккаунт с `api_token_blob_id = NULL` — это 200 OK и Cloudflare, который
-    // не ответит ни на один запрос.
-    const ok = await accToken.save({
-      blobKind: BLOB_KIND.cloudflareApiToken,
-      existingBlobId: null,
-      persist: async (blobId) => {
-        const created = await createAcc.mutateAsync({
-          name: accName,
-          account_id: accId,
-          api_token_blob_id: blobId,
-        });
-        // Итог синхронизации зон приходит только в этом ответе и больше нигде.
-        if (created.sync_result) {
-          setStatusMessage({
-            kind: "success",
-            text: `Linked Cloudflare to ${created.sync_result.updated} existing domains. ${created.sync_result.skipped} zones had no matching domain in the service.`,
-          });
-        } else {
-          setStatusMessage({
-            kind: "warning",
-            text: created.sync_warning || "Account created, but zone sync did not complete.",
-          });
-        }
-      },
-    });
-    if (!ok) return;
-    setShowAcc(false);
-    setAccName(""); setAccId("");
-    setErrors({});
-  };
-
-  // Закрытие формы — единственное место, где набранный токен надо забыть:
-  // страница смонтирована, модалку она только прячет, и без `reset` плейнтекст
-  // пережил бы закрытие и всплыл бы в следующей форме.
-  const closeAddAcc = () => {
-    accToken.reset();
-    setShowAcc(false);
-  };
   const handleTest = (accountId: number) => {
     setTestState((prev) => ({ ...prev, [accountId]: { state: "loading" } }));
     testAcc.mutate(accountId, {
@@ -419,51 +359,120 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       />
     )))}
 
-    {showAddAcc&&<Modal title="Add Cloudflare Account" onClose={closeAddAcc} width={460}>
-      <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label>
-          <Inp value={accName} onChange={e=>{setAccName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., Main CF Account" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>
-          {errors.name && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.name}</div>}
-        </div>
-        <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label>
-          <Inp value={accId} onChange={e=>setAccId((e.target as any).value)} placeholder="abc123def456..."/>
-        </div>
-        <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token</label>
-          {/* В вебе поля нет вовсе, а не «есть, но не сохранится»: шифрует Rust
-              мастер-ключом из keychain, так что записать секрет из браузера
-              физически невозможно. Поле, в которое дали набрать токен, обещало
-              бы сохранение — и обмануло бы уже после того, как токен набран. */}
-          {isTauri() ? (
-            <>
-              <Inp type="password" value={accToken.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>accToken.setValue(e.target.value)} placeholder="••••••••••••••••"/>
-              <div style={{fontSize:11.5,color:"#9ca3af",marginTop:4}}>Requires Zone:Read, DNS:Edit permissions</div>
-            </>
-          ) : (
-            <DesktopOnlyNote what="Saving secrets" />
-          )}
-        </div>
-      </div>
-      {accToken.error && (
-        <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{accToken.error}</div>
-      )}
-      <div style={{display:"flex",gap:8,marginTop:20}}>
-        {/* Из веба сюда не попасть: кнопка, открывающая форму, там заменена
-            заметкой. Флаг оставлен именно поэтому — вход в модалку задаёт один
-            стейт, и второй его источник вернул бы в браузер и поле секрета, и
-            кнопку сохранения. Последний рубеж дешевле, чем разбор, кто ещё
-            зовёт `setShowAcc`. */}
-        {isTauri() && (
-          <Btn variant="primary" disabled={accToken.saving || !accName.trim() || !accToken.value.trim()} onClick={handleAddAcc} style={{flex:1,justifyContent:"center"}}>{accToken.saving ? "Adding..." : "Add Account"}</Btn>
-        )}
-        <Btn variant="secondary" onClick={closeAddAcc} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
-      </div>
-    </Modal>}
+    {showAddAcc && <AddCfAccountModal onClose={()=>setShowAcc(false)} onStatus={setStatusMessage} />}
     {editingAcc && <EditCfAccountModal account={editingAcc} onClose={() => setEditingAcc(null)} />}
     {addZoneFor && <AddZoneModal acc={addZoneFor} onClose={() => setAddZoneFor(null)} />}
   </>;
+}
+
+/**
+ * Добавление аккаунта. Отдельный экспортируемый компонент, а не блок внутри
+ * страницы, ровно по той же причине, что и `AddServerModal`: гвард `isTauri()`
+ * на поле токена и кнопке сохранения — это последний рубеж на случай второго
+ * вызывающего, и проверить его можно, только отрендерив форму НАПРЯМУЮ. Пока
+ * она была инлайном, веб-тест мог лишь кликнуть кнопку, которой в вебе нет, и
+ * все утверждения о содержимом выполнялись вакуумно — мутация «оба гварда в
+ * `true`» проходила зелёной.
+ *
+ * Плейнтекст стирать при закрытии больше не нужно: страница монтирует форму
+ * условно, и `useSecretSave` уезжает вместе с ней.
+ */
+export function AddCfAccountModal({ onClose, onStatus }: {
+  onClose: () => void;
+  /** Итог синхронизации зон приходит только в ответе создания — и больше нигде. */
+  onStatus: (s: { kind: "success" | "warning"; text: string }) => void;
+}) {
+  const [accName, setAccName] = useState("");
+  const [accId, setAccId] = useState("");
+  // Плейнтекст токена держит хук, а не форма: он же знает, когда его стереть
+  // (порядок «блоб → сущность» и запрет отката — в `useSecretSave`).
+  const accToken = useSecretSave("API token");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const createAcc = useCreateCloudflareAccount();
+
+  const validate = () => {
+    const newErrors: Record<string, string> = {};
+    if (!accName.trim()) newErrors.name = "Account Name is required";
+    // Пустой токен своего сообщения здесь не получает: кнопка на нём выключена,
+    // а если до сохранения всё же дойдёт — откажет `save` своей формулировкой.
+    // Две копии одной фразы разъезжаются, а поймать это некому.
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleAddAcc = async () => {
+    if (!validate()) return;
+
+    // Порядок «блоб → аккаунт» и то, почему плейнтекст не едет в аргументы
+    // мутации, — внутри `useSecretSave`. Провал не создаёт аккаунт вовсе:
+    // аккаунт с `api_token_blob_id = NULL` — это 200 OK и Cloudflare, который
+    // не ответит ни на один запрос.
+    const ok = await accToken.save({
+      blobKind: BLOB_KIND.cloudflareApiToken,
+      existingBlobId: null,
+      persist: async (blobId) => {
+        const created = await createAcc.mutateAsync({
+          name: accName,
+          account_id: accId,
+          api_token_blob_id: blobId,
+        });
+        if (created.sync_result) {
+          onStatus({
+            kind: "success",
+            text: `Linked Cloudflare to ${created.sync_result.updated} existing domains. ${created.sync_result.skipped} zones had no matching domain in the service.`,
+          });
+        } else {
+          onStatus({
+            kind: "warning",
+            text: created.sync_warning || "Account created, but zone sync did not complete.",
+          });
+        }
+      },
+    });
+    if (ok) onClose();
+  };
+
+  return <Modal title="Add Cloudflare Account" onClose={onClose} width={460}>
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div>
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label>
+        <Inp value={accName} onChange={e=>{setAccName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., Main CF Account" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>
+        {errors.name && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.name}</div>}
+      </div>
+      <div>
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label>
+        <Inp value={accId} onChange={e=>setAccId((e.target as any).value)} placeholder="abc123def456..."/>
+      </div>
+      <div>
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token</label>
+        {/* В вебе поля нет вовсе, а не «есть, но не сохранится»: шифрует Rust
+            мастер-ключом из keychain, так что записать секрет из браузера
+            физически невозможно. Поле, в которое дали набрать токен, обещало
+            бы сохранение — и обмануло бы уже после того, как токен набран.
+            Страница в вебе сюда и не пускает (на месте кнопки заметка), но это
+            ПЕРВЫЙ рубеж, а этот — последний: он переживёт второй вход. */}
+        {isTauri() ? (
+          <>
+            <Inp type="password" value={accToken.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>accToken.setValue(e.target.value)} placeholder="••••••••••••••••"/>
+            <div style={{fontSize:11.5,color:"#9ca3af",marginTop:4}}>Requires Zone:Read, DNS:Edit permissions</div>
+          </>
+        ) : (
+          <DesktopOnlyNote what="Saving secrets" />
+        )}
+      </div>
+    </div>
+    {accToken.error && (
+      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{accToken.error}</div>
+    )}
+    <div style={{display:"flex",gap:8,marginTop:20}}>
+      {/* Кнопки сохранения в вебе нет по той же причине, что и поля: сохранять
+          нечем. Cancel остаётся всегда — форма обязана иметь выход. */}
+      {isTauri() && (
+        <Btn variant="primary" disabled={accToken.saving || !accName.trim() || !accToken.value.trim()} onClick={handleAddAcc} style={{flex:1,justifyContent:"center"}}>{accToken.saving ? "Adding..." : "Add Account"}</Btn>
+      )}
+      <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
+    </div>
+  </Modal>;
 }
 
 /**

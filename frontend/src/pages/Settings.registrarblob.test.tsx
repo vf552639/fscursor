@@ -2,7 +2,7 @@ import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { screen, fireEvent, waitFor, act } from "@testing-library/react";
 
-import Settings from "./Settings";
+import Settings, { AddRegistrarModal } from "./Settings";
 import { useDeleteRegistrarAccount } from "../api/registrars";
 import { b64ToU8 } from "../lib/b64";
 import {
@@ -254,6 +254,35 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
     expect(screen.queryByPlaceholderText("127.0.0.1")).toBeNull();
     expect(screen.queryByRole("button", { name: "Add Account" })).toBeNull();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+
+  it("сама форма в вебе не даёт ни полей секретов, ни кнопки сохранения", async () => {
+    // Через страницу это уже не проверить: в вебе туда нет входа, и любое
+    // утверждение о содержимом формы выполнялось бы вакуумно — гварды внутри
+    // модалки перестали бы удерживаться хоть чем-то. Поэтому рендерим форму
+    // НАПРЯМУЮ, как `Servers.sshblob` рендерит `AddServerModal`, и проходим ОБА
+    // провайдера: у Hostiq гвард один, у Namecheap — два.
+    setTauri(false);
+    const onClose = vi.fn();
+    renderWithClient(<AddRegistrarModal onClose={onClose} />);
+
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), {
+      target: { value: "reg-new" },
+    });
+    expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
+
+    fireEvent.click(screen.getByText("Namecheap"));
+    expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
+    expect(screen.queryByPlaceholderText("127.0.0.1")).toBeNull();
+
+    expect(screen.getAllByText(DESKTOP_NOTE).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Add Account" })).toBeNull();
+    // Выход у формы есть всегда — окно без единого действия было бы тупиком.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalled();
+
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
