@@ -222,18 +222,23 @@ pub async fn create_site(
     })
 }
 
-/// Признаки того, что команда упала именно на дубликате.
+/// Признаки того, что создание FTP-аккаунта упало именно на дубликате.
+///
+/// Спрашивается только на FTP-пути: у БД свой маркер (`DB_USER_TAKEN_MARKER`).
+/// `error 1396` здесь поэтому и не значится — ER_CANNOT_USER выдают только
+/// `CREATE USER`/`DROP USER`, и в этом списке он был бы недостижим, зато
+/// расширял бы поверхность ложного «уже есть».
 ///
 /// `does not exist` мимо: подстрока `exist` есть и в нём, поэтому маркеры
 /// точные, а не «содержит exist». `duplicate entry`, а не `duplicate`: первое —
 /// текст ER_DUP_ENTRY, второе ловило бы любое «could not duplicate …».
-const ALREADY_EXISTS_MARKERS: [&str; 5] = [
+/// ER_DUP_ENTRY тут достижим: FastPanel держит FTP-аккаунты в собственной
+/// MySQL, и вставка с занятым логином приходит оттуда.
+const ALREADY_EXISTS_MARKERS: [&str; 4] = [
     "already exists",
     "already exist",
     "already in use",
-    // MySQL/MariaDB: ER_DUP_ENTRY и ER_CANNOT_USER (`CREATE USER` по занятому имени).
     "duplicate entry",
-    "error 1396",
 ];
 
 /// Признак того, что на занятое имя пожаловался именно `CREATE USER`.
@@ -366,8 +371,16 @@ fn cells(line: &str) -> impl Iterator<Item = &str> {
 /// с кодом 0. Ни одна «ячейка» такой строки логину не равна — и проверка
 /// уверенно отвечала «аккаунта нет» по выводу, которого не поняла. Дальше хуже:
 /// уверенное «нет» ещё и отключает вторую линию обороны (её спрашивают только
-/// при `None`), то есть путь «не понял и признался» был СТРОЖЕ безопаснее, чем
+/// при `None`), то есть путь «не понял и признался» был СТРОГО безопаснее, чем
 /// «не понял и ответил».
+///
+/// **Это сужение, а не устранение класса.** Гейт проходит всё, где есть
+/// разделитель колонок, — в том числе выровненный help (`  create   Create an
+/// FTP account`), `Error:  permission denied` с двойным пробелом и
+/// `Try 'fastpanel --help | less'` с вертикальной чертой. Отличить их от
+/// таблицы, не видя живого FastPanel, нечем; проверить — на ручной приёмке.
+/// Цену остатка снижает то, что положительный ответ берётся и из такого вывода
+/// (см. `ftp_exists`): совпадение целой ячейкой гейта не требует.
 fn looks_like_a_table(output: &str) -> bool {
     output.lines().any(|line| cells(line).count() >= 2)
 }
@@ -407,10 +420,25 @@ pub async fn ftp_exists(
     }
     let text_cmd = format!("{} ftp_account list", q(fp_path));
     let (c2, o2) = s.run(&text_cmd, Duration::from_secs(30)).await?;
-    // «Непустой вывод с кодом 0» — недостаточное основание, чтобы поверить
-    // отрицательному ответу: см. `looks_like_a_table`. Не таблица — `None`.
-    if c2 == 0 && looks_like_a_table(&o2) {
-        return Ok(Some(text_lists_login(&o2, login)));
+    if c2 == 0 {
+        // Гейт формы — ТОЛЬКО на отрицательный ответ, и это не симметрия ради
+        // симметрии. Совпадение целой ячейкой с детерминированным логином —
+        // самостоятельное доказательство: чем бы вывод ни был, логин в нём
+        // назван. А цены у ошибок разные: ложное «да» стоит несозданного
+        // аккаунта, который и так есть, ложное «нет» — создания поверх живого,
+        // то есть выдуманного пароля в модалке.
+        //
+        // Одна колонка (логин на строку) — обычная форма для `list`, и
+        // таблицей она не выглядит. Гейт на весь ответ выбрасывал бы вместе с
+        // мусором и её.
+        if text_lists_login(&o2, login) {
+            return Ok(Some(true));
+        }
+        // «Непустой вывод с кодом 0» — недостаточное основание, чтобы поверить
+        // отрицательному ответу: см. `looks_like_a_table`.
+        if looks_like_a_table(&o2) {
+            return Ok(Some(false));
+        }
     }
     Ok(None)
 }
@@ -1638,6 +1666,36 @@ mod tests {
         assert!(matches!(out, FtpCreation::AlreadyExists { .. }));
     }
 
+    // Одна колонка, логин на строку — обычная форма вывода `list`, и таблицей
+    // она не выглядит. Гейт формы на ВЕСЬ ответ выбрасывал бы вместе с мусором
+    // и точное совпадение целой ячейкой — то есть отправлял бы создание на
+    // аккаунт, который в списке назван. Положительный ответ гейта не требует.
+    #[tokio::test]
+    async fn a_single_column_list_still_answers_yes() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 127, "unknown option --json"),
+            ("ftp_account list", 0, "ftp_example\nftp_other"),
+        ]);
+
+        let out = create_ftp_account(&mut s, FP, "example.com").await.unwrap();
+
+        assert!(matches!(out, FtpCreation::AlreadyExists { .. }));
+        assert!(!s.ran("ftp_account create"), "{:?}", s.seen);
+        assert!(!s.ran("--password="), "{:?}", s.seen);
+    }
+
+    // Но отрицательный ответ из той же одной колонки — по-прежнему «не знаю»:
+    // «логина здесь нет» ничего не значит, если мы не уверены, что читаем
+    // список аккаунтов, а не текст ошибки.
+    #[tokio::test]
+    async fn the_same_single_column_does_not_answer_no() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 127, "unknown option --json"),
+            ("ftp_account list", 0, "ftp_other\nftp_third"),
+        ]);
+        assert_eq!(ftp_exists(&mut s, FP, "ftp_example").await.unwrap(), None);
+    }
+
     // Список разобран частично: во второй записи ключ вне нашей четвёрки. Это
     // значит, что формат мы читаем неправильно, — а «логина нет» по неправильно
     // прочитанному списку и есть создание поверх существующего.
@@ -1762,9 +1820,12 @@ mod tests {
         // другие сбои, а цена ложного срабатывания — обещанный доступ, которого
         // нет. Ловим текст ER_DUP_ENTRY, а не слово.
         assert!(!looks_like_already_exists("could not duplicate config template"));
+        // ER_DUP_ENTRY достижим: FastPanel держит FTP-аккаунты в своей MySQL.
         assert!(looks_like_already_exists("ERROR 1062: Duplicate entry 'x' for key"));
-        assert!(looks_like_already_exists("ERROR 1396 (HY000) Operation CREATE USER failed"));
         assert!(looks_like_already_exists("Login already exists"));
+        // А ER_CANNOT_USER — нет: его выдаёт только CREATE USER/DROP USER, и в
+        // FTP-списке он был бы недостижим, зато расширял бы ложные «уже есть».
+        assert!(!looks_like_already_exists("ERROR 1396 (HY000) Operation CREATE USER failed"));
     }
 
     // У БД маркер свой и уже: вывод общий на четыре оператора батча, и жалоба

@@ -210,16 +210,24 @@ describe("ProvisionResultModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  // Но одного созданного аккаунта в модалке достаточно, чтобы запрет вернулся.
-  it("не закрывается кликом в затемнение, если хоть один пароль показан", () => {
+  // Но одного созданного аккаунта в модалке достаточно, чтобы запрет вернулся —
+  // и проверяется это с ОБЕИХ сторон. Одной стороны мало: предикат, забывший
+  // половину, остаётся зелёным на одном тесте, а забыть он может любую из двух.
+  it.each([
+    [
+      "показан только пароль FTP",
+      { db: { status: "exists" as const, db_name: "example_db", db_user: "example_user" } },
+    ],
+    [
+      "показан только пароль БД",
+      { ftp: { status: "exists" as const, ftp_user: "example_ftp" } },
+    ],
+  ])("не закрывается кликом в затемнение, когда %s", (_name, over) => {
     const onClose = vi.fn();
     const { container } = render(
       <ProvisionResultModal
         domain="example.com"
-        result={{
-          ...RESULT,
-          db: { status: "exists", db_name: "example_db", db_user: "example_user" },
-        }}
+        result={{ ...RESULT, ...over }}
         onClose={onClose}
       />,
     );

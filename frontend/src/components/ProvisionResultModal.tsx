@@ -133,9 +133,18 @@ export function ProvisionResultModal({
     </div>
   );
 
-  // Есть ли в этой модалке то, что исчезнет вместе с ней. Пароли приходят
-  // только в варианте `created`; у `exists` их нет по типу.
-  const hasSecrets = result.db?.status === "created" || result.ftp?.status === "created";
+  // Один источник правды на два решения: что рисовать и можно ли закрывать
+  // окно кликом мимо. Порознь они разъезжаются тихо — и именно в сторону
+  // «backdrop разрешён, а пароль на экране показан».
+  //
+  // Пароли приходят только в варианте `created`; у `exists` их нет по типу.
+  const db = result.db;
+  const ftp = result.ftp;
+  const dbCreated = db?.status === "created" ? db : null;
+  const ftpCreated = ftp?.status === "created" ? ftp : null;
+  const dbExisting = db?.status === "exists" ? db : null;
+  const ftpExisting = ftp?.status === "exists" ? ftp : null;
+  const hasSecrets = dbCreated !== null || ftpCreated !== null;
 
   return (
     // `closeOnBackdrop` выключен ровно тогда, когда `onClose` уничтожает
@@ -181,39 +190,39 @@ export function ProvisionResultModal({
             {result.ssl_error}
           </div>
         ) : null}
-        {result.db?.status === "created"
+        {dbCreated
           ? secretBlock("Database credentials", [
-              ["DB name", result.db.db_name],
-              ["DB user", result.db.db_user],
-              ["DB password", result.db.db_password],
+              ["DB name", dbCreated.db_name],
+              ["DB user", dbCreated.db_user],
+              ["DB password", dbCreated.db_password],
             ])
           : null}
-        {result.db?.status === "exists"
+        {dbExisting
           ? existingBlock(
               // Три разные новости, а не одна. Провижининг пропускает пару по
               // ПОЛЬЗОВАТЕЛЮ, поэтому «база тоже на месте» — отдельный факт, и
               // утверждать его, когда база дропнута руками, значит соврать: она
               // так и осталась несозданной. Про неизвестное молчим.
-              dbExistsTitle(result.db),
+              dbExistsTitle(dbExisting),
               "DB user",
-              result.db.db_user,
-              result.db.database_exists === false
+              dbExisting.db_user,
+              dbExisting.database_exists === false
                 ? `The database itself is missing: provision skips the pair when the user exists. ` +
-                  `Create ${result.db.db_name} in FastPanel, or drop the user and provision again.`
+                  `Create ${dbExisting.db_name} in FastPanel, or drop the user and provision again.`
                 : undefined,
             )
           : null}
-        {result.ftp?.status === "created"
+        {ftpCreated
           ? secretBlock("FTP credentials", [
-              ["FTP user", result.ftp.ftp_user],
-              ["FTP password", result.ftp.ftp_password],
+              ["FTP user", ftpCreated.ftp_user],
+              ["FTP password", ftpCreated.ftp_password],
             ])
           : null}
-        {result.ftp?.status === "exists"
+        {ftpExisting
           ? existingBlock(
-              `FTP account ${result.ftp.ftp_user} already existed`,
+              `FTP account ${ftpExisting.ftp_user} already existed`,
               "FTP user",
-              result.ftp.ftp_user,
+              ftpExisting.ftp_user,
             )
           : null}
       </div>
