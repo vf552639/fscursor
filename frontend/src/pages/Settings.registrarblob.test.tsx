@@ -106,8 +106,16 @@ describe("Settings — ключ и секрет регистратора чер�
     fireEvent.change(screen.getByPlaceholderText("your_namecheap_username"), {
       target: { value: "ncuser" },
     });
-    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: API_KEY } });
-    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: CLIENT_IP } });
+    // Оба поля — с пробелами по краям: ключ копируют из панели регистратора
+    // вместе с `\n`, а Client IP с пробелом просто не совпадёт с whitelist.
+    // `"   "` отбивался бы и без `trim` (поле пустое), а такой ввод — нет,
+    // поэтому утверждения ниже смотрят на содержимое блобов.
+    fireEvent.change(screen.getByPlaceholderText("••••••••"), {
+      target: { value: `  ${API_KEY}  ` },
+    });
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), {
+      target: { value: `  ${CLIENT_IP}  ` },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
@@ -148,8 +156,10 @@ describe("Settings — ключ и секрет регистратора чер�
     fireEvent.change(screen.getByPlaceholderText("admin@hostiq.ua"), {
       target: { value: "admin@hostiq.ua" },
     });
+    // У Hostiq поле ключа своё (другой плейсхолдер) и свой `trim` в onChange —
+    // значит и пробелы по краям надо ловить отдельно от Namecheap.
     fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
-      target: { value: API_KEY },
+      target: { value: `  ${API_KEY}  ` },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
 
@@ -158,7 +168,7 @@ describe("Settings — ключ и секрет регистратора чер�
     // Hostiq этот параметр не получает вообще (`make_service`), поэтому и поля
     // у него нет: собранный секрет, который никто не читает, — лишний блоб.
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
-    expect(blobOfKind("registrar_api_key")).toBeTruthy();
+    expect(blobPlaintext(blobOfKind("registrar_api_key"))).toBe(API_KEY);
     expect(mocks.apiPost.mock.calls[0][1]).not.toHaveProperty("api_secret_blob_id");
   });
 
@@ -200,8 +210,10 @@ describe("Settings — ключ и секрет регистратора чер�
 
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+    // С пробелами по краям: на правке цена нетримленного ключа выше — рабочий
+    // блоб перезаписывается мусором, и вернуть его можно только перенабором.
     fireEvent.change(screen.getByPlaceholderText("Leave empty to keep current key"), {
-      target: { value: "rotated-key" },
+      target: { value: "  rotated-key  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -220,6 +232,36 @@ describe("Settings — ключ и секрет регистратора чер�
     // Нетронутого секрета в теле нет вовсе: сервер оставляет прежнюю ссылку.
     expect(body).not.toHaveProperty("api_secret_blob_id");
     expect(body).not.toHaveProperty("api_key");
+  });
+
+  it("правка: тронутый Client IP уезжает в свой блоб без пробелов по краям", async () => {
+    // Отдельным тестом, а не строкой в предыдущем: там утверждение ровно
+    // обратное — нетронутый IP не трогается. Поле правки у IP своё, и `trim` в
+    // его onChange свой; без этого теста его снятие ничего бы не покрасило.
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...NAMECHEAP });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+    fireEvent.change(screen.getByPlaceholderText("Leave empty to keep current IP"), {
+      target: { value: `  ${CLIENT_IP}  ` },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+
+    // Ровно один блоб: пустое поле ключа значит «не меняем».
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
+    const secret = blobOfKind("registrar_api_secret");
+    // Новый id здесь = аккаунт продолжает ходить в API со старым IP.
+    expect(secret.blobId).toBe(SECRET_BLOB);
+    // IP с пробелом не совпадёт с whitelist Namecheap: отказ придёт от API, а
+    // не от формы, и связи с набранным у него не будет.
+    expect(blobPlaintext(secret)).toBe(CLIENT_IP);
+
+    const body = mocks.apiPut.mock.calls[0][1];
+    expect(body.api_secret_blob_id).toBe(SECRET_BLOB);
+    expect(body).not.toHaveProperty("api_key_blob_id");
   });
 
   it("переименование без секретов не пишет ни одного блоба", async () => {

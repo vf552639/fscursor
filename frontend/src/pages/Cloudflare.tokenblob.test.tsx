@@ -118,7 +118,11 @@ describe("Cloudflare — api_token через блоб", () => {
 
     renderPage([]);
     await openAddModal();
-    fillAddModal(TOKEN);
+    // С пробелами по краям, а не начисто: токен копируют из панели Cloudflare
+    // вместе с `\n`, и зашифрованный вместе с ним он даёт 403 на Test
+    // connection без всякой связи с формой. Утверждение ниже — про содержимое
+    // блоба: `"   "` отбивался бы и без `trim` (пустое поле), а такой ввод — нет.
+    fillAddModal(`  ${TOKEN}  `);
     fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
@@ -169,8 +173,11 @@ describe("Cloudflare — api_token через блоб", () => {
 
     renderPage();
     await openEditModal();
+    // Тоже с пробелами по краям: на правке цена нетримленного токена выше —
+    // рабочий блоб перезаписывается мусором, и вернуть его можно только
+    // перенабором.
     fireEvent.change(screen.getByPlaceholderText("Leave empty to keep current"), {
-      target: { value: TOKEN },
+      target: { value: `  ${TOKEN}  ` },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -180,6 +187,7 @@ describe("Cloudflare — api_token через блоб", () => {
     // Новый id здесь = аккаунт продолжает указывать на старый токен.
     expect(blob.blobId).toBe(EXISTING_BLOB);
     expect(blob.blobKind).toBe("cloudflare_api_token");
+    expect(blobPlaintext(blob)).toBe(TOKEN);
 
     const [url, body] = mocks.apiPut.mock.calls[0];
     expect(url).toBe("/cloudflare/accounts/5");
