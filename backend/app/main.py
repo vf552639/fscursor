@@ -2,8 +2,11 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
@@ -61,6 +64,34 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Server & Domain Management Panel", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_without_extra_input(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """422 без эха значения лишнего поля.
+
+    Схемы записи (`ServerCreate/Update`, `CloudflareAccount*`,
+    `RegistrarAccount*`) стоят с `extra="forbid"`, и это ровно та ловушка, в
+    которую попадёт регрессия «форма опять шлёт плейнтекст-секрет». Дефолтный
+    обработчик FastAPI кладёт в ответ `input` — то самое значение, то есть
+    сам пароль: фронт подставляет `detail` в текст ошибки (`api/client.ts`),
+    оттуда он идёт в тост и в кэш мутаций, а с сервера — в лог прокси. Отказ
+    должен быть громким по ИМЕНИ поля, а не по его содержимому, поэтому у
+    ошибок `extra_forbidden` значение снимается.
+
+    Снимается только у них: у остальных ошибок `input` — это разбор
+    объявленного, заведомо несекретного поля (кривой UUID блоба, порт строкой),
+    и без него диагностика становится гаданием.
+    """
+    errors = [
+        {k: v for k, v in err.items() if k != "input"}
+        if err.get("type") == "extra_forbidden"
+        else err
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content=jsonable_encoder({"detail": errors}))
 
 configure_logging()
 add_loguru_intercept_handler()
