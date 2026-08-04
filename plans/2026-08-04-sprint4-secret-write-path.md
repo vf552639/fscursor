@@ -67,13 +67,23 @@
         `vault_delete_blob` вместо первого любого вызова в `expectBlobsGoneAfterEntity`;
         `expect(result.current.error).toBeNull()` в `expectDeleteIgnoresBlobFailure`;
         вернуть в JSDoc `forgetSecretBlobs` довод, почему провал уборки не показываем.
-- [ ] **2. Громкий провал** — `extra="forbid"` на `ServerCreate/Update`, `CloudflareAccount*`,
+- [x] **2. Громкий провал** — `extra="forbid"` на `ServerCreate/Update`, `CloudflareAccount*`,
       `RegistrarAccount*`; плейнтекст-поля вон из TS-типов и тел запросов.
-  - [ ] Обязательно вместе с этим: `tests/test_secret_write_path.py` — оба теста шлют
-        `ssh_password` и ждут `201`; после `forbid` это станет `422`. Менять на ассерт
-        `422` + `loc == ["body","ssh_password"]`, а НЕ убирать поле из тела: без замены
-        ассерта перебор колонок станет нефальсифицируемым — тот самый холостой тест,
-        против которого написан весь файл.
+  - [x] `model_config = ConfigDict(extra="forbid")` стоит на каждом из шести Create/Update
+        отдельно (не на Base: ту же базу наследуют `*Response` с `from_attributes=True`).
+  - [x] `tests/test_secret_write_path.py` — оба старых теста шлют `ssh_password` и теперь
+        ждут `422` + `loc == ["body","ssh_password"]`; поле из тела НЕ убрано, чистый POST
+        добавлен рядом, чтобы перебор колонок остался на живой строке.
+        `test_plaintext_secret_field_is_rejected_loudly` — шесть случаев, по одному на схему.
+        Мутационная проверка: снятие `forbid` с каждой схемы роняет ровно её случай (6/6).
+  - [x] Плейнтекст-полей в TS-типах и телах запросов не осталось ещё с фазы 1 — аудит всех
+        вызывающих (фронт ×7 тел, `ServerWriteBack` десктопа, `bulk_import_service`,
+        backend-тесты) расхождений со схемами не нашёл.
+  - [x] Побочная находка, закрытая здесь же: дефолтный 422 FastAPI возвращает `input` —
+        то есть сам плейнтекст-секрет, который фронт кладёт в текст ошибки
+        (`api/client.ts`), в тост и в кэш мутаций. `validation_error_without_extra_input`
+        в `app/main.py` снимает `input` у ошибок `extra_forbidden` (и только у них).
+        Мутационная проверка: без него `secret not in r.text` краснеет.
 - [ ] **3. Опасные пути** — `sdmp://bulk-provision` через гейт подтверждения с возвратом
       результата (№3); проверки существования БД/FTP-аккаунта до создания (№5).
 - [ ] **4. Видимость упавшего provision** — писать `last_provision_error` до раннего возврата,
