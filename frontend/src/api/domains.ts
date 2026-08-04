@@ -516,6 +516,180 @@ export async function runProvisionDomain(vars: ProvisionDomainVars): Promise<Pro
   return outcome;
 }
 
+/**
+ * Строка отчёта массового прогона (см. `BulkProvisionItem` в
+ * `commands/provision.rs`). Три исхода различимы намеренно: «не запускался» —
+ * это не «упал», и повтор после обрыва должен идти по хвосту, а не вслепую.
+ */
+export type BulkProvisionItem =
+  | { domain_id: string; outcome: "done"; result: ProvisionDesktopResult }
+  | { domain_id: string; outcome: "failed"; error: string }
+  | { domain_id: string; outcome: "skipped" };
+
+/** Ответ команды `provision_bulk` (см. `BulkProvisionOut` в Rust). */
+export interface BulkProvisionDesktopResult {
+  idempotency_key: string;
+  status: "ok" | "failed" | "already_ran";
+  error?: string;
+  items: BulkProvisionItem[];
+}
+
+/**
+ * Разобранный отчёт массового прогона — то, что показывает воркспейс.
+ *
+ * `results` несут пароли FTP (и БД, если бы массовый путь её создавал). Они
+ * существуют ТОЛЬКО здесь: сервер их не знает, кэш мутаций и локальный
+ * SQLCipher-кэш не хранят. Каждый обязан быть показан ровно один раз
+ * (`ProvisionResultModal` через очередь показов) и не осесть ни в localStorage,
+ * ни в кэше запросов, ни в логе.
+ */
+export interface BulkProvisionOutcome {
+  status: "ok" | "failed" | "already_ran";
+  /** Причина обрыва прогона — только при `failed`. */
+  error?: string;
+  results: ProvisionOutcome[];
+  failed: Array<{ domainId: string; error: string }>;
+  /** Домены, до которых прогон не дошёл. */
+  skipped: string[];
+}
+
+/**
+ * Одна строка для тоста об исходе массового прогона.
+ *
+ * Отдельная чистая функция, а не шаблон внутри воркспейса, по двум причинам:
+ * её проверяет тест, и она обязана НЕ КАСАТЬСЯ `results[].result` — тост
+ * уезжает в DOM и в скриншоты, а там лежат пароли.
+ */
+export function summarizeBulkProvision(o: BulkProvisionOutcome): string {
+  if (o.status === "already_ran") {
+    // Ровно то, что раньше выглядело как пустой успех: прогон с этим набором
+    // доменов уже был, его пароли показаны один раз и второй раз их не покажет
+    // никто — сервер их не знает по определению.
+    return (
+      "Bulk provision: this run already happened — nothing was started again, " +
+      "and its passwords cannot be shown a second time."
+    );
+  }
+  const parts = [`${o.results.length} provisioned`];
+  if (o.failed.length > 0) parts.push(`${o.failed.length} failed`);
+  if (o.skipped.length > 0) parts.push(`${o.skipped.length} not started`);
+  const head = `Bulk provision: ${parts.join(", ")}.`;
+  const first = o.failed[0];
+  return first ? `${head} #${first.domainId}: ${first.error}` : head;
+}
+
+function parseBulkProvisionResult(res: BulkProvisionDesktopResult): BulkProvisionOutcome {
+  const results: ProvisionOutcome[] = [];
+  const failed: Array<{ domainId: string; error: string }> = [];
+  const skipped: string[] = [];
+  for (const item of res.items) {
+    if (item.outcome === "done") {
+      // Имени домена у массового пути нет — он адресует по id, как и ссылка;
+      // та же форма `#id`, что в тексте подтверждения и у deep link'а provision.
+      results.push({ domain: `#${item.domain_id}`, result: item.result });
+    } else if (item.outcome === "failed") {
+      failed.push({ domainId: item.domain_id, error: item.error });
+    } else {
+      skipped.push(item.domain_id);
+    }
+  }
+  return { status: res.status, error: res.error, results, failed, skipped };
+}
+
+/**
+ * Занять на время массового прогона тот же гейт, которым защищён одиночный
+ * provision, — по одной заявке на каждый домен набора.
+ *
+ * Почему так, а не флагом «идёт bulk». Гейт живёт в `MutationCache` под
+ * `PROVISION_DOMAIN_KEY`, и обе его стороны отбирают домен предикатом по
+ * `variables.domainId`: страница `Domains` гасит ⚙ (`useMutationState`), а
+ * `runProvisionDomain` бросает на летящем домене. Массовый прогон — это один
+ * вызов с одним `variables`, поэтому предикату он неотличим от чужого домена;
+ * чтобы обе стороны увидели каждый домен набора, на каждый заводится
+ * собственная pending-мутация, висящая ровно столько, сколько идёт прогон.
+ *
+ * Заявка ничего не выполняет и ничего не возвращает, кроме id: результат
+ * приезжает отчётом bulk, а возврат `mutationFn` react-query кладёт в `data`
+ * `MutationCache`, откуда его не убирает даже `reset()` (запись живёт ещё
+ * gcTime). Паролям там не место.
+ *
+ * Возвращает функцию освобождения. Звать её ОБЯЗАТЕЛЬНО на любом исходе, иначе
+ * домены останутся «провижинятся» навсегда и ⚙ уже не включится.
+ */
+function claimProvisionGate(domainIds: number[]): () => void {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  for (const domainId of domainIds) {
+    const claim = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: PROVISION_DOMAIN_KEY,
+      mutationFn: async (vars: ProvisionDomainVars) => {
+        await held;
+        return { domain_id: String(vars.domainId) };
+      },
+    });
+    // `void` + `catch`: заявка живёт своей жизнью, а её промис никого не
+    // интересует — ждём мы сам прогон.
+    void claim
+      .execute({ domainId, domainName: `#${domainId}`, withDb: false })
+      .catch(() => {});
+  }
+  return release;
+}
+
+/** Домены набора, по которым provision уже летит (кнопкой, ссылкой или другим bulk). */
+function alreadyProvisioning(domainIds: number[]): number[] {
+  return domainIds.filter((id) =>
+    queryClient.getMutationCache().find({
+      mutationKey: PROVISION_DOMAIN_KEY,
+      status: "pending",
+      predicate: (m) => (m.state.variables as ProvisionDomainVars | undefined)?.domainId === id,
+    }),
+  );
+}
+
+/**
+ * Массовый provision — путь deep link `sdmp://bulk-provision`. Только десктоп.
+ *
+ * Отчёт возвращается вызывающему целиком: на каждом домене создаётся
+ * FTP-аккаунт, пароль которого существует только в этом ответе. Вызывающий
+ * обязан показать каждый результат ровно один раз и не сохранять.
+ *
+ * Оба конца гейта одиночного provision соблюдены: набор не стартует, если
+ * какой-то из его доменов уже провижинится, и на время прогона каждый домен
+ * набора занят для кнопки ⚙ и для `sdmp://provision`.
+ */
+export async function runBulkProvisionDomains(
+  userId: string,
+  domainIds: string[],
+): Promise<BulkProvisionOutcome> {
+  if (!isTauri()) {
+    throw new Error(desktopOnly("Provisioning"));
+  }
+  // Гейт ключуется числовым id — тем же, что кладёт в `variables` страница.
+  // Нечисловой id ссылки гейту не соответствует ничему; такой домен всё равно
+  // отобьёт Rust («domain not in local cache»), и он попадёт в отчёт как failed.
+  const numeric = domainIds.map(Number).filter((n) => Number.isInteger(n));
+  const busy = alreadyProvisioning(numeric);
+  if (busy.length > 0) {
+    throw new Error(
+      `Provisioning of ${busy.map((id) => `#${id}`).join(", ")} is already running.`,
+    );
+  }
+  const release = claimProvisionGate(numeric);
+  try {
+    const res = await invokeSynced<BulkProvisionDesktopResult>("provision_bulk", {
+      userId,
+      domainIds,
+    });
+    return parseBulkProvisionResult(res);
+  } finally {
+    release();
+    queryClient.invalidateQueries({ queryKey: domainsKeys.all });
+  }
+}
+
 export function useBulkProvisionDomains() {
   return useMutation({
     mutationFn: (domain_ids: number[]) =>

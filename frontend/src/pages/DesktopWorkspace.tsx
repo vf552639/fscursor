@@ -17,7 +17,7 @@ import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/d
 import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
 import { ProvisionResultModal } from "../components/ProvisionResultModal";
 import { useShowOnceQueue } from "../hooks/useShowOnceQueue";
-import type { ProvisionOutcome } from "../api/domains";
+import { summarizeBulkProvision, type ProvisionOutcome } from "../api/domains";
 
 /**
  * Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`).
@@ -178,6 +178,16 @@ export default function DesktopWorkspace() {
           else if (res.cancelled) showToast("Deep link cancelled — nothing was run");
           else if (res.fastpanel) fpQueue.push(res.fastpanel);
           else if (res.provision) provisionQueue.push(res.provision);
+          else if (res.bulkProvision) {
+            // Каждый отработавший домен — своя показ-один-раз модалка: пароль
+            // FTP каждого существует в единственном экземпляре, и сложить их в
+            // один слот значило бы потерять все, кроме последнего. Очередь для
+            // того и заведена.
+            for (const outcome of res.bulkProvision.results) provisionQueue.push(outcome);
+            // Тост — про исход прогона целиком (упавшие, незапущенные, «уже
+            // было»); паролей он не касается, см. `summarizeBulkProvision`.
+            showToast(summarizeBulkProvision(res.bulkProvision));
+          }
         } catch (e) {
           showToast(e instanceof Error ? e.message : String(e));
         }

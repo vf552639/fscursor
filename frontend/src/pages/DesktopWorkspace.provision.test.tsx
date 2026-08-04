@@ -227,4 +227,88 @@ describe("DesktopWorkspace — владелец результатов provision
     expect(JSON.stringify(localStorage)).not.toContain("PW-LINK");
     expect(JSON.stringify(sessionStorage)).not.toContain("PW-LINK");
   });
+
+  it("показывает результат каждого домена bulk-провижининга — по одному", async () => {
+    mocks.invokeSynced.mockResolvedValue({
+      idempotency_key: "k",
+      status: "failed",
+      error: "failed on domain 3: ssh: connect: refused",
+      items: [
+        { domain_id: "1", outcome: "done", result: result("1", "PW-A") },
+        { domain_id: "2", outcome: "done", result: result("2", "PW-B") },
+        { domain_id: "3", outcome: "failed", error: "ssh: connect: refused" },
+      ],
+    });
+    vi.stubGlobal("confirm", () => true);
+
+    renderWorkspace([
+      { id: 1, name: "a.com" },
+      { id: 2, name: "b.com" },
+      { id: 3, name: "c.com" },
+    ]);
+    await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
+    const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
+
+    handler(["sdmp://bulk-provision?ids=1,2,3"]);
+
+    // Раньше bulk отдавал наружу один ключ идемпотентности, а `Ok` каждого
+    // домена отбрасывал: N созданных FTP-аккаунтов и ни одного пароля к ним.
+    expect(await screen.findByText("PW-A-ftp")).toBeTruthy();
+    // И второй результат не затёрт первым — очередь показов, а не один слот.
+    expect(screen.queryByText("PW-B-ftp")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("PW-B-ftp")).toBeTruthy();
+
+    // Про упавший домен пользователю сказано, и сказано без паролей.
+    const toast = await screen.findByText(/Bulk provision:/);
+    expect(toast.textContent).toContain("2 provisioned");
+    expect(toast.textContent).toContain("#3: ssh: connect: refused");
+    expect(toast.textContent).not.toContain("PW-");
+
+    expect(JSON.stringify(localStorage)).not.toContain("PW-");
+    expect(JSON.stringify(sessionStorage)).not.toContain("PW-");
+  });
+
+  it("на время bulk-прогона гасит ⚙ у каждого домена набора", async () => {
+    let finish: (v: unknown) => void = () => {};
+    mocks.invokeSynced.mockImplementation(() => new Promise((r) => (finish = r)));
+    vi.stubGlobal("confirm", () => true);
+
+    renderWorkspace([
+      { id: 1, name: "a.com" },
+      { id: 2, name: "b.com" },
+      { id: 9, name: "z.com" },
+    ]);
+    await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
+    const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
+
+    const rowOf = async (name: string) =>
+      (await screen.findByText(name)).closest("tr") as HTMLElement;
+
+    handler(["sdmp://bulk-provision?ids=1,2"]);
+
+    // Клик по ⚙ домена, который сейчас идёт в bulk, открыл бы вторую SSH-сессию
+    // с create_site/create_ftp_account/certbot по тому же домену.
+    await waitFor(async () =>
+      expect(
+        within(await rowOf("a.com")).getByRole("button", { name: "Provisioning…" }),
+      ).toBeTruthy(),
+    );
+    expect(
+      within(await rowOf("b.com")).getByRole("button", { name: "Provisioning…" }),
+    ).toBeTruthy();
+    // Домен вне набора не тронут — гейт подоменный, а не глобальный.
+    expect(
+      within(await rowOf("z.com")).getByRole("button", { name: "Provision domain" }),
+    ).toBeTruthy();
+
+    finish({ idempotency_key: "k", status: "ok", items: [] });
+
+    // И отпущен после прогона — иначе ⚙ не включится уже никогда.
+    await waitFor(async () =>
+      expect(
+        within(await rowOf("a.com")).getByRole("button", { name: "Provision domain" }),
+      ).toBeTruthy(),
+    );
+  });
 });

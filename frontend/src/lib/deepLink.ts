@@ -1,5 +1,10 @@
 import { invokeSynced } from "./localCache";
-import { runProvisionDomain, type ProvisionOutcome } from "../api/domains";
+import {
+  runBulkProvisionDomains,
+  runProvisionDomain,
+  type BulkProvisionOutcome,
+  type ProvisionOutcome,
+} from "../api/domains";
 
 /**
  * Результат команды `install_fastpanel` (см. `InstallFastpanelResult` в
@@ -18,10 +23,11 @@ export interface InstallFastpanelResult {
  * Что сделал deep link. `handled: false` — ссылка не наша, вызывающий тостит.
  * `cancelled: true` — ссылка наша, но пользователь не подтвердил выполнение.
  *
- * `fastpanel` и `provision` — результаты, которые существуют только здесь:
- * пароль панели, пароли БД и FTP. Вызывающий обязан показать их один раз;
- * потерять их — значит оставить пользователя с аккаунтами, войти в которые он
- * не сможет никогда.
+ * `fastpanel`, `provision` и `bulkProvision` — результаты, которые существуют
+ * только здесь: пароль панели, пароли БД и FTP. Вызывающий обязан показать их
+ * один раз; потерять их — значит оставить пользователя с аккаунтами, войти в
+ * которые он не сможет никогда. У `bulkProvision` таких результатов сразу
+ * несколько — по одному на отработавший домен, и потерять можно все N.
  */
 export type DeepLinkOutcome =
   | { handled: false }
@@ -30,6 +36,7 @@ export type DeepLinkOutcome =
       cancelled?: boolean;
       fastpanel?: InstallFastpanelResult;
       provision?: ProvisionOutcome;
+      bulkProvision?: BulkProvisionOutcome;
     };
 
 /**
@@ -168,8 +175,18 @@ export async function handleSdmpDeepLinkInTauri(
   }
 
   if (action.kind === "bulk-provision") {
-    await invokeSynced("provision_bulk", { userId, domainIds: action.domainIds });
-    return { handled: true };
+    // Не прямой `invokeSynced`, а тот же путь, что у одиночного provision, и по
+    // тем же двум причинам.
+    //
+    // 1. Результат. На каждом домене создаётся FTP-аккаунт, пароль которого
+    //    возвращается только в этом ответе. Прямой вызов отдавал наружу один
+    //    ключ идемпотентности, а `Ok` каждого домена отбрасывал — N аккаунтов,
+    //    войти в которые пользователь не сможет никогда.
+    // 2. Гейт. Он подоменный и живёт в `MutationCache`; прямой вызов его не
+    //    консультировал, поэтому ссылка спокойно открывала вторую SSH-сессию по
+    //    домену, который уже провижинится кнопкой ⚙ или другой ссылкой.
+    const bulkProvision = await runBulkProvisionDomains(userId, action.domainIds);
+    return { handled: true, bulkProvision };
   }
 
   // Креды панели живут только в этом ответе — обязательно отдаём их наверх,
