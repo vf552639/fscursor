@@ -3,8 +3,10 @@ import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart,
 import { useServers, useCreateServer } from "../api/servers";
 import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
 import { OpenInDesktop } from "../components/OpenInDesktop";
-import { desktopOnly, isTauri } from "../lib/runtime";
-import { putSecretBlob, BLOB_KIND } from "../lib/secretBlob";
+import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
+import { isTauri } from "../lib/runtime";
+import { BLOB_KIND } from "../lib/secretBlob";
+import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
@@ -16,10 +18,10 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   const [os, setOs] = useState("Ubuntu 22.04 LTS (x86_64)");
   const [fastpanelUrl, setFastpanelUrl] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
-  // Между кликом и `create.mutate` теперь есть await записи блоба, а
-  // `create.isPending` в этом окне ещё false: без своего флага второй клик
-  // успевает записать второй блоб и создать второй сервер.
-  const [saving, setSaving] = useState(false);
+  // SSH-пароль вкладки install держит хук, а не общий с вкладкой connect
+  // `password`: одно поле на два секрета разных видов — это пароль FastPanel,
+  // уехавший в блоб под `blobKind: server_ssh_password`.
+  const sshPassword = useSecretSave("SSH password");
 
   const create = useCreateServer();
 
@@ -31,7 +33,7 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       if (!ip.trim()) newErrors.ip = "IP address is required";
       // Basic IP regex
       else if (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip.trim())) newErrors.ip = "Invalid IP address format";
-      if (!password) newErrors.password = "SSH Password is required for installation";
+      if (!sshPassword.value) newErrors.password = "SSH Password is required for installation";
     } else {
       if (!fastpanelUrl.trim()) newErrors.fastpanelUrl = "FastPanel URL is required";
       if (!login.trim()) newErrors.login = "Login is required";
@@ -45,6 +47,11 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   const handleTabChange = (newTab: string) => {
     setTab(newTab);
     setErrors({});
+    // Набранный секрет не переезжает между вкладками: поля называются
+    // одинаково («Password»), а виды секретов разные, и раньше пароль панели,
+    // набранный на connect, уходил бы в блоб как SSH-пароль сервера.
+    setPassword("");
+    sshPassword.reset();
     if (newTab === "install") {
       setLogin("root");
     } else {
@@ -65,70 +72,52 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   
   const handleAdd = async () => {
     if (!validate()) return;
-    setSaving(true);
-    try {
-      let payload_ip = ip;
-      let payload_url = "";
-      
-      if (tab === "connect") {
-        // Try to extract IP from Fastpanel URL if IP field is hidden/empty
-        try {
-          const urlObj = new URL(fastpanelUrl.startsWith('http') ? fastpanelUrl : `https://${fastpanelUrl}`);
-          payload_ip = urlObj.hostname;
-        } catch (e) {
-          // Fallback for simple strings like "192.168.1.1:8888"
-          payload_ip = fastpanelUrl.replace(/https?:\/\//, '').split(':')[0].split('/')[0];
-        }
-        payload_url = fastpanelUrl || `https://${payload_ip}:8888`;
-      }
+    let payload_ip = ip;
+    let payload_url = "";
 
-      if (tab === "install") {
-        // Сначала блоб, потом сервер, и НЕ наоборот: сервер с
-        // `ssh_password_blob_id = NULL` выглядит созданным, но все SSH-команды
-        // по нему падают. Упало создание сервера — блоб остаётся записанным, и
-        // откатывать его нельзя (см. JSDoc `putSecretBlob`): осиротевший блоб
-        // безвреден, повтор перезапишет тот же id.
-        //
-        // Пароль — аргумент функции, а не поле `create.mutate({...})`:
-        // react-query кладёт аргументы мутации в `variables`, откуда их не
-        // убирает даже `reset()`, — плейнтекст жил бы в MutationCache ещё gcTime.
-        const blobId = await putSecretBlob({
-          plaintext: password,
-          blobKind: BLOB_KIND.serverSshPassword,
-          existingBlobId: null,
-        });
-        create.mutate({
+    if (tab === "connect") {
+      // Try to extract IP from Fastpanel URL if IP field is hidden/empty
+      try {
+        const urlObj = new URL(fastpanelUrl.startsWith('http') ? fastpanelUrl : `https://${fastpanelUrl}`);
+        payload_ip = urlObj.hostname;
+      } catch (e) {
+        // Fallback for simple strings like "192.168.1.1:8888"
+        payload_ip = fastpanelUrl.replace(/https?:\/\//, '').split(':')[0].split('/')[0];
+      }
+      payload_url = fastpanelUrl || `https://${payload_ip}:8888`;
+    }
+
+    if (tab === "install") {
+      // Порядок «блоб → сервер», запрет отката блоба и то, почему плейнтекст
+      // не едет в аргументы мутации, — внутри `useSecretSave`. Провал не
+      // создаёт сервер вовсе: сервер с `ssh_password_blob_id = NULL` — это
+      // 200 OK и баннер «SSH не настроен», который никогда не уйдёт.
+      const ok = await sshPassword.save({
+        blobKind: BLOB_KIND.serverSshPassword,
+        existingBlobId: null,
+        persist: (blobId) => create.mutateAsync({
           name: name,
           ip_address: payload_ip,
           ssh_user: login,
           ssh_password_blob_id: blobId,
           os: os
-        }, {
-          onSuccess: () => onClose(),
-          onError: (err: any) => alert("Error adding server: " + (err?.message || "Internal Error"))
-        });
-      } else {
-         create.mutate({
-          name: name,
-          ip_address: payload_ip,
-          ssh_user: "root", // Default SSH user for backend schema
-          os: os,
-          fastpanel_user: login,
-          fastpanel_password: password,
-          fastpanel_url: payload_url,
-          fastpanel_status: "installed",
-        }, {
-          onSuccess: () => onClose(),
-          onError: (err: any) => alert("Error connecting server: " + (err?.message || "Internal Error"))
-        });
-      }
-    } catch (e: any) {
-      // Сюда приходит падение записи блоба — и сервер тогда не создаётся вовсе.
-      // Молчать нельзя: «сервер добавлен» без секрета и есть тот самый провал,
-      // после которого баннер «SSH не настроен» не уходит никогда.
-      alert("Error adding server: " + (e?.message || "Internal Error"));
-    } finally {
-      setSaving(false);
+        }),
+      });
+      if (ok) onClose();
+    } else {
+       create.mutate({
+        name: name,
+        ip_address: payload_ip,
+        ssh_user: "root", // Default SSH user for backend schema
+        os: os,
+        fastpanel_user: login,
+        fastpanel_password: password,
+        fastpanel_url: payload_url,
+        fastpanel_status: "installed",
+      }, {
+        onSuccess: () => onClose(),
+        onError: (err: any) => alert("Error connecting server: " + (err?.message || "Internal Error"))
+      });
     }
   };
 
@@ -172,11 +161,11 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
                   кнопка формы там и так ведёт в десктоп (OpenInDesktop ниже). */}
               {isTauri() ? (
                 <>
-                  <Inp type="password" value={password} onChange={e=>{setPassword((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="••••••••" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
+                  <Inp type="password" value={sshPassword.value} onChange={e=>{sshPassword.setValue((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="••••••••" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
                   {errors.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.password}</div>}
                 </>
               ) : (
-                <div style={{fontSize:11.5,color:"#6b7280",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8,padding:"8px 12px"}}>{desktopOnly("Saving secrets")}</div>
+                <DesktopOnlyNote what="Saving secrets" />
               )}
             </div>
           </div>
@@ -211,8 +200,14 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       )}
     </div>
     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+      {/* Ошибка сохранения — в самой форме, а не в `alert`: она про поле, к
+          которому пользователь сейчас вернётся, и текст у неё тот же, что в
+          модалке SSH на карточке сервера. */}
+      {sshPassword.error && (
+        <div role="alert" style={{padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{sshPassword.error}</div>
+      )}
       {isTauri() ? (
-        <Btn variant="primary" onClick={handleAdd} disabled={saving || create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{saving || create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
+        <Btn variant="primary" onClick={handleAdd} disabled={sshPassword.saving || create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{sshPassword.saving || create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
       ) : (
         <OpenInDesktop
           variant="primary"

@@ -5,8 +5,10 @@ import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, installFas
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
-import { desktopOnly, isTauri } from "../lib/runtime";
-import { putSecretBlob, BLOB_KIND } from "../lib/secretBlob";
+import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
+import { isTauri } from "../lib/runtime";
+import { BLOB_KIND } from "../lib/secretBlob";
+import { useSecretSave } from "../hooks/useSecretSave";
 import type { InstallFastpanelResult } from "../lib/deepLink";
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
@@ -31,12 +33,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   
   const [showSshModal, setShowSshModal] = useState(false);
   const [sshUser, setSshUser] = useState("root");
-  const [sshPassword, setSshPassword] = useState("");
   const [sshPort, setSshPort] = useState(22);
-  const [sshError, setSshError] = useState<string | null>(null);
-  // Своё «сохраняю»: `updateServer.isPending` включается только после записи
-  // блоба, и в окне до неё второй клик писал бы блоб второй раз.
-  const [sshSaving, setSshSaving] = useState(false);
+  // Плейнтекст пароля держит хук: эта страница смонтирована целиком, модалку
+  // она только прячет, — своё `useState` пережило бы закрытие формы и лежало бы
+  // в памяти до ухода со страницы.
+  const sshPassword = useSecretSave("SSH password");
   const [editingDomain, setEditingDomain] = useState<any | null>(null);
 
   // Queries
@@ -102,52 +103,33 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const openSshModal = () => {
     setSshUser(s?.ssh_user || "root");
     setSshPort(s?.ssh_port || 22);
-    setSshPassword("");
-    setSshError(null);
+    sshPassword.reset();
     setShowSshModal(true);
   };
 
+  // Закрытие формы — единственное место, где набранный пароль надо забыть:
+  // ✕ и клик по оверлею оба зовут `onClose` модалки, и без этого плейнтекст
+  // пережил бы закрытие (страница-то смонтирована).
+  const closeSshModal = () => {
+    sshPassword.reset();
+    setShowSshModal(false);
+  };
+
   const handleSaveSsh = async () => {
-    setSshError(null);
-    // Пустой пароль дал бы блоб из нуля байт и `has_ssh = true` на сервере:
-    // SSH-команды после этого падают уже на живом соединении, а не здесь.
-    if (!sshPassword) {
-      setSshError("SSH password is required");
-      return;
-    }
-    setSshSaving(true);
-    let blobId: string;
-    try {
-      blobId = await putSecretBlob({
-        plaintext: sshPassword,
-        blobKind: BLOB_KIND.serverSshPassword,
-        // Это ПРАВКА: у сервера уже может быть блоб, и переписать надо именно
-        // его. Новый id оставил бы сущность указывать на прежний пароль —
-        // «сохранено», а по SSH ходит старый секрет. Версии блоба ведёт сервер
-        // внутри одного id.
-        existingBlobId: s?.ssh_password_blob_id ?? null,
-      });
-    } catch (e: any) {
-      // Сервер не трогаем вовсе: PUT со ссылкой на несуществующий блоб — это
-      // 200 OK и неработающий SSH.
-      setSshError(e?.message || "Failed to save the SSH password");
-      return;
-    } finally {
-      setSshSaving(false);
-    }
-    // В мутацию уходит только id: аргументы `mutate` оседают в `variables`
-    // мутации, откуда их не убирает даже `reset()` (см. JSDoc `putSecretBlob`).
-    updateServer.mutate({
-      ssh_user: sshUser,
-      ssh_password_blob_id: blobId,
-      ssh_port: sshPort
-    }, {
-      onSuccess: () => {
-        setSshPassword("");
-        setShowSshModal(false);
-      },
-      onError: (err: any) => setSshError(err?.message || "request error"),
+    const ok = await sshPassword.save({
+      blobKind: BLOB_KIND.serverSshPassword,
+      // Это ПРАВКА: у сервера уже может быть блоб, и переписать надо именно
+      // его. Новый id оставил бы сущность указывать на прежний пароль —
+      // «сохранено», а по SSH ходит старый секрет. Версии блоба ведёт сервер
+      // внутри одного id.
+      existingBlobId: s?.ssh_password_blob_id ?? null,
+      persist: (blobId) => updateServer.mutateAsync({
+        ssh_user: sshUser,
+        ssh_password_blob_id: blobId,
+        ssh_port: sshPort
+      }),
     });
+    if (ok) setShowSshModal(false);
   };
 
   const handleDelete = () => {
@@ -236,7 +218,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
           isTauri() ? (
             <Btn size="sm" variant="secondary" onClick={openSshModal}>Изменить SSH</Btn>
           ) : (
-            <span style={{alignSelf:"center",fontSize:12.5,color:"#6b7280"}}>{desktopOnly("Saving secrets")}</span>
+            <DesktopOnlyNote what="Saving secrets" />
           )
         ) : null}
         {s.has_ssh && isFPInstalled ? (
@@ -269,7 +251,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         {isTauri() ? (
           <Btn variant="primary" size="sm" onClick={openSshModal}>Добавить SSH</Btn>
         ) : (
-          <div style={{fontSize:12.5,fontWeight:600,color:"#92400e",marginLeft:16,whiteSpace:"nowrap"}}>{desktopOnly("Saving secrets")}</div>
+          <DesktopOnlyNote what="Saving secrets" />
         )}
       </div>
     )}
@@ -412,19 +394,19 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     </div>
 
     {showSshModal && (
-      <Modal title={s.has_ssh ? "Изменить SSH-доступ" : "Добавить SSH-доступ"} onClose={()=>setShowSshModal(false)} width={420}>
+      <Modal title={s.has_ssh ? "Изменить SSH-доступ" : "Добавить SSH-доступ"} onClose={closeSshModal} width={420}>
         <div style={{display:"flex", flexDirection:"column", gap:14}}>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH User</label><Inp value={sshUser} onChange={e=>setSshUser((e.target as any).value)} placeholder="e.g., root"/></div>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label><Inp type="password" value={sshPassword} onChange={e=>setSshPassword((e.target as any).value)} placeholder="••••••••"/></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label><Inp type="password" value={sshPassword.value} onChange={e=>sshPassword.setValue((e.target as any).value)} placeholder="••••••••"/></div>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Port</label><Inp type="number" value={sshPort} onChange={e=>setSshPort(Number((e.target as any).value))} placeholder="22"/></div>
         </div>
-        {sshError && (
+        {sshPassword.error && (
           <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
-            {sshError}
+            {sshPassword.error}
           </div>
         )}
         <div style={{marginTop:22}}>
-          <Btn variant="primary" onClick={handleSaveSsh} disabled={sshSaving || updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{sshSaving || updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="primary" onClick={handleSaveSsh} disabled={sshPassword.saving} style={{width:"100%",justifyContent:"center"}}>{sshPassword.saving ? "Saving..." : "Save"}</Btn>
         </div>
       </Modal>
     )}

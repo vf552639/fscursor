@@ -54,18 +54,19 @@ export interface ServerCreate {
   ip_address: string;
   ssh_port?: number;
   ssh_user?: string;
-  ssh_password?: string;
   /**
-   * Ссылка на блоб от `putSecretBlob` — единственное, что сервер реально
-   * записывает. Соседний `ssh_password` схема не объявляет и с `extra="ignore"`
-   * молча выбрасывает: 200 OK и `NULL` в колонке. Он ещё жив только ради
-   * FastPanel-формы, которую переводит фаза 1b, и уходит в фазе 2.
+   * Ссылка на блоб от `putSecretBlob` — единственный способ передать
+   * SSH-пароль. Поля `ssh_password` здесь нет намеренно: серверная схема его
+   * не объявляет и с `extra="ignore"` молча выбрасывает (200 OK и `NULL` в
+   * колонке), поэтому в TS оно давало зелёную компиляцию на пути, который
+   * теряет секрет. Без него это ошибка типа, а не молчаливая потеря.
    */
   ssh_password_blob_id?: string | null;
   os?: string | null;
   purchase_date?: string | null;
   expiry_date?: string | null;
   fastpanel_user?: string;
+  /** Так же теряется, как терялся `ssh_password`; уедет в блоб в фазе 1b. */
   fastpanel_password?: string;
   fastpanel_url?: string;
   fastpanel_status?: string;
@@ -76,7 +77,6 @@ export interface ServerUpdate {
   ip_address?: string;
   ssh_port?: number;
   ssh_user?: string;
-  ssh_password?: string;
   /** См. `ServerCreate.ssh_password_blob_id`. При правке — ТОТ ЖЕ id. */
   ssh_password_blob_id?: string | null;
   os?: string | null;
@@ -84,6 +84,7 @@ export interface ServerUpdate {
   purchase_date?: string | null;
   expiry_date?: string | null;
   fastpanel_user?: string;
+  /** См. `ServerCreate.fastpanel_password`. */
   fastpanel_password?: string;
   fastpanel_url?: string;
   fastpanel_status?: string;

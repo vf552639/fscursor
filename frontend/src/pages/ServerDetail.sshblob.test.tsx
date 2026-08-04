@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ServerDetail from "./ServerDetail";
 import { b64ToU8 } from "../lib/b64";
 import { useAuthStore } from "../store/auth";
+import { setTauri, UUID_V4, putBlobArgs, putBlobCalls } from "../test/secretBlobKit";
 
 /**
  * Правка SSH-доступа — это перезапись СУЩЕСТВУЮЩЕГО блоба: id ведёт сущность, а
@@ -43,7 +44,6 @@ vi.mock("../components/RevealSecret", () => ({
   RevealSecret: () => <span>reveal</span>,
 }));
 
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const EXISTING_BLOB = "11111111-2222-4333-8444-555555555555";
 const NEW_PW = "new-ssh-pw";
 // Ровно то, что вернёт `desktopOnly("Saving secrets")`: одна фраза продукта на
@@ -90,18 +90,6 @@ const SERVER = {
 // учила бы состоянию, которого не бывает.
 const SERVER_NO_SSH = { ...SERVER, has_ssh: false, ssh_password_blob_id: null };
 
-function setTauri(on: boolean) {
-  const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
-  if (on) w.__TAURI_INTERNALS__ = {};
-  else delete w.__TAURI_INTERNALS__;
-}
-
-function putBlobArgs(): Record<string, any> {
-  const calls = mocks.invokeIfTauri.mock.calls.filter((c: unknown[]) => c[0] === "vault_put_blob");
-  if (calls.length !== 1) throw new Error(`vault_put_blob вызвана ${calls.length} раз, ожидался 1`);
-  return calls[0][1] as Record<string, any>;
-}
-
 function renderDetail(server: typeof SERVER | typeof SERVER_NO_SSH = SERVER) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === `/servers/${server.id}`) return server;
@@ -146,7 +134,7 @@ describe("ServerDetail — SSH-пароль через блоб", () => {
 
     await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
 
-    const blob = putBlobArgs();
+    const blob = putBlobArgs(mocks.invokeIfTauri);
     // Новый id здесь = сущность продолжает указывать на старый пароль.
     expect(blob.blobId).toBe(EXISTING_BLOB);
     expect(blob.blobKind).toBe("server_ssh_password");
@@ -176,9 +164,47 @@ describe("ServerDetail — SSH-пароль через блоб", () => {
     fireEvent.click(screen.getByText("Save"));
 
     await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
-    const blob = putBlobArgs();
+    const blob = putBlobArgs(mocks.invokeIfTauri);
     expect(blob.blobId).toMatch(UUID_V4);
     expect(mocks.apiPut.mock.calls[0][1].ssh_password_blob_id).toBe(blob.blobId);
+  });
+
+  it("закрытие формы забывает набранный пароль", async () => {
+    setTauri(true);
+
+    renderDetail();
+    const pw = await openSshForm("Изменить SSH");
+    fireEvent.change(pw, { target: { value: NEW_PW } });
+    // ✕ и клик по оверлею — единственные выходы из формы, Cancel в ней нет.
+    // Страница смонтирована всё время, так что незачищенный плейнтекст лежал бы
+    // в памяти до ухода с неё.
+    fireEvent.click(screen.getByText("✕"));
+
+    const reopened = await openSshForm("Изменить SSH");
+    expect(reopened.value).toBe("");
+  });
+
+  it("второй клик в окне записи блоба не пишет второй блоб", async () => {
+    setTauri(true);
+    // Кнопка обязана быть мёртвой всё время записи блоба И сохранения сервера:
+    // между ними нет кадра, где оба флага ложны.
+    let releaseBlob: () => void = () => {};
+    mocks.invokeIfTauri.mockReturnValue(new Promise<void>((r) => { releaseBlob = () => r(); }));
+    mocks.apiPut.mockResolvedValue({ ...SERVER });
+
+    renderDetail();
+    const pw = await openSshForm("Изменить SSH");
+    fireEvent.change(pw, { target: { value: NEW_PW } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1));
+    const saving = (await screen.findByText("Saving...")).closest("button") as HTMLButtonElement;
+    expect(saving.disabled).toBe(true);
+    fireEvent.click(saving);
+
+    releaseBlob();
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
   });
 
   it("упавшая запись блоба не трогает сервер и показывает ошибку", async () => {

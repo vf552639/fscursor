@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AddServerModal } from "./Servers";
 import { b64ToU8 } from "../lib/b64";
 import { useAuthStore } from "../store/auth";
+import { setTauri, UUID_V4, putBlobArgs, putBlobCalls } from "../test/secretBlobKit";
 
 /**
  * Форма слала `ssh_password` плейнтекстом — поля, которого нет в `ServerCreate`
@@ -37,20 +38,9 @@ vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
 // К добавлению сервера отношения не имеет, а тянет парсер CSV.
 vi.mock("../components/ServerBulkImportDialog", () => ({ default: () => null }));
 
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SSH_PW = "s3cret-ssh-pw";
-
-function setTauri(on: boolean) {
-  const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
-  if (on) w.__TAURI_INTERNALS__ = {};
-  else delete w.__TAURI_INTERNALS__;
-}
-
-function putBlobArgs(): Record<string, any> {
-  const calls = mocks.invokeIfTauri.mock.calls.filter((c: unknown[]) => c[0] === "vault_put_blob");
-  if (calls.length !== 1) throw new Error(`vault_put_blob вызвана ${calls.length} раз, ожидался 1`);
-  return calls[0][1] as Record<string, any>;
-}
+const FP_PW = "fastpanel-pw";
+const DESKTOP_NOTE = "Saving secrets runs in the SDMP desktop app.";
 
 function renderModal(onClose = vi.fn()) {
   const client = new QueryClient({
@@ -100,7 +90,7 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
 
-    const blob = putBlobArgs();
+    const blob = putBlobArgs(mocks.invokeIfTauri);
     expect(blob.userId).toBe("user-1");
     expect(blob.blobKind).toBe("server_ssh_password");
     expect(blob.blobId).toMatch(UUID_V4);
@@ -123,19 +113,64 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
   it("упавшая запись блоба не создаёт сервер и не молчит", async () => {
     setTauri(true);
     mocks.invokeIfTauri.mockRejectedValue(new Error("keychain locked"));
-    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
 
     const { onClose } = renderModal();
     fillInstallTab(SSH_PW);
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
-    await waitFor(() => expect(alertSpy).toHaveBeenCalled());
-    expect(String(alertSpy.mock.calls[0][0])).toContain("keychain locked");
+    // Ошибка — в форме, куда пользователь сейчас смотрит, и той же фразой, что
+    // в модалке SSH на карточке сервера.
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "keychain locked");
     // Сервер без секрета — это ровно тот 200 OK, после которого баннер «SSH не
     // настроен» не уходит никогда.
     expect(mocks.apiPost).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
-    alertSpy.mockRestore();
+  });
+
+  it("второй клик в окне записи блоба не пишет второй блоб", async () => {
+    setTauri(true);
+    // Запись блоба и создание сервера идут асинхронно; пока они идут, кнопка
+    // обязана быть мёртвой. Иначе двойной клик оставляет лишний блоб и второй
+    // сервер с тем же IP.
+    let releaseBlob: () => void = () => {};
+    mocks.invokeIfTauri.mockReturnValue(new Promise<void>((r) => { releaseBlob = () => r(); }));
+    mocks.apiPost.mockResolvedValue({ id: 1 });
+
+    renderModal();
+    fillInstallTab(SSH_PW);
+    const btn = screen.getByRole("button", { name: "Add Server" }) as HTMLButtonElement;
+    fireEvent.click(btn);
+
+    await waitFor(() => expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1));
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Adding..." }) as HTMLButtonElement).disabled).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Adding..." }));
+
+    releaseBlob();
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
+  });
+
+  it("пароль не переезжает с вкладки connect на install", async () => {
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ id: 1 });
+
+    renderModal();
+    // На connect в поле «Password» набирают пароль ПАНЕЛИ. Уехав на install,
+    // он был бы записан в блоб как SSH-пароль сервера — секрет не того вида под
+    // не тем `blobKind`.
+    fireEvent.click(screen.getByText(/Connect Existing Fastpanel/));
+    fireEvent.change(screen.getByPlaceholderText("Enter password"), { target: { value: FP_PW } });
+    fireEvent.click(screen.getByText(/Install New Fastpanel/));
+
+    expect((screen.getByPlaceholderText("••••••••") as HTMLInputElement).value).toBe("");
+    fillInstallTab(SSH_PW);
+    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    const blob = putBlobArgs(mocks.invokeIfTauri);
+    expect(new TextDecoder().decode(b64ToU8(blob.plaintextB64))).toBe(SSH_PW);
   });
 
   it("в вебе поля пароля нет вовсе, а есть общая фраза про десктоп", async () => {
@@ -145,7 +180,7 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     // Шифрует Rust мастер-ключом из keychain — из браузера секрет не сохранить.
     // Поле, в которое дали набрать пароль, обещало бы обратное.
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
-    expect(screen.getByText("Saving secrets runs in the SDMP desktop app.")).toBeTruthy();
+    expect(screen.getByText(DESKTOP_NOTE)).toBeTruthy();
 
     // Сервер без SSH завести законно — форма остаётся, но её действие ведёт в
     // десктоп тем же deep link'ом, что и остальные исполняющие действия.
