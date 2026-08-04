@@ -1,6 +1,25 @@
 import React from "react";
 import { Badge, Btn, CopyBtn, Modal } from "./ui/Primitives";
-import type { ProvisionDesktopResult } from "../api/domains";
+import type { ProvisionDbResult, ProvisionDesktopResult } from "../api/domains";
+
+/**
+ * Заголовок блока про уже существовавшую БД.
+ *
+ * Три состояния `database_exists` — три разные новости, и слепить их нельзя:
+ * провижининг пропускает пару по ПОЛЬЗОВАТЕЛЮ (пароль его), поэтому наличие
+ * самой базы — отдельный факт. Сказать «база и пользователь уже существовали»
+ * там, где базу дропнули руками, значит соврать: она так и осталась
+ * несозданной. А там, где проверить не удалось, про базу не утверждаем ничего.
+ */
+function dbExistsTitle(db: Extract<ProvisionDbResult, { status: "exists" }>): string {
+  if (db.database_exists === false) {
+    return `User ${db.db_user} already exists, but database ${db.db_name} does not`;
+  }
+  if (db.database_exists === true) {
+    return `Database ${db.db_name} and user ${db.db_user} already existed`;
+  }
+  return `Database user ${db.db_user} already exists`;
+}
 
 /**
  * Показ-один-раз результата `provision_domain`.
@@ -84,12 +103,13 @@ export function ProvisionResultModal({
    * меняем: старый лежит в конфиге живого сайта на сервере, и ротация посреди
    * повторного provision уронила бы работающий сайт.
    */
-  const existingBlock = (title: string, label: string, value: string) => (
+  const existingBlock = (title: string, label: string, value: string, hint?: string) => (
     <div>
       <div style={{ ...noticeStyle, marginBottom: 10 }}>
         {title} — nothing was created and no password is shown. Its password was shown once,
         when it was created; it is not stored anywhere, so it cannot be shown again. If it is
         lost, change it in FastPanel.
+        {hint ? ` ${hint}` : ""}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <div style={{ width: 100, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>
@@ -160,9 +180,17 @@ export function ProvisionResultModal({
           : null}
         {result.db?.status === "exists"
           ? existingBlock(
-              `Database ${result.db.db_name} and user ${result.db.db_user} already existed`,
+              // Три разные новости, а не одна. Провижининг пропускает пару по
+              // ПОЛЬЗОВАТЕЛЮ, поэтому «база тоже на месте» — отдельный факт, и
+              // утверждать его, когда база дропнута руками, значит соврать: она
+              // так и осталась несозданной. Про неизвестное молчим.
+              dbExistsTitle(result.db),
               "DB user",
               result.db.db_user,
+              result.db.database_exists === false
+                ? `The database itself is missing: provision skips the pair when the user exists. ` +
+                  `Create ${result.db.db_name} in FastPanel, or drop the user and provision again.`
+                : undefined,
             )
           : null}
         {result.ftp?.status === "created"

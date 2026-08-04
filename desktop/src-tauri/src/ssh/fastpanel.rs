@@ -221,24 +221,35 @@ pub async fn create_site(
 
 /// Признаки того, что команда упала именно на дубликате.
 ///
-/// Вторая линия обороны там, где первая (`ftp_exists`/`db_exists`) не смогла
-/// ответить: CLI не знает подкоманды `list`, mysql не пустил к `mysql.user`.
-/// Без неё повтор упирался бы в безликий `opaque_exit` с одним кодом возврата,
-/// и пользователь читал бы «ошибка на сервере» там, где на самом деле всё уже
-/// сделано.
-///
 /// `does not exist` мимо: подстрока `exist` есть и в нём, поэтому маркеры
-/// точные, а не «содержит exist».
+/// точные, а не «содержит exist». `duplicate entry`, а не `duplicate`: первое —
+/// текст ER_DUP_ENTRY, второе ловило бы любое «could not duplicate …».
 const ALREADY_EXISTS_MARKERS: [&str; 5] = [
     "already exists",
     "already exist",
     "already in use",
-    "duplicate",
-    // MySQL/MariaDB: ER_CANNOT_USER от `CREATE USER` по занятому имени.
+    // MySQL/MariaDB: ER_DUP_ENTRY и ER_CANNOT_USER (`CREATE USER` по занятому имени).
+    "duplicate entry",
     "error 1396",
 ];
 
 /// Похоже ли, что команда упала на «уже существует».
+///
+/// **Это эвристика по тексту, а не проверка.** Она — вторая линия обороны ровно
+/// там, где первой (`ftp_exists`/`db_exists`) не было: CLI не знает подкоманды
+/// `list`, mysql не пустил к `mysql.user`. Без неё повтор упирался бы в
+/// безликий `opaque_exit` с одним кодом возврата, и пользователь читал бы
+/// «ошибка на сервере» там, где на самом деле всё уже сделано.
+///
+/// Цена, которую она стоит, — ложное срабатывание: непрофильный сбой с такой
+/// строкой в тексте будет показан как «аккаунт уже существовал, оставили», и
+/// пользователь уйдёт уверенным, что доступ у него есть, тогда как аккаунта
+/// нет. Поэтому маркеры узкие, а спрашивают её ТОЛЬКО когда существование не
+/// установлено (см. вызовы): ответившей проверке веры больше, чем совпадению
+/// подстроки, и её «нет» отправляет сбой в `opaque_exit`, как и раньше.
+/// Не превращать в первичную проверку и не расширять маркеры «на всякий
+/// случай»: каждый расширенный маркер — это ещё один способ соврать про
+/// несуществующий доступ.
 ///
 /// Принимает вывод, но НИКОГДА его не возвращает: у `create`-команд в argv
 /// стоит сгенерированный пароль, и утилиты повторяют его в тексте ошибки
@@ -348,7 +359,8 @@ pub async fn create_ftp_account(
     // Проверка ДО генерации пароля: сгенерировать его для существующего аккаунта
     // значило бы показать пользователю в модалке пароль, который никуда не
     // подходит (`ftp_account create` пароль существующему логину не меняет).
-    if ftp_exists(s, fp_path, &ftp_user).await? == Some(true) {
+    let known = ftp_exists(s, fp_path, &ftp_user).await?;
+    if known == Some(true) {
         return Ok(FtpCreation::AlreadyExists { ftp_user });
     }
     let password = generate_password(14);
@@ -362,7 +374,12 @@ pub async fn create_ftp_account(
     let (code, output) = s.run(&cmd, Duration::from_secs(120)).await?;
     if code != 0 {
         // Вывод читаем, но наружу не отдаём — в нём повторён argv с паролем.
-        if looks_like_already_exists(&output) {
+        //
+        // `known.is_none()` — то самое сужение эвристики: спрашиваем её только
+        // там, где проверки не было вовсе. Сказавшая «нет» проверка авторитетнее
+        // совпадения подстроки, и сбой после неё уходит в `opaque_exit` — это
+        // громкий и честный отказ вместо обещания несуществующего доступа.
+        if known.is_none() && looks_like_already_exists(&output) {
             return Ok(FtpCreation::AlreadyExists { ftp_user });
         }
         return Err(opaque_exit("create_ftp_account", code));
@@ -474,10 +491,21 @@ fn parse_db_exists_output(output: &str) -> Option<DbPresence> {
 /// способом, что и fallback создания (`mysql -e` без учётных данных, то есть
 /// сокет-авторизацией root'а), — если он не работает, не работает и создание.
 ///
-/// Тройка «есть/нет/не знаем» обязательна: «не знаем» нельзя трактовать как
-/// «нет». Имена детерминированы (`{slug}_db`, `{slug}_usr`), а
-/// `CREATE USER` существующему пользователю пароль не меняет — ошибка в сторону
-/// «нет» и есть тот самый дефект, ради которого написана эта функция.
+/// **Про третье состояние, честно.** У `ftp_exists` тройка настоящая: там
+/// `None` и `Some(false)` ведут к разным веткам (эвристику по тексту ошибки
+/// спрашивают только при `None`). Здесь, в РЕШЕНИИ «создавать ли», третье
+/// состояние **вырождено**: `None` и `Some { user: false }` одинаково означают
+/// «повода не создавать нет», и подмена одного другим ничего не меняет — это
+/// проверено мутацией и осталось зелёным сознательно, а не по недосмотру.
+///
+/// Так безопасно ровно по одной причине: у `CREATE USER` убран `IF NOT EXISTS`,
+/// поэтому занятое имя — не тихий no-op с чужим паролем, а ошибка 1396, которую
+/// разбирают ниже. Пропадёт эта причина — «не знаем» снова станет опасным, и
+/// тогда третье состояние придётся задействовать по-настоящему.
+///
+/// В ОТЧЁТЕ пользователю третье состояние не вырождено: `database_exists` у
+/// `ExistingDb` равен `None` ровно тогда, когда проверка молчала, и тогда
+/// модалка про базу не утверждает ничего.
 pub async fn db_exists(
     s: &mut impl Exec,
     database_name: &str,
@@ -491,10 +519,19 @@ pub async fn db_exists(
     Ok(parse_db_exists_output(&out))
 }
 
-/// База и пользователь, которые уже были на сервере.
+/// Пользователь БД, который уже был на сервере, и что известно про саму базу.
+///
+/// Решение «не создавать» принимается по ПОЛЬЗОВАТЕЛЮ: пароль принадлежит ему.
+/// Но сказать пользователю «база и пользователь уже существовали» можно только
+/// там, где база действительно есть: она могла быть дропнута руками, и тогда
+/// текст модалки был бы враньём, а база молча осталась бы несозданной.
+/// Поэтому `database_exists` — трёхзначный: `Some(true)` / `Some(false)` там,
+/// где проверка ответила, `None` — там, где не ответила и «уже существует»
+/// распознано по тексту ошибки.
 pub struct ExistingDb {
     pub db_name: String,
     pub db_user: String,
+    pub database_exists: Option<bool>,
 }
 
 /// Исход `create_database`. Enum по той же причине, что и `FtpCreation`:
@@ -548,11 +585,16 @@ pub async fn create_database(
     // пользователя — недоделанная пара, её нижняя ветка доводит до конца и
     // отдаёт настоящий рабочий пароль; пользователь без пароля, который мы могли
     // бы показать, — это ложь, и вот её мы и отсекаем.
-    if let Some(present) = db_exists(s, &database_name, &database_user).await? {
+    let presence = db_exists(s, &database_name, &database_user).await?;
+    if let Some(present) = presence {
         if present.user {
             return Ok(DbCreation::AlreadyExists(ExistingDb {
                 db_name: database_name,
                 db_user: database_user,
+                // Проверка ответила — значит про базу мы знаем точно, и знание
+                // это ниже нигде не выбрасывается: «пользователь есть, а базы
+                // нет» пользователю надо сказать, а не замолчать.
+                database_exists: Some(present.database),
             }));
         }
     }
@@ -587,10 +629,17 @@ pub async fn create_database(
         // Но прочитать `fb_out` мы имеем право: сюда попадает и случай, когда
         // проверка выше не отработала (`None`), а пользователь на самом деле
         // есть, — и тогда это не ошибка, а «уже было».
-        if looks_like_already_exists(&fb_out) {
+        //
+        // `presence.is_none()` — то же сужение эвристики, что и у FTP: если
+        // проверка ответила «пользователя нет», её слово весомее совпадения
+        // подстроки, и сбой уходит громким `opaque_exit`.
+        if presence.is_none() && looks_like_already_exists(&fb_out) {
             return Ok(DbCreation::AlreadyExists(ExistingDb {
                 db_name: database_name,
                 db_user: database_user,
+                // Проверка молчала — про базу мы не знаем ничего, и врать про
+                // неё не будем: модалка скажет только про пользователя.
+                database_exists: None,
             }));
         }
         return Err(opaque_exit("create_database", fb_code));
@@ -1203,6 +1252,9 @@ mod tests {
             DbCreation::AlreadyExists(e) => {
                 assert_eq!(e.db_name, "example_db");
                 assert_eq!(e.db_user, "example_usr");
+                // Проверка ответила — про базу известно точно, и это знание
+                // доезжает до модалки.
+                assert_eq!(e.database_exists, Some(true));
             }
             DbCreation::Created(_) => panic!("выдал пароль существующему пользователю"),
         }
@@ -1298,6 +1350,73 @@ mod tests {
         };
         assert!(!msg.contains("leakedPassword"), "{msg}");
         assert!(!msg.contains("IDENTIFIED BY"), "{msg}");
+    }
+
+    // Пользователя дропнуть забыли, а базу снесли руками. Решение «не создавать»
+    // принимается по пользователю, поэтому база так и останется несозданной —
+    // и модалка обязана сказать про неё правду, а не «база уже существовала».
+    #[tokio::test]
+    async fn a_live_user_over_a_dropped_database_is_reported_precisely() {
+        let mut s = FakeServer::new(&[("information_schema", 0, "0\t1")]);
+
+        match create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap()
+        {
+            DbCreation::AlreadyExists(e) => assert_eq!(e.database_exists, Some(false)),
+            DbCreation::Created(_) => panic!("выдал пароль существующему пользователю"),
+        }
+    }
+
+    // Проверка молчала, «уже есть» распознано по тексту ошибки — про саму базу
+    // не известно ничего, и выдумывать про неё нельзя ни в одну сторону.
+    #[tokio::test]
+    async fn an_unverified_duplicate_claims_nothing_about_the_database() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 1, "ERROR 1045: Access denied"),
+            ("database create", 1, "failed"),
+            ("mysql -e", 1, "ERROR 1396 (HY000): Operation CREATE USER failed"),
+        ]);
+
+        match create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap()
+        {
+            DbCreation::AlreadyExists(e) => assert_eq!(e.database_exists, None),
+            DbCreation::Created(_) => panic!("непроверенный дубликат выдан за созданную базу"),
+        }
+    }
+
+    // Проверка ОТВЕТИЛА «пользователя нет», а создание всё равно упало с текстом
+    // про дубликат. Эвристика по подстроке слабее ответившей проверки: это
+    // громкий отказ, а не обещание доступа, которого может не быть.
+    #[tokio::test]
+    async fn a_confident_no_outweighs_a_duplicate_looking_error() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            ("database create", 1, "failed"),
+            ("mysql -e", 1, "ERROR 1050: table 'x' already exists"),
+        ]);
+
+        let msg = match create_database(&mut s, FP, "example.com", None, None).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("совпадение подстроки перебило ответившую проверку"),
+        };
+        assert!(msg.contains("create_database exit 1"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_confident_no_outweighs_a_duplicate_looking_ftp_error() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 0, "[]"),
+            ("ftp_account create", 1, "quota entry already exists"),
+        ]);
+
+        let msg = match create_ftp_account(&mut s, FP, "example.com").await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("совпадение подстроки перебило ответившую проверку"),
+        };
+        assert!(msg.contains("create_ftp_account exit 1"), "{msg}");
     }
 
     // Пароль существующему FTP-аккаунту `ftp_account create` не меняет: показать
@@ -1471,6 +1590,11 @@ mod tests {
     fn a_not_found_message_is_not_an_already_exists_message() {
         assert!(!looks_like_already_exists("ERROR: site does not exist"));
         assert!(!looks_like_already_exists("no such ftp account"));
+        // `duplicate` в одиночку — слишком широко: так пишут и про совсем
+        // другие сбои, а цена ложного срабатывания — обещанный доступ, которого
+        // нет. Ловим текст ER_DUP_ENTRY, а не слово.
+        assert!(!looks_like_already_exists("could not duplicate config template"));
+        assert!(looks_like_already_exists("ERROR 1062: Duplicate entry 'x' for key"));
         assert!(looks_like_already_exists("ERROR 1396 (HY000) Operation CREATE USER failed"));
         assert!(looks_like_already_exists("Login already exists"));
     }

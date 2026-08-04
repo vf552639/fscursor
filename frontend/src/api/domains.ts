@@ -380,7 +380,21 @@ export function useSetNameservers() {
  */
 export type ProvisionDbResult =
   | { status: "created"; db_name: string; db_user: string; db_password: string }
-  | { status: "exists"; db_name: string; db_user: string };
+  | {
+      status: "exists";
+      db_name: string;
+      db_user: string;
+      /**
+       * Есть ли сама база. Отсутствует, когда проверить не удалось и «уже
+       * существует» распознано по тексту ошибки создания.
+       *
+       * Провижининг пропускает пару по ПОЛЬЗОВАТЕЛЮ (пароль его), а база могла
+       * быть дропнута руками — тогда она так и осталась несозданной, и сказать
+       * «база уже существовала» было бы неправдой. Три значения, три разные
+       * фразы; `undefined` — про базу не утверждаем ничего.
+       */
+      database_exists?: boolean;
+    };
 
 /** Что стало с FTP-аккаунтом домена (см. `FtpOut` в `commands/provision.rs`). */
 export type ProvisionFtpResult =

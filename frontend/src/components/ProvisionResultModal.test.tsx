@@ -92,7 +92,12 @@ describe("ProvisionResultModal", () => {
         domain="example.com"
         result={{
           ...RESULT,
-          db: { status: "exists", db_name: "example_db", db_user: "example_user" },
+          db: {
+            status: "exists",
+            db_name: "example_db",
+            db_user: "example_user",
+            database_exists: true,
+          },
           ftp: { status: "exists", ftp_user: "example_ftp" },
         }}
         onClose={() => {}}
@@ -114,6 +119,53 @@ describe("ProvisionResultModal", () => {
     expect(screen.getAllByText(/cannot be shown again/i).length).toBe(2);
     // Логин показан: по нему аккаунт находят в панели, чтобы сменить пароль там.
     expect(screen.getAllByText("example_ftp").length).toBeGreaterThan(0);
+  });
+
+  // Пользователь БД жив, базу снесли руками. Провижининг пропускает пару по
+  // пользователю, то есть база так и осталась несозданной — сказать «база уже
+  // существовала» значит отправить человека работать с базой, которой нет.
+  it("не выдаёт живого пользователя БД за существующую базу", () => {
+    render(
+      <ProvisionResultModal
+        domain="example.com"
+        result={{
+          ...RESULT,
+          db: {
+            status: "exists",
+            db_name: "example_db",
+            db_user: "example_user",
+            database_exists: false,
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(/User example_user already exists, but database example_db does not/i),
+    ).toBeTruthy();
+    // И сказано, что с этим делать: сам провижининг базу не досоздаст.
+    expect(screen.getByText(/drop the user and provision again/i)).toBeTruthy();
+  });
+
+  // Проверку выполнить не удалось, «уже существует» распознано по тексту ошибки:
+  // про саму базу не известно ничего. Утверждать в такой ситуации хоть что-то —
+  // угадывать за пользователя.
+  it("про непроверенную базу не утверждает ни того, ни другого", () => {
+    render(
+      <ProvisionResultModal
+        domain="example.com"
+        result={{
+          ...RESULT,
+          db: { status: "exists", db_name: "example_db", db_user: "example_user" },
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/Database user example_user already exists/i)).toBeTruthy();
+    expect(screen.queryByText(/already existed/i)).toBeNull();
+    expect(screen.queryByText(/database example_db does not/i)).toBeNull();
   });
 
   // Смешанный случай — самый вероятный на повторе с `withDb`: базу создали
