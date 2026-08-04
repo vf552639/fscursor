@@ -364,13 +364,20 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
     (!fStatus || d.status === fStatus) &&
     (!focusDomainId || d.id === focusDomainId)
   ), [search, fSrv, fReg, fCF, fStatus, focusDomainId, domains]);
+  /**
+   * Домены, у которых провижининг дошёл до SSL и сертификата не получил.
+   *
+   * Считается по `ssl_status === "error"` — единственному признаку, который
+   * такой прогон о себе действительно оставляет: провал выпуска (как и пропуск
+   * из-за DNS или отсутствия почты) намеренно НЕ роняет провижининг, поэтому
+   * домен остаётся `site_created`, а не `failed`, и в `last_provision_error`
+   * ничего не пишется — там живут только фатальные провалы, и их текст
+   * (`provision failed at {шаг}: {класс}`) слова «ssl» не содержит вовсе.
+   * Прежний предикат (`status === "failed"` И текст ошибки со словом «ssl»)
+   * не мог стать истинным ни при одном прогоне.
+   */
   const failedAtSslCount = useMemo(
-    () =>
-      domains.filter(
-        (d) =>
-          d.status === "failed" &&
-          (d.last_provision_error || "").toLowerCase().includes("ssl")
-      ).length,
+    () => domains.filter((d) => d.ssl_status === "error").length,
     [domains]
   );
   
@@ -603,7 +610,24 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
                 <td style={{padding:"11px 16px",fontSize:13}}>{srv?<span style={{display:"flex",alignItems:"center",gap:5}}><StatusDot status={displayStatus} size={7}/>{srv.name}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
-                <td style={{padding:"11px 16px"}}><StatusBadge status={d.status} title={d.last_provision_error || undefined} /></td>
+                <td style={{padding:"11px 16px"}}>
+                  <StatusBadge status={d.status} title={d.last_provision_error || undefined} />
+                  {/*
+                    Текст ошибки — строкой, а не только тултипом бейджа: тултип
+                    невидим, пока в него не попали мышью, а искать провалившийся
+                    домен глазами по списку в двести строк надо без наведения.
+                    Полный текст остаётся в `title` и в модалке домена.
+                  */}
+                  {d.last_provision_error ? (
+                    <div
+                      data-testid="provision-error"
+                      title={d.last_provision_error}
+                      style={{marginTop:4,fontSize:11.5,color:"#b91c1c",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}
+                    >
+                      {d.last_provision_error}
+                    </div>
+                  ) : null}
+                </td>
                 <td style={{padding:"11px 16px"}}>
                   <Badge variant={d.ssl_status === "active" ? "green" : d.ssl_status === "pending" ? "yellow" : d.ssl_status === "error" ? "red" : "gray"}>
                     {d.ssl_status === "active" ? "SSL active" : d.ssl_status === "pending" ? "SSL pending" : d.ssl_status === "error" ? "SSL error" : "— No SSL"}
