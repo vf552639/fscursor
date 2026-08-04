@@ -691,9 +691,12 @@ export default function DesktopWorkspace() {
           total={provisionQueue.total}
         />
       )}
-      {/* Строго после паролей: сначала то, что существует в единственном
-          экземпляре, потом итог — он никуда не денется. */}
-      {!provisionQueue.current && bulkReportQueue.current && (
+      {/* Строго после ОБЕИХ очередей секретов: сначала то, что существует в
+          единственном экземпляре, потом итог — он никуда не денется. `fpQueue`
+          тоже: установка панели и bulk-прогон идут параллельно (гейты
+          посерверные и подоменные), и итог, отрисованный в JSX позже, лёг бы
+          поверх кред FastPanel. */}
+      {!provisionQueue.current && !fpQueue.current && bulkReportQueue.current && (
         <BulkProvisionReportModal
           outcome={bulkReportQueue.current}
           onClose={bulkReportQueue.dismiss}

@@ -45,6 +45,29 @@ describe("FastPanelCredsModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  // `onClose` здесь — не «свернуть окно», а погасить единственную копию пароля
+  // панели, добытую тридцатиминутной установкой. Промах мимо Done в затемнение
+  // стоил бы ровно её: заново пароль берётся только сбросом на сервере.
+  it("не закрывается кликом в затемнение — это погасило бы пароль панели", () => {
+    const onClose = vi.fn();
+    const { container } = render(
+      <FastPanelCredsModal
+        creds={{
+          server_id: "7",
+          url: "https://10.0.0.7:8888",
+          user: "fastuser",
+          password: "s3cr3t-panel-pw",
+        }}
+        onClose={onClose}
+      />,
+    );
+
+    fireEvent.click(container.firstElementChild as HTMLElement);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText("s3cr3t-panel-pw")).toBeTruthy();
+  });
+
   it("без пароля объясняет, что делать, вместо пустого поля", () => {
     render(
       <FastPanelCredsModal

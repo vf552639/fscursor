@@ -288,6 +288,41 @@ describe("DesktopWorkspace — владелец результатов provision
     expect(screen.queryByText("Bulk provision stopped")).toBeNull();
   });
 
+  // Установка панели и массовый прогон идут параллельно: гейты посерверные и
+  // подоменные. Итог bulk рисуется в JSX позже кред FastPanel и накрыл бы их —
+  // пароль панели добыт тридцатиминутной установкой и существует в одном
+  // экземпляре, так что читать его пользователь должен первым.
+  it("не накрывает итогом креды FastPanel", async () => {
+    // Прогон БЕЗ единого удавшегося домена: очередь паролей provision пуста, и
+    // итог держит только очередь FastPanel — иначе эта проверка ничего не
+    // проверяет (`!provisionQueue.current` закрыл бы её сам).
+    mocks.invokeSynced.mockImplementation(async (cmd: string) =>
+      cmd === "install_fastpanel"
+        ? { server_id: "9", url: "https://h:8888", user: "fp", password: "FP-PW" }
+        : {
+            idempotency_key: "k-run",
+            status: "failed",
+            error: "failed on domain 1: ssh: connect: refused",
+            items: [{ domain_id: "1", outcome: "failed", error: "ssh: connect: refused" }],
+          },
+    );
+    vi.stubGlobal("confirm", () => true);
+
+    renderWorkspace([{ id: 1, name: "a.com" }]);
+    await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
+    const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
+
+    handler(["sdmp://install-fastpanel?serverId=9", "sdmp://bulk-provision?ids=1"]);
+
+    // Первым — пароль панели: он добыт тридцатиминутной установкой и существует
+    // в одном экземпляре, а итог никуда не денется.
+    expect(await screen.findByText("FP-PW")).toBeTruthy();
+    expect(screen.queryByText("Bulk provision stopped")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Bulk provision stopped")).toBeTruthy();
+  });
+
   it("на время bulk-прогона гасит ⚙ у каждого домена набора", async () => {
     let finish: (v: unknown) => void = () => {};
     mocks.invokeSynced.mockImplementation(() => new Promise((r) => (finish = r)));

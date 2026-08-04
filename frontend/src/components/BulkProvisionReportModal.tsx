@@ -1,6 +1,6 @@
 import React from "react";
 import { Badge, Btn, Modal } from "./ui/Primitives";
-import { summarizeBulkProvision, type BulkProvisionOutcome } from "../api/domains";
+import { summarizeBulkProvision, type BulkProvisionReport } from "../api/domains";
 
 /**
  * Итог массового прогона — отдельным экраном, а не тостом.
@@ -13,15 +13,16 @@ import { summarizeBulkProvision, type BulkProvisionOutcome } from "../api/domain
  * часами и заканчивается частичным результатом — её итог не имеет права быть
  * эфемерным.
  *
- * Паролей здесь нет и быть не может: компонент читает `status`, `error`,
- * `failed`, `skipped` и ТОЛЬКО имена (`#id`) из `results`. Сами результаты
- * показывает `ProvisionResultModal`, по одному и один раз.
+ * Паролей здесь нет и быть не может — и это держит компилятор, а не
+ * комментарий: проп сужен до `BulkProvisionReport`, где у `results` есть только
+ * `domain`. Сами результаты показывает `ProvisionResultModal`, по одному и один
+ * раз.
  */
 export function BulkProvisionReportModal({
   outcome,
   onClose,
 }: {
-  outcome: BulkProvisionOutcome;
+  outcome: BulkProvisionReport;
   onClose: () => void;
 }) {
   const title =
