@@ -101,16 +101,26 @@ describe("putSecretBlob", () => {
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
   });
 
-  it("генерит валидный uuid v4 и без crypto.randomUUID", async () => {
-    const orig = crypto.randomUUID;
-    // @ts-expect-error — моделируем non-secure context, где метода нет.
-    delete (crypto as Crypto).randomUUID;
+  it("генерит валидный уникальный uuid v4 и без crypto.randomUUID", async () => {
+    // Моделируем non-secure context ИМЕННО через own-свойство-заглушку:
+    // `delete crypto.randomUUID` был бы no-op, метод живёт на Crypto.prototype,
+    // и фоллбэк-ветка просто не исполнилась бы (ревью T1).
+    Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true });
+    expect(crypto.randomUUID).toBeUndefined();
     try {
-      const id = await putSecretBlob("s", BLOB_KIND.serverSshPassword);
-      expect(id).toMatch(UUID_V4);
+      const a = await putSecretBlob("s", BLOB_KIND.serverSshPassword);
+      const b = await putSecretBlob("s", BLOB_KIND.serverSshPassword);
+      // Формат проверяем полным regex'ом: биты версии и варианта — часть id,
+      // который уедет в БД ссылкой на секрет, константа или v-less строка тут
+      // должны падать.
+      expect(a).toMatch(UUID_V4);
+      expect(b).toMatch(UUID_V4);
+      expect(a).not.toBe(b);
     } finally {
-      Object.defineProperty(crypto, "randomUUID", { value: orig, configurable: true });
+      // Снимаем own-заглушку — прототипный метод возвращается сам.
+      delete (crypto as Partial<Crypto>).randomUUID;
     }
+    expect(typeof crypto.randomUUID).toBe("function");
   });
 });
 
