@@ -110,7 +110,7 @@ pub fn bulk_run_complete(conn: &Connection, key: &str, detail: &str) -> rusqlite
 /// Пометить прогон неудачным, чтобы повтор с тем же ключом был возможен.
 ///
 /// Не `bulk_run_complete`: тот всегда пишет `done`, а `done` — как и `running` —
-/// заставляет повторный запуск вернуть ключ, ничего не сделав. Прогон, брошенный
+/// заставляет повторный запуск ответить `already_ran`, ничего не сделав. Прогон, брошенный
 /// на середине, обязан оставить статус, по которому его можно перезапустить.
 pub fn bulk_run_fail(conn: &Connection, key: &str, detail: &str) -> rusqlite::Result<()> {
     conn.execute(
@@ -160,8 +160,8 @@ mod tests {
     }
 
     // Брошенный на середине прогон обязан стать перезапускаемым: `running` и
-    // `done` — те два статуса, при которых provision_bulk возвращает ключ, не
-    // сделав ничего.
+    // `done` — те два статуса, при которых provision_bulk отвечает
+    // `already_ran`, не запустив ни одного домена.
     #[test]
     fn failed_bulk_run_leaves_a_retryable_status() {
         let dir = tempdir().unwrap();

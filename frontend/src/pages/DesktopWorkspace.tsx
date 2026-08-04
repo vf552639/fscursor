@@ -57,7 +57,10 @@ export const PROVISION_STEP_LABEL: Record<string, string> = {
   // провижн не увидит, что делать уже нечего.
   writeback_failed: "Provisioned, but the result could not be saved on the server",
   bulk_item: "Bulk provision: next domain…",
-  bulk_failed: "Bulk provision: a domain failed, continuing…",
+  // Не «continuing»: массовый прогон останавливается на первой ошибке, и это
+  // событие эмитится ровно в момент обрыва. Что успело отработать и что
+  // осталось несделанным, скажет итоговый тост (`summarizeBulkProvision`).
+  bulk_failed: "Bulk provision: a domain failed — the run stopped there",
 };
 
 /**
