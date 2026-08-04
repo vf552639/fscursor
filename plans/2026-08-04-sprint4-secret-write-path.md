@@ -44,6 +44,15 @@
 - [ ] **1b. Развернуть паттерн** — `fastpanel_password`, регистратор (`api_key`/`api_secret`),
       Cloudflare (`api_token`); правка секрета = перезапись того же `blob_id`, удаление
       сущности → `vault_delete_blob`.
+  - [x] 1b-1 (фундамент) — коммиты `dc06d06`, `5cc8a5a`. `useMultiSecretSave`/`saveAll` на
+        несколько секретов под один POST; `persist` сужен до `Promise<void>`;
+        `RegistrarAccountResponse` отдаёт `api_key_blob_id`/`api_secret_blob_id` (без них
+        форма правки не знала бы, какой блоб перезаписывать). **Spec-ревью пройдено с
+        находкой, находка закрыта; ре-ревью по `5cc8a5a` и ревью качества не проводились —
+        начинать с них.**
+  - [ ] 1b-2 (проводка форм) — вкладка connect в `Servers.tsx` (`fastpanel_password`),
+        `Settings.tsx` (регистратор), `Cloudflare.tsx` (`api_token`); удаление сущности →
+        `vault_delete_blob`; заодно вычистить ставшие мёртвыми плейнтекст-поля из TS-типов.
 - [ ] **2. Громкий провал** — `extra="forbid"` на `ServerCreate/Update`, `CloudflareAccount*`,
       `RegistrarAccount*`; плейнтекст-поля вон из TS-типов и тел запросов.
   - [ ] Обязательно вместе с этим: `tests/test_secret_write_path.py` — оба теста шлют
@@ -90,6 +99,12 @@
   `ServerDetail.tsx` 7, `Notifications.tsx` 2, `UnlockModal.tsx` 1 — в основном `TS7006`).
   Следствие: типовые гарды не роняют сборку, потому что ронять нечего. Нужен зелёный
   `tsc` и отдельный скрипт `typecheck`.
+- `registrar_service.py:57-67` применяет `api_*_blob_id` только при `not None`, а
+  `exclude_unset` делает явный `null` в PUT неотличимым от отсутствия поля → снять секрет
+  регистратора через PUT нельзя. Всплывёт в 1b-2, если форме понадобится «убрать секрет».
+- Во `frontend/` нет eslint вообще (ни `eslint.config.*`, ни `.eslintrc*`, ни секции в
+  `package.json`) — значит `no-floating-promises` и подобные страховки не работают. Отсюда
+  рантайм-гвард на вложенный `save` вместо расчёта на линтер.
 - Мёртвые deep link'и, предсуществующие: `add-server`, `ssh-test`, `refresh-metrics`,
   `sync-domains`, `delete-server` в `ServerDetail.tsx`/`Servers.tsx` и вся
   `BulkActionToolbar.tsx` — хосты, которых `parseDeepLinkAction` не знает: ссылка ведёт в
