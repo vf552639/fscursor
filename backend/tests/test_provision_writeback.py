@@ -7,10 +7,19 @@
 никто не заполнял.
 
 Инвариант ZK: write-back — это метаданные, но не секреты. Пароли на сервер не
-уезжают, поэтому здесь проверяется в том числе, что плейнтекст-пароль в
-`PUT` игнорируется и в ответе/БД не появляется.
+уезжают, поэтому здесь проверяется в том числе, что плейнтекст-пароль в `PUT`
+никуда не записывается.
+
+Проверка — **по БД**, а не по тексту ответа. Ассерт `secret not in r.text`,
+живший здесь до Спринта 4, был зелёным ровно потому, что в `DomainResponse`
+нет поля под пароль: он остался бы зелёным и в мире, где рядом заведена
+плейнтекст-колонка и сервис только что записал в неё пароль. Утверждение,
+верное при любой реализации, — это не проверка. Вместо него — перебор всех
+колонок маппера `Domain` (переживёт добавление новой колонки) плюс перебор
+строк аудита, которые породил тот же `PUT`.
 """
 
+import asyncio
 import base64
 import uuid
 from datetime import datetime, timezone
@@ -18,8 +27,10 @@ from datetime import datetime, timezone
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import update
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import select, update
 
+from app.audit.models import AuditLog
 from app.auth.models import User
 from app.core.database import AsyncSessionLocal
 from app.main import app
@@ -29,6 +40,42 @@ from app.models.server import Server
 
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
+
+
+# Пользователи, заведённые текущим тестом (образец — `test_secret_write_path`).
+# Каждый тест файла регистрирует своих, а удалять их было некому: в общей
+# dev-БД копились `wb-*`.
+_REGISTERED_EMAILS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _purge_users_registered_by_this_test():
+    """Убрать пользователей теста — их хозяйство уедет следом по FK CASCADE.
+
+    Уборка в teardown, а не в `finally` каждого теста: забыть `finally` в новом
+    тесте куда легче, чем не заметить пропавшую фикстуру. `asyncio.run` в
+    синхронной фикстуре безопасен — пул `NullPool`, соединение заводится под
+    текущий цикл и им же закрывается (см. `core/database`).
+    """
+    _REGISTERED_EMAILS.clear()
+    yield
+    emails = list(_REGISTERED_EMAILS)
+    _REGISTERED_EMAILS.clear()
+    if emails:
+        asyncio.run(_purge_users(emails))
+
+
+async def _purge_users(emails: list[str]) -> None:
+    async with AsyncSessionLocal() as s:
+        await s.execute(sa_delete(User).where(User.email.in_(emails)))
+        await s.commit()
+
+
+def _leaks(value: object, secret: str) -> bool:
+    """Видно ли секрет в значении колонки — хоть текстом, хоть байтами."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return secret.encode() in bytes(value)
+    return secret in str(value)
 
 
 async def _login(client: AsyncClient, email: str, key: bytes = b"\x01" * 32) -> None:
@@ -42,6 +89,7 @@ async def _login(client: AsyncClient, email: str, key: bytes = b"\x01" * 32) -> 
 
 async def _register_and_login(client: AsyncClient, email: str, key: bytes = b"\x01" * 32) -> None:
     """Зарегистрировать нового пользователя, подтвердить почту и войти."""
+    _REGISTERED_EMAILS.append(email)
     r = await client.post(
         "/api/auth/register",
         json={
@@ -232,11 +280,29 @@ async def test_failed_provision_is_visible_and_keeps_the_earlier_result():
 
 
 @pytest.mark.asyncio
-async def test_domain_update_ignores_plaintext_password_fields():
-    """Инвариант ZK: плейнтекст-пароль в `PUT` не сохраняется и не возвращается.
+async def test_plaintext_password_in_put_lands_in_no_column_of_the_domain():
+    """Инвариант ZK: плейнтекст-пароль в `PUT` не оседает ни в одной колонке.
 
     Пароли живут только в зашифрованных блобах (`*_password_blob_id`), поэтому
-    расширение схемы полями результата не должно открыть канал для секретов.
+    расширение `DomainUpdate` полями результата provision не должно открыть
+    канал для секретов.
+
+    Проверка по БД, а не по `r.text` (см. шапку файла): в `DomainResponse` нет
+    поля под пароль, поэтому ассерт по ответу зеленел бы и с записанной
+    плейнтекст-колонкой. Перебор идёт по мапперу, а не по паре запомнившихся
+    имён: колонку с секретом могут завести завтра, и тест обязан это увидеть.
+
+    Чтобы перебор мог провалиться, плейнтекст **кладётся в тело запроса** —
+    сегодня `DomainUpdate` живёт с дефолтным `extra="ignore"`, поле доезжает до
+    pydantic и было бы записано, объяви его схема. Если на `DomainUpdate`
+    когда-нибудь повесят `extra="forbid"` (Фаза 2 сделала это для
+    `Server*`/`Cloudflare*`/`Registrar*`, но не для доменов), `PUT` начнёт
+    отдавать 422 — ассерт на 200 упадёт громко, и это правильно: молча
+    нефальсифицируемым перебор остаться не должен.
+
+    Аудит проверяется тем же перебором: `PUT` пишет строку `audit_log`, и
+    `metadata` там — свободный JSONB, куда тело запроса попадает одной строкой
+    кода. «Аудит без секретов» — пятый принцип продукта.
     """
     dom = f"{uuid.uuid4().hex[:8]}.example.com"
     secret = f"plaintext-{uuid.uuid4().hex}"
@@ -256,12 +322,42 @@ async def test_domain_update_ignores_plaintext_password_fields():
                 },
             )
             assert r.status_code == 200, r.text
-            assert secret not in r.text
 
-            r = await c.get(f"/api/domains/{domain_id}")
-            assert r.status_code == 200, r.text
-            assert secret not in r.text
-            assert r.json()["db_user"] == "dbu"
+            async with AsyncSessionLocal() as s:
+                domain = (
+                    await s.execute(select(Domain).where(Domain.id == domain_id))
+                ).scalar_one()
+
+                # Позитивный контроль: этот же `PUT` действительно что-то
+                # записал. Без него перебор ниже был бы зелен и на роуте,
+                # который молча не делает ничего.
+                assert domain.db_user == "dbu", "PUT не записал даже объявленное поле"
+
+                leaked = [
+                    attr.key
+                    for attr in sa_inspect(Domain).mapper.column_attrs
+                    if _leaks(getattr(domain, attr.key), secret)
+                ]
+                assert leaked == [], f"плейнтекст виден в колонках domains: {leaked}"
+
+                audit_rows = (
+                    await s.execute(
+                        select(AuditLog).where(
+                            AuditLog.target_type == "domain",
+                            AuditLog.target_id == str(domain_id),
+                        )
+                    )
+                ).scalars().all()
+                # Тоже позитивный контроль: строки аудита есть, значит перебору
+                # по ним есть что перебирать.
+                assert audit_rows, "PUT не оставил следа в аудите — перебор ниже холостой"
+                audit_leaked = [
+                    row.id
+                    for row in audit_rows
+                    if any(_leaks(getattr(row, attr.key), secret)
+                           for attr in sa_inspect(AuditLog).mapper.column_attrs)
+                ]
+                assert audit_leaked == [], f"плейнтекст виден в audit_log: {audit_leaked}"
         finally:
             await _purge(Domain, domain_id)
 
@@ -301,6 +397,7 @@ async def test_user_b_cannot_write_back_to_user_a_domain():
     """Чужой домен не обновляется через `PUT` — 404, значения не меняются."""
     dom = f"{uuid.uuid4().hex[:8]}.example.com"
     a_email = f"wb-a-{uuid.uuid4().hex[:8]}@example.com"
+    hijack = {"site_user": "hijack", "ssl_status": "active"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         await _register_and_login(c, a_email)
         r = await c.post("/api/domains", json={"domain_name": dom})
@@ -311,10 +408,7 @@ async def test_user_b_cannot_write_back_to_user_a_domain():
             await _register_and_login(
                 c, f"wb-b-{uuid.uuid4().hex[:8]}@example.com", key=b"\x99" * 32
             )
-            r = await c.put(
-                f"/api/domains/{domain_id}",
-                json={"site_user": "hijack", "ssl_status": "active"},
-            )
+            r = await c.put(f"/api/domains/{domain_id}", json=hijack)
             assert r.status_code == 404, r.text
 
             # владелец видит домен нетронутым
@@ -331,6 +425,7 @@ async def test_user_b_cannot_write_back_to_user_a_domain():
 async def test_user_b_cannot_write_back_to_user_a_server():
     """Чужой сервер не обновляется через `PUT` — 404, значения не меняются."""
     a_email = f"wb-sa-{uuid.uuid4().hex[:8]}@example.com"
+    hijack = {"fastpanel_status": "installed", "fastpanel_user": "hijack"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         await _register_and_login(c, a_email)
         r = await c.post(
@@ -344,10 +439,7 @@ async def test_user_b_cannot_write_back_to_user_a_server():
             await _register_and_login(
                 c, f"wb-sb-{uuid.uuid4().hex[:8]}@example.com", key=b"\x99" * 32
             )
-            r = await c.put(
-                f"/api/servers/{server_id}",
-                json={"fastpanel_status": "installed", "fastpanel_user": "hijack"},
-            )
+            r = await c.put(f"/api/servers/{server_id}", json=hijack)
             assert r.status_code == 404, r.text
 
             await c.post("/api/auth/logout")
