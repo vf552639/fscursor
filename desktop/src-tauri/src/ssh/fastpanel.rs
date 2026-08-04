@@ -174,40 +174,39 @@ pub fn generate_password(len: usize) -> String {
 }
 
 pub async fn site_exists(
-    s: &mut SshSession,
+    s: &mut impl Exec,
     site_user: &str,
     domain: &str,
 ) -> Result<bool, SshError> {
     let path = format!("/var/www/{site_user}/data/www/{domain}");
     let (code, _) = s
-        .exec(&format!("test -d {}", q(&path)), Duration::from_secs(30), false)
+        .run(&format!("test -d {}", q(&path)), Duration::from_secs(30))
         .await?;
     Ok(code == 0)
 }
 
-pub async fn cert_exists(s: &mut SshSession, domain: &str) -> Result<bool, SshError> {
+pub async fn cert_exists(s: &mut impl Exec, domain: &str) -> Result<bool, SshError> {
     let path = format!("/etc/letsencrypt/live/{domain}/fullchain.pem");
     let (code, _) = s
-        .exec(&format!("test -f {}", q(&path)), Duration::from_secs(30), false)
+        .run(&format!("test -f {}", q(&path)), Duration::from_secs(30))
         .await?;
     Ok(code == 0)
 }
 
+/// Создать сайт. `impl Exec`, а не `SshSession`, ровно затем же, зачем у
+/// `create_ftp_account`: единственная защита от секрета в argv этой команды —
+/// тест, который видит УШЕДШУЮ на сервер строку (`create_site_argv_has_no_secret`).
+/// Её вывод, в отличие от `database create` и `ftp_account create`, уходит в
+/// текст ошибки целиком, и цена промаха здесь выше всего.
 pub async fn create_site(
-    s: &mut SshSession,
+    s: &mut impl Exec,
     fp_path: &str,
     domain: &str,
     php_version: &str,
 ) -> Result<CreateSiteResult, SshError> {
     let site_user = make_site_user(domain);
-    let cmd = format!(
-        "{} sites create --server-name={} --owner={} --create-user --php-version={}",
-        q(fp_path),
-        q(domain),
-        q(&site_user),
-        q(php_version),
-    );
-    let (code, output) = s.exec(&cmd, Duration::from_secs(120), false).await?;
+    let cmd = build_create_site_cmd(fp_path, domain, &site_user, php_version);
+    let (code, output) = s.run(&cmd, Duration::from_secs(120)).await?;
     if code != 0 {
         return Err(SshError::Session(format!(
             "create_site exit {code}: {output}"
@@ -495,8 +494,13 @@ pub async fn create_ftp_account(
     }))
 }
 
+/// Выпустить сертификат Let's Encrypt.
+///
+/// `impl Exec` — по той же причине, что и у `create_site`: вывод команды уходит
+/// в текст ошибки целиком, и то, что в её argv нет пароля, обязано быть
+/// зафиксировано тестом (`issue_ssl_argv_has_no_secret`), а не наблюдением.
 pub async fn issue_ssl_certificate(
-    s: &mut SshSession,
+    s: &mut impl Exec,
     fp_path: &str,
     domain: &str,
     email: &str,
@@ -507,7 +511,7 @@ pub async fn issue_ssl_certificate(
         q(domain),
         q(email),
     );
-    let (code, output) = s.exec(&cmd, SSL_ISSUE_EXEC_TIMEOUT, false).await?;
+    let (code, output) = s.run(&cmd, SSL_ISSUE_EXEC_TIMEOUT).await?;
     if code != 0 {
         return Err(SshError::Session(format!("issue_ssl exit {code}: {output}")));
     }
@@ -1263,8 +1267,9 @@ pub async fn list_sites(s: &mut SshSession, fp_path: Option<&str>) -> Result<Vec
     Ok(vec![])
 }
 
-/// Build the shell command for `create_site` (for tests).
-pub fn build_create_site_cmd(fp_path: &str, domain: &str, site_user: &str, php_version: &str) -> String {
+/// Команда создания сайта. Зовётся из `create_site` — не «для тестов»: копия,
+/// которую проверял тест, а исполнял никто, ровно ничего не гарантировала.
+fn build_create_site_cmd(fp_path: &str, domain: &str, site_user: &str, php_version: &str) -> String {
     format!(
         "{} sites create --server-name={} --owner={} --create-user --php-version={}",
         q(fp_path),
@@ -1277,20 +1282,6 @@ pub fn build_create_site_cmd(fp_path: &str, domain: &str, site_user: &str, php_v
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn create_site_cmd_quoting() {
-        let cmd = build_create_site_cmd(
-            "/usr/local/fastpanel2/fastpanel",
-            "example.com",
-            "ex_usr",
-            "8.1",
-        );
-        assert!(cmd.contains("sites create"));
-        assert!(cmd.contains("example.com"));
-        assert!(cmd.contains("ex_usr"));
-        assert!(cmd.contains("8.1"));
-    }
 
     #[test]
     fn make_site_user_slug() {
@@ -1355,6 +1346,57 @@ mod tests {
     }
 
     const FP: &str = "/usr/local/fastpanel2/fastpanel";
+
+    // ---- argv команд, чей вывод уходит в текст ошибки ----------------------
+    //
+    // `create_site` и `issue_ssl_certificate` — единственные две команды
+    // модуля, которые кладут сырой вывод в сообщение об ошибке (у остальных
+    // стоит `opaque_exit`). Читать этот вывод безопасно ровно до тех пор, пока
+    // в argv команды нет секрета: FastPanel CLI при ошибке повторяет argv.
+    // Поэтому строка пинается ЦЕЛИКОМ и по факту ухода на сервер — дописать к
+    // ней `--password=` (или любой другой аргумент) без падения теста нельзя.
+    // Раньше на этом месте стоял `contains` по КОПИИ команды, которую никто не
+    // исполнял: он был бы зелёным и в мире, где `create_site` шлёт что угодно.
+
+    #[tokio::test]
+    async fn create_site_argv_has_no_secret() {
+        let mut s = FakeServer::new(&[("sites create", 1, "boom")]);
+
+        // `unwrap_err` тут нечем: у `CreateSiteResult` намеренно нет `Debug`.
+        let err = match create_site(&mut s, FP, "example.com", "8.1").await {
+            Err(e) => e,
+            Ok(_) => panic!("упавшая команда прочиталась как успех"),
+        };
+
+        assert_eq!(
+            s.seen,
+            vec![
+                "/usr/local/fastpanel2/fastpanel sites create --server-name=example.com \
+                 --owner=example_usr --create-user --php-version=8.1"
+            ]
+        );
+        // И вывод действительно доезжает до текста ошибки — то есть проверка
+        // argv выше не декоративная.
+        assert!(err.to_string().contains("boom"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn issue_ssl_argv_has_no_secret() {
+        let mut s = FakeServer::new(&[("certificates create-le", 1, "acme said no")]);
+
+        let err = issue_ssl_certificate(&mut s, FP, "example.com", "user@example.com")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            s.seen,
+            vec![
+                "/usr/local/fastpanel2/fastpanel certificates create-le \
+                 --server-name=example.com --email='user@example.com'"
+            ]
+        );
+        assert!(err.to_string().contains("acme said no"), "{err}");
+    }
 
     // Тот самый дефект долга №5: имя пользователя детерминированно, `CREATE USER`
     // существующему пароль не меняет, и функция возвращала свежий пароль, который
