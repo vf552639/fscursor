@@ -48,7 +48,9 @@ libsodium-биндинг было бы вдвойне плохо: ассерт �
 приёмку не выдаём.
 """
 
+import asyncio
 import base64
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -62,7 +64,7 @@ from sqlalchemy import select, update
 from app.auth.models import User
 from app.blobs.models import BlobStorage
 from app.core.database import AsyncSessionLocal
-from app.main import app
+from app.main import _input_is_unsafe_to_echo, app
 from app.models.registrar_account import RegistrarAccount
 from app.models.server import Server
 
@@ -88,7 +90,43 @@ def opaque_blob_for(plaintext_len: int) -> bytes:
     return os.urandom(FRAMING_LEN + plaintext_len)
 
 
+# Пользователи, заведённые текущим тестом. Уборка сущностей тут принцип (см.
+# шапку), но пользователи из него выпадали: каждый тест регистрирует своего, а
+# удалять его было некому — в общей dev-БД накопились сотни `swp-*`/`forbid-*`.
+# Спринт поднял цену прогона файла с 5 строк до 13, так что это уже не мелочь.
+_REGISTERED_EMAILS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _purge_users_registered_by_this_test():
+    """Убрать пользователей теста — всё их хозяйство уедет по FK CASCADE.
+
+    Уборка в teardown, а не в `finally` каждого теста: тестов в файле уже
+    третий десяток, и забыть `finally` в новом куда легче, чем не заметить
+    пропавшую фикстуру. Что она работает — утверждает
+    `test_purging_a_test_user_takes_everything_it_owned_with_it`.
+
+    `asyncio.run` в синхронной фикстуре безопасен: пул — `NullPool`, соединение
+    заводится под текущий цикл и им же закрывается (см. `core/database`).
+    Все FK на `users` объявлены `ondelete="CASCADE"`, поэтому одного DELETE
+    хватает: сессии, устройства, аудит, блобы и сущности уедут следом.
+    """
+    _REGISTERED_EMAILS.clear()
+    yield
+    emails = list(_REGISTERED_EMAILS)
+    _REGISTERED_EMAILS.clear()
+    if emails:
+        asyncio.run(_purge_users(emails))
+
+
+async def _purge_users(emails: list[str]) -> None:
+    async with AsyncSessionLocal() as s:
+        await s.execute(sa_delete(User).where(User.email.in_(emails)))
+        await s.commit()
+
+
 async def _register_and_login(client: AsyncClient, email: str) -> None:
+    _REGISTERED_EMAILS.append(email)
     r = await client.post(
         "/api/auth/register",
         json={
@@ -501,37 +539,59 @@ async def test_plaintext_secret_field_is_rejected_loudly(
         # Снятый `forbid` пропустит POST — прибираем созданное, чтобы падение
         # не оставляло мусор в общей dev-БД, и только потом утверждаем.
         if r.status_code < 300 and method == "POST":
-            await c.delete(f"{path}/{r.json()['id']}")
+            cleanup = await c.delete(f"{path}/{r.json()['id']}")
+            # Уборка обязана сработать: молча промахнувшийся DELETE (поменяли
+            # форму пути) заметен был бы не красным тестом, а мусором в БД.
+            assert cleanup.status_code in (204, 404), cleanup.text
 
         assert r.status_code == 422, r.text
         assert _extra_forbidden_locs(r) == [["body", plaintext_field]], r.text
 
         # Отказ громкий по ИМЕНИ поля, но не по его содержимому. Дефолтный
         # обработчик FastAPI кладёт в 422 ключ `input` — то есть сам пароль
-        # (у `extra_forbidden`) или всё тело с ним внутри (у `missing`), —
-        # который фронт подставляет в текст ошибки (`api/client.ts`), а тот
-        # уходит в тост и в кэш мутаций. Ассерт по тексту здесь уместен, в
-        # отличие от осуждаемого в шапке файла: предметом проверки и является
-        # само тело ответа, и без `validation_error_without_extra_input`
-        # (`app/main.py`) секрет в нём лежит буквально.
-        assert secret not in r.text, "422 вернул сам секрет — он уедет в тост и в логи"
+        # (у `extra_forbidden`) или всё тело с ним внутри (у `missing`).
+        # Оттуда он уезжает в `ApiError.details` (`api/client.ts` кладёт туда
+        # тело ответа целиком), в состояние ошибки React Query и в логи; в
+        # ТЕКСТ ошибки — нет, `String(data.detail)` от массива даёт
+        # `"[object Object]"`. Ассерт по тексту здесь уместен, в отличие от
+        # осуждаемого в шапке файла: предметом проверки и является само тело
+        # ответа, и без `validation_error_without_secret_input` (`app/main.py`)
+        # секрет в нём лежит буквально.
+        assert secret not in r.text, "422 вернул сам секрет — он уедет в details и в логи"
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # Тело-список: `input` — контейнер.
+        pytest.param("list", id="тело-список"),
+        # Тело-строка: двойная сериализация (`JSON.stringify` поверх тела,
+        # которое axios сериализует сам). `input` тут СКАЛЯР, поэтому признак
+        # «контейнер» его не ловит — ловит только «ошибка про корень тела».
+        pytest.param("str", id="тело-строка"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_422_does_not_echo_a_body_it_could_not_even_parse():
+async def test_422_does_not_echo_a_body_it_could_not_even_parse(shape: str):
     """Тело, до полей которого валидация не дошла, не возвращается целиком.
 
-    Отдельно от параметризованного теста, потому что механизм другой: список
-    вместо объекта — это `model_attributes_type` на `loc == ["body"]`, и
-    ошибки `extra_forbidden` здесь не возникает ВООБЩЕ (полей никто не
+    Отдельно от параметризованного теста выше, потому что механизм другой: не
+    объект вместо объекта — это `model_attributes_type` на `loc == ["body"]`,
+    и ошибки `extra_forbidden` здесь не возникает ВООБЩЕ (полей никто не
     разбирал). Признак «снимаем `input` у `extra_forbidden`» такое тело
     пропускает, и вместе с ним — весь плейнтекст, который в нём был.
+
+    Оба вида тела нужны порознь: список ловится ещё и признаком «`input` —
+    контейнер», а строка — только признаком «ошибка про корень тела», и без
+    неё он был бы ничем не подпёрт.
     """
     secret = f"S3cr3t-{uuid.uuid4().hex}"
+    inner = {"name": "srv", "ip_address": "203.0.113.25", "ssh_password": secret}
+    body = [inner] if shape == "list" else json.dumps(inner)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         await _register_and_login(c, f"forbid-body-{uuid.uuid4().hex[:8]}@example.com")
-        r = await c.post("/api/servers", json=[{"name": "srv", "ssh_password": secret}])
+        r = await c.post("/api/servers", json=body)
 
         assert r.status_code == 422, r.text
         # Именно эта ошибка, а не случайный 422 по другой причине.
@@ -539,15 +599,93 @@ async def test_422_does_not_echo_a_body_it_could_not_even_parse():
         assert secret not in r.text, "422 вернул тело запроса целиком — вместе с секретом"
 
 
+# Поля, которые схема ОБЪЯВЛЯЕТ, но значение которых всё равно секрет. Довод
+# «объявленным полям доверяем» тут не работает: признаки редактирования
+# существуют именно потому, что клиенту не доверяют.
+#
+# `/api/auth/register` — без сессии вовсе, и это единственные во всём
+# приложении поля с ограничением длины (`auth/schemas.py`), то есть
+# единственные, способные дать `string_too_*` с эхом; материал в них —
+# ключ входа и recovery-фраза. `ssh_password_blob_id` — та самая опечатка
+# `api_token_blob_id: token` вместо `blobId`, ради которой всё и затевалось:
+# UUID не разобрался, а в `input` лежит пароль.
+DECLARED_SECRET_FIELD_CASES = [
+    pytest.param(
+        "/api/auth/register",
+        lambda secret: {
+            "email": f"leak-{uuid.uuid4().hex[:8]}@example.com",
+            "salt_b64": b64(b"\x00" * 16),
+            "auth_key_b64": secret,
+            "recovery_blob_b64": b64(b"\x02" * 96),
+            "recovery_auth_key_b64": b64(b"\x03" * 32),
+        },
+        ["body", "auth_key_b64"],
+        "string_too_short",
+        id="auth_key_b64",
+    ),
+    pytest.param(
+        "/api/auth/register",
+        lambda secret: {
+            "email": f"leak-{uuid.uuid4().hex[:8]}@example.com",
+            "salt_b64": b64(b"\x00" * 16),
+            "auth_key_b64": b64(b"\x01" * 32),
+            "recovery_blob_b64": secret,
+            "recovery_auth_key_b64": b64(b"\x03" * 32),
+        },
+        ["body", "recovery_blob_b64"],
+        "string_too_short",
+        id="recovery_blob_b64",
+    ),
+    pytest.param(
+        "/api/servers",
+        lambda secret: {
+            "name": f"srv-{uuid.uuid4().hex[:6]}",
+            "ip_address": "203.0.113.26",
+            "ssh_password_blob_id": secret,
+        },
+        ["body", "ssh_password_blob_id"],
+        "uuid_parsing",
+        id="ssh_password_blob_id",
+    ),
+]
+
+
+@pytest.mark.parametrize("path,make_body,loc,error_type", DECLARED_SECRET_FIELD_CASES)
+@pytest.mark.asyncio
+async def test_422_does_not_echo_the_value_of_a_secret_named_field(
+    path: str, make_body, loc: list, error_type: str
+):
+    """Значение секретоподобного поля не возвращается, даже если поле своё."""
+    # Нарочно короткий: `auth_key_b64` и `recovery_blob_b64` объявлены с
+    # `min_length`, и `string_too_short` — единственная их ошибка, которая
+    # вообще доносит значение до ответа. Длинный секрет прошёл бы валидацию, и
+    # тест проверял бы уже не эхо, а разбор base64 в самом роуте.
+    secret = f"S3cr3t-{uuid.uuid4().hex[:8]}"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        if path != "/api/auth/register":
+            await _register_and_login(c, f"leak-{uuid.uuid4().hex[:8]}@example.com")
+        r = await c.post(path, json=make_body(secret))
+
+        assert r.status_code == 422, r.text
+        err = next(e for e in r.json()["detail"] if list(e["loc"]) == loc)
+        # Ошибка та самая: иначе тест зеленел бы на 422 по другой причине,
+        # где секрет и не мог бы появиться.
+        assert err["type"] == error_type, r.text
+        assert secret not in r.text, "422 вернул значение секретного поля"
+
+
 @pytest.mark.asyncio
 async def test_422_still_shows_what_was_wrong_with_a_declared_field():
-    """У ошибок объявленных полей `input` остаётся на месте.
+    """У ошибок несекретных объявленных полей `input` остаётся на месте.
 
-    Обратная сторона предыдущих двух тестов, и без неё они толкают к
-    «починке» вида «снять `input` вообще»: тогда `422` перестал бы говорить,
-    ЧТО именно прислали в порт или в id блоба, и разбор кривого запроса стал
-    бы гаданием. Плейнтекст-секретов среди объявленных полей нет — в этом и
-    смысл фазы 1, — так что беречь тут нечего, а терять есть что.
+    Обратная сторона тестов выше, и без неё они толкают к «починке» вида
+    «снять `input` вообще»: тогда 422 перестал бы говорить, ЧТО именно
+    прислали в порт, и разбор кривого запроса стал бы гаданием.
+
+    `ssh_port` взят не случайно: это поле, которому нечего скрывать. У полей с
+    секретоподобным ИМЕНЕМ значение снимается — см.
+    `test_422_does_not_echo_the_value_of_a_secret_named_field`.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         await _register_and_login(c, f"forbid-diag-{uuid.uuid4().hex[:8]}@example.com")
@@ -563,3 +701,109 @@ async def test_422_still_shows_what_was_wrong_with_a_declared_field():
         err = next(e for e in r.json()["detail"] if e["loc"] == ["body", "ssh_port"])
         assert err["type"] == "int_parsing", r.text
         assert err["input"] == "not-an-int", "422 больше не говорит, что именно прислали"
+
+
+# ---------------------------------------------------------------------------
+# Юниты на сам предикат `_input_is_unsafe_to_echo`.
+#
+# Тесты выше проверяют признаки по эффекту — через живой запрос, а это round
+# trip плюс поход в БД на регистрацию. Признаков стало четыре, комбинаций у
+# них больше, чем разумно гонять через сеть, и юнит здесь не замена
+# эндпоинт-тестам, а их дешёвое дополнение: форму ошибок, на которых он
+# считает, задаёт pydantic, и все эти формы взяты из ответов живого API
+# (см. случаи выше), а не придуманы.
+# ---------------------------------------------------------------------------
+
+UNSAFE_ERRORS = [
+    pytest.param(
+        {"type": "extra_forbidden", "loc": ["body", "ssh_password"], "input": "S3cr3t"},
+        id="лишнее-поле-значение-и-есть-секрет",
+    ),
+    pytest.param(
+        {"type": "missing", "loc": ["body", "name"], "input": {"ssh_password": "S3cr3t"}},
+        id="missing-в-input-всё-тело",
+    ),
+    pytest.param(
+        {"type": "model_attributes_type", "loc": ["body"], "input": [{"ssh_password": "S"}]},
+        id="корень-тела-список",
+    ),
+    pytest.param(
+        {"type": "model_attributes_type", "loc": ["body"], "input": '{"ssh_password":"S"}'},
+        id="корень-тела-строка",
+    ),
+    pytest.param(
+        {"type": "string_too_short", "loc": ["body", "auth_key_b64"], "input": "hunter2"},
+        id="секретное-имя-_b64",
+    ),
+    pytest.param(
+        {"type": "uuid_parsing", "loc": ["body", "ssh_password_blob_id"], "input": "S3cr3t"},
+        id="секретное-имя-_blob_id",
+    ),
+    pytest.param(
+        {"type": "string_type", "loc": ["body", "api_key"], "input": 1},
+        id="секретное-имя-из-десктопной-конвенции",
+    ),
+    pytest.param(
+        {"type": "string_type", "loc": ["body", "creds", "db_password"], "input": 1},
+        id="секретное-имя-вложенное",
+    ),
+]
+
+SAFE_ERRORS = [
+    pytest.param(
+        {"type": "int_parsing", "loc": ["body", "ssh_port"], "input": "not-an-int"},
+        id="порт-строкой",
+    ),
+    pytest.param(
+        {"type": "int_parsing", "loc": ["path", "server_id"], "input": "abc"},
+        id="path-параметр",
+    ),
+    pytest.param(
+        {"type": "string_type", "loc": ["body", "name"], "input": 5},
+        id="имя-сервера-числом",
+    ),
+    pytest.param(
+        {"type": "missing", "loc": ["body", "ip_address"], "input": None},
+        id="missing-без-родителя-в-input",
+    ),
+]
+
+
+@pytest.mark.parametrize("err", UNSAFE_ERRORS)
+def test_predicate_hides_input(err: dict):
+    assert _input_is_unsafe_to_echo(err) is True
+
+
+@pytest.mark.parametrize("err", SAFE_ERRORS)
+def test_predicate_keeps_input(err: dict):
+    """Иначе «починка» вида «снять input вообще» прошла бы незамеченной."""
+    assert _input_is_unsafe_to_echo(err) is False
+
+
+@pytest.mark.asyncio
+async def test_purging_a_test_user_takes_everything_it_owned_with_it():
+    """Уборка пользователей работает — и уносит его хозяйство по FK CASCADE.
+
+    Сама фикстура `_purge_users_registered_by_this_test` ничего не утверждает:
+    она чистит в teardown, и её поломка проявилась бы не красным тестом, а
+    ростом числа строк в общей dev-БД — то есть примерно никогда. Поэтому
+    механизм проверяется здесь явно, на живой строке.
+    """
+    email = f"purge-{uuid.uuid4().hex[:8]}@example.com"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, email)
+        r = await c.post(
+            "/api/servers",
+            json={"name": f"srv-{uuid.uuid4().hex[:6]}", "ip_address": "203.0.113.27"},
+        )
+        assert r.status_code == 201, r.text
+        server_id = r.json()["id"]
+
+    await _purge_users([email])
+
+    async with AsyncSessionLocal() as s:
+        user = (await s.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        assert user is None, "пользователь остался в общей dev-БД"
+        server = (await s.execute(select(Server).where(Server.id == server_id))).scalar_one_or_none()
+        assert server is None, "сервер пережил владельца — CASCADE не отработал"
