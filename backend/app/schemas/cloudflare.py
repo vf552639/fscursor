@@ -12,10 +12,9 @@ class CloudflareAccountBase(BaseModel):
 
 
 class CloudflareAccountCreate(CloudflareAccountBase):
-    # Незнакомое поле — 422, а не тишина: плейнтекст `api_token` с дефолтным
-    # `extra="ignore"` молча выбрасывался, а аккаунт оставался с
-    # `api_token_blob_id = NULL`. `forbid` только здесь и на `Update`:
-    # `CloudflareAccountResponse` наследует ту же базу и собирается из ORM.
+    # Плейнтекст `api_token` в теле — 422, а не тихо потерянный токен.
+    # Почему `forbid` и почему на каждой схеме отдельно — `ServerCreate` в
+    # `schemas/server.py`.
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1)

@@ -13,10 +13,9 @@ class RegistrarAccountBase(BaseModel):
 
 
 class RegistrarAccountCreate(RegistrarAccountBase):
-    # Незнакомое поле — 422, а не тишина: плейнтекст `api_key`/`api_secret` с
-    # дефолтным `extra="ignore"` молча выбрасывался, а аккаунт оставался с
-    # `*_blob_id = NULL`. `forbid` только здесь и на `Update`:
-    # `RegistrarAccountResponse` наследует ту же базу и собирается из ORM.
+    # Плейнтекст `api_key`/`api_secret` в теле — 422, а не тихо потерянные
+    # секреты. Почему `forbid` и почему на каждой схеме отдельно —
+    # `ServerCreate` в `schemas/server.py`.
     model_config = ConfigDict(extra="forbid")
 
     api_key_blob_id: Optional[UUID] = None

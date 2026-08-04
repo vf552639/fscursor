@@ -2,7 +2,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from typing import Any, Mapping
+
+from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,8 +68,75 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+# Секретоподобные ИМЕНА полей: значение такого поля не показываем обратно
+# никогда. Список — та же конвенция, что у десктопного `SECRET_KEY_MARKERS`
+# (`desktop/src-tauri/src/audit_redact.rs`), и сравнение такое же: подстрока в
+# имени, приведённом к нижнему регистру, так что `db_password` ловится одним
+# маркером `password`.
+#
+# Расхождение с десктопом ровно одно и оно намеренное: там `*_blob_id` вынесен
+# в ИСКЛЮЧЕНИЯ, здесь — наоборот, в маркеры. Списки решают разные вопросы.
+# Десктоп спрашивает «можно ли отправить это ПОЛЕ на сервер»: ссылка на блоб
+# отправляться обязана. Здесь вопрос другой — «можно ли показать обратно
+# ЗНАЧЕНИЕ, которое в это поле не влезло», а не влезает в `*_blob_id` ровно
+# один тип значения: плейнтекст-секрет, посаженный туда опечаткой
+# (`api_token_blob_id: token` вместо `blobId`). То есть эхо тут показало бы
+# секрет именно тогда, когда он там оказался по ошибке.
+#
+# Меняешь список — посмотри на оба: они соседи по смыслу, но не копии.
+SECRET_NAME_MARKERS = ("password", "auth_key", "api_key", "_b64", "_blob_id")
+
+
+def _input_is_unsafe_to_echo(err: Mapping[str, Any]) -> bool:
+    """Вернёт ли `input` этой ошибки клиенту то, чего он видеть не должен.
+
+    Четыре признака, все — про форму ошибки, а не про список типов pydantic
+    (`missing`, `model_attributes_type`, `model_type`, `dict_type`, …):
+    перечисление типов пришлось бы догонять за каждой версией библиотеки, и
+    первый незнакомый тип протёк бы молча.
+
+    1. `type == "extra_forbidden"` — `input` и есть значение незаявленного
+       поля, то есть в нашем сценарии сам пароль.
+    2. `input` — контейнер. Pydantic кладёт в него РОДИТЕЛЯ ошибки, а не
+       значение поля: у `missing` (не хватает `name`) `input` равен всему телу
+       запроса, вместе с плейнтекстом, который в нём был. Регрессировавшая
+       форма запросто пришлёт и лишнее поле, и недодаст обязательное.
+    3. `loc == ("body",)` — ошибка про КОРЕНЬ тела (`model_attributes_type`:
+       прислали список или строку вместо объекта). Признак (2) ловит только
+       list/dict, а двойная сериализация (`JSON.stringify` поверх тела) даёт
+       тело-строку — и она проехала бы целиком. У ошибки про корень нет имени
+       поля, о котором `input` мог бы что-то диагностировать, так что терять
+       тут нечего.
+    4. Имя поля секретоподобное (`SECRET_NAME_MARKERS`). Скалярный `input`
+       объявленного поля — тоже секрет, если поле секретное: `auth_key_b64` и
+       `recovery_blob_b64` короче минимума отдают `string_too_short` с самим
+       материалом внутри (и на `/auth/register`, то есть без всякой сессии), а
+       `ssh_password_blob_id` с плейнтекстом вместо UUID — `uuid_parsing` с
+       паролем внутри.
+
+    Что остаётся: `input` скалярных ошибок несекретных объявленных полей
+    (`int_parsing` у `ssh_port`, `value_error` у `provider`) и ошибок
+    path-параметров. Без них разбор кривого запроса стал бы гаданием, и на это
+    есть отдельный тест — иначе «починка» вида «снять `input` вообще» прошла
+    бы незамеченной.
+    """
+    if err.get("type") == "extra_forbidden":
+        return True
+    if isinstance(err.get("input"), (dict, list)):
+        return True
+    loc = tuple(err.get("loc") or ())
+    if loc == ("body",):
+        return True
+    # По всему `loc`, а не только по последнему элементу: у ошибки внутри
+    # секретного поля (индекс списка, вложенный объект) имя секрета стоит
+    # выше, а `input` всё тот же материал.
+    return any(
+        marker in str(part).lower() for part in loc for marker in SECRET_NAME_MARKERS
+    )
+
+
 @app.exception_handler(RequestValidationError)
-async def validation_error_without_extra_input(
+async def validation_error_without_secret_input(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     """422, который не возвращает клиенту присланный плейнтекст.
@@ -75,41 +144,27 @@ async def validation_error_without_extra_input(
     Схемы записи (`ServerCreate/Update`, `CloudflareAccount*`,
     `RegistrarAccount*`) стоят с `extra="forbid"` — это ловушка на регрессию
     «форма опять шлёт плейнтекст-секрет». Дефолтный обработчик FastAPI кладёт
-    в ответ `input`, и тогда ловушка возвращает секрет обратно: фронт
-    подставляет `detail` в текст ошибки (`api/client.ts`), оттуда он идёт в
-    тост и в кэш мутаций; десктоп кладёт тело в `ApiError::Http`
-    (`sync/http.rs`); прокси пишет его в лог. Отказ обязан быть громким по
-    ИМЕНИ поля, а не по его содержимому.
+    в ответ `input`, и тогда ловушка возвращает секрет обратно.
 
-    Снимаем `input` по двум признакам.
+    Куда он оттуда уезжает: `frontend/src/api/client.ts` кладёт тело ответа
+    целиком в `ApiError.details`, а оттуда оно попадает в состояние ошибки
+    React Query и в логи. (В ТЕКСТ ошибки — нет: у 422 `detail` это массив, и
+    `String(data.detail)` даёт `"[object Object]"`. Тост секрета не покажет.)
+    В десктопе тело живёт в `ApiError::Status { status, body }`
+    (`sync/http.rs`) — не в `ApiError::Http`, который `#[error(transparent)]`
+    поверх `reqwest::Error` и тела не несёт вовсе. Плюс лог прокси.
 
-    1. `type == "extra_forbidden"` — здесь `input` и есть значение
-       незаявленного поля, то есть в нашем сценарии сам пароль.
-    2. `input` — контейнер (dict/list). Pydantic подставляет в него РОДИТЕЛЬ
-       ошибки, а не значение поля: у `missing` (не хватает `name`) и у
-       `model_attributes_type` (тело — список) `input` равен всему телу
-       запроса целиком, вместе с любым плейнтекстом, который туда попал.
-       Регрессировавшая форма вполне может заодно недодать обязательное поле —
-       и тогда одного признака (1) не хватило бы.
-
-    Признак (2) структурный, а не список типов (`missing`,
-    `model_attributes_type`, `model_type`, `dict_type`, …): перечисление
-    пришлось бы догонять за каждой версией pydantic, и первый же незнакомый
-    тип с телом внутри протёк бы молча. И не `loc == ["body"]`: у `missing`
-    loc указывает на поле (`["body","name"]`), а `input` — всё равно всё тело.
-
-    Что сохраняется: `input` скалярных ошибок объявленных полей
-    (`int_parsing` у порта, `uuid_parsing` у id блоба, `string_too_short`) и
-    ошибок path-параметров. Плейнтекст-секретов среди объявленных полей нет —
-    в этом и смысл фазы, — а без этих значений диагностика стала бы гаданием.
+    Отказ обязан быть громким по ИМЕНИ поля, а не по его содержимому. Что
+    именно считается небезопасным — в `_input_is_unsafe_to_echo`.
     """
     errors = [
-        {k: v for k, v in err.items() if k != "input"}
-        if err.get("type") == "extra_forbidden" or isinstance(err.get("input"), (dict, list))
-        else err
+        {k: v for k, v in err.items() if k != "input"} if _input_is_unsafe_to_echo(err) else err
         for err in exc.errors()
     ]
-    return JSONResponse(status_code=422, content=jsonable_encoder({"detail": errors}))
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=jsonable_encoder({"detail": errors}),
+    )
 
 configure_logging()
 add_loguru_intercept_handler()
