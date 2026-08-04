@@ -93,3 +93,65 @@ pub(crate) fn cache_path(handle: &State<'_, SyncHandle>) -> Result<PathBuf, Comm
         .ok_or_else(|| CommandError::Api("sync not initialized".into()))?;
     Ok(c.cache_path.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::aead;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Отдать блоб так, как его отдаёт бэкенд (`app/blobs/routes.py::_to_response`).
+    async fn serve_blob(srv: &MockServer, blob_id: &str, ciphertext: &[u8]) {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/blobs/{blob_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": blob_id,
+                "blob_kind": "ssh_password",
+                "ciphertext_b64": B64.encode(ciphertext),
+                "version": 7,
+                "updated_at": "2026-08-04T00:00:00Z",
+                "deleted": false,
+            })))
+            .mount(srv)
+            .await;
+    }
+
+    /// Замыкание всей цепочки спринта: то, что уехало на сервер шифротекстом,
+    /// возвращается провижинингу исходным паролем.
+    ///
+    /// Именно этой функцией `provision.rs` достаёт SSH-пароль. Если она начнёт
+    /// отдавать сырые байты блоба, десктоп пойдёт логиниться base64-мусором, а
+    /// пользователь увидит невнятное «auth failed» вместо понятной причины.
+    #[tokio::test]
+    async fn blob_plaintext_returns_the_password_that_was_encrypted() {
+        let srv = MockServer::start().await;
+        let key = [77u8; aead::KEY_LEN];
+        let password = "correct horse battery staple";
+        serve_blob(&srv, "b-9", &aead::encrypt(password.as_bytes(), &key).unwrap()).await;
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        let got = blob_plaintext(&api, &key, "b-9").await.unwrap();
+        assert_eq!(String::from_utf8(got).unwrap(), password);
+    }
+
+    /// Чужой ключ должен давать ошибку, а не «какой-нибудь» пароль: молчаливый
+    /// мусор в ответе означал бы, что расшифровка не проверяется вовсе.
+    #[tokio::test]
+    async fn blob_plaintext_fails_on_a_foreign_key() {
+        let srv = MockServer::start().await;
+        serve_blob(
+            &srv,
+            "b-9",
+            &aead::encrypt(b"secret", &[77u8; aead::KEY_LEN]).unwrap(),
+        )
+        .await;
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        let err = blob_plaintext(&api, &[1u8; aead::KEY_LEN], "b-9")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CommandError::Aead(_)), "{err}");
+    }
+}

@@ -572,6 +572,7 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::aead;
     use serde_json::json;
     use wiremock::matchers::{body_json, header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1032,5 +1033,57 @@ mod tests {
         let c = ApiClient::new(format!("{}/api", srv.uri()));
         let (status, _body) = c.request_raw("GET", "/servers", None).await.unwrap();
         assert_eq!(status, 401);
+    }
+
+    /// Инвариант zero-knowledge, записанный как тест: с машины уезжает
+    /// шифротекст, и развернуть его может только держатель ключа.
+    ///
+    /// Проверяем не форму вызова, а то, что реально легло в тело запроса:
+    /// вытаскиваем body из `wiremock`, декодируем base64 и смотрим на байты.
+    /// Тест вида «`blob_put` вызвался» остался бы зелёным и в мире, где в
+    /// `ciphertext_b64` уехал пароль открытым текстом — а это ровно та ошибка,
+    /// после которой сервер видит секреты всех пользователей.
+    #[tokio::test]
+    async fn blob_put_puts_ciphertext_on_the_wire_and_only_the_key_undoes_it() {
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/blobs/b-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "b-1",
+                "blob_kind": "ssh_password",
+                "ciphertext_b64": "",
+                "version": 1,
+                "updated_at": "2026-08-04T00:00:00Z",
+                "deleted": false,
+            })))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let key = [42u8; aead::KEY_LEN];
+        let plaintext = b"correct horse battery staple";
+        let ciphertext = aead::encrypt(plaintext, &key).unwrap();
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.blob_put("b-1", "ssh_password", &ciphertext).await.unwrap();
+
+        let reqs = srv.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["blob_kind"], "ssh_password");
+        let wire = B64
+            .decode(body["ciphertext_b64"].as_str().unwrap())
+            .expect("ciphertext_b64 must be base64");
+
+        assert!(
+            !wire.windows(plaintext.len()).any(|w| w == plaintext),
+            "плейнтекст найден в теле запроса"
+        );
+        // Длина ровно «плейнтекст + обвязка»: если она сойдётся с длиной
+        // плейнтекста, шифрования не было; если разойдётся с обвязкой —
+        // раскладка уехала и десктоп не расшифрует то, что сам же прислал.
+        assert_eq!(wire.len(), plaintext.len() + aead::NONCE_LEN + aead::TAG_LEN);
+        assert_eq!(aead::decrypt(&wire, &key).unwrap(), plaintext);
+        assert!(aead::decrypt(&wire, &[1u8; aead::KEY_LEN]).is_err());
     }
 }
