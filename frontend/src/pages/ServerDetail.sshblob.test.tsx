@@ -46,6 +46,9 @@ vi.mock("../components/RevealSecret", () => ({
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const EXISTING_BLOB = "11111111-2222-4333-8444-555555555555";
 const NEW_PW = "new-ssh-pw";
+// Ровно то, что вернёт `desktopOnly("Saving secrets")`: одна фраза продукта на
+// все «это умеет только десктоп», своей формулировки здесь быть не должно.
+const DESKTOP_NOTE = "Saving secrets runs in the SDMP desktop app.";
 
 const SERVER = {
   id: 7,
@@ -199,26 +202,25 @@ describe("ServerDetail — SSH-пароль через блоб", () => {
     await openSshForm("Добавить SSH");
     fireEvent.click(screen.getByText("Save"));
 
-    expect(await screen.findByText("Введите SSH-пароль")).toBeTruthy();
+    expect(await screen.findByText("SSH password is required")).toBeTruthy();
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });
 
-  it("в вебе форма не открывается вовсе — только deep link в десктоп", async () => {
+  it.each([
+    ["без SSH — баннер", SERVER_NO_SSH, "Добавить SSH"],
+    ["с SSH — шапка карточки", SERVER, "Изменить SSH"],
+  ])("в вебе (%s) форма не открывается, а объяснение — общей фразой", async (_name, fixture, label) => {
     setTauri(false);
-    const { container } = renderDetail(SERVER_NO_SSH);
+    const { container } = renderDetail(fixture as typeof SERVER);
 
-    const link = (await waitFor(() => {
-      const a = container.querySelector('a[href^="sdmp://server-ssh"]');
-      expect(a).toBeTruthy();
-      return a;
-    })) as HTMLAnchorElement;
-    expect(link.getAttribute("href")).toBe("sdmp://server-ssh?serverId=7");
-    expect(link.textContent).toContain("Добавить SSH");
-
-    // Кнопки — то есть пути в обход десктопа — нет: набирать пароль там, где
-    // его физически нельзя сохранить, пользователю не предлагаем.
-    fireEvent.click(link);
+    expect(await screen.findByText(DESKTOP_NOTE)).toBeTruthy();
+    // Не OpenInDesktop: хоста `server-ssh` parseDeepLinkAction не знает —
+    // ссылка вела бы в {handled:false} и только тостила бы сама себя.
+    expect(container.querySelectorAll('a[href^="sdmp://server-ssh"]').length).toBe(0);
+    // И не кнопка: набирать пароль там, где его физически нельзя сохранить,
+    // пользователю не предлагаем — объясняем это до ввода, а не после.
+    expect(screen.queryByText(label as string)).toBeNull();
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPut).not.toHaveBeenCalled();

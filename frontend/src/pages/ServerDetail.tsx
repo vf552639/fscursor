@@ -5,7 +5,7 @@ import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, installFas
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
-import { isTauri } from "../lib/runtime";
+import { desktopOnly, isTauri } from "../lib/runtime";
 import { putSecretBlob, BLOB_KIND } from "../lib/secretBlob";
 import type { InstallFastpanelResult } from "../lib/deepLink";
 
@@ -112,7 +112,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     // Пустой пароль дал бы блоб из нуля байт и `has_ssh = true` на сервере:
     // SSH-команды после этого падают уже на живом соединении, а не здесь.
     if (!sshPassword) {
-      setSshError("Введите SSH-пароль");
+      setSshError("SSH password is required");
       return;
     }
     setSshSaving(true);
@@ -225,15 +225,19 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             disabled={refreshMetrics.isPending}
           />
         ) : null}
+        {/* Единственный способ сменить SSH-пароль: до этого модалку открывал
+            только баннер «SSH не настроен», который у сервера с секретом не
+            показывается, — так что ротация пароля была недостижима из UI.
+            В вебе — фраза, а НЕ OpenInDesktop: хоста `server-ssh` в
+            parseDeepLinkAction нет, ссылка вела бы в {handled:false} и только
+            тостила. Взаимоисключающе с баннером ниже (тот при !has_ssh), так
+            что фраза на экране в любом случае одна. */}
         {s.has_ssh ? (
-          // Единственный способ сменить SSH-пароль: до этого модалку открывал
-          // только баннер «SSH не настроен», который у сервера с секретом не
-          // показывается, — так что ротация пароля была недостижима из UI.
-          <OpenInDesktop
-            action={`server-ssh?serverId=${s.id}`}
-            label="Изменить SSH"
-            desktopOnClick={openSshModal}
-          />
+          isTauri() ? (
+            <Btn size="sm" variant="secondary" onClick={openSshModal}>Изменить SSH</Btn>
+          ) : (
+            <span style={{alignSelf:"center",fontSize:12.5,color:"#6b7280"}}>{desktopOnly("Saving secrets")}</span>
+          )
         ) : null}
         {s.has_ssh && isFPInstalled ? (
           <OpenInDesktop
@@ -259,16 +263,14 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
           <div style={{fontWeight:600, fontSize:14, color:"#92400e", marginBottom:2}}>⚠ SSH-доступ не настроен</div>
           <div style={{fontSize:13, color:"#a16207"}}>Для мониторинга uptime, CPU и диска необходимо добавить SSH-данные.</div>
         </div>
-        {/* В вебе — ссылка в десктоп, а не кнопка: пароль шифрует Rust
-            мастер-ключом из keychain, поэтому из браузера его не сохранить.
-            Форму в вебе не открываем совсем — набранный секрет всё равно
-            некуда деть, а открытая форма это обещает. */}
-        <OpenInDesktop
-          variant="primary"
-          action={`server-ssh?serverId=${s.id}`}
-          label="Добавить SSH"
-          desktopOnClick={openSshModal}
-        />
+        {/* В вебе — фраза вместо кнопки: пароль шифрует Rust мастер-ключом из
+            keychain, из браузера его не сохранить, и форму открывать незачем —
+            набранный секрет некуда деть, а открытая форма это обещает. */}
+        {isTauri() ? (
+          <Btn variant="primary" size="sm" onClick={openSshModal}>Добавить SSH</Btn>
+        ) : (
+          <div style={{fontSize:12.5,fontWeight:600,color:"#92400e",marginLeft:16,whiteSpace:"nowrap"}}>{desktopOnly("Saving secrets")}</div>
+        )}
       </div>
     )}
 
