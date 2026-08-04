@@ -158,13 +158,27 @@ describe("runBulkProvisionDomains — отчёт вместо ключа иде�
     // Пароли действительно пришли — иначе «нигде нет» ничего не доказывает.
     expect(out.results.map((r) => r.result.ftp?.ftp_password)).toEqual(SECRETS);
 
+    // ОБЯЗАТЕЛЬНО дождаться, пока заявки гейта осядут. `release()` вызывается в
+    // `finally`, но их `mutationFn` дорезолвливается микротаском позже, и до
+    // этого момента `state.data` у КАЖДОЙ мутации — `undefined`. Дамп, снятый
+    // сразу после `await`, смотрел бы в состояние, где пароля не может быть в
+    // принципе, и проходил бы при любой реализации (проверено: заявка,
+    // резолвящаяся полным отчётом, оставляла тест зелёным).
+    await vi.waitFor(() =>
+      expect(
+        queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: PROVISION_DOMAIN_KEY, status: "pending" }),
+      ).toHaveLength(0),
+    );
+    const settled = queryClient.getMutationCache().getAll();
+    expect(settled.length).toBeGreaterThan(0);
+    expect(settled.every((m) => m.state.data !== undefined)).toBe(true);
+
     // Кэш мутаций переживает `reset()` ещё gcTime — попав туда, пароль лежал бы
     // в памяти минутами и уехал бы в любой дамп состояния.
     const cacheDump = JSON.stringify(
-      queryClient
-        .getMutationCache()
-        .getAll()
-        .map((m) => ({ state: m.state, options: { mutationKey: m.options.mutationKey } })),
+      settled.map((m) => ({ state: m.state, options: { mutationKey: m.options.mutationKey } })),
     );
     const consoleDump = JSON.stringify(spies.flatMap((s) => s.mock.calls));
     for (const s of SECRETS) {
@@ -199,10 +213,10 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
     );
 
     const bulk = runBulkProvisionDomains("user-1", ["1", "2"]);
-    // Ждём, пока заявки гейта окажутся в кэше (они ставятся синхронно, но
-    // `execute` уходит в микротаск).
-    await Promise.resolve();
-
+    // Ждать нечего: `Mutation.execute` переводит мутацию в `pending`
+    // синхронно, до первого `await` внутри `mutationFn` (query-core 5.100.9,
+    // `mutation.ts`). Гейт обязан закрыться в тот же тик, что и старт прогона,
+    // иначе между ними помещается второй запуск.
     const pending = queryClient
       .getMutationCache()
       .findAll({ mutationKey: PROVISION_DOMAIN_KEY, status: "pending" })
