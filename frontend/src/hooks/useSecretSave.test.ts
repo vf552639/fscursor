@@ -337,14 +337,16 @@ describe("гвард на вложенный save", () => {
   // ошибки компиляции: человек применит её и вернётся в баг.
   type Nested = () => Promise<boolean>;
   it.each<[string, (nested: Nested) => Promise<void>]>([
-    ["блочное тело с await", async (nested) => void (await nested())],
+    ["блочное тело с await", async (nested) => {
+      await nested();
+    }],
     ["брошенный промис", async (nested) => {
       nested();
     }],
     ["void", async (nested) => void nested()],
     [".then(() => {})", async (nested) => nested().then(() => {})],
   ])("%s: внешний save падает, а не рапортует успех", async (_form, persist) => {
-    const { outer, nested } = nesting();
+    const { outer, inner, nested } = nesting();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
     let ok: boolean | undefined;
@@ -358,6 +360,9 @@ describe("гвард на вложенный save", () => {
 
     expect(ok).toBe(false);
     expect(outer.current.error).toMatch(/do not call save\(\) inside persist\(\)/);
+    // И у заблокированной формы тоже: сработай гвард вне вложенности, только её
+    // `error` и увидел бы автор — у внешней формы его ставит `catch` в `run`.
+    expect(inner.current.error).toMatch(/nested secret save/);
     // Ещё и в консоль: сработавший не по делу гвард не должен уметь молчать.
     expect(errors).toHaveBeenCalledWith(expect.stringMatching(/nested secret save/));
     // Плейнтекст внешнего поля цел: провал не притворился успехом.
@@ -406,6 +411,36 @@ describe("гвард на вложенный save", () => {
     });
 
     expect([first, second]).toEqual([true, true]);
+  });
+
+  it("пока одна форма пишет блоб, вторая проходит целиком", async () => {
+    // Окно гварда — только `persist`, и держится это одним комментарием.
+    // Расширь его на всю операцию (самая долгая часть — запись блоба через
+    // Tauri-IPC), и вторая, ни во что не вложенная форма получит бросок
+    // «nested secret save» просто за то, что сохранилась не в свою очередь.
+    const { outer, inner } = nesting();
+    let releaseBlob: (blobId: string) => void = () => {};
+    mocks.putSecretBlob.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { releaseBlob = resolve; }),
+    );
+    const args = (kind: (typeof BLOB_KIND)[keyof typeof BLOB_KIND]) => ({
+      blobKind: kind,
+      existingBlobId: null,
+      persist: async () => {},
+    });
+
+    let slow: boolean | undefined;
+    let fast: boolean | undefined;
+    await act(async () => {
+      const pending = outer.current.save(args(BLOB_KIND.registrarApiKey));
+      // Целиком, вместе с `persist`: первая форма в этот момент висит на записи
+      // своего блоба и снять с неё гвард нечему.
+      fast = await inner.current.save(args(BLOB_KIND.registrarApiSecret));
+      releaseBlob("id-registrar_api_key");
+      slow = await pending;
+    });
+
+    expect([slow, fast]).toEqual([true, true]);
   });
 
   it("повтор после ошибки не заблокирован", async () => {
