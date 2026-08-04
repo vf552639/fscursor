@@ -55,6 +55,13 @@ export interface ServerCreate {
   ssh_port?: number;
   ssh_user?: string;
   ssh_password?: string;
+  /**
+   * Ссылка на блоб от `putSecretBlob` — единственное, что сервер реально
+   * записывает. Соседний `ssh_password` схема не объявляет и с `extra="ignore"`
+   * молча выбрасывает: 200 OK и `NULL` в колонке. Он ещё жив только ради
+   * FastPanel-формы, которую переводит фаза 1b, и уходит в фазе 2.
+   */
+  ssh_password_blob_id?: string | null;
   os?: string | null;
   purchase_date?: string | null;
   expiry_date?: string | null;
@@ -70,6 +77,8 @@ export interface ServerUpdate {
   ssh_port?: number;
   ssh_user?: string;
   ssh_password?: string;
+  /** См. `ServerCreate.ssh_password_blob_id`. При правке — ТОТ ЖЕ id. */
+  ssh_password_blob_id?: string | null;
   os?: string | null;
   status?: string;
   purchase_date?: string | null;

@@ -6,6 +6,7 @@ import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
+import { putSecretBlob, BLOB_KIND } from "../lib/secretBlob";
 import type { InstallFastpanelResult } from "../lib/deepLink";
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
@@ -32,6 +33,10 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const [sshUser, setSshUser] = useState("root");
   const [sshPassword, setSshPassword] = useState("");
   const [sshPort, setSshPort] = useState(22);
+  const [sshError, setSshError] = useState<string | null>(null);
+  // Своё «сохраняю»: `updateServer.isPending` включается только после записи
+  // блоба, и в окне до неё второй клик писал бы блоб второй раз.
+  const [sshSaving, setSshSaving] = useState(false);
   const [editingDomain, setEditingDomain] = useState<any | null>(null);
 
   // Queries
@@ -92,13 +97,56 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const deleteDomain = useDeleteDomain();
   const updateDomain = useUpdateDomain(editingDomain?.id || 0);
 
-  const handleSaveSsh = () => {
+  // Открываем модалку только отсюда: поля надо взять у сервера, иначе правка
+  // SSH-пароля заодно молча переписала бы пользователя на "root" и порт на 22.
+  const openSshModal = () => {
+    setSshUser(s?.ssh_user || "root");
+    setSshPort(s?.ssh_port || 22);
+    setSshPassword("");
+    setSshError(null);
+    setShowSshModal(true);
+  };
+
+  const handleSaveSsh = async () => {
+    setSshError(null);
+    // Пустой пароль дал бы блоб из нуля байт и `has_ssh = true` на сервере:
+    // SSH-команды после этого падают уже на живом соединении, а не здесь.
+    if (!sshPassword) {
+      setSshError("Введите SSH-пароль");
+      return;
+    }
+    setSshSaving(true);
+    let blobId: string;
+    try {
+      blobId = await putSecretBlob({
+        plaintext: sshPassword,
+        blobKind: BLOB_KIND.serverSshPassword,
+        // Это ПРАВКА: у сервера уже может быть блоб, и переписать надо именно
+        // его. Новый id оставил бы сущность указывать на прежний пароль —
+        // «сохранено», а по SSH ходит старый секрет. Версии блоба ведёт сервер
+        // внутри одного id.
+        existingBlobId: s?.ssh_password_blob_id ?? null,
+      });
+    } catch (e: any) {
+      // Сервер не трогаем вовсе: PUT со ссылкой на несуществующий блоб — это
+      // 200 OK и неработающий SSH.
+      setSshError(e?.message || "Failed to save the SSH password");
+      return;
+    } finally {
+      setSshSaving(false);
+    }
+    // В мутацию уходит только id: аргументы `mutate` оседают в `variables`
+    // мутации, откуда их не убирает даже `reset()` (см. JSDoc `putSecretBlob`).
     updateServer.mutate({
       ssh_user: sshUser,
-      ssh_password: sshPassword,
+      ssh_password_blob_id: blobId,
       ssh_port: sshPort
     }, {
-      onSuccess: () => setShowSshModal(false)
+      onSuccess: () => {
+        setSshPassword("");
+        setShowSshModal(false);
+      },
+      onError: (err: any) => setSshError(err?.message || "request error"),
     });
   };
 
@@ -177,6 +225,16 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             disabled={refreshMetrics.isPending}
           />
         ) : null}
+        {s.has_ssh ? (
+          // Единственный способ сменить SSH-пароль: до этого модалку открывал
+          // только баннер «SSH не настроен», который у сервера с секретом не
+          // показывается, — так что ротация пароля была недостижима из UI.
+          <OpenInDesktop
+            action={`server-ssh?serverId=${s.id}`}
+            label="Изменить SSH"
+            desktopOnClick={openSshModal}
+          />
+        ) : null}
         {s.has_ssh && isFPInstalled ? (
           <OpenInDesktop
             action={`sync-domains?serverId=${s.id}`}
@@ -201,7 +259,16 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
           <div style={{fontWeight:600, fontSize:14, color:"#92400e", marginBottom:2}}>⚠ SSH-доступ не настроен</div>
           <div style={{fontSize:13, color:"#a16207"}}>Для мониторинга uptime, CPU и диска необходимо добавить SSH-данные.</div>
         </div>
-        <Btn variant="primary" size="sm" onClick={()=>setShowSshModal(true)}>Добавить SSH</Btn>
+        {/* В вебе — ссылка в десктоп, а не кнопка: пароль шифрует Rust
+            мастер-ключом из keychain, поэтому из браузера его не сохранить.
+            Форму в вебе не открываем совсем — набранный секрет всё равно
+            некуда деть, а открытая форма это обещает. */}
+        <OpenInDesktop
+          variant="primary"
+          action={`server-ssh?serverId=${s.id}`}
+          label="Добавить SSH"
+          desktopOnClick={openSshModal}
+        />
       </div>
     )}
 
@@ -343,14 +410,19 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     </div>
 
     {showSshModal && (
-      <Modal title="Добавить SSH-доступ" onClose={()=>setShowSshModal(false)} width={420}>
+      <Modal title={s.has_ssh ? "Изменить SSH-доступ" : "Добавить SSH-доступ"} onClose={()=>setShowSshModal(false)} width={420}>
         <div style={{display:"flex", flexDirection:"column", gap:14}}>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH User</label><Inp value={sshUser} onChange={e=>setSshUser((e.target as any).value)} placeholder="e.g., root"/></div>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label><Inp type="password" value={sshPassword} onChange={e=>setSshPassword((e.target as any).value)} placeholder="••••••••"/></div>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Port</label><Inp type="number" value={sshPort} onChange={e=>setSshPort(Number((e.target as any).value))} placeholder="22"/></div>
         </div>
+        {sshError && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {sshError}
+          </div>
+        )}
         <div style={{marginTop:22}}>
-          <Btn variant="primary" onClick={handleSaveSsh} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="primary" onClick={handleSaveSsh} disabled={sshSaving || updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{sshSaving || updateServer.isPending ? "Saving..." : "Save"}</Btn>
         </div>
       </Modal>
     )}
