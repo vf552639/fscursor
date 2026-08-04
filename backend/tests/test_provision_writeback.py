@@ -354,8 +354,13 @@ async def test_plaintext_password_in_put_lands_in_no_column_of_the_domain():
                     )
                 ).scalars().all()
                 # Тоже позитивный контроль: строки аудита есть, значит перебору
-                # по ним есть что перебирать.
-                assert audit_rows, "PUT не оставил следа в аудите — перебор ниже холостой"
+                # по ним есть что перебирать. Спрашиваем именно про `domain.update`:
+                # под фильтр выше подходит и `domain.create` от POST выше по тесту,
+                # и на ней контроль был бы удовлетворён при полностью убранном
+                # аудите у PUT — то есть перебор снова стал бы холостым.
+                assert any(r.action == "domain.update" for r in audit_rows), (
+                    "PUT не оставил следа в аудите — перебор ниже холостой"
+                )
                 audit_leaked = [
                     row.id
                     for row in audit_rows
