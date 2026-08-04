@@ -138,7 +138,8 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   const handleDelete = () => {
     if(confirm("Delete server?")) {
-      delSrv.mutate(s!.id, { onSuccess: () => onBack("servers") });
+      // Сервер целиком, а не id: вместе с ним уходят и его блобы.
+      delSrv.mutate(s!, { onSuccess: () => onBack("servers") });
     }
   };
 

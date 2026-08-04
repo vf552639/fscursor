@@ -4,6 +4,7 @@ import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { queryClient } from "./queryClient";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
+import { forgetSecretBlobs } from "../lib/secretBlob";
 import { useAuthStore } from "../store/auth";
 import type { InstallFastpanelResult } from "../lib/deepLink";
 
@@ -161,9 +162,19 @@ export function useUpdateServer(id: number) {
   });
 }
 
+/**
+ * Аргумент — сам сервер, а не его id: вместе с сервером уходят и оба его блоба,
+ * а ссылки на них знает только отрисованная сущность. Порядок и то, почему
+ * провал уборки не роняет удаление, — в `forgetSecretBlobs`.
+ */
 export function useDeleteServer() {
   return useMutation({
-    mutationFn: (id: number) => apiDelete(`/servers/${id}`),
+    mutationFn: async (
+      server: Pick<Server, "id" | "ssh_password_blob_id" | "fastpanel_password_blob_id">,
+    ) => {
+      await apiDelete(`/servers/${server.id}`);
+      await forgetSecretBlobs([server.ssh_password_blob_id, server.fastpanel_password_blob_id]);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: serversKeys.all }),
   });
 }

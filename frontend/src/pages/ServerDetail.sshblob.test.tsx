@@ -10,6 +10,7 @@ import {
   UUID_V4,
   putBlobArgs,
   putBlobCalls,
+  deletedBlobIds,
   secretBlobLifecycle,
   DESKTOP_NOTE,
 } from "../test/secretBlobKit";
@@ -24,6 +25,7 @@ import {
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiPut: vi.fn(),
+  apiDelete: vi.fn(),
   invokeIfTauri: vi.fn(),
 }));
 
@@ -31,6 +33,7 @@ vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   apiGet: mocks.apiGet,
   apiPut: mocks.apiPut,
+  apiDelete: mocks.apiDelete,
 }));
 
 // Транспорт, а не `secretBlob`: см. Servers.sshblob.test.tsx.
@@ -52,6 +55,7 @@ vi.mock("../components/RevealSecret", () => ({
 
 const EXISTING_BLOB = "11111111-2222-4333-8444-555555555555";
 const NEW_PW = "new-ssh-pw";
+const FP_BLOB = "99999999-8888-4777-8666-555555555555";
 
 const SERVER = {
   id: 7,
@@ -67,8 +71,9 @@ const SERVER = {
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   has_ssh: true,
-  ssh_password_blob_id: EXISTING_BLOB,
-  fastpanel_password_blob_id: null,
+  ssh_password_blob_id: EXISTING_BLOB as string | null,
+  // Тип, а не значение: фикстура с паролем панели живёт в тесте на удаление.
+  fastpanel_password_blob_id: null as string | null,
   uptime_seconds: null,
   cpu_usage_pct: null,
   cpu_count: null,
@@ -225,6 +230,26 @@ describe("ServerDetail — SSH-пароль через блоб", () => {
     expect(await screen.findByText("SSH password is required")).toBeTruthy();
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPut).not.toHaveBeenCalled();
+  });
+
+  it("удаление сервера снимает и его блобы — после самого удаления", async () => {
+    setTauri(true);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.apiDelete.mockResolvedValue(undefined);
+    const withFp = { ...SERVER, fastpanel_password_blob_id: FP_BLOB };
+
+    renderDetail(withFp);
+    fireEvent.click(await screen.findByText("✕ Delete"));
+
+    await waitFor(() =>
+      expect(deletedBlobIds(mocks.invokeIfTauri)).toEqual([EXISTING_BLOB, FP_BLOB]),
+    );
+    expect(mocks.apiDelete).toHaveBeenCalledWith("/servers/7");
+    // Порядок обратен записи: сначала сущность, потом блобы. Наоборот — это
+    // живой сервер со стёртым паролем, если DELETE не доедет.
+    expect(mocks.apiDelete.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.invokeIfTauri.mock.invocationCallOrder[0],
+    );
   });
 
   it.each([
