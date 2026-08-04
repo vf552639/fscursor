@@ -30,6 +30,12 @@ class RegistrarAccountResponse(RegistrarAccountBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    # Не секреты, а непрозрачные ссылки, и форме правки они обязательны: без
+    # них она не знает, какой блоб перезаписывать, и заведёт новый — аккаунт
+    # останется указывать на прежний ключ. `ServerResponse` и
+    # `CloudflareAccountResponse` свои отдают по той же причине.
+    api_key_blob_id: Optional[UUID] = None
+    api_secret_blob_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
 

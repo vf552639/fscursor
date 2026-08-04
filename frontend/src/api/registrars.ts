@@ -18,6 +18,11 @@ export interface RegistrarAccount {
   name: string;
   api_user: string | null;
   is_active: boolean;
+  // Ссылки на блобы, а не секреты. Форма правки перезаписывает ИМЕННО этот id:
+  // новый оставил бы аккаунт указывать на прежний ключ («сохранено», а в API
+  // регистратора едет старый секрет), и снять секрет при удалении было бы нечем.
+  api_key_blob_id: string | null;
+  api_secret_blob_id: string | null;
   created_at: string;
   updated_at: string;
 }

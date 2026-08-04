@@ -63,6 +63,7 @@ from app.auth.models import User
 from app.blobs.models import BlobStorage
 from app.core.database import AsyncSessionLocal
 from app.main import app
+from app.models.registrar_account import RegistrarAccount
 from app.models.server import Server
 
 BLOB_KIND = "ssh_password"
@@ -111,6 +112,16 @@ async def _register_and_login(client: AsyncClient, email: str) -> None:
         json={"email": email, "auth_key_b64": b64(b"\x01" * 32)},
     )
     assert r.status_code == 200, r.text
+
+
+async def _purge_registrars(account_ids: list[int], blob_ids: list[str]) -> None:
+    """То же, что `_purge`, но для аккаунтов регистратора."""
+    async with AsyncSessionLocal() as s:
+        for aid in account_ids:
+            await s.execute(sa_delete(RegistrarAccount).where(RegistrarAccount.id == aid))
+        for bid in blob_ids:
+            await s.execute(sa_delete(BlobStorage).where(BlobStorage.id == uuid.UUID(bid)))
+        await s.commit()
 
 
 async def _purge(server_ids: list[int], blob_ids: list[str]) -> None:
@@ -287,3 +298,60 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
             assert str(rows[with_blob]) == blob_id
         finally:
             await _purge(server_ids, [blob_id])
+
+
+@pytest.mark.asyncio
+async def test_registrar_response_carries_both_blob_ids():
+    """Аккаунт регистратора отдаёт `api_key_blob_id` и `api_secret_blob_id`.
+
+    Здесь ассерт по ОТВЕТУ, а не по БД, — в отличие от остального файла, и это
+    осознанно: проверяется ровно форма ответа. Форма правки берёт id
+    перезаписываемого блоба из отрисованной сущности; нет id в ответе — форма
+    заведёт новый блоб, а `*_blob_id` аккаунта останется прежним: «сохранено»,
+    а в API регистратора поедет старый ключ. Ассерт по БД этого не увидел бы —
+    колонки-то заполнены с самого создания.
+
+    Чтобы это не было проверкой эха запроса, id читаются из GET списка: его
+    строки сервер собирает из БД, а не из тела POST. Секретом сами id не
+    являются — это непрозрачные ссылки, и `ServerResponse` с
+    `CloudflareAccountResponse` свои отдают давно (в десктопном
+    `audit_redact.rs` суффикс `_blob_id` внесён в исключения явным списком).
+    """
+    key_blob_id = str(uuid.uuid4())
+    secret_blob_id = str(uuid.uuid4())
+    account_ids: list[int] = []
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"reg-blob-{uuid.uuid4().hex[:8]}@example.com")
+        try:
+            for bid, kind in ((key_blob_id, "registrar_api_key"), (secret_blob_id, "registrar_api_secret")):
+                r = await c.put(
+                    f"/api/blobs/{bid}",
+                    json={"blob_kind": kind, "ciphertext_b64": b64(opaque_blob_for(32))},
+                )
+                assert r.status_code == 200, r.text
+
+            r = await c.post(
+                "/api/registrars/accounts",
+                json={
+                    "provider": "hostiq",
+                    "name": f"reg-{uuid.uuid4().hex[:6]}",
+                    "api_key_blob_id": key_blob_id,
+                    "api_secret_blob_id": secret_blob_id,
+                },
+            )
+            assert r.status_code == 201, r.text
+            created = r.json()
+            account_ids.append(created["id"])
+            assert created.get("api_key_blob_id") == key_blob_id
+            assert created.get("api_secret_blob_id") == secret_blob_id
+
+            r = await c.get("/api/registrars/accounts")
+            assert r.status_code == 200, r.text
+            listed = next(a for a in r.json() if a["id"] == created["id"])
+            assert listed.get("api_key_blob_id") == key_blob_id, (
+                "форма правки не узнает, какой блоб перезаписывать"
+            )
+            assert listed.get("api_secret_blob_id") == secret_blob_id
+        finally:
+            await _purge_registrars(account_ids, [key_blob_id, secret_blob_id])

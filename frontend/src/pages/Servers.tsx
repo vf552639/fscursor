@@ -95,13 +95,15 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       const ok = await sshPassword.save({
         blobKind: BLOB_KIND.serverSshPassword,
         existingBlobId: null,
-        persist: (blobId) => create.mutateAsync({
-          name: name,
-          ip_address: payload_ip,
-          ssh_user: login,
-          ssh_password_blob_id: blobId,
-          os: os
-        }),
+        persist: async (blobId) => {
+          await create.mutateAsync({
+            name: name,
+            ip_address: payload_ip,
+            ssh_user: login,
+            ssh_password_blob_id: blobId,
+            os: os
+          });
+        },
       });
       if (ok) onClose();
     } else {

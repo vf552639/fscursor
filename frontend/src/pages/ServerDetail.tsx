@@ -123,11 +123,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
       // «сохранено», а по SSH ходит старый секрет. Версии блоба ведёт сервер
       // внутри одного id.
       existingBlobId: s?.ssh_password_blob_id ?? null,
-      persist: (blobId) => updateServer.mutateAsync({
-        ssh_user: sshUser,
-        ssh_password_blob_id: blobId,
-        ssh_port: sshPort
-      }),
+      // `await` без возврата значения: `persist` объявлен `Promise<void>`,
+      // чтобы в него нельзя было вложить второй `save` (см. его JSDoc).
+      persist: async (blobId) => {
+        await updateServer.mutateAsync({
+          ssh_user: sshUser,
+          ssh_password_blob_id: blobId,
+          ssh_port: sshPort
+        });
+      },
     });
     if (ok) setShowSshModal(false);
   };
