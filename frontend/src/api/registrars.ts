@@ -7,6 +7,7 @@ import { invokeSynced } from "../lib/localCache";
 // `routes/registrars.py` только CRUD аккаунтов). HTTP-резерв здесь был мёртвым —
 // он уходил в 404. Веб — «только смотрит».
 import { requireDesktop } from "../lib/runtime";
+import { forgetSecretBlobs } from "../lib/secretBlob";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -31,8 +32,16 @@ export interface RegistrarAccountCreate {
   provider: RegistrarProvider;
   name: string;
   api_user?: string | null;
-  api_key?: string;
-  api_secret?: string;
+  /**
+   * Ссылки на блобы от `putSecretBlob` — единственный способ передать секреты.
+   * Полей `api_key`/`api_secret` здесь нет намеренно: серверная схема их не
+   * объявляет и с `extra="ignore"` молча выбрасывает (200 OK и `NULL` в
+   * колонках), поэтому в TS они давали зелёную компиляцию на пути, который
+   * теряет секрет. Без них это ошибка типа, а не молчаливая потеря.
+   */
+  api_key_blob_id?: string | null;
+  /** У Namecheap этим параметром едет whitelisted client IP (см. `make_service`). */
+  api_secret_blob_id?: string | null;
   is_active?: boolean;
 }
 
@@ -40,8 +49,14 @@ export interface RegistrarAccountUpdate {
   provider?: RegistrarProvider;
   name?: string;
   api_user?: string | null;
-  api_key?: string;
-  api_secret?: string;
+  /**
+   * См. `RegistrarAccountCreate`. При правке — ТОТ ЖЕ id. Снять секрет через
+   * PUT нельзя: `registrar_service.update_account` применяет эти поля только
+   * когда они `not None`, а `exclude_unset` не отличает явный `null` от
+   * пропуска. Форме это и не нужно — пустое поле значит «не менять».
+   */
+  api_key_blob_id?: string | null;
+  api_secret_blob_id?: string | null;
   is_active?: boolean;
 }
 
@@ -91,9 +106,19 @@ export function useUpdateRegistrarAccount(id: number) {
   });
 }
 
+/**
+ * Аргумент — сам аккаунт, а не его id: вместе с аккаунтом уходят и оба его
+ * блоба, а ссылки на них знает только отрисованная сущность. Порядок и то,
+ * почему провал уборки не роняет удаление, — в `forgetSecretBlobs`.
+ */
 export function useDeleteRegistrarAccount() {
   return useMutation({
-    mutationFn: (id: number) => apiDelete(`/registrars/accounts/${id}`),
+    mutationFn: async (
+      account: Pick<RegistrarAccount, "id" | "api_key_blob_id" | "api_secret_blob_id">,
+    ) => {
+      await apiDelete(`/registrars/accounts/${account.id}`);
+      await forgetSecretBlobs([account.api_key_blob_id, account.api_secret_blob_id]);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: registrarsKeys.accounts }),
   });
 }

@@ -3,8 +3,27 @@ import { Card, CHd, CTi, CBo, StatCard, Badge, Btn, Modal, Inp, EmptyState, Erro
 import { useRegistrarAccounts, useCreateRegistrarAccount, useTestRegistrarConnection, useUpdateRegistrarAccount, useDeleteRegistrarAccount, RegistrarProvider } from "../api/registrars";
 import { useSystemConfig, useTestNotificationDelivery, useUpdateSystemConfig } from "../api/settings";
 import { describeQueryError } from "../lib/queryError";
+import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
+import { isTauri } from "../lib/runtime";
+import { BLOB_KIND } from "../lib/secretBlob";
+import { useMultiSecretSave } from "../hooks/useSecretSave";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 import RecoveryPhraseCard from "./RecoveryPhraseCard";
+
+/**
+ * Как поля секретов регистратора называются пользователю. Одни и те же на
+ * форме создания и правки: из них хук собирает и «… is required», и текст
+ * ошибки записи, а два набора формулировок разъехались бы.
+ *
+ * `apiSecret` — это НЕ второй ключ: десктоп отдаёт его Namecheap как
+ * whitelisted client IP (`commands/registrars.rs`), поэтому и подпись про IP.
+ */
+const REGISTRAR_SECRETS = { apiKey: "API key", apiSecret: "Client IP" } as const;
+
+/** Client IP получает только Namecheap: Hostiq этот параметр не читает вовсе. */
+function usesClientIp(provider: string): boolean {
+  return provider.toLowerCase() === "namecheap";
+}
 
 export default function Settings(){
   const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
@@ -22,7 +41,9 @@ export default function Settings(){
   
   const [accName, setAccName] = useState("");
   const [apiUser, setApiUser] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // Плейнтексты обоих секретов держит хук, а не страница: он же знает, когда их
+  // стереть, и он же гарантирует «оба блоба → один POST» (см. useSecretSave).
+  const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
 
   const [testing,setTest]=useState<any>({}); const [testRes,setRes]=useState<any>({});
   const [editingRegistrar, setEditingRegistrar] = useState<any | null>(null);
@@ -66,18 +87,40 @@ export default function Settings(){
     });
   };
 
-  const handleAdd = () => {
-    createReg.mutate({
-      provider,
-      name: accName,
-      api_user: apiUser,
-      api_key: apiKey
-    }, {
-      onSuccess: () => {
-        setSA(false);
-        setAccName(""); setApiUser(""); setApiKey("");
-      }
+  const handleAdd = async () => {
+    // На СОЗДАНИИ ключи объявляются всегда: пропущенный ключ значит
+    // `*_blob_id = NULL` — тот самый 200 OK и «registrar account has no
+    // api_key_blob_id» в каждой команде. «Не меняем» бывает только на правке.
+    // Client IP объявляем ровно тогда, когда у формы есть его поле.
+    const ok = await secrets.saveAll({
+      secrets: {
+        apiKey: { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: null },
+        ...(usesClientIp(provider)
+          ? { apiSecret: { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: null } }
+          : {}),
+      },
+      persist: async (blobIds) => {
+        await createReg.mutateAsync({
+          provider,
+          name: accName,
+          api_user: apiUser,
+          api_key_blob_id: blobIds.apiKey,
+          // Спредом, а не `api_secret_blob_id: undefined`: у Hostiq поля быть
+          // не должно вовсе, а ключ со значением undefined — это уже поле.
+          ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
+        });
+      },
     });
+    if (!ok) return;
+    setSA(false);
+    setAccName(""); setApiUser("");
+  };
+
+  // Закрытие формы — единственное место, где набранные секреты надо забыть:
+  // страница смонтирована, модалку она только прячет.
+  const closeAdd = () => {
+    secrets.reset();
+    setSA(false);
   };
   
   return <>
@@ -129,12 +172,13 @@ export default function Settings(){
               {testRes[r.id]&&<Badge variant={testRes[r.id]==="ok"?"green":"red"}>{testRes[r.id]==="ok"?"✓ Connected":"✕ Failed"}</Badge>}
               <Btn size="sm" variant="secondary" onClick={()=>handleTest(r.id)} disabled={testing[r.id]}>{testing[r.id]?"Testing…":"🔌 Test"}</Btn>
               <Btn size="sm" variant="secondary" onClick={() => setEditingRegistrar(r)}>✎ Edit</Btn>
-              <Btn size="sm" variant="danger" onClick={() => { if (!confirm(`Delete registrar ${r.name}?`)) return; deleteReg.mutate(r.id); }}>✕</Btn>
+              {/* Аккаунт целиком, а не id: вместе с ним уходят и оба его блоба. */}
+              <Btn size="sm" variant="danger" onClick={() => { if (!confirm(`Delete registrar ${r.name}?`)) return; deleteReg.mutate(r); }}>✕</Btn>
             </div>
           </div>
         </Card>;
       })}
-      {showAdd&&<Modal title="Add Registrar Account" onClose={()=>setSA(false)} width={480}>
+      {showAdd&&<Modal title="Add Registrar Account" onClose={closeAdd} width={480}>
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={e=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
           <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
@@ -150,21 +194,60 @@ export default function Settings(){
               ))}
             </div>
           </div>
+          {/* В вебе полей секретов нет вовсе, а не «есть, но не сохранятся»:
+              шифрует Rust мастер-ключом из keychain, так что записать их из
+              браузера физически невозможно. Поле, в которое дали набрать ключ,
+              обещало бы сохранение — и обмануло бы уже после того, как ключ
+              набран. */}
           {provider==="hostiq"?<>
             <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label><Inp type="password" value={apiKey} onChange={e=>setApiKey((e.target as any).value)} placeholder="••••••••••••••••"/></div>
+            <div>
+              <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
+              {isTauri() ? (
+                <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••••••••••"/>
+              ) : (
+                <DesktopOnlyNote what="Saving secrets" />
+              )}
+            </div>
           </>:<>
             <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="your_namecheap_username"/></div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-              <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label><Inp type="password" value={apiKey} onChange={e=>setApiKey((e.target as any).value)} placeholder="••••••••"/></div>
-              <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP</label><Inp placeholder="127.0.0.1"/></div>
+              <div>
+                <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
+                {isTauri() ? (
+                  <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••"/>
+                ) : (
+                  <DesktopOnlyNote what="Saving secrets" />
+                )}
+              </div>
+              <div>
+                {/* Поле было нарисовано, но ни к чему не подключено: набранный
+                    IP никуда не уезжал, и аккаунт Namecheap нельзя было
+                    настроить до конца — десктоп шлёт вместо него 127.0.0.1, а
+                    Namecheap отвечает отказом по whitelist. */}
+                <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP</label>
+                {isTauri() ? (
+                  <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value)} placeholder="127.0.0.1"/>
+                ) : (
+                  <DesktopOnlyNote what="Saving secrets" />
+                )}
+              </div>
             </div>
+            <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
           </>}
         </div>
-        <div style={{display:"flex",gap:8,marginTop:22}}>
-          <Btn variant="primary" onClick={handleAdd} disabled={createReg.isPending} style={{flex:1,justifyContent:"center"}}>{createReg.isPending ? "Adding..." : "Add Account"}</Btn>
-        </div>
-        <div style={{marginTop:8}}><Btn variant="secondary" onClick={()=>setSA(false)} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
+        {secrets.error && (
+          <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
+        )}
+        {/* Кнопки создания в вебе нет: без ключа аккаунт регистратора бесполезен
+            целиком, а завести его без ключа — ровно та запись, из-за которой
+            затевался спринт. */}
+        {isTauri() && (
+          <div style={{display:"flex",gap:8,marginTop:22}}>
+            <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>
+          </div>
+        )}
+        <div style={{marginTop:8}}><Btn variant="secondary" onClick={closeAdd} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
       </Modal>}
     </>}
     {tab==="system"&&<Card>
@@ -248,16 +331,83 @@ export default function Settings(){
 function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: () => void }) {
   const [name, setName] = useState(registrar.name || "");
   const [apiUser, setApiUser] = useState(registrar.api_user || "");
-  const [apiKey, setApiKey] = useState("");
+  const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
   const update = useUpdateRegistrarAccount(registrar.id);
+  const hasClientIp = usesClientIp(String(registrar.provider || ""));
+  const saving = secrets.saving || update.isPending;
+
+  const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
+    name: name.trim(),
+    api_user: apiUser.trim() || null,
+    ...(blobIds.apiKey ? { api_key_blob_id: blobIds.apiKey } : {}),
+    ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
+  });
+
+  const handleSave = async () => {
+    // «Оставь пустым, чтобы сохранить текущий» — это и есть `Partial` у
+    // `saveAll`: в `secrets` кладём ТОЛЬКО тронутые поля, у остальных сущность
+    // сохраняет прежний `*_blob_id`. Иначе переименование аккаунта требовало бы
+    // перенабрать и ключ, и IP.
+    const touched = {
+      apiKey: secrets.values.apiKey !== "",
+      apiSecret: hasClientIp && secrets.values.apiSecret !== "",
+    };
+    if (!touched.apiKey && !touched.apiSecret) {
+      update.mutate(patch({}), { onSuccess: onClose });
+      return;
+    }
+    const ok = await secrets.saveAll({
+      secrets: {
+        // Это ПРАВКА: переписываем именно текущие блобы. Новый id оставил бы
+        // аккаунт указывать на прежний секрет — «сохранено», а в API
+        // регистратора едет старый ключ.
+        apiKey: touched.apiKey
+          ? { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: registrar.api_key_blob_id ?? null }
+          : undefined,
+        apiSecret: touched.apiSecret
+          ? { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: registrar.api_secret_blob_id ?? null }
+          : undefined,
+      },
+      persist: async (blobIds) => { await update.mutateAsync(patch(blobIds)); },
+    });
+    if (ok) onClose();
+  };
+
+  // Ошибка хука первее: она уже содержит текст провалившегося PUT, а
+  // `update.error` на том же пути дал бы второй красный блок про то же самое.
+  const error = secrets.error ?? (update.error ? String((update.error as any)?.message || "Could not save account") : null);
+
   return <Modal title={`Edit ${registrar.name}`} onClose={onClose} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key (optional)</label><Inp type="password" value={apiKey} onChange={e=>setApiKey((e.target as any).value)} placeholder="Leave empty to keep current key" /></div>
+      {/* Как и в форме создания: в вебе полей нет, потому что записать секрет
+          оттуда физически нечем. Переименовать аккаунт в вебе при этом можно —
+          для этого секреты и не нужны. */}
+      <div>
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key (optional)</label>
+        {isTauri() ? (
+          <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="Leave empty to keep current key" />
+        ) : (
+          <DesktopOnlyNote what="Saving secrets" />
+        )}
+      </div>
+      {hasClientIp && (
+        <div>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP (optional)</label>
+          {isTauri() ? (
+            <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value)} placeholder="Leave empty to keep current IP" />
+          ) : (
+            <DesktopOnlyNote what="Saving secrets" />
+          )}
+        </div>
+      )}
     </div>
+    {error && (
+      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{error}</div>
+    )}
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      <Btn variant="primary" disabled={update.isPending || !name.trim()} onClick={() => update.mutate({ name: name.trim(), api_user: apiUser.trim() || null, ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) }, { onSuccess: onClose })} style={{flex:1,justifyContent:"center"}}>{update.isPending ? "Saving..." : "Save"}</Btn>
+      <Btn variant="primary" disabled={saving || !name.trim()} onClick={handleSave} style={{flex:1,justifyContent:"center"}}>{saving ? "Saving..." : "Save"}</Btn>
       <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;
