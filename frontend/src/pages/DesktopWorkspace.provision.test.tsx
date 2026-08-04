@@ -89,8 +89,13 @@ function result(id: string, password: string) {
     site_user: `site_${id}`,
     site_path: `/var/www/site_${id}`,
     ssl_issued: true,
-    db: { db_name: `db_${id}`, db_user: `user_${id}`, db_password: password },
-    ftp: { ftp_user: `ftp_${id}`, ftp_password: `${password}-ftp` },
+    db: {
+      status: "created" as const,
+      db_name: `db_${id}`,
+      db_user: `user_${id}`,
+      db_password: password,
+    },
+    ftp: { status: "created" as const, ftp_user: `ftp_${id}`, ftp_password: `${password}-ftp` },
   };
 }
 

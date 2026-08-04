@@ -47,7 +47,12 @@ export const PROVISION_STEP_LABEL: Record<string, string> = {
   firewall_preflight: "Provision: checking the firewall…",
   firewall_warning: "Provision: firewall may block HTTP/HTTPS — SSL can fail",
   ftp: "Provision: creating the FTP account…",
+  // «Уже есть» — не «создано»: пароля у такого аккаунта в ответе нет, и модалка
+  // покажет вместо него объяснение. Шаг называется так же прямо, иначе повтор
+  // выглядел бы как прогон, потерявший пароль.
+  ftp_exists: "Provision: FTP account already exists, keeping it",
   db: "Provision: creating the database…",
+  db_exists: "Provision: database and its user already exist, keeping them",
   ssl_exists: "Provision: certificate already present, skipping issue",
   ssl_dns_check: "Provision: checking DNS before issuing SSL…",
   ssl_skipped_dns: "Provision: SSL skipped — the domain does not resolve here yet",

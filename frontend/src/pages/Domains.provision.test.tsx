@@ -63,8 +63,13 @@ const PROVISION_RESULT = {
   site_user: "example_com",
   site_path: "/var/www/example_com",
   ssl_issued: true,
-  db: { db_name: "example_db", db_user: "example_user", db_password: DB_PASSWORD },
-  ftp: { ftp_user: "example_ftp", ftp_password: FTP_PASSWORD },
+  db: {
+    status: "created" as const,
+    db_name: "example_db",
+    db_user: "example_user",
+    db_password: DB_PASSWORD,
+  },
+  ftp: { status: "created" as const, ftp_user: "example_ftp", ftp_password: FTP_PASSWORD },
 };
 
 function domainRow(id = 42, name = "example.com") {
@@ -169,8 +174,13 @@ function resultWithPassword(id: string, password: string) {
   return {
     ...PROVISION_RESULT,
     domain_id: id,
-    db: { db_name: `db_${id}`, db_user: `user_${id}`, db_password: password },
-    ftp: { ftp_user: `ftp_${id}`, ftp_password: `${password}-ftp` },
+    db: {
+      status: "created" as const,
+      db_name: `db_${id}`,
+      db_user: `user_${id}`,
+      db_password: password,
+    },
+    ftp: { status: "created" as const, ftp_user: `ftp_${id}`, ftp_password: `${password}-ftp` },
   };
 }
 

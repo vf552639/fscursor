@@ -29,22 +29,21 @@ export function ProvisionResultModal({
   position?: number;
   total?: number;
 }) {
+  const noticeStyle = {
+    fontSize: 12.5,
+    color: "#92400e",
+    background: "#fffbeb",
+    border: "1px solid #fde68a",
+    borderRadius: 8,
+    padding: "10px 12px",
+  } as const;
+
   const secretBlock = (
     title: string,
     rows: ReadonlyArray<readonly [string, string]>,
   ) => (
     <div>
-      <div
-        style={{
-          fontSize: 12.5,
-          color: "#92400e",
-          background: "#fffbeb",
-          border: "1px solid #fde68a",
-          borderRadius: 8,
-          padding: "10px 12px",
-          marginBottom: 10,
-        }}
-      >
+      <div style={{ ...noticeStyle, marginBottom: 10 }}>
         {title} — shown once. Not stored anywhere; copy them now.
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -67,6 +66,49 @@ export function ProvisionResultModal({
             <CopyBtn value={value} />
           </div>
         ))}
+      </div>
+    </div>
+  );
+
+  /**
+   * Аккаунт, который этот прогон НЕ создавал.
+   *
+   * Пароля здесь нет и быть не может: его выдал ровно один раз тот прогон,
+   * который аккаунт создал, и больше он не хранится нигде — ни на сервере, ни
+   * в кэше. Сказать это словами обязательно: пустое место на месте пароля
+   * читалось бы как «провижининг что-то потерял», а «shown once» рядом с
+   * пустотой — как «пароль показали, а я проморгал».
+   *
+   * Логин показываем и копируем: он-то как раз нужен, чтобы найти аккаунт в
+   * панели и, если пароль утерян, сменить его там руками. Сами мы его не
+   * меняем: старый лежит в конфиге живого сайта на сервере, и ротация посреди
+   * повторного provision уронила бы работающий сайт.
+   */
+  const existingBlock = (title: string, label: string, value: string) => (
+    <div>
+      <div style={{ ...noticeStyle, marginBottom: 10 }}>
+        {title} — nothing was created and no password is shown. Its password was shown once,
+        when it was created; it is not stored anywhere, so it cannot be shown again. If it is
+        lost, change it in FastPanel.
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ width: 100, fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>
+          {label}
+        </div>
+        <code
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 13,
+            background: "#f3f4f6",
+            padding: "8px 10px",
+            borderRadius: 6,
+            wordBreak: "break-all",
+          }}
+        >
+          {value}
+        </code>
+        <CopyBtn value={value} />
       </div>
     </div>
   );
@@ -109,18 +151,32 @@ export function ProvisionResultModal({
             {result.ssl_error}
           </div>
         ) : null}
-        {result.db
+        {result.db?.status === "created"
           ? secretBlock("Database credentials", [
               ["DB name", result.db.db_name],
               ["DB user", result.db.db_user],
               ["DB password", result.db.db_password],
             ])
           : null}
-        {result.ftp
+        {result.db?.status === "exists"
+          ? existingBlock(
+              `Database ${result.db.db_name} and user ${result.db.db_user} already existed`,
+              "DB user",
+              result.db.db_user,
+            )
+          : null}
+        {result.ftp?.status === "created"
           ? secretBlock("FTP credentials", [
               ["FTP user", result.ftp.ftp_user],
               ["FTP password", result.ftp.ftp_password],
             ])
+          : null}
+        {result.ftp?.status === "exists"
+          ? existingBlock(
+              `FTP account ${result.ftp.ftp_user} already existed`,
+              "FTP user",
+              result.ftp.ftp_user,
+            )
           : null}
       </div>
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>

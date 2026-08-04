@@ -368,13 +368,34 @@ export function useSetNameservers() {
 }
 
 /**
+ * Что стало с базой домена (см. `DbOut` в `commands/provision.rs`).
+ *
+ * Размеченное объединение, а не «пароль может не прийти»: у существующей базы
+ * пароль выдан прошлым прогоном и не хранится больше нигде, поэтому в варианте
+ * `exists` поля пароля НЕТ — обратиться к нему нельзя, не сузив тип. Тот же
+ * приём, которым в фазе 3a закрывались пароли в `BulkProvisionReport`: убрать
+ * поле из типа, а не договориться его не трогать.
+ *
+ * Вместе с `undefined` («базу не просили») состояний три, и все различимы.
+ */
+export type ProvisionDbResult =
+  | { status: "created"; db_name: string; db_user: string; db_password: string }
+  | { status: "exists"; db_name: string; db_user: string };
+
+/** Что стало с FTP-аккаунтом домена (см. `FtpOut` в `commands/provision.rs`). */
+export type ProvisionFtpResult =
+  | { status: "created"; ftp_user: string; ftp_password: string }
+  | { status: "exists"; ftp_user: string };
+
+/**
  * Ответ `provision_domain` (см. `ProvisionResultOut` в `commands/provision.rs`).
  * Опциональные поля Rust опускает целиком, когда их нет; `ftp` приходит только
  * при `site_only: false`.
  *
  * `db.db_password` и `ftp.ftp_password` генерируются на сервере и больше нигде
  * не хранятся: показать один раз в модалке и не писать ни в localStorage, ни в
- * sessionStorage, ни в кэш запросов, ни в лог, ни в URL.
+ * sessionStorage, ни в кэш запросов, ни в лог, ни в URL. Приходят они только в
+ * варианте `created` — то есть только у того прогона, который их и создал.
  */
 export interface ProvisionDesktopResult {
   domain_id: string;
@@ -382,8 +403,8 @@ export interface ProvisionDesktopResult {
   site_path: string;
   ssl_issued?: boolean;
   ssl_error?: string;
-  db?: { db_name: string; db_user: string; db_password: string };
-  ftp?: { ftp_user: string; ftp_password: string };
+  db?: ProvisionDbResult;
+  ftp?: ProvisionFtpResult;
 }
 
 /**

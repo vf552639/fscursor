@@ -6,6 +6,7 @@ import {
   runProvisionDomain,
   summarizeBulkProvision,
   type BulkProvisionDesktopResult,
+  type ProvisionOutcome,
 } from "./domains";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
@@ -42,9 +43,21 @@ function doneItem(id: string, password: string) {
       site_user: `site_${id}`,
       site_path: `/var/www/site_${id}`,
       ssl_issued: true,
-      ftp: { ftp_user: `ftp_${id}`, ftp_password: password },
+      ftp: { status: "created" as const, ftp_user: `ftp_${id}`, ftp_password: password },
     },
   };
+}
+
+/**
+ * Пароль FTP из результата домена — `undefined`, если аккаунт уже существовал.
+ *
+ * Сужение по `status` тут не церемония: у варианта `exists` поля пароля нет в
+ * типе вовсе (см. `ProvisionFtpResult`), и обратиться к нему напрямую — ошибка
+ * компиляции. Это ровно та страховка, ради которой варианты и разведены.
+ */
+function ftpPasswordOf(r: ProvisionOutcome): string | undefined {
+  const ftp = r.result.ftp;
+  return ftp?.status === "created" ? ftp.ftp_password : undefined;
 }
 
 function report(over: Partial<BulkProvisionDesktopResult>): BulkProvisionDesktopResult {
@@ -95,7 +108,7 @@ describe("runBulkProvisionDomains — отчёт вместо ключа иде�
     // уносил его вместе с провалом домена 2.
     expect(out.results).toHaveLength(1);
     expect(out.results[0].domain).toBe("#1");
-    expect(out.results[0].result.ftp?.ftp_password).toBe("PW-1");
+    expect(ftpPasswordOf(out.results[0])).toBe("PW-1");
     // Упавший назван причиной, незапущенный — отличим от упавшего.
     expect(out.failed).toEqual([{ domainId: "2", error: "ssh: connect: refused" }]);
     expect(out.skipped).toEqual(["3"]);
@@ -200,7 +213,7 @@ describe("runBulkProvisionDomains — отчёт вместо ключа иде�
 
     const out = await runBulkProvisionDomains("user-1", ["1", "2"]);
     // Пароли действительно пришли — иначе «нигде нет» ничего не доказывает.
-    expect(out.results.map((r) => r.result.ftp?.ftp_password)).toEqual(SECRETS);
+    expect(out.results.map(ftpPasswordOf)).toEqual(SECRETS);
 
     // ОБЯЗАТЕЛЬНО дождаться, пока заявки гейта осядут. `release()` вызывается в
     // `finally`, но их `mutationFn` дорезолвливается микротаском позже, и до
