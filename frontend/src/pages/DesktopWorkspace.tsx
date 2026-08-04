@@ -52,7 +52,12 @@ export const PROVISION_STEP_LABEL: Record<string, string> = {
   // выглядел бы как прогон, потерявший пароль.
   ftp_exists: "Provision: FTP account already exists, keeping it",
   db: "Provision: creating the database…",
-  db_exists: "Provision: database and its user already exist, keeping them",
+  // Именно про ПОЛЬЗОВАТЕЛЯ, и только про него: шаг шлётся на любой
+  // `AlreadyExists`, а решение принимается по пользователю — сама база могла
+  // быть снесена руками. Точная новость про базу приходит модалкой; тост,
+  // говорящий «database and its user already exist», через секунду
+  // опровергался бы ею же.
+  db_exists: "Provision: database user already exists, keeping it",
   ssl_exists: "Provision: certificate already present, skipping issue",
   ssl_dns_check: "Provision: checking DNS before issuing SSL…",
   ssl_skipped_dns: "Provision: SSL skipped — the domain does not resolve here yet",

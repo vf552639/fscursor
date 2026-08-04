@@ -133,15 +133,25 @@ export function ProvisionResultModal({
     </div>
   );
 
+  // Есть ли в этой модалке то, что исчезнет вместе с ней. Пароли приходят
+  // только в варианте `created`; у `exists` их нет по типу.
+  const hasSecrets = result.db?.status === "created" || result.ftp?.status === "created";
+
   return (
-    // `closeOnBackdrop={false}`: `onClose` здесь — это `dismiss`, то есть
-    // уничтожение единственной копии паролей. Клик мимо кнопки Done не имеет
-    // права стоить FTP-аккаунта, войти в который уже никто не сможет.
+    // `closeOnBackdrop` выключен ровно тогда, когда `onClose` уничтожает
+    // единственную копию пароля: клик мимо кнопки Done не имеет права стоить
+    // FTP-аккаунта, войти в который уже никто не сможет.
+    //
+    // Но когда терять нечего — а на повторном bulk по два десятка сделанных
+    // доменов это вся очередь целиком, — запрет превращается в двадцать
+    // обязательных кликов Done подряд. Цена такой «защиты» не нулевая: она учит
+    // прокликивать не глядя как раз в той очереди, где следующей может оказаться
+    // модалка с настоящим паролем.
     <Modal
       title={`Provisioned ${domain}`}
       onClose={onClose}
       width={520}
-      closeOnBackdrop={false}
+      closeOnBackdrop={!hasSecrets}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {total > 1 && (

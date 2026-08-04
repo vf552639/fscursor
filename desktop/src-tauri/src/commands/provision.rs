@@ -94,17 +94,33 @@ pub enum FtpOut {
 }
 
 impl DbOut {
-    /// Имена базы и пользователя — они одинаково правдивы в обоих вариантах,
-    /// и write-back обязан записать их даже там, где ничего не создавал:
-    /// прошлый прогон мог не дописать их на сервер.
-    fn names(&self) -> (&str, &str) {
+    /// Имя пользователя БД — оно правдиво в обоих вариантах: он либо создан
+    /// этим прогоном, либо существовал до него. Write-back записывает его и
+    /// там, где ничего не создавал: прошлый прогон мог не дописать его на
+    /// сервер (write-back best-effort), и повтор обязан эту дыру закрывать.
+    fn db_user(&self) -> &str {
         match self {
-            DbOut::Created {
-                db_name, db_user, ..
-            }
-            | DbOut::Exists {
-                db_name, db_user, ..
-            } => (db_name, db_user),
+            DbOut::Created { db_user, .. } | DbOut::Exists { db_user, .. } => db_user,
+        }
+    }
+
+    /// Имя базы — ТОЛЬКО если база действительно есть.
+    ///
+    /// В варианте `Exists { database_exists: Some(false) }` её нет: гард стоит
+    /// на пользователе, и базу, снесённую руками, провижининг не досоздаёт.
+    /// Записать туда имя значило бы показать его в карточке домена рядом с
+    /// модалкой, которая на том же экране говорит, что базы нет. `None` здесь
+    /// означает «поле не трогаем» (сервер читает `exclude_unset`): стереть
+    /// чужое прошлое значение мы тоже не вправе — знания, что это то же имя, у
+    /// нас нет.
+    fn db_name_if_present(&self) -> Option<&str> {
+        match self {
+            DbOut::Created { db_name, .. } => Some(db_name),
+            DbOut::Exists {
+                db_name,
+                database_exists,
+                ..
+            } => (*database_exists != Some(false)).then_some(db_name.as_str()),
         }
     }
 }
@@ -317,13 +333,10 @@ const DB_STEP_EXISTS: &str = "db_exists";
 /// Подставить пароль варианту `Exists` тут нечем: поля нет.
 fn db_outcome(created: DbCreation) -> (DbOut, &'static str) {
     match created {
-        // `output` (сырой вывод команды) отбрасываем здесь же: в fallback-ветке
-        // это вывод mysql, в котором повторён CREATE USER ... IDENTIFIED BY.
         DbCreation::Created(CreateDbResult {
             db_name,
             db_user,
             db_password,
-            ..
         }) => (
             DbOut::Created {
                 db_name,
@@ -347,14 +360,12 @@ fn db_outcome(created: DbCreation) -> (DbOut, &'static str) {
     }
 }
 
-/// То же для FTP-аккаунта. `output` из `CreateFtpResult` не переносится:
-/// пользы в нём нет, а гарантий, что FastPanel не повторит в нём пароль, — тоже.
+/// То же для FTP-аккаунта.
 fn ftp_outcome(created: FtpCreation) -> (FtpOut, &'static str) {
     match created {
         FtpCreation::Created(CreateFtpResult {
             ftp_user,
             ftp_password,
-            ..
         }) => (
             FtpOut::Created {
                 ftp_user,
@@ -417,7 +428,6 @@ async fn run_provision_steps(
                 CreateSiteResult {
                     site_user: u.clone(),
                     site_path: format!("/var/www/{u}/data/www/{domain_name}"),
-                    output: "already exists".into(),
                 },
                 true,
             )
@@ -688,17 +698,19 @@ fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
                 SSL_STATUS_ERROR.to_string()
             }
         }),
-        // Имена базы уезжают и тогда, когда она уже существовала: это правда о
-        // домене, а не отчёт о работе. Прошлый прогон мог их не записать —
-        // write-back best-effort, — и повтор обязан эту дыру закрывать.
+        // Имена уезжают и тогда, когда база уже существовала: это правда о
+        // домене, а не отчёт о работе, и прошлый прогон мог их не записать.
+        // Но ровно настолько, насколько это правда: имя базы, которой нет,
+        // не пишем (см. `db_name_if_present`).
         db_name: r
             .db
             .as_ref()
-            .and_then(|d| fit_or_omit(id, "db_name", d.names().0, MAX_DB_NAME)),
+            .and_then(|d| d.db_name_if_present())
+            .and_then(|n| fit_or_omit(id, "db_name", n, MAX_DB_NAME)),
         db_user: r
             .db
             .as_ref()
-            .and_then(|d| fit_or_omit(id, "db_user", d.names().1, MAX_DB_USER)),
+            .and_then(|d| fit_or_omit(id, "db_user", d.db_user(), MAX_DB_USER)),
         // Провижининг NS не трогает: их ставит `registrar_set_nameservers`.
         ns_status: None,
         last_provision_error: Some(None),
@@ -1846,6 +1858,12 @@ mod tests {
         assert_eq!(v["db"]["db_name"], "u1_db");
         // Поля пароля нет вовсе — не пустая строка, которую фронт показал бы под
         // подписью «скопируйте сейчас».
+        //
+        // Ассерт не вакуумный, в отличие от снятого такого же про `output`:
+        // `db_password` в этот вариант можно ДОБАВИТЬ обратно (заполнив хоть
+        // пустой строкой, хоть «последним известным»), и тогда он покраснеет.
+        // `output` же не существует ни в одном варианте, и вернуть его — это
+        // изменить тип, а не реализацию.
         assert!(v["db"].get("db_password").is_none(), "{v}");
     }
 
@@ -1889,6 +1907,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["ftp"]["status"], "exists");
         assert_eq!(v["ftp"]["ftp_user"], "u1_ftp");
+        // Про «не вакуумный» — см. соседний тест про БД.
         assert!(v["ftp"].get("ftp_password").is_none(), "{v}");
     }
 
@@ -1948,10 +1967,6 @@ mod tests {
             db_name: "u1_db".into(),
             db_user: "u1_dbu".into(),
             db_password: "dbP4ssw0rd".into(),
-            // Сырой вывод команды повторяет argv с паролем. Что он не доедет до
-            // отчёта, здесь НЕ утверждается: в `DbOut` такого поля нет, и
-            // ассерт был бы верен при любой реализации. Гарантия структурная.
-            output: "created with --password=dbP4ssw0rd".into(),
         }));
         assert_eq!(step, "db");
         let v = serde_json::to_value(&out).unwrap();
@@ -1966,16 +1981,46 @@ mod tests {
         assert_eq!(kept_step, "ftp_exists");
         let v = serde_json::to_value(&kept).unwrap();
         assert_eq!(v["status"], "exists");
+        // Про «не вакуумный» — см. `a_pre_existing_database_is_reported_as_such…`.
         assert!(v.get("ftp_password").is_none(), "{v}");
 
         let (made, made_step) = ftp_outcome(FtpCreation::Created(CreateFtpResult {
             ftp_user: "ftp_x".into(),
             ftp_password: "ftpP4ssw0rd".into(),
-            output: "created with --password=ftpP4ssw0rd".into(),
         }));
         assert_eq!(made_step, "ftp");
         let v = serde_json::to_value(&made).unwrap();
         assert_eq!(v["ftp_password"], "ftpP4ssw0rd");
+    }
+
+    // Базу снесли руками, пользователь остался. Записать `db_name` значило бы
+    // показать в карточке домена имя базы, которой нет, — при том что модалка
+    // на том же экране говорит обратное. Логин при этом правдив: он есть.
+    #[test]
+    fn domain_write_back_body_does_not_record_a_database_that_is_gone() {
+        let mut r = full_result();
+        r.db = Some(DbOut::Exists {
+            db_name: "u1_db".into(),
+            db_user: "u1_dbu".into(),
+            database_exists: Some(false),
+        });
+        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        assert!(!body.contains("db_name"), "{body}");
+        assert!(body.contains("\"db_user\":\"u1_dbu\""), "{body}");
+    }
+
+    // А неизвестность — не повод стирать: проверка молчала, и «базы нет» мы не
+    // утверждаем. Имя пишем, как и раньше: прошлый прогон мог его не записать.
+    #[test]
+    fn domain_write_back_body_still_records_an_unverified_database() {
+        let mut r = full_result();
+        r.db = Some(DbOut::Exists {
+            db_name: "u1_db".into(),
+            db_user: "u1_dbu".into(),
+            database_exists: None,
+        });
+        let body = serde_json::to_string(&domain_write_back_body(&r)).unwrap();
+        assert!(body.contains("\"db_name\":\"u1_db\""), "{body}");
     }
 
     // ---- массовый прогон ----------------------------------------------------

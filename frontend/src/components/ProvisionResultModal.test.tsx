@@ -188,6 +188,46 @@ describe("ProvisionResultModal", () => {
     expect(screen.getByText(/FTP account example_ftp already existed/i)).toBeTruthy();
   });
 
+  // Обратная сторона: когда терять нечего, запрет на клик мимо окна — это
+  // двадцать обязательных Done подряд на повторном bulk. Так учатся
+  // прокликивать не глядя — ровно в той очереди, где следующей может быть
+  // модалка с настоящим паролем.
+  it("закрывается кликом в затемнение, когда терять нечего", () => {
+    const onClose = vi.fn();
+    const { container } = render(
+      <ProvisionResultModal
+        domain="example.com"
+        result={{
+          ...RESULT,
+          db: { status: "exists", db_name: "example_db", db_user: "example_user" },
+          ftp: { status: "exists", ftp_user: "example_ftp" },
+        }}
+        onClose={onClose}
+      />,
+    );
+
+    fireEvent.click(container.firstElementChild as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  // Но одного созданного аккаунта в модалке достаточно, чтобы запрет вернулся.
+  it("не закрывается кликом в затемнение, если хоть один пароль показан", () => {
+    const onClose = vi.fn();
+    const { container } = render(
+      <ProvisionResultModal
+        domain="example.com"
+        result={{
+          ...RESULT,
+          db: { status: "exists", db_name: "example_db", db_user: "example_user" },
+        }}
+        onClose={onClose}
+      />,
+    );
+
+    fireEvent.click(container.firstElementChild as HTMLElement);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   // Пачка результатов от одного bulk-прогона: без счётчика пользователь не
   // знает ни сколько паролей ещё впереди, ни что очередь вообще есть.
   it("называет своё место в очереди показов, когда их несколько", () => {

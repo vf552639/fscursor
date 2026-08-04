@@ -50,26 +50,30 @@ pub const SSL_ISSUE_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 /// за exec'ом выше, поэтому в бюджет тишины сессии входит вместе с ним.
 pub const SSL_ISSUE_SETTLE: Duration = Duration::from_secs(5);
 
+/// Сырой вывод команд сюда НЕ кладётся, и это не забывчивость: у `create`-команд
+/// FastPanel в argv стоит сгенерированный пароль, а при ошибке они повторяют
+/// argv в тексте. Пока поле существовало, оно было мёртвым (читателей ноль), но
+/// структуры `Serialize`, и первый же, кто вернул бы такую структуру из
+/// Tauri-команды напрямую, отдал бы пароль во фронт. Нет поля — нет пути.
 #[derive(Serialize)]
 pub struct CreateSiteResult {
     pub site_user: String,
     pub site_path: String,
-    pub output: String,
 }
 
+/// Про отсутствующий `output` — см. `CreateSiteResult`.
 #[derive(Serialize)]
 pub struct CreateFtpResult {
     pub ftp_user: String,
     pub ftp_password: String,
-    pub output: String,
 }
 
+/// Про отсутствующий `output` — см. `CreateSiteResult`.
 #[derive(Serialize)]
 pub struct CreateDbResult {
     pub db_name: String,
     pub db_user: String,
     pub db_password: String,
-    pub output: String,
 }
 
 #[derive(Serialize)]
@@ -215,7 +219,6 @@ pub async fn create_site(
     Ok(CreateSiteResult {
         site_user: site_user.clone(),
         site_path: format!("/var/www/{site_user}/data/www/{domain}"),
-        output,
     })
 }
 
@@ -233,19 +236,43 @@ const ALREADY_EXISTS_MARKERS: [&str; 5] = [
     "error 1396",
 ];
 
+/// Признак того, что на занятое имя пожаловался именно `CREATE USER`.
+///
+/// Отдельный, УЖЕ маркеров выше, и не по вкусу. `build_create_db_sql` шлёт в
+/// один `mysql -e` четыре оператора; mysql останавливается на первой ошибке, а
+/// вывод мы видим целиком и не знаем, чей он. Общие маркеры принадлежали бы
+/// любому из четырёх: `GRANT`, упавший с `ERROR 1062 Duplicate entry`, читался
+/// бы как «пользователь уже был» — и функция выбросила бы пароль пользователя,
+/// созданного двумя операторами раньше, а модалка сказала бы про него «пароль
+/// показан один раз при создании». Человек ушёл бы искать в записях пароль,
+/// которого там нет.
+///
+/// `ER_CANNOT_USER` (1396) выдаёт только `CREATE USER`/`DROP USER` — атрибуция
+/// однозначна. Всё остальное на этой ветке уходит громким `opaque_exit`.
+const DB_USER_TAKEN_MARKER: &str = "error 1396";
+
+/// Пожаловался ли `CREATE USER` на занятое имя. Про чтение вывода — см. ниже.
+fn db_user_already_taken(output: &str) -> bool {
+    output.to_lowercase().contains(DB_USER_TAKEN_MARKER)
+}
+
 /// Похоже ли, что команда упала на «уже существует».
 ///
-/// **Это эвристика по тексту, а не проверка.** Она — вторая линия обороны ровно
-/// там, где первой (`ftp_exists`/`db_exists`) не было: CLI не знает подкоманды
-/// `list`, mysql не пустил к `mysql.user`. Без неё повтор упирался бы в
+/// **Это эвристика по тексту, а не проверка**, и она — про FTP-аккаунт: вторая
+/// линия обороны ровно там, где первой (`ftp_exists`) не было, потому что CLI
+/// не знает подкоманды `list`. У БД своя, ещё более узкая
+/// (`db_user_already_taken`): там вывод общий на четыре оператора батча. Без неё повтор упирался бы в
 /// безликий `opaque_exit` с одним кодом возврата, и пользователь читал бы
 /// «ошибка на сервере» там, где на самом деле всё уже сделано.
 ///
 /// Цена, которую она стоит, — ложное срабатывание: непрофильный сбой с такой
 /// строкой в тексте будет показан как «аккаунт уже существовал, оставили», и
 /// пользователь уйдёт уверенным, что доступ у него есть, тогда как аккаунта
-/// нет. Поэтому маркеры узкие, а спрашивают её ТОЛЬКО когда существование не
-/// установлено (см. вызовы): ответившей проверке веры больше, чем совпадению
+/// нет. Сузить её так же, как у БД, не выходит: у `ftp_account create` в argv
+/// и сайт, и логин, и пароль, а жалоба на занятый каталог или квоту относится
+/// к аккаунту не меньше, чем жалоба на занятый логин, — своего однозначного
+/// кода вроде 1396 у FastPanel нет. Поэтому маркеры узкие, а спрашивают её
+/// ТОЛЬКО когда существование не установлено (см. вызовы): ответившей проверке веры больше, чем совпадению
 /// подстроки, и её «нет» отправляет сбой в `opaque_exit`, как и раньше.
 /// Не превращать в первичную проверку и не расширять маркеры «на всякий
 /// случай»: каждый расширенный маркер — это ещё один способ соврать про
@@ -259,14 +286,31 @@ fn looks_like_already_exists(output: &str) -> bool {
     ALREADY_EXISTS_MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// Отрезать всё до первой `[` или `{`.
+///
+/// `SshSession::exec` сливает stdout и stderr в один поток, поэтому любой
+/// баннер, варнинг или строка от sudo, напечатанные перед JSON, ломают разбор
+/// целиком — а «не разобрался» уводит проверку в текстовый фолбэк, то есть в
+/// самое слабое её место. Дешевле срезать шапку, чем потом гадать по таблице.
+fn json_slice(raw: &str) -> &str {
+    match raw.find(['[', '{']) {
+        Some(i) => &raw[i..],
+        None => raw,
+    }
+}
+
 /// Логины FTP-аккаунтов из JSON-вывода `ftp_account list --json`.
 ///
 /// `None` — «разобрать не удалось», и это НЕ то же самое, что «аккаунтов нет».
-/// Непустой список, из которого не достался ни один логин, тоже `None`: формат
-/// вывода FastPanel не документирован, и молча решить «аккаунта нет» значило бы
-/// пойти создавать поверх существующего.
+/// Список, из которого достались НЕ ВСЕ логины, — тоже `None`: формат вывода
+/// FastPanel не документирован, и запись с ключом вне нашей четвёрки означает,
+/// что мы читаем его неправильно. Молча решить «аккаунта нет» по такому чтению
+/// значило бы пойти создавать поверх существующего — а это ровно тот дефект,
+/// ради которого функция и написана. Пропущенных записей нам не видно, поэтому
+/// сравниваем длины: их равенство — единственное доказательство, что понят весь
+/// список, а не его часть.
 fn ftp_logins_from_json(raw: &str) -> Option<Vec<String>> {
-    let mut v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut v: serde_json::Value = serde_json::from_str(json_slice(raw)).ok()?;
     if let Some(obj) = v.as_object_mut() {
         for key in ["result", "ftp_accounts", "accounts", "data"] {
             if let Some(inner) = obj.get(key).cloned() {
@@ -288,10 +332,44 @@ fn ftp_logins_from_json(raw: &str) -> Option<Vec<String>> {
             logins.push(l.trim().to_string());
         }
     }
-    if logins.is_empty() && !arr.is_empty() {
+    if logins.len() != arr.len() {
         return None;
     }
     Some(logins)
+}
+
+/// Разделитель колонок: два и более пробела, табы, вертикальная черта.
+///
+/// Тот же, что у `parse_sites_from_text_table`, и по той же причине, что важна
+/// здесь вдвойне: ОДИНОЧНЫЙ пробел разделителем не считается. Иначе таблицей
+/// выглядит любая фраза из двух слов — например `Unknown command 'ftp_account'.
+/// See --help`, которую печатает сборка без этой подкоманды, — и проверка
+/// уверенно отвечает «аккаунта нет» по выводу, которого не поняла.
+fn table_cell_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s{2,}|\t+|\|").unwrap())
+}
+
+fn cells(line: &str) -> impl Iterator<Item = &str> {
+    table_cell_re()
+        .split(line.trim())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+}
+
+/// Похож ли вывод на таблицу: есть ли хоть одна строка, которую РАЗДЕЛИТЕЛЬ
+/// колонок (не пробел, см. `table_cell_re`) режет минимум на две ячейки.
+///
+/// Без этой проверки отрицательный ответ текстового фолбэка ничего не стоит.
+/// Наличия подкоманды `ftp_account list` в FastPanel CLI никто не гарантировал:
+/// сборка без неё печатает `Unknown command 'ftp_account'. See --help` и выходит
+/// с кодом 0. Ни одна «ячейка» такой строки логину не равна — и проверка
+/// уверенно отвечала «аккаунта нет» по выводу, которого не поняла. Дальше хуже:
+/// уверенное «нет» ещё и отключает вторую линию обороны (её спрашивают только
+/// при `None`), то есть путь «не понял и признался» был СТРОЖЕ безопаснее, чем
+/// «не понял и ответил».
+fn looks_like_a_table(output: &str) -> bool {
+    output.lines().any(|line| cells(line).count() >= 2)
 }
 
 /// Есть ли в текстовой таблице колонка, равная логину.
@@ -300,10 +378,7 @@ fn ftp_logins_from_json(raw: &str) -> Option<Vec<String>> {
 /// подстрокой и в `ftp_shop_old`, и в путь `/var/www/ftp_shop`, и «нашли»
 /// означало бы не создать аккаунт вовсе.
 fn text_lists_login(output: &str, login: &str) -> bool {
-    let sep = Regex::new(r"[\s|,]+").unwrap();
-    output
-        .lines()
-        .any(|line| sep.split(line).map(str::trim).any(|cell| cell == login))
+    output.lines().any(|line| cells(line).any(|cell| cell == login))
 }
 
 /// Существует ли FTP-аккаунт с таким логином. `None` — ответить не смогли.
@@ -332,7 +407,9 @@ pub async fn ftp_exists(
     }
     let text_cmd = format!("{} ftp_account list", q(fp_path));
     let (c2, o2) = s.run(&text_cmd, Duration::from_secs(30)).await?;
-    if c2 == 0 && !o2.trim().is_empty() {
+    // «Непустой вывод с кодом 0» — недостаточное основание, чтобы поверить
+    // отрицательному ответу: см. `looks_like_a_table`. Не таблица — `None`.
+    if c2 == 0 && looks_like_a_table(&o2) {
         return Ok(Some(text_lists_login(&o2, login)));
     }
     Ok(None)
@@ -387,7 +464,6 @@ pub async fn create_ftp_account(
     Ok(FtpCreation::Created(CreateFtpResult {
         ftp_user,
         ftp_password: password,
-        output,
     }))
 }
 
@@ -548,7 +624,7 @@ pub enum DbCreation {
 /// которого у существующего пользователя нет: модалка показывала «скопируйте
 /// сейчас, второй раз не покажем» строку, не подходящую ни к чему. Без него тот
 /// же случай — громкая ошибка `ER_CANNOT_USER` (1396), которую разбирает
-/// `looks_like_already_exists`.
+/// `db_user_already_taken`.
 ///
 /// У базы `IF NOT EXISTS` остаётся намеренно: существующая база с отсутствующим
 /// пользователем — это недоделанная прошлым прогоном пара, и её надо доделать,
@@ -610,13 +686,12 @@ pub async fn create_database(
         q(&database_user),
         q(&database_password),
     );
-    let (code, out) = s.run(&fp_cmd, Duration::from_secs(60)).await?;
+    let (code, _) = s.run(&fp_cmd, Duration::from_secs(60)).await?;
     if code == 0 {
         return Ok(DbCreation::Created(CreateDbResult {
             db_name: database_name,
             db_user: database_user,
             db_password: database_password,
-            output: out,
         }));
     }
 
@@ -630,10 +705,12 @@ pub async fn create_database(
         // проверка выше не отработала (`None`), а пользователь на самом деле
         // есть, — и тогда это не ошибка, а «уже было».
         //
-        // `presence.is_none()` — то же сужение эвристики, что и у FTP: если
+        // Два сужения сразу. `presence.is_none()` — то же, что у FTP: если
         // проверка ответила «пользователя нет», её слово весомее совпадения
-        // подстроки, и сбой уходит громким `opaque_exit`.
-        if presence.is_none() && looks_like_already_exists(&fb_out) {
+        // подстроки. И маркер здесь свой, `db_user_already_taken`: вывод —
+        // общий на четыре оператора батча, и приписывать `CREATE USER` чужую
+        // жалобу нельзя (см. `DB_USER_TAKEN_MARKER`).
+        if presence.is_none() && db_user_already_taken(&fb_out) {
             return Ok(DbCreation::AlreadyExists(ExistingDb {
                 db_name: database_name,
                 db_user: database_user,
@@ -648,7 +725,6 @@ pub async fn create_database(
         db_name: database_name,
         db_user: database_user,
         db_password: database_password,
-        output: if fb_out.is_empty() { out } else { fb_out },
     }))
 }
 
@@ -1041,9 +1117,24 @@ fn normalize_site_row(raw: &serde_json::Value) -> Option<SiteInfo> {
     })
 }
 
+fn site_table_header_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\b(domain|site|owner|php)\b").unwrap())
+}
+
+fn site_table_sep_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s{2,}|\t+|\|").unwrap())
+}
+
+fn site_path_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^/var/www/([^/]+)/data/www/([^/]+)$").unwrap())
+}
+
 fn parse_sites_from_text_table(output: &str) -> Vec<SiteInfo> {
-    let header = Regex::new(r"\b(domain|site|owner|php)\b").unwrap();
-    let sep = Regex::new(r"\s{2,}|\t+|\|").unwrap();
+    let header = site_table_header_re();
+    let sep = site_table_sep_re();
     let mut sites = Vec::new();
     for ln in output.lines() {
         let line = ln.trim();
@@ -1082,7 +1173,7 @@ fn parse_sites_from_text_table(output: &str) -> Vec<SiteInfo> {
 }
 
 fn parse_sites_from_paths(output: &str) -> Vec<SiteInfo> {
-    let re = Regex::new(r"^/var/www/([^/]+)/data/www/([^/]+)$").unwrap();
+    let re = site_path_re();
     let mut rows = Vec::new();
     for ln in output.lines() {
         let path = ln.trim();
@@ -1327,6 +1418,30 @@ mod tests {
         assert!(matches!(out, DbCreation::AlreadyExists(_)));
     }
 
+    // Батч `CREATE DATABASE; CREATE USER; GRANT; FLUSH` уходит одним `mysql -e`,
+    // и вывод у него общий. Упавший GRANT — не «пользователь уже был»:
+    // пользователь создан двумя операторами раньше, и его СВЕЖИЙ пароль в этот
+    // момент живой. Выбросить его и сказать «пароль показан при создании»
+    // значит отправить человека искать в записях то, чего там нет.
+    #[tokio::test]
+    async fn a_failed_grant_is_not_evidence_that_the_user_already_existed() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 1, "ERROR 1045: Access denied"),
+            ("database create", 1, "failed"),
+            (
+                "mysql -e",
+                1,
+                "ERROR 1062 (23000) at line 1: Duplicate entry 'x' for key 'PRIMARY'",
+            ),
+        ]);
+
+        let msg = match create_database(&mut s, FP, "example.com", None, None).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("чужая жалоба приписана CREATE USER"),
+        };
+        assert!(msg.contains("create_database exit 1"), "{msg}");
+    }
+
     // Настоящий провал остаётся провалом, и его вывод по-прежнему не выходит
     // наружу: mysql повторяет в ошибке весь запрос вместе с IDENTIFIED BY.
     #[tokio::test]
@@ -1491,6 +1606,59 @@ mod tests {
         assert!(msg.contains("create_ftp_account exit 2"), "{msg}");
     }
 
+    // Сборка без подкоманды `ftp_account` печатает «Unknown command …» и выходит
+    // с кодом 0. Это не таблица и не ответ «аккаунта нет»: поверить ему значит
+    // пойти создавать поверх живого аккаунта — да ещё и с отключённой второй
+    // линией обороны, которую спрашивают только при `None`.
+    #[tokio::test]
+    async fn an_unknown_command_message_is_not_an_answer() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 127, "unknown option --json"),
+            (
+                "ftp_account list",
+                0,
+                "Unknown command 'ftp_account'. See --help",
+            ),
+        ]);
+        assert_eq!(ftp_exists(&mut s, FP, "ftp_example").await.unwrap(), None);
+    }
+
+    // …и весь путь целиком: непонятый вывод не должен кончаться созданием
+    // поверх существующего аккаунта. Здесь `create` жалуется на дубликат —
+    // раньше эту жалобу никто не слушал, потому что проверка «ответила».
+    #[tokio::test]
+    async fn a_misread_list_does_not_disable_the_second_line_of_defence() {
+        let mut s = FakeServer::new(&[
+            ("ftp_account list --json", 127, "unknown option --json"),
+            ("ftp_account list", 0, "Unknown command 'ftp_account'."),
+            ("ftp_account create", 1, "login already exists"),
+        ]);
+
+        let out = create_ftp_account(&mut s, FP, "example.com").await.unwrap();
+        assert!(matches!(out, FtpCreation::AlreadyExists { .. }));
+    }
+
+    // Список разобран частично: во второй записи ключ вне нашей четвёрки. Это
+    // значит, что формат мы читаем неправильно, — а «логина нет» по неправильно
+    // прочитанному списку и есть создание поверх существующего.
+    #[test]
+    fn a_partially_understood_list_is_not_understood() {
+        assert!(
+            ftp_logins_from_json(r#"[{"login":"ftp_other"},{"id":7,"account":"ftp_example"}]"#)
+                .is_none()
+        );
+    }
+
+    // `exec` сливает stdout и stderr: баннер перед JSON ломал разбор целиком и
+    // уводил проверку в текстовый фолбэк — то есть в самое слабое её место.
+    #[test]
+    fn a_banner_in_front_of_json_does_not_break_the_parse() {
+        assert_eq!(
+            ftp_logins_from_json("Warning: locale not set\n[{\"login\":\"ftp_a\"}]"),
+            Some(vec!["ftp_a".to_string()])
+        );
+    }
+
     // Пустой список — это ответ «аккаунтов нет», а не «не смогли прочитать».
     #[tokio::test]
     async fn an_empty_ftp_list_means_the_login_is_free() {
@@ -1597,5 +1765,33 @@ mod tests {
         assert!(looks_like_already_exists("ERROR 1062: Duplicate entry 'x' for key"));
         assert!(looks_like_already_exists("ERROR 1396 (HY000) Operation CREATE USER failed"));
         assert!(looks_like_already_exists("Login already exists"));
+    }
+
+    // У БД маркер свой и уже: вывод общий на четыре оператора батча, и жалоба
+    // соседа не должна приписываться `CREATE USER`. 1396 — ER_CANNOT_USER,
+    // его выдаёт только он.
+    #[test]
+    fn the_database_marker_belongs_to_create_user_alone() {
+        assert!(db_user_already_taken(
+            "ERROR 1396 (HY000) at line 1: Operation CREATE USER failed for 'u'@'localhost'"
+        ));
+        assert!(!db_user_already_taken(
+            "ERROR 1062 (23000): Duplicate entry 'x' for key 'PRIMARY'"
+        ));
+        assert!(!db_user_already_taken("ERROR: database already exists"));
+    }
+
+    // Таблица — это строка, которую режет РАЗДЕЛИТЕЛЬ колонок. Фраза из слов
+    // через одиночный пробел таблицей не является: именно так выглядит и
+    // `Unknown command …`, и любая другая ошибка, а цена ошибки в эту сторону —
+    // лишний `None`, в обратную — создание поверх живого аккаунта.
+    #[test]
+    fn a_sentence_is_not_a_table() {
+        assert!(looks_like_a_table("LOGIN | SITE\nftp_a | a.com"));
+        assert!(looks_like_a_table("ftp_a\tsite.com"));
+        assert!(looks_like_a_table("ftp_a    site.com"));
+        assert!(!looks_like_a_table("Unknown command 'ftp_account'. See --help"));
+        assert!(!looks_like_a_table("ftp_a\nftp_b"));
+        assert!(!looks_like_a_table("   "));
     }
 }

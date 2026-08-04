@@ -23,6 +23,20 @@ describe("таблицы шагов прогресса", () => {
     }
   });
 
+  // Шаг `db_exists` шлётся на ЛЮБОЙ `AlreadyExists`, а гард стоит на
+  // пользователе БД: сама база могла быть дропнута руками. Тост, обещающий, что
+  // база на месте, опровергался бы модалкой через секунду — и прав был бы не он.
+  it("шаг db_exists не обещает, что база на месте", () => {
+    const label = PROVISION_STEP_LABEL.db_exists.toLowerCase();
+    expect(label).toContain("user");
+    expect(label).not.toMatch(/database (and|is|already)/);
+  });
+
+  it("знает шаги существующих БД и FTP-аккаунта", () => {
+    expect(PROVISION_STEP_LABEL.db_exists).toBeTruthy();
+    expect(PROVISION_STEP_LABEL.ftp_exists).toBeTruthy();
+  });
+
   it("покрывают все шаги, которые шлёт Rust по каналу fastpanel:progress", () => {
     for (const step of [
       "ssh_connect",
