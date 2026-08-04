@@ -22,24 +22,20 @@ libsodium-биндинг было бы вдвойне плохо: ассерт �
 `requirements.txt` кормит прод-образ — примитив расшифровки оказался бы в одном
 `import` от сервиса, чей весь контракт «он не умеет расшифровывать».
 
-Чего этот файл НЕ проверяет: что плейнтекст-поле `ssh_password` в теле запроса
-**отвергается**. Сегодня схемы живут с `extra="ignore"` и молча его глотают;
-громкий отказ (`extra="forbid"`) — фаза 2 плана
-`plans/2026-08-04-sprint4-secret-write-path.md`. Здесь утверждается только, что
-поле никуда не приземляется.
+Фаза 2 включена: схемы `ServerCreate/Update`, `CloudflareAccount*` и
+`RegistrarAccount*` живут с `extra="forbid"`, и плейнтекст-поле в теле — это
+`422 {"detail":[{"type":"extra_forbidden","loc":["body","ssh_password"],…}]}`,
+а не тихо проглоченное поле. Доказывает это `test_plaintext_secret_field_is_*`
+ниже — по шести схемам, по одной на каждую: `forbid` наследованием не
+раздаётся, снятие его с одной схемы должен ловить отдельный ассерт.
 
-ВНИМАНИЕ ТОМУ, КТО ВКЛЮЧИТ ФАЗУ 2. С `extra="forbid"` на `ServerCreate` оба
-POST начнут отвечать `422 {"detail":[{"type":"extra_forbidden",
-"loc":["body","ssh_password"], ...}]}`, и оба теста покраснеют на «422 != 201»
-— сообщением, к их названиям отношения не имеющим. Правильная правка: заменить
-ассерт-приёмник на `422` и `loc == ["body", "ssh_password"]` — это и станет
-новой фальсифицируемой половиной, причём более громкой, чем нынешняя.
-**Не удаляй строку `"ssh_password": secret` из тела запроса**, чтобы вернуть
-201: перебор колонок ниже тут же станет пустым — ровно тем нефальсифицируемым
-ассертом, против которого написан весь файл. И учти, что после `forbid`
-провалить перебор колонок независимо будет уже нечем: плейнтекст физически не
-дойдёт до сервиса ни при какой правке, так что он останется дешёвой
-регрессионной сеткой, а доказывать будет ассерт на 422.
+Что осталось от перебора колонок после `forbid`. Провалить его независимо
+теперь нечем: плейнтекст физически не доходит до сервиса ни при какой правке
+сервиса или модели. Он остаётся дешёвой регрессионной сеткой на случай, если
+`forbid` кто-то снимет (тогда POST снова пройдёт — и сетка увидит, куда сел
+секрет), а доказывает отказ ассерт на 422 и `loc`. **Не удаляй строку
+`"ssh_password": secret` из тела запроса** и не превращай отвергнутый POST в
+чистый: тогда исчезнет ровно то утверждение, ради которого написан файл.
 
 Где кончается автоматика: доказано всё до «десктоп получил обратно исходный
 пароль». Собственно **успешный SSH-коннект этим паролем** автотестом не
@@ -140,6 +136,20 @@ async def _purge(server_ids: list[int], blob_ids: list[str]) -> None:
         await s.commit()
 
 
+def _extra_forbidden_locs(response) -> list[list[str]]:
+    """`loc` всех ошибок «лишнее поле» из тела 422.
+
+    Смотрим именно на `loc`, а не на статус целиком: 422 схема отдаёт и за
+    десяток других причин (нет `name`, кривой UUID), и тест, довольный любым
+    422, зеленел бы на опечатке в теле запроса.
+    """
+    return [
+        list(err["loc"])
+        for err in response.json()["detail"]
+        if err.get("type") == "extra_forbidden"
+    ]
+
+
 def _leaks(value: object, secret: str) -> bool:
     """Видно ли секрет в значении колонки — хоть текстом, хоть байтами."""
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -155,6 +165,9 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
     поле, которого нет в схеме, сервер молча его игнорировал, а
     `ssh_password_blob_id` оставался NULL — и любая SSH-команда десктопа
     падала с «server has no ssh_password_blob_id».
+
+    Тот же плейнтекст-POST проверяется здесь и как отказ (`extra="forbid"`):
+    сервер обязан ответить 422 и ничего не создать.
     """
     secret = f"S3cr3t-{uuid.uuid4().hex}"
     ciphertext = opaque_blob_for(len(secret))
@@ -170,17 +183,34 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
             )
             assert r.status_code == 200, r.text
 
+            # Ровно то тело, которое слали старые формы. С `extra="forbid"`
+            # это громкий отказ, а не 201 с NULL в колонке.
             r = await c.post(
                 "/api/servers",
                 json={
                     "name": f"srv-{uuid.uuid4().hex[:6]}",
                     "ip_address": "203.0.113.20",
                     "ssh_password_blob_id": blob_id,
-                    # Взводим ловушку: старые формы слали пароль вот так. Пока
-                    # схема `extra="ignore"`, сервер его молча глотает — и
-                    # перебор колонок ниже проверяет, что глотает бесследно.
-                    # Без этой строки ассерт нечем провалить.
                     "ssh_password": secret,
+                },
+            )
+            # Если `forbid` снимут, POST пройдёт — заберём id, чтобы `finally`
+            # убрал строку из общей dev-БД, и только потом упадём.
+            if r.status_code < 300:
+                server_ids.append(r.json()["id"])
+            assert r.status_code == 422, r.text
+            assert _extra_forbidden_locs(r) == [["body", "ssh_password"]], r.text
+
+            # А так, как шлёт форма сегодня, — 201. Дальше перебор колонок:
+            # провалить его теперь может только сервер, который сам достанет
+            # плейнтекст (или снятый `forbid` — тогда красным станет ассерт
+            # выше, а этот покажет, куда именно сел секрет).
+            r = await c.post(
+                "/api/servers",
+                json={
+                    "name": f"srv-{uuid.uuid4().hex[:6]}",
+                    "ip_address": "203.0.113.20",
+                    "ssh_password_blob_id": blob_id,
                 },
             )
             assert r.status_code == 201, r.text
@@ -235,9 +265,8 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
     """`has_ssh` — это ровно «ссылка на блоб не NULL», и ничто иное.
 
     Флаг рисует в UI зелёную галочку и разрешает SSH-действия. Если он начнёт
-    зависеть от чего-то ещё (или от плейнтекст-поля, которое сервер молча
-    проглотил), пользователь увидит «пароль есть» там, где десктопу нечего
-    расшифровывать.
+    зависеть от чего-то ещё, пользователь увидит «пароль есть» там, где
+    десктопу нечего расшифровывать.
     """
     secret = f"S3cr3t-{uuid.uuid4().hex}"
     blob_id = str(uuid.uuid4())
@@ -253,10 +282,11 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
             assert r.status_code == 200, r.text
 
             base = {"ip_address": "203.0.113.21"}
-            # Плейнтекст-пароль есть, ссылки на блоб нет: `has_ssh` обязан
-            # остаться False. Иначе UI пообещал бы SSH там, где десктопу
-            # нечего расшифровывать, — и пользователь узнал бы об этом на
-            # середине provision.
+            # Плейнтекст-пароль вместо ссылки на блоб — это отказ: сервер с
+            # ним не заводится вовсе. Раньше он заводился и рисовал
+            # `has_ssh: false` — «сохранено» там, где десктопу нечего
+            # расшифровывать, и пользователь узнавал об этом на середине
+            # provision.
             r = await c.post(
                 "/api/servers",
                 json={
@@ -264,6 +294,17 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
                     "name": f"srv-no-{uuid.uuid4().hex[:6]}",
                     "ssh_password": secret,
                 },
+            )
+            if r.status_code < 300:
+                server_ids.append(r.json()["id"])
+            assert r.status_code == 422, r.text
+            assert _extra_forbidden_locs(r) == [["body", "ssh_password"]], r.text
+
+            # Без ссылки на блоб и без плейнтекста `has_ssh` обязан быть False:
+            # флаг рисует в UI зелёную галочку и разрешает SSH-действия.
+            r = await c.post(
+                "/api/servers",
+                json={**base, "name": f"srv-no-{uuid.uuid4().hex[:6]}"},
             )
             assert r.status_code == 201, r.text
             without_blob = r.json()["id"]
@@ -355,3 +396,97 @@ async def test_registrar_response_carries_both_blob_ids():
             assert listed.get("api_secret_blob_id") == secret_blob_id
         finally:
             await _purge_registrars(account_ids, [key_blob_id, secret_blob_id])
+
+
+# Заведомо несуществующий id для PUT'ов ниже. Тело схема разбирает до того,
+# как роут пойдёт искать сущность, так что заводить её незачем: с `forbid`
+# ответ — 422, без него — 404, и разница видна.
+MISSING_ID = 2_000_000_000
+
+# Шесть схем — шесть случаев. `extra="forbid"` стоит на каждом Create/Update
+# отдельно (на Base его вешать нельзя: ту же базу наследуют `*Response`,
+# которые собираются из ORM-объекта), поэтому и снятие его с одной схемы
+# обязано ронять свой отдельный случай. Одного теста «на все шесть» не
+# хватило бы: он зеленел бы, пока `forbid` остаётся хоть где-то.
+FORBID_CASES = [
+    pytest.param(
+        "POST", "/api/servers",
+        {"name": "srv-forbid", "ip_address": "203.0.113.22"},
+        "ssh_password",
+        id="ServerCreate",
+    ),
+    pytest.param(
+        "PUT", f"/api/servers/{MISSING_ID}",
+        {"fastpanel_user": "fp"},
+        "fastpanel_password",
+        id="ServerUpdate",
+    ),
+    pytest.param(
+        "POST", "/api/cloudflare/accounts",
+        {"name": "cf-forbid"},
+        "api_token",
+        id="CloudflareAccountCreate",
+    ),
+    pytest.param(
+        "PUT", f"/api/cloudflare/accounts/{MISSING_ID}",
+        {"name": "cf-forbid"},
+        "api_token",
+        id="CloudflareAccountUpdate",
+    ),
+    pytest.param(
+        "POST", "/api/registrars/accounts",
+        {"provider": "hostiq", "name": "reg-forbid"},
+        "api_key",
+        id="RegistrarAccountCreate",
+    ),
+    pytest.param(
+        "PUT", f"/api/registrars/accounts/{MISSING_ID}",
+        {"api_user": "u"},
+        "api_secret",
+        id="RegistrarAccountUpdate",
+    ),
+]
+
+
+@pytest.mark.parametrize("method,path,body,plaintext_field", FORBID_CASES)
+@pytest.mark.asyncio
+async def test_plaintext_secret_field_is_rejected_loudly(
+    method: str, path: str, body: dict, plaintext_field: str
+):
+    """Незнакомое поле в теле — 422 с `loc`, а не тихо выброшенный секрет.
+
+    Дефект, ради которого написан весь файл, держался на `extra="ignore"`:
+    форма слала плейнтекст в поле, которого нет в схеме, сервер молча его
+    выбрасывал и отвечал 2xx с `*_blob_id = NULL`. Секрет исчезал бесследно,
+    а пользователь видел «сохранено». С `forbid` та же регрессия падает в
+    лицо ещё на валидации.
+
+    Ассерт по `loc`, а не по статусу: 422 схема отдаёт и за десяток других
+    причин, и тест, довольный любым 422, зеленел бы на опечатке в теле.
+    """
+    secret = f"S3cr3t-{uuid.uuid4().hex}"
+    payload = {**body, plaintext_field: secret}
+    # Имена уникальны на прогон: если `forbid` снимут, запрос пройдёт и
+    # создаст сущность — не хочется ловить ещё и конфликт имён поверх.
+    if "name" in payload:
+        payload["name"] = f"{payload['name']}-{uuid.uuid4().hex[:6]}"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"forbid-{uuid.uuid4().hex[:8]}@example.com")
+        r = await c.request(method, path, json=payload)
+        # Снятый `forbid` пропустит POST — прибираем созданное, чтобы падение
+        # не оставляло мусор в общей dev-БД, и только потом утверждаем.
+        if r.status_code < 300 and method == "POST":
+            await c.delete(f"{path}/{r.json()['id']}")
+
+        assert r.status_code == 422, r.text
+        assert _extra_forbidden_locs(r) == [["body", plaintext_field]], r.text
+
+        # Отказ громкий по ИМЕНИ поля, но не по его содержимому. Дефолтный
+        # обработчик FastAPI кладёт в 422 ключ `input` — то есть сам пароль,
+        # который фронт подставляет в текст ошибки (`api/client.ts`), а тот
+        # уходит в тост и в кэш мутаций. Ассерт по тексту здесь уместен, в
+        # отличие от осуждаемого в шапке файла: предметом проверки и является
+        # само тело ответа, и без `validation_error_without_extra_input`
+        # (`app/main.py`) секрет в нём лежит буквально.
+        assert secret not in r.text, "422 вернул сам секрет — он уедет в тост и в логи"

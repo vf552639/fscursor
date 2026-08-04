@@ -13,11 +13,20 @@ class RegistrarAccountBase(BaseModel):
 
 
 class RegistrarAccountCreate(RegistrarAccountBase):
+    # Незнакомое поле — 422, а не тишина: плейнтекст `api_key`/`api_secret` с
+    # дефолтным `extra="ignore"` молча выбрасывался, а аккаунт оставался с
+    # `*_blob_id = NULL`. `forbid` только здесь и на `Update`:
+    # `RegistrarAccountResponse` наследует ту же базу и собирается из ORM.
+    model_config = ConfigDict(extra="forbid")
+
     api_key_blob_id: Optional[UUID] = None
     api_secret_blob_id: Optional[UUID] = None
 
 
 class RegistrarAccountUpdate(BaseModel):
+    # См. `RegistrarAccountCreate`.
+    model_config = ConfigDict(extra="forbid")
+
     provider: Optional[str] = None
     name: Optional[str] = None
     api_user: Optional[str] = None

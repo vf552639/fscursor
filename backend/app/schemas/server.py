@@ -16,6 +16,15 @@ class ServerBase(BaseModel):
 
 
 class ServerCreate(ServerBase):
+    # Незнакомое поле — это отказ, а не тишина. С дефолтным `extra="ignore"`
+    # форма могла прислать `ssh_password` плейнтекстом, сервер молча выбрасывал
+    # его и отвечал 201 с `ssh_password_blob_id = NULL`: пользователь видел
+    # «сохранено», а секрет исчезал бесследно. `forbid` стоит на Create/Update,
+    # а НЕ на `ServerBase`: его наследует ещё и `ServerResponse`
+    # (`from_attributes=True`), которому лишние атрибуты ORM-объекта запрещать
+    # нельзя.
+    model_config = ConfigDict(extra="forbid")
+
     ssh_password_blob_id: Optional[UUID] = None
     fastpanel_user: Optional[str] = None
     fastpanel_password_blob_id: Optional[UUID] = None
@@ -24,6 +33,9 @@ class ServerCreate(ServerBase):
 
 
 class ServerUpdate(BaseModel):
+    # См. `ServerCreate`: незнакомое поле — 422, а не тихая потеря.
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     ip_address: Optional[str] = None
     ssh_port: Optional[int] = None
