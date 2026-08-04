@@ -1,6 +1,6 @@
 import React from "react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 
 import { AddServerModal } from "./Servers";
 import { b64ToU8 } from "../lib/b64";
@@ -10,8 +10,7 @@ import {
   putBlobArgs,
   putBlobCalls,
   renderWithClient,
-  setBlobUser,
-  clearBlobUser,
+  secretBlobLifecycle,
   BLOB_USER_ID,
   DESKTOP_NOTE,
 } from "../test/secretBlobKit";
@@ -75,16 +74,7 @@ function fillConnectTab(password: string) {
 }
 
 describe("AddServerModal — пароль FastPanel через блоб", () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    setBlobUser();
-  });
-
-  afterEach(() => {
-    cleanup();
-    setTauri(false);
-    clearBlobUser();
-  });
+  secretBlobLifecycle();
 
   it("в десктопе шлёт fastpanel_password_blob_id и НЕ шлёт fastpanel_password", async () => {
     setTauri(true);

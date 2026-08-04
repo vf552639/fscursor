@@ -1,12 +1,18 @@
 import React from "react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import ServerDetail from "./ServerDetail";
 import { b64ToU8 } from "../lib/b64";
-import { useAuthStore } from "../store/auth";
-import { setTauri, UUID_V4, putBlobArgs, putBlobCalls } from "../test/secretBlobKit";
+import {
+  setTauri,
+  UUID_V4,
+  putBlobArgs,
+  putBlobCalls,
+  secretBlobLifecycle,
+  DESKTOP_NOTE,
+} from "../test/secretBlobKit";
 
 /**
  * Правка SSH-доступа — это перезапись СУЩЕСТВУЮЩЕГО блоба: id ведёт сущность, а
@@ -46,9 +52,6 @@ vi.mock("../components/RevealSecret", () => ({
 
 const EXISTING_BLOB = "11111111-2222-4333-8444-555555555555";
 const NEW_PW = "new-ssh-pw";
-// Ровно то, что вернёт `desktopOnly("Saving secrets")`: одна фраза продукта на
-// все «это умеет только десктоп», своей формулировки здесь быть не должно.
-const DESKTOP_NOTE = "Saving secrets runs in the SDMP desktop app.";
 
 const SERVER = {
   id: 7,
@@ -112,16 +115,7 @@ async function openSshForm(label: string) {
 }
 
 describe("ServerDetail — SSH-пароль через блоб", () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
-  });
-
-  afterEach(() => {
-    cleanup();
-    setTauri(false);
-    useAuthStore.getState().clear();
-  });
+  secretBlobLifecycle();
 
   it("правка перезаписывает ТОТ ЖЕ блоб и шлёт только его id", async () => {
     setTauri(true);

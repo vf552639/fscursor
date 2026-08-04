@@ -1,7 +1,7 @@
 import React from "react";
-import { render } from "@testing-library/react";
+import { render, renderHook, cleanup } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { Mock } from "vitest";
+import { afterEach, beforeEach, vi, type Mock } from "vitest";
 
 import { useAuthStore } from "../store/auth";
 
@@ -42,6 +42,26 @@ export function clearBlobUser() {
 }
 
 /**
+ * Преамбула файла тестов на секреты — одним вызовом внутри `describe`. Пара
+ * `beforeEach`/`afterEach` была скопирована дословно в каждый файл, и цена
+ * копии не в строках: и флаг десктопа (`__TAURI_INTERNALS__` на общем `window`),
+ * и `userId` в глобальном сторе переживают файл. Забыть их снять — значит
+ * покрасить ЧУЖОЙ тест: он увидит десктоп там, где сам его не включал.
+ */
+export function secretBlobLifecycle() {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    setBlobUser();
+  });
+
+  afterEach(() => {
+    cleanup();
+    setTauri(false);
+    clearBlobUser();
+  });
+}
+
+/**
  * Формы секретов живут под react-query. `retry: false` — не украшение: с
  * ретраями упавший POST доезжает до формы через задержки, и тест на «ошибка
  * показана, сервер не создан» ловил бы её не с первого прохода.
@@ -51,6 +71,23 @@ export function renderWithClient(node: React.ReactElement) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);
+}
+
+/**
+ * То же окружение для хука без экрана. Нужно там, где утверждение — про исход
+ * САМОЙ мутации: удаление блобов при удалении сущности best-effort, и «провал
+ * уборки не сделал удаление проваленным» через страницу не видно вовсе —
+ * ошибку такой мутации на этих экранах никто не рисует.
+ */
+export function renderHookWithClient<T>(hook: () => T) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return renderHook(hook, {
+    wrapper: ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
 }
 
 /** Полный формат: биты версии и варианта — часть id, который уедет в БД. */
@@ -72,4 +109,11 @@ export function putBlobArgs(invokeIfTauri: Mock): Record<string, any> {
   const calls = putBlobCalls(invokeIfTauri);
   if (calls.length !== 1) throw new Error(`vault_put_blob вызвана ${calls.length} раз, ожидался 1`);
   return calls[0];
+}
+
+/** Id, которые форма попросила стереть: удаление сущности снимает и её блобы. */
+export function deletedBlobIds(invokeIfTauri: Mock): string[] {
+  return invokeIfTauri.mock.calls
+    .filter((c: unknown[]) => c[0] === "vault_delete_blob")
+    .map((c: unknown[]) => (c[1] as { blobId: string }).blobId);
 }
