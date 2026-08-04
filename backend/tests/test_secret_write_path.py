@@ -447,10 +447,11 @@ async def test_registrar_response_carries_both_blob_ids():
 MISSING_ID = 2_000_000_000
 
 # Шесть схем — шесть случаев. `extra="forbid"` стоит на каждом Create/Update
-# отдельно (на Base его вешать нельзя: ту же базу наследуют `*Response`,
-# которые собираются из ORM-объекта), поэтому и снятие его с одной схемы
-# обязано ронять свой отдельный случай. Одного теста «на все шесть» не
-# хватило бы: он зеленел бы, пока `forbid` остаётся хоть где-то.
+# отдельно: на Base его вешать МОЖНО, но тогда снятие одной правкой гасит
+# ловушку у всех шести разом (см. `ServerCreate` в `schemas/server.py`).
+# Поэтому и снятие с одной схемы обязано ронять свой отдельный случай: одного
+# теста «на все шесть» не хватило бы — он зеленел бы, пока `forbid` остаётся
+# хоть где-то.
 FORBID_CASES = [
     pytest.param(
         "POST", "/api/servers",
@@ -746,6 +747,19 @@ UNSAFE_ERRORS = [
     pytest.param(
         {"type": "string_type", "loc": ["body", "creds", "db_password"], "input": 1},
         id="секретное-имя-вложенное",
+    ),
+    # `token`/`secret` — маркеры на вырост: плейнтекст-полей с такими именами
+    # схемы не объявляют, `ConfirmEmailRequest.token` живёт без `min_length`,
+    # и утечки сегодня нет. Она открылась бы молча в день, когда `min_length`
+    # там появится, — а `api_token`/`api_secret` до сих пор держались на одном
+    # признаке `extra_forbidden`.
+    pytest.param(
+        {"type": "string_too_short", "loc": ["body", "token"], "input": "e30fa1"},
+        id="секретное-имя-token",
+    ),
+    pytest.param(
+        {"type": "string_type", "loc": ["body", "api_secret"], "input": 1},
+        id="секретное-имя-secret",
     ),
 ]
 
