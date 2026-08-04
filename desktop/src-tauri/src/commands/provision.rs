@@ -243,6 +243,145 @@ fn db_error(e: SshError) -> CommandError {
     }
 }
 
+/// Шаги провижининга — те же строки, что уходят в `provision:progress` (их
+/// читает `PROVISION_STEP_LABEL` фронта) и в `steps` аудита. Одно значение на
+/// три места: разъехавшись, они назвали бы пользователю не тот шаг.
+///
+/// `prepare` — всё, что до первой команды на сервере: keychain, локальный кэш,
+/// расшифровка блоба с SSH-паролем.
+const STEP_PREPARE: &str = "prepare";
+const STEP_SSH_CONNECT: &str = "ssh_connect";
+const STEP_FASTPANEL_PATH: &str = "fastpanel_path";
+const STEP_FIREWALL: &str = "firewall_preflight";
+const STEP_CREATE_SITE: &str = "create_site";
+const STEP_FTP: &str = "ftp";
+const STEP_DB: &str = "db";
+
+/// Классы причин провала — ровно то, что разрешено назвать СЕРВЕРУ.
+///
+/// Это и есть инвариант ZK для `domains.last_provision_error`: колонка уезжает
+/// на сервер, оттуда в веб-панель и в CSV-экспорт, а сервер плейнтекст-секретов
+/// видеть не должен никогда. Тексты — константы, а не куски `e.to_string()`:
+/// сырой вывод команды (в котором FastPanel повторяет argv, а mysql — `CREATE
+/// USER ... IDENTIFIED BY`) на сервер не уходит ни при каком стечении.
+const CAUSE_SSH_AUTH: &str = "ssh authentication failed";
+const CAUSE_SSH_CONNECT: &str = "could not open an ssh connection";
+const CAUSE_SSH_HOST_KEY: &str = "the ssh host key was not accepted";
+const CAUSE_SSH_BROKEN: &str = "the ssh connection broke";
+const CAUSE_TIMEOUT: &str = "the command timed out on the server";
+const CAUSE_COMMAND_FAILED: &str = "the command failed on the server";
+const CAUSE_NO_FASTPANEL: &str = "fastpanel is not installed on the server";
+const CAUSE_VAULT: &str = "the vault is locked or unavailable on the desktop";
+const CAUSE_DECRYPT: &str = "the stored ssh password could not be decrypted";
+
+/// Провал провижининга: шаг, класс причины и сама ошибка.
+///
+/// Два разных читателя, и они получают разное. Десктоп (`error`) — полный текст,
+/// включая вывод упавшей команды: он никуда с машины не уходит и нужен, чтобы
+/// чинить. Сервер (`step` + `cause`) — только эти два `&'static str`.
+///
+/// `&'static str` здесь не стиль, а сама гарантия: из значения ошибки в текст,
+/// уезжающий на сервер, не может утечь ни байта — такой тип неоткуда взять,
+/// кроме как из константы. Проверка сдвинута с ревью на компилятор.
+struct ProvisionFailure {
+    step: &'static str,
+    /// `None` — класс неизвестен; тогда пользователю достаётся один шаг. Врать
+    /// про причину хуже, чем промолчать о ней.
+    cause: Option<&'static str>,
+    error: CommandError,
+}
+
+/// Класс ошибки SSH по её тексту. Возвращает КОНСТАНТУ — см. `ProvisionFailure`.
+///
+/// Разбор по строке, а не по варианту `SshError`: до этого места ошибка уже
+/// схлопнута в `CommandError::Ssh(String)` (`ssh_connect_session_with_timeout`
+/// отдаёт именно его), и восстанавливать вариант ради матчинга значило бы
+/// держать две дороги к одному ответу. Формат строк задан `Display` у
+/// `SshError` в этом же крейте.
+fn ssh_cause(msg: &str) -> &'static str {
+    let m = msg.trim_start_matches("ssh: ");
+    if m == "auth failed" {
+        CAUSE_SSH_AUTH
+    } else if m.starts_with("connect:") {
+        CAUSE_SSH_CONNECT
+    } else if m.starts_with("host key") {
+        CAUSE_SSH_HOST_KEY
+    } else if m.starts_with("io:") {
+        CAUSE_SSH_BROKEN
+    } else if m.contains("exec timeout") {
+        CAUSE_TIMEOUT
+    } else {
+        CAUSE_COMMAND_FAILED
+    }
+}
+
+/// Класс ошибки шага по её `CommandError`.
+fn failure_cause(e: &CommandError) -> Option<&'static str> {
+    match e {
+        CommandError::Keychain(_) => Some(CAUSE_VAULT),
+        CommandError::Kdf(_) | CommandError::Aead(_) | CommandError::Recovery(_) => {
+            Some(CAUSE_DECRYPT)
+        }
+        CommandError::Ssh(m) => Some(ssh_cause(m)),
+        // `Api` несёт слишком разное — от «домена нет в локальном кэше» до
+        // ответа сервера, — и одного честного класса на всё это нет.
+        CommandError::Api(_) => None,
+    }
+}
+
+impl ProvisionFailure {
+    /// Провал названного шага. `impl Into<CommandError>` — чтобы одинаково
+    /// принимать и `SshError` шагов, и `CommandError` подготовки.
+    fn at(step: &'static str, e: impl Into<CommandError>) -> Self {
+        let error = e.into();
+        Self {
+            step,
+            cause: failure_cause(&error),
+            error,
+        }
+    }
+
+    /// Провал с заранее известным классом — там, где ошибку конструируем мы
+    /// сами и её текст ни о чём серверу не скажет.
+    fn known(step: &'static str, cause: &'static str, error: CommandError) -> Self {
+        Self {
+            step,
+            cause: Some(cause),
+            error,
+        }
+    }
+
+    /// Провал создания БД: наружу (и в UI десктопа) уходит обезличенный
+    /// `db_error`, а класс берётся из исходной `SshError` — она различает
+    /// таймаут и обычный провал, а `db_error` эту разницу уже стёр бы в `Api`.
+    fn db(e: SshError) -> Self {
+        let cause = ssh_cause(&e.to_string());
+        Self {
+            step: STEP_DB,
+            cause: Some(cause),
+            error: db_error(e),
+        }
+    }
+
+    /// Текст для серверной колонки `last_provision_error`.
+    ///
+    /// Собирается только из `step` и `cause` — оба `&'static str`.
+    fn server_text(&self) -> String {
+        match self.cause {
+            Some(c) => format!("provision failed at {}: {c}", self.step),
+            None => format!("provision failed at {}", self.step),
+        }
+    }
+}
+
+/// Ошибка подготовки (до первой команды на сервере) — чтобы `?` в этой части
+/// `provision_domain_inner` работал без обвязки на каждой строке.
+impl From<CommandError> for ProvisionFailure {
+    fn from(e: CommandError) -> Self {
+        Self::at(STEP_PREPARE, e)
+    }
+}
+
 /// Сколько сертификату должно оставаться до истечения, чтобы считать его
 /// пригодным и не выпускать заново.
 ///
@@ -388,23 +527,32 @@ async fn run_provision_steps(
     app: &AppHandle,
     session: &mut SshSession,
     plan: &ProvisionPlan<'_>,
-) -> Result<ProvisionSteps, CommandError> {
+) -> Result<ProvisionSteps, ProvisionFailure> {
     let domain_id = plan.domain_id;
     let domain_name = plan.domain_name;
 
     let _ = app.emit(
         "provision:progress",
-        serde_json::json!({ "step": "fastpanel_path", "domain_id": domain_id }),
+        serde_json::json!({ "step": STEP_FASTPANEL_PATH, "domain_id": domain_id }),
     );
     let fp_path = fastpanel::get_fastpanel_path(session, None)
-        .await?
-        .ok_or_else(|| CommandError::Api("fastpanel binary not found on server".into()))?;
+        .await
+        .map_err(|e| ProvisionFailure::at(STEP_FASTPANEL_PATH, e))?
+        .ok_or_else(|| {
+            ProvisionFailure::known(
+                STEP_FASTPANEL_PATH,
+                CAUSE_NO_FASTPANEL,
+                CommandError::Api("fastpanel binary not found on server".into()),
+            )
+        })?;
 
     let _ = app.emit(
         "provision:progress",
-        serde_json::json!({ "step": "firewall_preflight", "domain_id": domain_id }),
+        serde_json::json!({ "step": STEP_FIREWALL, "domain_id": domain_id }),
     );
-    let ports = fastpanel::ensure_ports_open(session, &[80, 443]).await?;
+    let ports = fastpanel::ensure_ports_open(session, &[80, 443])
+        .await
+        .map_err(|e| ProvisionFailure::at(STEP_FIREWALL, e))?;
     if !ports.success {
         // Закрытые 80/443 — причина №1 будущего провала HTTP-01. В лог этого
         // мало: пользователь увидит только невнятный ssl_error через минуту.
@@ -423,7 +571,10 @@ async fn run_provision_steps(
     // Переиспользование существующего сайта и его создание — разные события, и
     // аудит не должен называть первое вторым.
     let (site, site_reused) = if let Some(ref u) = plan.site_user_existing {
-        if fastpanel::site_exists(session, u, domain_name).await? {
+        if fastpanel::site_exists(session, u, domain_name)
+            .await
+            .map_err(|e| ProvisionFailure::at(STEP_CREATE_SITE, e))?
+        {
             (
                 CreateSiteResult {
                     site_user: u.clone(),
@@ -433,13 +584,17 @@ async fn run_provision_steps(
             )
         } else {
             (
-                fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?,
+                fastpanel::create_site(session, &fp_path, domain_name, plan.php_version)
+                    .await
+                    .map_err(|e| ProvisionFailure::at(STEP_CREATE_SITE, e))?,
                 false,
             )
         }
     } else {
         (
-            fastpanel::create_site(session, &fp_path, domain_name, plan.php_version).await?,
+            fastpanel::create_site(session, &fp_path, domain_name, plan.php_version)
+                .await
+                .map_err(|e| ProvisionFailure::at(STEP_CREATE_SITE, e))?,
             false,
         )
     };
@@ -447,7 +602,7 @@ async fn run_provision_steps(
     let site_step = if site_reused {
         "site_exists"
     } else {
-        "create_site"
+        STEP_CREATE_SITE
     };
     let mut done = ProvisionSteps {
         site_user: site.site_user,
@@ -463,7 +618,7 @@ async fn run_provision_steps(
     if !plan.site_only {
         let _ = app.emit(
             "provision:progress",
-            serde_json::json!({ "step": "ftp", "domain_id": domain_id }),
+            serde_json::json!({ "step": STEP_FTP, "domain_id": domain_id }),
         );
         // Пароль FTP генерируется на сервере и нигде больше не хранится: не
         // отдав его в ответе, мы оставляем пользователя с аккаунтом, войти в
@@ -477,8 +632,11 @@ async fn run_provision_steps(
         // Существующий аккаунт — не создание: у `FtpCreation::AlreadyExists`
         // пароля нет физически, и выдать его за созданный нечем. Пароль такого
         // аккаунта был показан один раз тем прогоном, который его создал.
-        let (ftp, ftp_step) =
-            ftp_outcome(fastpanel::create_ftp_account(session, &fp_path, domain_name).await?);
+        let (ftp, ftp_step) = ftp_outcome(
+            fastpanel::create_ftp_account(session, &fp_path, domain_name)
+                .await
+                .map_err(|e| ProvisionFailure::at(STEP_FTP, e))?,
+        );
         if ftp_step == FTP_STEP_EXISTS {
             // Про создание пользователь уже предупреждён шагом выше; здесь
             // сообщаем новость — создавать не пришлось.
@@ -606,7 +764,7 @@ async fn run_provision_steps(
     if plan.with_db {
         let _ = app.emit(
             "provision:progress",
-            serde_json::json!({ "step": "db", "domain_id": domain_id }),
+            serde_json::json!({ "step": STEP_DB, "domain_id": domain_id }),
         );
         // `output` из CreateDbResult отбрасываем здесь же: в fallback-ветке это
         // вывод mysql, в котором повторён CREATE USER ... IDENTIFIED BY.
@@ -617,7 +775,7 @@ async fn run_provision_steps(
         let (db, db_step) = db_outcome(
             fastpanel::create_database(session, &fp_path, domain_name, None, None)
                 .await
-                .map_err(db_error)?,
+                .map_err(ProvisionFailure::db)?,
         );
         if db_step == DB_STEP_EXISTS {
             let _ = app.emit(
@@ -638,6 +796,11 @@ async fn run_provision_steps(
 const SSL_STATUS_ACTIVE: &str = "active";
 const SSL_STATUS_ERROR: &str = "error";
 const FASTPANEL_STATUS_INSTALLED: &str = "installed";
+/// Из словаря `DomainStatus` бэкенда. `failed` читает и бейдж строки, и фильтр
+/// «FAILED», и CSV-экспорт упавших — до этой фазы его не ставил никто.
+const DOMAIN_STATUS_FAILED: &str = "failed";
+const DOMAIN_STATUS_ACTIVE: &str = "active";
+const DOMAIN_STATUS_SITE_CREATED: &str = "site_created";
 
 /// Ширины колонок из `backend/app/models/domain.py` и
 /// `backend/app/models/server.py`. Перелив там даёт не 422, а ошибку БД.
@@ -686,9 +849,26 @@ fn fit_or_omit(id: &str, field: &str, value: &str, max: usize) -> Option<String>
 /// ошибка прошлого прогона больше не описывает состояние домена. Текст
 /// `ssl_error` на сервер не отправляем — это вывод certbot, ровно как и в
 /// метаданных аудита, который его тоже не берёт.
+///
+/// `status` — по той же причине, что и `null` в ошибке: домен, помеченный
+/// `failed` прошлым прогоном, обязан перестать быть `failed`, иначе бейдж
+/// строки навсегда красный при пустой ошибке. `active` — только когда
+/// сертификат действительно есть; во всех прочих исходах `site_created`, в том
+/// числе когда SSL не пробовали (`site_only`): сайт создан — это правда, а
+/// правды про SSL у этого прогона нет. Цена — повторный `site_only` по живому
+/// домену опускает его статус с `active`; про SSL при этом продолжает
+/// говорить `ssl_status`, которого мы в этом случае не трогаем.
 fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
     let id = r.domain_id.as_str();
     DomainWriteBack {
+        status: Some(
+            if r.ssl_issued == Some(true) {
+                DOMAIN_STATUS_ACTIVE
+            } else {
+                DOMAIN_STATUS_SITE_CREATED
+            }
+            .to_string(),
+        ),
         site_user: fit_or_omit(id, "site_user", &r.site_user, MAX_SITE_USER),
         site_path: fit_or_omit(id, "site_path", &r.site_path, MAX_SITE_PATH),
         ssl_status: r.ssl_issued.map(|ok| {
@@ -714,6 +894,25 @@ fn domain_write_back_body(r: &ProvisionResultOut) -> DomainWriteBack {
         // Провижининг NS не трогает: их ставит `registrar_set_nameservers`.
         ns_status: None,
         last_provision_error: Some(None),
+    }
+}
+
+/// Что уезжает на сервер о ПРОВАЛИВШЕМСЯ прогоне.
+///
+/// Ровно два поля. Остальные опущены намеренно: сервер применяет патч через
+/// `exclude_unset`, и всё, чего здесь нет, он не трогает — упавший прогон не
+/// вправе стирать `site_user`, `db_name` и прочую правду, добытую удачным
+/// прогоном до него. Своё же `null` в `last_provision_error` ставит только
+/// удачный прогон (`domain_write_back_body`), и это единственный способ погасить
+/// эту ошибку — второй упавший прогон её перепишет, но не сотрёт.
+///
+/// В тексте — только шаг и класс причины (см. `ProvisionFailure::server_text`):
+/// вывод команды, в котором FastPanel повторяет argv, на сервер не уходит.
+fn domain_failure_write_back_body(f: &ProvisionFailure) -> DomainWriteBack {
+    DomainWriteBack {
+        status: Some(DOMAIN_STATUS_FAILED.to_string()),
+        last_provision_error: Some(Some(f.server_text())),
+        ..Default::default()
     }
 }
 
@@ -754,6 +953,38 @@ fn log_write_back_failure(kind: &str, r: Result<(), ApiError>) -> bool {
     }
 }
 
+/// Записать провал провижининга в домен — чтобы упавший прогон было видно.
+/// Возвращает `true`, если записать не удалось (об этом надо сказать наружу).
+///
+/// Best-effort, как и write-back успеха, и по более узкой причине: сеть могла
+/// отвалиться вместе с самим провижинингом, а `?` здесь подменил бы причину
+/// провала («ssh: auth failed») на «write-back failed» — то есть потерял бы ту
+/// самую ошибку, которую пришли записать. Поэтому провал записи только
+/// логируется, а наружу возвращается исходная ошибка. Не превращать в `?`.
+///
+/// Без `AppHandle` намеренно: событие прогресса шлёт вызывающий, а сюда не
+/// приходит ничего, чего нельзя поднять в тесте, — и тогда проверяется ЭФФЕКТ
+/// (что реально ушло на сервер), а не факт вызова.
+async fn record_provision_failure(
+    api: &ApiClient,
+    domain_id: &str,
+    f: &ProvisionFailure,
+) -> bool {
+    log_write_back_failure(
+        "domain failure",
+        api.domain_write_back(domain_id, &domain_failure_write_back_body(f))
+            .await,
+    )
+}
+
+/// Провижининг домена целиком, с записью провала на сервер.
+///
+/// Разделено на две функции не ради красоты: раньше `?` уносил управление ДО
+/// блока write-back, поэтому упавший прогон не записывал ничего — «Last error»
+/// в UI был вечным «—», а колонка `last_provision_error`, бейдж `FAILED` и
+/// CSV-экспорт упавших не могли сработать в принципе. Теперь единственный выход
+/// с ошибкой проходит через `record_provision_failure`, и обойти его нельзя,
+/// не изменив тип.
 pub async fn run_provision_domain(
     app: &AppHandle,
     user_id: &str,
@@ -763,6 +994,32 @@ pub async fn run_provision_domain(
     cache_path: &Path,
     api: &ApiClient,
 ) -> Result<ProvisionResultOut, CommandError> {
+    match provision_domain_inner(app, user_id, domain_id, site_only, with_db, cache_path, api).await
+    {
+        Ok(result) => Ok(result),
+        Err(f) => {
+            if record_provision_failure(api, domain_id, &f).await {
+                let _ = app.emit(
+                    "provision:progress",
+                    serde_json::json!({ "step": "writeback_failed", "domain_id": domain_id }),
+                );
+            }
+            // Наружу — полный текст, включая вывод упавшей команды: он остаётся
+            // на этой машине, и чинить пользователю нечем, кроме него.
+            Err(f.error)
+        }
+    }
+}
+
+async fn provision_domain_inner(
+    app: &AppHandle,
+    user_id: &str,
+    domain_id: &str,
+    site_only: bool,
+    with_db: bool,
+    cache_path: &Path,
+    api: &ApiClient,
+) -> Result<ProvisionResultOut, ProvisionFailure> {
     let mut key = keychain::load_master_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
@@ -841,7 +1098,7 @@ pub async fn run_provision_domain(
 
     let _ = app.emit(
         "provision:progress",
-        serde_json::json!({ "step": "ssh_connect", "domain_id": domain_id }),
+        serde_json::json!({ "step": STEP_SSH_CONNECT, "domain_id": domain_id }),
     );
 
     let session = ssh_connect_session_with_timeout(
@@ -856,7 +1113,7 @@ pub async fn run_provision_domain(
     // Пароль сервера дальше не нужен ни на одном пути — ни на успешном, ни на
     // ошибочном. Гасим до разбора результата, а не после.
     password.zeroize();
-    let mut session = session?;
+    let mut session = session.map_err(|e| ProvisionFailure::at(STEP_SSH_CONNECT, e))?;
 
     let plan = ProvisionPlan {
         domain_id,
@@ -2361,5 +2618,217 @@ mod tests {
         assert_eq!(v["items"][1]["outcome"], "failed");
         assert_eq!(v["items"][1]["error"], "boom");
         assert_eq!(v["items"][2]["outcome"], "skipped");
+    }
+
+    // ---- видимость упавшего провижининга (фаза 4, долг №4) -----------------
+    //
+    // До этой фазы `?` уносил управление ДО блока write-back, и упавший прогон
+    // не записывал ничего: «Last error» в UI был вечным «—». Здесь проверяется
+    // ЭФФЕКТ — что именно уходит на сервер по каждому виду провала.
+
+    /// Пароль, которым «испачканы» входные ошибки всех тестов ниже: если он
+    /// хоть где-то доедет до серверного текста, это видно сразу.
+    const LEAKED: &str = "hunter2-P4ssw0rd";
+
+    // Единственный источник, у которого сырой вывод команды доезжает до текста
+    // ошибки (`create_site` его туда кладёт целиком). На сервер уходит шаг и
+    // класс — вывода нет; в UI десктопа возвращается полный текст.
+    #[test]
+    fn a_failed_step_sends_the_server_a_step_and_a_class_but_no_command_output() {
+        let f = ProvisionFailure::at(
+            STEP_CREATE_SITE,
+            SshError::Session(format!(
+                "create_site exit 1: fastpanel sites create --password={LEAKED} failed"
+            )),
+        );
+
+        assert_eq!(
+            f.server_text(),
+            "provision failed at create_site: the command failed on the server"
+        );
+        // Полный текст остаётся на этой машине — иначе чинить нечем.
+        assert!(f.error.to_string().contains(LEAKED), "{}", f.error);
+    }
+
+    // Каждый источник ошибки провижининга по отдельности: ни один не выпускает
+    // на сервер ни байта из текста ошибки, и каждый называет свой класс. Общий
+    // `assert` на отсутствие пароля тут был бы верен при любой реализации
+    // (`&'static str` иначе и не собрать), поэтому проверяется РАВЕНСТВО
+    // ожидаемому тексту — оно ловит и подмену класса, и приписку к нему.
+    #[test]
+    fn every_error_source_of_the_provision_path_is_classified() {
+        let dirty = |m: &str| format!("{m} {LEAKED}");
+        let cases: Vec<(ProvisionFailure, &str)> = vec![
+            (
+                ProvisionFailure::from(CommandError::Keychain(dirty("locked"))),
+                "provision failed at prepare: the vault is locked or unavailable on the desktop",
+            ),
+            (
+                ProvisionFailure::from(CommandError::Aead(dirty("decrypt"))),
+                "provision failed at prepare: the stored ssh password could not be decrypted",
+            ),
+            // Локальный кэш и ответы сервера — слишком разное, чтобы честно
+            // назвать одним классом. Тогда пользователю достаётся один шаг.
+            (
+                ProvisionFailure::from(CommandError::Api(dirty("domain not in local cache"))),
+                "provision failed at prepare",
+            ),
+            (
+                ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth),
+                "provision failed at ssh_connect: ssh authentication failed",
+            ),
+            (
+                ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Connect(dirty("refused"))),
+                "provision failed at ssh_connect: could not open an ssh connection",
+            ),
+            (
+                ProvisionFailure::at(STEP_SSH_CONNECT, SshError::HostKeyMismatch),
+                "provision failed at ssh_connect: the ssh host key was not accepted",
+            ),
+            (
+                ProvisionFailure::known(
+                    STEP_FASTPANEL_PATH,
+                    CAUSE_NO_FASTPANEL,
+                    CommandError::Api("fastpanel binary not found on server".into()),
+                ),
+                "provision failed at fastpanel_path: fastpanel is not installed on the server",
+            ),
+            (
+                ProvisionFailure::at(STEP_FIREWALL, SshError::Session("exec timeout".into())),
+                "provision failed at firewall_preflight: the command timed out on the server",
+            ),
+            (
+                // `create_ftp_account` отдаёт `opaque_exit` — вывод уже снят,
+                // но класс шага всё равно обязан назваться.
+                ProvisionFailure::at(
+                    STEP_FTP,
+                    SshError::Session(dirty("create_ftp_account exit 1")),
+                ),
+                "provision failed at ftp: the command failed on the server",
+            ),
+            (
+                ProvisionFailure::db(SshError::Session(dirty("CREATE USER IDENTIFIED BY"))),
+                "provision failed at db: the command failed on the server",
+            ),
+            (
+                ProvisionFailure::db(SshError::Session("exec timeout".into())),
+                "provision failed at db: the command timed out on the server",
+            ),
+        ];
+
+        for (f, expected) in cases {
+            assert_eq!(f.server_text(), expected);
+            let body = serde_json::to_string(&domain_failure_write_back_body(&f)).unwrap();
+            assert!(!body.contains(LEAKED), "{body}");
+        }
+    }
+
+    // Провал БД отдаёт наружу обезличенный `db_error` (в UI десктопа), а
+    // серверу — свой класс. Пароль БД не доезжает ни туда, ни туда.
+    #[test]
+    fn a_failed_database_step_hides_the_output_from_the_desktop_too() {
+        let f = ProvisionFailure::db(SshError::Session(format!(
+            "mysql: CREATE USER 'u'@'localhost' IDENTIFIED BY '{LEAKED}'"
+        )));
+        assert!(!f.error.to_string().contains(LEAKED), "{}", f.error);
+        assert!(!f.server_text().contains(LEAKED));
+    }
+
+    // Тело провала — ровно два поля. Остальное сервер применяет через
+    // `exclude_unset`, и лишний ключ стёр бы правду удачного прогона до него
+    // (`site_user`, `db_name`, `ssl_status`).
+    #[test]
+    fn domain_failure_write_back_body_touches_only_the_status_and_the_error() {
+        let f = ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth);
+        assert_eq!(
+            serde_json::to_string(&domain_failure_write_back_body(&f)).unwrap(),
+            "{\"status\":\"failed\",\"last_provision_error\":\
+             \"provision failed at ssh_connect: ssh authentication failed\"}"
+        );
+    }
+
+    // Без этого домен, помеченный `failed`, оставался бы красным навсегда:
+    // ошибку удачный прогон гасит, а статус — нет.
+    #[test]
+    fn a_finished_run_takes_the_domain_out_of_failed() {
+        let b = domain_write_back_body(&full_result());
+        assert_eq!(b.status.as_deref(), Some("active"));
+        assert_eq!(b.last_provision_error, Some(None));
+
+        // SSL не вышел — сайт всё равно создан, и это не `failed`.
+        let mut r = full_result();
+        r.ssl_issued = Some(false);
+        assert_eq!(
+            domain_write_back_body(&r).status.as_deref(),
+            Some("site_created")
+        );
+
+        // SSL не пробовали (`site_only`) — сказать про него нечего, но статус
+        // всё равно обязан перестать быть `failed`.
+        let mut r = full_result();
+        r.ssl_issued = None;
+        assert_eq!(
+            domain_write_back_body(&r).status.as_deref(),
+            Some("site_created")
+        );
+    }
+
+    // ЭФФЕКТ ради которого фаза: упавший прогон реально уходит на сервер — в
+    // тот домен, на котором упал, и ровно двумя полями. Проверяется по запросу,
+    // ушедшему в сеть, а не по факту вызова функции.
+    #[tokio::test]
+    async fn a_failed_run_writes_the_error_to_that_domain() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .and(body_json(serde_json::json!({
+                "status": "failed",
+                "last_provision_error":
+                    "provision failed at create_site: the command failed on the server",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 42})))
+            // Без `.expect(1)` расхождение в теле выглядело бы как 404 от
+            // незамэтченного запроса — ни диффа, ни намёка, что дело в теле.
+            // Оно же ловит запись не в тот домен: путь входит в матч.
+            .expect(1)
+            .named("PUT /domains/42 со статусом failed и текстом ошибки")
+            .mount(&srv)
+            .await;
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        let f = ProvisionFailure::at(
+            STEP_CREATE_SITE,
+            SshError::Session(format!("create_site exit 1: --password={LEAKED}")),
+        );
+
+        assert!(
+            !record_provision_failure(&api, "42", &f).await,
+            "запись прошла, а функция сказала, что нет"
+        );
+    }
+
+    // Сеть могла отвалиться вместе с самим провижинингом. Тогда провал записи —
+    // это флаг наружу, а не подмена причины: `?` здесь превратил бы «ssh: auth
+    // failed» в «write-back failed», то есть потерял бы ту самую ошибку, ради
+    // которой всё.
+    #[tokio::test]
+    async fn a_failed_write_back_of_the_failure_is_a_flag_not_a_new_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/domains/42"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({})))
+            .mount(&srv)
+            .await;
+
+        let api = ApiClient::new(format!("{}/api", srv.uri()));
+        let f = ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth);
+
+        assert!(record_provision_failure(&api, "42", &f).await);
     }
 }

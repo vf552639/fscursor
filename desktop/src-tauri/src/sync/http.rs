@@ -152,6 +152,11 @@ struct BlobUpsertBody<'a> {
 /// Паролей здесь нет и быть не может: полей под них не существует.
 #[derive(Debug, Default, Serialize)]
 pub struct DomainWriteBack {
+    /// Из словаря `DomainStatus` бэкенда (`new` | … | `site_created` |
+    /// `active` | `failed`). Колонка `NOT NULL`, поэтому поле именно опускается,
+    /// когда сказать нечего: явный `null` тут не 422, а 500.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
