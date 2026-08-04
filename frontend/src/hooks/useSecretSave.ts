@@ -28,17 +28,21 @@ export interface SecretTarget {
   existingBlobId: string | null;
 }
 
-export interface SecretSave {
-  /** Плейнтекст для `value`/`onChange` поля ввода. Наружу не отдавать. */
-  value: string;
-  /** Заодно гасит показанную ошибку: она была про прошлый ввод. */
-  setValue: (v: string) => void;
-  /** Идёт запись блоба ИЛИ сохранение сущности — кнопку держать выключенной. */
+/** Общее у одиночной и многополевой формы. */
+interface SecretFormState {
+  /** Идёт запись блобов ИЛИ сохранение сущности — кнопку держать выключенной. */
   saving: boolean;
   /** Готовый текст для `role="alert"`; `null` — показывать нечего. */
   error: string | null;
   /** Забыть набранное: отмена, закрытие формы, смена вкладки. */
   reset: () => void;
+}
+
+export interface SecretSave extends SecretFormState {
+  /** Плейнтекст для `value`/`onChange` поля ввода. Наружу не отдавать. */
+  value: string;
+  /** Заодно гасит показанную ошибку: она была про прошлый ввод. */
+  setValue: (v: string) => void;
   save: (
     args: SecretTarget & {
       /**
@@ -48,57 +52,40 @@ export interface SecretSave {
        * `isPending` react-query поднимает через `notifyManager` уже следующим
        * макротаском — оставался бы кадр, где кнопка снова живая.
        *
-       * Тип именно `Promise<void>`, и сузить его пришлось не ради чистоты.
-       * `Promise<unknown>` принимал сюда вложенный `save` второго секрета —
-       * очевидную композицию для формы регистратора, — и она молча ломалась:
-       * внутренний `save` на ошибке ВОЗВРАЩАЕТ `false`, а не бросает, так что
-       * внешний видел успешный промис, стирал свой плейнтекст и рапортовал
-       * форме успех, не сохранив ничего. Расширишь тип обратно — вернёшь этот
-       * зелёный путь без записанного секрета.
-       *
-       * Но закрывает сужение ровно одну запись — короткую стрелку
-       * `persist: (id) => inner.save(…)`. Блочное тело
-       * (`async (id) => { await inner.save(…); }`), брошенный промис и
-       * `.then(() => {})` типом не ловятся в принципе: `async`-функция
-       * возвращает `Promise<void>`, что бы внутри ни было. Их добивает
-       * рантайм-гвард на переиспользование (`saveInFlight` ниже), а
-       * правильный инструмент для нескольких секретов — `saveAll`.
-       *
-       * Вызов платит за сужение одной строкой: `async (id) => { await m(id); }`,
-       * где `m` — мутация СУЩНОСТИ, а не ещё один `save`.
+       * Инвариант: сюда передают сохранение СУЩНОСТИ и ничего больше. Вложить
+       * `save` второго секрета нельзя — чем это кончается и чем ловится, см.
+       * `saveInFlight`; `Promise<void>` — половина той защиты, он отбивает
+       * короткую стрелку `persist: (id) => inner.save(…)` на компиляции.
+       * Вызов платит за это одной строкой: `async (id) => { await m(id); }`,
+       * где `m` — мутация сущности.
        */
       persist: (blobId: string) => Promise<void>;
     },
   ) => Promise<boolean>;
 }
 
-export interface MultiSecretSave<K extends string> {
+export interface MultiSecretSave<K extends string> extends SecretFormState {
   /** Плейнтексты по ключам полей. Наружу не отдавать. */
   values: Record<K, string>;
   /** Заодно гасит показанную ошибку: она была про прошлый ввод. */
   setValue: (key: K, v: string) => void;
-  /** Идёт запись блобов ИЛИ сохранение сущности — кнопку держать выключенной. */
-  saving: boolean;
-  /** Одна ошибка на всю форму: секреты сохраняются одним действием. */
-  error: string | null;
-  /** Забыть набранное: отмена, закрытие формы, смена вкладки. */
-  reset: () => void;
   /**
    * Записать все блобы и только потом сохранить сущность разом.
    *
-   * Альтернатива — вложить `save` одного секрета в `persist` другого — тихо
-   * ломается (см. `SecretSave["save"]`): очевидная короткая запись не
-   * компилируется, любая другая падает рантайм-гвардом на первом же прогоне.
+   * В `secrets` кладут ТОЛЬКО меняемые поля: ключ есть — секрет перезаписываем,
+   * и пустым он быть не может; ключа нет (или он `undefined`) — поле не
+   * трогаем, у сущности остаётся прежний `*_blob_id`, а в `blobIds` его не
+   * будет. Иначе правка имени аккаунта требовала бы перенабрать API-токен —
+   * аффорданс «оставь пустым, чтобы сохранить текущий» есть в формах сегодня.
    *
-   * Правила те же, что у одиночного пути, но на N полей: `persist` не
-   * вызывается, если хоть одна запись блоба упала; уже записанные блобы НЕ
-   * откатываются (`deleteSecretBlob` на правке снёс бы живой секрет — JSDoc
-   * `putSecretBlob`), осиротевший блоб безвреден, а повтор перезапишет те же
-   * id; плейнтексты стираются только на полном успехе.
+   * `persist` не вызывается, если хоть одна запись блоба упала; уже записанные
+   * блобы НЕ откатываются (`deleteSecretBlob` на правке снёс бы живой секрет —
+   * JSDoc `putSecretBlob`), осиротевший блоб безвреден, а повтор перезапишет те
+   * же id; плейнтексты стираются только на полном успехе.
    */
   saveAll: (args: {
-    secrets: Record<K, SecretTarget>;
-    persist: (blobIds: Record<K, string>) => Promise<void>;
+    secrets: Partial<Record<K, SecretTarget>>;
+    persist: (blobIds: Partial<Record<K, string>>) => Promise<void>;
   }) => Promise<boolean>;
 }
 
@@ -107,27 +94,29 @@ function blanked<K extends string>(keyed: Record<K, unknown>): Record<K, string>
 }
 
 /**
- * Идёт сохранение секрета. Флаг МОДУЛЬНЫЙ, а не по инстансу, потому что
- * вложенность — это всегда два разных инстанса хука: форма регистратора,
- * попытавшаяся сохранить `api_secret` внутри `persist` от `api_key`.
+ * Идёт `persist`, то есть сохранение сущности. Ловим этим ровно одно: `save`,
+ * начатый ИЗНУТРИ `persist`, — попытку сохранить второй секрет вложением.
+ * Она компилируется (`async`-тело возвращает `Promise<void>`, что бы внутри ни
+ * было) и проваливается тихо: внутренний `save` на ошибке ВОЗВРАЩАЕТ `false`, а
+ * не бросает, поэтому внешний видит успешный промис, стирает плейнтекст и
+ * рапортует форме успех, не сохранив второй секрет. Правильный инструмент —
+ * `saveAll`.
  *
- * Тип такое не выразит: блочное тело `async` возвращает `Promise<void>`, что бы
- * внутри ни было. А повторный вход — выразим.
- *
- * Побочный эффект: два секрета нельзя сохранять и буквально параллельно
- * (`Promise.all` двух форм). Это осознанно — форма сохранения секрета в
- * продукте всегда одна модалка, и ложное срабатывание тут громкое и мгновенное,
- * тогда как пропущенная вложенность тихая и уносит секрет.
+ * Флаг модульный, а не по инстансу: вложенность — это всегда два РАЗНЫХ
+ * инстанса хука. И окно — только `persist`: взведи его на всю операцию, и он
+ * заодно накрыл бы запись блобов (Tauri-IPC, самая долгая часть), то есть
+ * срабатывал бы на честных параллельных формах.
  */
 let saveInFlight = false;
 
-/**
- * Сообщение разработчику, а не пользователю: диагноз и лечение в одной строке.
- * По-английски, потому что через `catch` внешнего вызова оно попадает в тот же
- * `error`, что и остальные тексты хука.
- */
+/** Только для тестов: флаг переживает `cleanup()` и упал бы в следующем тесте. */
+export function resetSecretSaveGuardForTests(): void {
+  saveInFlight = false;
+}
+
+/** Сообщение разработчику: диагноз, лечение и файл, в который идти. */
 const NESTED_SAVE =
-  "useSecretSave: another secret save is already in flight — do not nest save() inside persist(); " +
+  "nested secret save (hooks/useSecretSave.ts): do not call save() inside persist() — " +
   "use useMultiSecretSave/saveAll to write several secrets before one entity save";
 
 /**
@@ -140,9 +129,12 @@ export function useMultiSecretSave<K extends string>(labels: Record<K, string>):
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Плейнтексты и подписи `saveAll` читает из ref'ов, а не из замыкания: иначе
-  // он пересоздавался бы на каждое нажатие клавиши, а форма держит его в
-  // обработчике, который живёт дольше рендера.
+  // Ref, а не замыкание: иначе `saveAll` пересоздавался бы на каждое нажатие
+  // клавиши, а форма держит его в обработчике, который живёт дольше рендера.
+  // Пишем прямо в рендере, а не в effect: тот отстал бы на кадр — сохранился бы
+  // плейнтекст без последнего символа. Безопасно, пока рендеры формы не
+  // отбрасываются: переведёшь её на `startTransition`/`useDeferredValue` — в
+  // ref осядет значение из незакоммиченного рендера.
   const valuesRef = useRef(values);
   valuesRef.current = values;
   const labelsRef = useRef(labels);
@@ -164,27 +156,41 @@ export function useMultiSecretSave<K extends string>(labels: Record<K, string>):
     setError(null);
     const labels = labelsRef.current;
     const values = valuesRef.current;
-    const keys = Object.keys(secrets) as K[];
-    // Пустые поля проверяем ВСЕ и до первой записи. Пустой плейнтекст дал бы
+    // Отсутствующий ключ и явный `undefined` значат одно и то же — «не меняем»:
+    // форма пишет `apiKey: touched ? target : undefined`, и разбирать эти два
+    // случая по-разному значило бы наказывать за стиль записи.
+    const changing = (Object.keys(secrets) as K[])
+      .map((k) => [k, secrets[k]] as const)
+      .filter((pair): pair is readonly [K, SecretTarget] => pair[1] !== undefined);
+
+    // Пустые поля собираем ВСЕ и до первой записи. Пустой плейнтекст дал бы
     // блоб из нуля байт при заполненном `*_blob_id`: сервер считает секрет
     // настроенным, и падает уже живое соединение, а не форма. Проверка после
-    // первой записи оставила бы такой блоб от соседнего поля.
-    for (const k of keys) {
-      if (!values[k]) {
-        setError(`${labels[k]} is required`);
-        return false;
-      }
+    // первой записи оставила бы такой блоб от соседнего поля, а сообщение про
+    // одно поле гоняло бы по кругу форму, где пустые оба.
+    const missing = changing.filter(([k]) => !values[k]).map(([k]) => labels[k]);
+    if (missing.length > 0) {
+      setError(`${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} required`);
+      return false;
     }
+
     setSaving(true);
     try {
       // Сначала все блобы, потом сущность. Наоборот — это сущность со ссылкой
       // NULL: «сохранено» и неработающие команды. Порядок и запрет отката
       // блоба в `catch` — в JSDoc `putSecretBlob`, здесь они исполняются.
-      const blobIds = {} as Record<K, string>;
-      for (const k of keys) {
-        blobIds[k] = await putSecretBlob({ plaintext: values[k], ...secrets[k] });
+      const blobIds: Partial<Record<K, string>> = {};
+      for (const [k, target] of changing) {
+        blobIds[k] = await putSecretBlob({ plaintext: values[k], ...target });
       }
-      await persist(blobIds);
+      saveInFlight = true;
+      try {
+        await persist(blobIds);
+      } finally {
+        // Снимаем на всех путях: иначе упавшее сохранение сущности заблокировало
+        // бы формы до перезагрузки приложения.
+        saveInFlight = false;
+      }
       // Плейнтексты стираем только здесь — на успехе. На ошибке они нужны для
       // повтора, а на отмене их стирает `reset`.
       setValues(blanked);
@@ -193,7 +199,7 @@ export function useMultiSecretSave<K extends string>(labels: Record<K, string>):
       // `message` содержательный у обоих источников: `putSecretBlob` бросает
       // Error, а axios-интерцептор сворачивает `detail` ответа в `ApiError`.
       // Наружу НЕ пробрасываем: форма показала бы вторую копию из своего catch.
-      const what = keys.map((k) => labels[k]).join(" and ");
+      const what = changing.map(([k]) => labels[k]).join(" and ") || "secrets";
       setError(e instanceof Error && e.message ? e.message : `Could not save ${what}`);
       return false;
     } finally {
@@ -203,27 +209,24 @@ export function useMultiSecretSave<K extends string>(labels: Record<K, string>):
 
   const saveAll = useCallback<MultiSecretSave<K>["saveAll"]>(
     (args) => {
-      // Бросаем СИНХРОННО, а не отдаём отклонённый промис. Вложенный вызов
-      // часто роняют на пол (`inner.save(…)` без `await`) — отказ промиса до
-      // внешнего вызова тогда не долетит, он досидит до конца и отрапортует
-      // успех, стерев плейнтекст. Синхронное исключение вылетает из тела
-      // `persist` при ЛЮБОЙ форме записи (await, брошенный промис, `void`,
-      // `.then`) и роняет внешний `saveAll` в его собственный catch.
-      //
-      // Именно исключение, а не `return false`: это ошибка разработчика на
-      // этапе сборки формы, а не отказ пользователю, и молчать о ней нельзя.
-      if (saveInFlight) throw new Error(NESTED_SAVE);
-      saveInFlight = true;
-      // Снимаем на ВСЕХ путях, включая исключения: иначе одна упавшая запись
-      // заблокировала бы формы до перезагрузки приложения.
-      return run(args).finally(() => {
-        saveInFlight = false;
-      });
+      if (saveInFlight) {
+        // СИНХРОННО, а не отклонённым промисом: вложенный вызов часто роняют на
+        // пол (`inner.save(…)` без `await`), и его отказ до внешнего не долетел
+        // бы. И громко: вызовы делают `await save(…)` без `try/catch`, так что
+        // молчащий бросок выглядел бы как клик в пустоту.
+        console.error(NESTED_SAVE);
+        setError(NESTED_SAVE);
+        throw new Error(NESTED_SAVE);
+      }
+      return run(args);
     },
     [run],
   );
 
-  return { values, setValue, saving, error, reset, saveAll };
+  return useMemo(
+    () => ({ values, setValue, saving, error, reset, saveAll }),
+    [values, setValue, saving, error, reset, saveAll],
+  );
 }
 
 /**
@@ -241,7 +244,9 @@ export function useSecretSave(secretLabel: string): SecretSave {
     ({ blobKind, existingBlobId, persist }) =>
       saveAll({
         secrets: { secret: { blobKind, existingBlobId } },
-        persist: (blobIds) => persist(blobIds.secret),
+        // Ключ всегда в `secrets`, значит и id всегда есть: одиночная форма не
+        // может «не менять» свой единственный секрет.
+        persist: (blobIds) => persist(blobIds.secret as string),
       }),
     [saveAll],
   );

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 
-import { useSecretSave, useMultiSecretSave, type SecretSave } from "./useSecretSave";
+import {
+  useSecretSave,
+  useMultiSecretSave,
+  resetSecretSaveGuardForTests,
+  type SecretSave,
+} from "./useSecretSave";
 import { BLOB_KIND } from "../lib/secretBlob";
 
 /**
@@ -33,13 +38,19 @@ let trace: string[] = [];
 beforeEach(() => {
   vi.resetAllMocks();
   trace = [];
+  // Флаг гварда — модульный: `cleanup()` его не трогает, и подтёкший он упал бы
+  // в следующем тесте сообщением про вложенность, которой там нет.
+  resetSecretSaveGuardForTests();
   mocks.putSecretBlob.mockImplementation(async (a: { blobKind: string }) => {
     trace.push(`blob:${a.blobKind}`);
     return `id-${a.blobKind}`;
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function renderRegistrar() {
   const { result } = renderHook(() => useMultiSecretSave(LABELS));
@@ -128,6 +139,58 @@ describe("useMultiSecretSave.saveAll", () => {
     // при этом честно показывала бы ошибку по второму.
     const { result } = renderHook(() => useMultiSecretSave(LABELS));
     act(() => result.current.setValue("apiKey", "k3y"));
+    const persist = vi.fn(async () => {});
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAll({ secrets: TARGETS, persist });
+    });
+
+    expect(ok).toBe(false);
+    expect(mocks.putSecretBlob).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    expect(result.current.error).toBe("API secret is required");
+  });
+
+  it("пустые оба — названы оба, а не первое по кругу", async () => {
+    const { result } = renderHook(() => useMultiSecretSave(LABELS));
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAll({ secrets: TARGETS, persist: async () => {} });
+    });
+
+    expect(ok).toBe(false);
+    expect(result.current.error).toBe("API key and API secret are required");
+  });
+
+  it("нетронутое поле не пишется и не едет в persist", async () => {
+    // Форма правки: «оставь пустым — оставим текущий секрет». Без этого правка
+    // имени аккаунта требовала бы перенабрать API-токен, а автор формы пошёл бы
+    // в обход хука — мимо дисциплины стирания плейнтекста.
+    const result = renderRegistrar();
+    act(() => result.current.setValue("apiSecret", ""));
+    const persist = vi.fn(async () => {
+      trace.push("persist");
+    });
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAll({
+        secrets: { apiKey: TARGETS.apiKey, apiSecret: undefined },
+        persist,
+      });
+    });
+
+    expect(ok).toBe(true);
+    expect(trace).toEqual(["blob:registrar_api_key", "persist"]);
+    expect(persist).toHaveBeenCalledWith({ apiKey: "id-registrar_api_key" });
+  });
+
+  it("заявленное, но пустое поле — это ошибка, а не «не меняем»", async () => {
+    // Обратная половина того же контракта: ключ в `secrets` значит «этот секрет
+    // перезаписываем». Пустить сюда пустую строку — записать блоб из нуля байт.
+    const result = renderRegistrar();
+    act(() => result.current.setValue("apiSecret", ""));
     const persist = vi.fn(async () => {});
 
     let ok: boolean | undefined;
@@ -267,37 +330,62 @@ describe("гвард на вложенный save", () => {
     return { outer, inner, nested };
   }
 
-  it.each([
-    // Первая — ровно та запись, которую JSDoc `persist` советует как лечение
-    // от ошибки компиляции: человек применит её и вернётся в баг.
-    "блочное тело с await",
-    "брошенный промис",
-    "void",
-    ".then(() => {})",
-  ])("%s: внешний save падает, а не рапортует успех", async (form) => {
+  // Сам вызов лежит в таблице, а не выбирается сравнением с именем строки:
+  // иначе переименование случая молча уронило бы его в `else`, продублировав
+  // соседний, — и грид, объявленный главной защитой, тихо потерял бы ветку.
+  // Первая запись — ровно та, которую JSDoc `persist` советует как лечение от
+  // ошибки компиляции: человек применит её и вернётся в баг.
+  type Nested = () => Promise<boolean>;
+  it.each<[string, (nested: Nested) => Promise<void>]>([
+    ["блочное тело с await", async (nested) => void (await nested())],
+    ["брошенный промис", async (nested) => {
+      nested();
+    }],
+    ["void", async (nested) => void nested()],
+    [".then(() => {})", async (nested) => nested().then(() => {})],
+  ])("%s: внешний save падает, а не рапортует успех", async (_form, persist) => {
     const { outer, nested } = nesting();
-    const persist = async () => {
-      if (form === "блочное тело с await") await nested();
-      else if (form === "брошенный промис") nested();
-      else if (form === "void") void nested();
-      else await nested().then(() => {});
-    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
     let ok: boolean | undefined;
     await act(async () => {
       ok = await outer.current.save({
         blobKind: BLOB_KIND.registrarApiKey,
         existingBlobId: null,
-        persist,
+        persist: () => persist(nested),
       });
     });
 
     expect(ok).toBe(false);
-    expect(outer.current.error).toMatch(/do not nest save\(\) inside persist\(\)/);
+    expect(outer.current.error).toMatch(/do not call save\(\) inside persist\(\)/);
+    // Ещё и в консоль: сработавший не по делу гвард не должен уметь молчать.
+    expect(errors).toHaveBeenCalledWith(expect.stringMatching(/nested secret save/));
     // Плейнтекст внешнего поля цел: провал не притворился успехом.
     expect(outer.current.value).toBe("k3y");
     // Блоб записан только внешний — до вложенного дело не дошло.
     expect(mocks.putSecretBlob).toHaveBeenCalledTimes(1);
+  });
+
+  it("после сработавшего гварда форма сохраняется снова", async () => {
+    // Путь через `throw` тоже обязан снять флаг: иначе одна ошибка автора формы
+    // выключала бы сохранение секретов во всём приложении до перезагрузки.
+    const { outer, nested } = nesting();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const args = {
+      blobKind: BLOB_KIND.registrarApiKey,
+      existingBlobId: null,
+      persist: async () => {},
+    };
+
+    let blocked: boolean | undefined;
+    let after: boolean | undefined;
+    await act(async () => {
+      blocked = await outer.current.save({ ...args, persist: async () => void (await nested()) });
+      after = await outer.current.save(args);
+    });
+
+    expect(blocked).toBe(false);
+    expect(after).toBe(true);
   });
 
   it("две формы подряд (не вложенно) сохраняются обе", async () => {
