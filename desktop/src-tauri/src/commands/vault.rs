@@ -34,7 +34,7 @@ pub async fn vault_decrypt_blob(
 /// пока связка `encrypt` → `blob_put` жила внутри неё, замена шифрования на
 /// `pt.clone()` не роняла ни одного теста — то есть SSH-пароли всех
 /// пользователей могли уехать на сервер плейнтекстом при зелёном наборе.
-pub(crate) async fn put_blob_encrypted(
+async fn put_blob_encrypted(
     api: &ApiClient,
     key: &[u8; 32],
     blob_id: &str,
@@ -74,7 +74,6 @@ pub async fn vault_delete_blob(blob_id: String, api: State<'_, ApiClient>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -89,16 +88,11 @@ mod tests {
     #[tokio::test]
     async fn put_blob_encrypted_puts_ciphertext_on_the_wire_and_only_the_key_undoes_it() {
         let srv = MockServer::start().await;
+        // Тело ответа пустое намеренно: `blob_put` уходит в `expect_ok`, а тот
+        // читает только статус. Нарисованный тут блоб ничего бы не проверял.
         Mock::given(method("PUT"))
             .and(path("/api/blobs/b-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "b-1",
-                "blob_kind": "ssh_password",
-                "ciphertext_b64": "",
-                "version": 1,
-                "updated_at": "2026-08-04T00:00:00Z",
-                "deleted": false,
-            })))
+            .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&srv)
             .await;
@@ -128,6 +122,11 @@ mod tests {
         // десктоп не расшифрует то, что сам же и прислал.
         assert_eq!(wire.len(), plaintext.len() + aead::NONCE_LEN + aead::TAG_LEN);
         assert_eq!(aead::decrypt(&wire, &key).unwrap(), plaintext);
-        assert!(aead::decrypt(&wire, &[1u8; aead::KEY_LEN]).is_err());
+        // Именно `Decrypt`, а не любая ошибка: на `TooShort` этот ассерт был
+        // бы зелёным при поехавшей раскладке — то есть по неверной причине.
+        assert!(matches!(
+            aead::decrypt(&wire, &[1u8; aead::KEY_LEN]),
+            Err(aead::AeadError::Decrypt)
+        ));
     }
 }

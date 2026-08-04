@@ -97,7 +97,6 @@ pub(crate) fn cache_path(handle: &State<'_, SyncHandle>) -> Result<PathBuf, Comm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::aead;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -149,6 +148,8 @@ mod tests {
         .await;
 
         let api = ApiClient::new(format!("{}/api", srv.uri()));
+        // `Aead` прилетает и с провала base64 (см. выше по функции), но мок
+        // отдаёт заведомо валидный b64 — значит, причина именно в ключе.
         let err = blob_plaintext(&api, &[1u8; aead::KEY_LEN], "b-9")
             .await
             .unwrap_err();

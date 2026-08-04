@@ -28,6 +28,19 @@ libsodium-биндинг было бы вдвойне плохо: ассерт �
 `plans/2026-08-04-sprint4-secret-write-path.md`. Здесь утверждается только, что
 поле никуда не приземляется.
 
+ВНИМАНИЕ ТОМУ, КТО ВКЛЮЧИТ ФАЗУ 2. С `extra="forbid"` на `ServerCreate` оба
+POST начнут отвечать `422 {"detail":[{"type":"extra_forbidden",
+"loc":["body","ssh_password"], ...}]}`, и оба теста покраснеют на «422 != 201»
+— сообщением, к их названиям отношения не имеющим. Правильная правка: заменить
+ассерт-приёмник на `422` и `loc == ["body", "ssh_password"]` — это и станет
+новой фальсифицируемой половиной, причём более громкой, чем нынешняя.
+**Не удаляй строку `"ssh_password": secret` из тела запроса**, чтобы вернуть
+201: перебор колонок ниже тут же станет пустым — ровно тем нефальсифицируемым
+ассертом, против которого написан весь файл. И учти, что после `forbid`
+провалить перебор колонок независимо будет уже нечем: плейнтекст физически не
+дойдёт до сервиса ни при какой правке, так что он останется дешёвой
+регрессионной сеткой, а доказывать будет ассерт на 422.
+
 Где кончается автоматика: доказано всё до «десктоп получил обратно исходный
 пароль». Собственно **успешный SSH-коннект этим паролем** автотестом не
 проверяется — для него нужен живой сервер, это ручной шаг из чек-листа приёмки
@@ -54,22 +67,24 @@ from app.models.server import Server
 
 BLOB_KIND = "ssh_password"
 
-# Раскладка десктопного `crypto::aead`: nonce (24) || mac (16) || ciphertext.
-NONCE_LEN = 24
-TAG_LEN = 16
+# Обвязка десктопного `crypto::aead` — nonce (24) + mac (16). Числа тут только
+# ради правдоподобного размера блоба и контрактом НЕ являются: рассинхрон с
+# десктопом здесь не диагностируется — поменяй там раскладку, и ни один ассерт
+# этого файла не шелохнётся.
+FRAMING_LEN = 24 + 16
 
 
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 
-def opaque_blob(plaintext: str) -> bytes:
+def opaque_blob_for(plaintext_len: int) -> bytes:
     """Блоб такого же размера, какой прислал бы десктоп, — и не более того.
 
     Случайные байты, а не шифротекст: бэкенду нечем их отличить, и в этом вся
     суть — он обязан хранить и возвращать их байт в байт, не понимая ничего.
     """
-    return os.urandom(NONCE_LEN + TAG_LEN + len(plaintext.encode()))
+    return os.urandom(FRAMING_LEN + plaintext_len)
 
 
 async def _register_and_login(client: AsyncClient, email: str) -> None:
@@ -102,8 +117,9 @@ async def _purge(server_ids: list[int], blob_ids: list[str]) -> None:
     """Убрать за собой напрямую в БД.
 
     База тестов общая с dev-окружением, а упавший ассерт обрывает тест на
-    середине — чистка через API в этот момент сама получила бы 404. Сервер
-    удаляем первым: он ссылается на блоб внешним ключом.
+    середине — чистка через API в этот момент сама получила бы 404. Порядок
+    удаления роли не играет: FK объявлен `ondelete="SET NULL"`, так что и
+    блоб-первым Postgres просто обнулил бы `ssh_password_blob_id`.
     """
     async with AsyncSessionLocal() as s:
         for sid in server_ids:
@@ -130,7 +146,7 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
     падала с «server has no ssh_password_blob_id».
     """
     secret = f"S3cr3t-{uuid.uuid4().hex}"
-    ciphertext = opaque_blob(secret)
+    ciphertext = opaque_blob_for(len(secret))
     blob_id = str(uuid.uuid4())
     server_ids: list[int] = []
 
@@ -166,9 +182,15 @@ async def test_ssh_password_reaches_the_server_only_as_ciphertext():
                         select(BlobStorage).where(BlobStorage.id == uuid.UUID(blob_id))
                     )
                 ).scalar_one()
-                stored = bytes(blob.ciphertext)
-                assert secret.encode() not in stored, "плейнтекст доехал до blob_storage"
-                assert stored == ciphertext, "сервер переписал шифротекст — блоб не расшифруется"
+                # Байт в байт то, что прислал клиент. Ассерта вида
+                # `secret not in stored` тут нет намеренно: он был бы той же
+                # формы, что осуждаемый в шапке `secret not in r.text`, —
+                # байты сгенерированы до запроса и с секретом не связаны, так
+                # что провалить его могла бы только подмена содержимого, а её
+                # строго сильнее ловит равенство.
+                assert bytes(blob.ciphertext) == ciphertext, (
+                    "сервер переписал блоб — десктоп его не расшифрует"
+                )
                 assert blob.blob_kind == BLOB_KIND
 
                 server = (
@@ -215,7 +237,7 @@ async def test_has_ssh_flips_only_because_the_blob_id_is_set():
         try:
             r = await c.put(
                 f"/api/blobs/{blob_id}",
-                json={"blob_kind": BLOB_KIND, "ciphertext_b64": b64(opaque_blob(secret))},
+                json={"blob_kind": BLOB_KIND, "ciphertext_b64": b64(opaque_blob_for(len(secret)))},
             )
             assert r.status_code == 200, r.text
 
