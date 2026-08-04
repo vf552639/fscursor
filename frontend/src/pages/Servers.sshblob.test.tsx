@@ -165,6 +165,14 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     fireEvent.click(screen.getByText(/Install New Fastpanel/));
 
     expect((screen.getByPlaceholderText("••••••••") as HTMLInputElement).value).toBe("");
+
+    // И обратно: теперь у обеих вкладок пароль уходит в блоб, так что забытый
+    // на install SSH-пароль был бы записан как пароль панели.
+    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: SSH_PW } });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Existing Fastpanel/ }));
+    expect((screen.getByPlaceholderText("Enter password") as HTMLInputElement).value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: /Install New Fastpanel/ }));
+
     fillInstallTab(SSH_PW);
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 

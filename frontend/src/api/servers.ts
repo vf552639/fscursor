@@ -66,8 +66,8 @@ export interface ServerCreate {
   purchase_date?: string | null;
   expiry_date?: string | null;
   fastpanel_user?: string;
-  /** Так же теряется, как терялся `ssh_password`; уедет в блоб в фазе 1b. */
-  fastpanel_password?: string;
+  /** См. `ssh_password_blob_id`: `fastpanel_password` здесь нет по той же причине. */
+  fastpanel_password_blob_id?: string | null;
   fastpanel_url?: string;
   fastpanel_status?: string;
 }
@@ -84,8 +84,8 @@ export interface ServerUpdate {
   purchase_date?: string | null;
   expiry_date?: string | null;
   fastpanel_user?: string;
-  /** См. `ServerCreate.fastpanel_password`. */
-  fastpanel_password?: string;
+  /** См. `ServerCreate.fastpanel_password_blob_id`. При правке — ТОТ ЖЕ id. */
+  fastpanel_password_blob_id?: string | null;
   fastpanel_url?: string;
   fastpanel_status?: string;
 }

@@ -14,14 +14,17 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   const [name, setName] = useState("");
   const [ip, setIp] = useState("");
   const [login, setLogin] = useState("root");
-  const [password, setPassword] = useState("");
   const [os, setOs] = useState("Ubuntu 22.04 LTS (x86_64)");
   const [fastpanelUrl, setFastpanelUrl] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
-  // SSH-пароль вкладки install держит хук, а не общий с вкладкой connect
-  // `password`: одно поле на два секрета разных видов — это пароль FastPanel,
-  // уехавший в блоб под `blobKind: server_ssh_password`.
+  // По хуку на вкладку, а не одно поле `password` на обе: поля называются
+  // одинаково, а виды секретов разные, и общее состояние отправляло бы пароль
+  // панели в блоб под `blobKind: server_ssh_password`.
   const sshPassword = useSecretSave("SSH password");
+  const fastpanelPassword = useSecretSave("FastPanel password");
+  // Вкладка на экране одна, и ошибка с флагом «сохраняю» показываются от её
+  // хука: у соседней они про поле, которого сейчас нет.
+  const secret = tab === "install" ? sshPassword : fastpanelPassword;
 
   const create = useCreateServer();
 
@@ -37,7 +40,7 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
     } else {
       if (!fastpanelUrl.trim()) newErrors.fastpanelUrl = "FastPanel URL is required";
       if (!login.trim()) newErrors.login = "Login is required";
-      if (!password) newErrors.password = "Password is required";
+      if (!fastpanelPassword.value) newErrors.password = "Password is required";
     }
     
     setErrors(newErrors);
@@ -48,10 +51,10 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
     setTab(newTab);
     setErrors({});
     // Набранный секрет не переезжает между вкладками: поля называются
-    // одинаково («Password»), а виды секретов разные, и раньше пароль панели,
-    // набранный на connect, уходил бы в блоб как SSH-пароль сервера.
-    setPassword("");
+    // одинаково («Password»), а виды секретов разные, и пароль панели,
+    // набранный на connect, уехал бы в блоб как SSH-пароль сервера.
     sshPassword.reset();
+    fastpanelPassword.reset();
     if (newTab === "install") {
       setLogin("root");
     } else {
@@ -107,19 +110,27 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       });
       if (ok) onClose();
     } else {
-       create.mutate({
-        name: name,
-        ip_address: payload_ip,
-        ssh_user: "root", // Default SSH user for backend schema
-        os: os,
-        fastpanel_user: login,
-        fastpanel_password: password,
-        fastpanel_url: payload_url,
-        fastpanel_status: "installed",
-      }, {
-        onSuccess: () => onClose(),
-        onError: (err: any) => alert("Error connecting server: " + (err?.message || "Internal Error"))
+      // Тот же порядок «блоб → сервер». Ошибка теперь в форме, а не в `alert`:
+      // она про поле, к которому пользователь сейчас вернётся. И провал так же
+      // не создаёт сервер: запись с `fastpanel_password_blob_id = NULL` — это
+      // подключение к уже стоящей панели, к которой нечем подключиться.
+      const ok = await fastpanelPassword.save({
+        blobKind: BLOB_KIND.serverFastpanelPassword,
+        existingBlobId: null,
+        persist: async (blobId) => {
+          await create.mutateAsync({
+            name: name,
+            ip_address: payload_ip,
+            ssh_user: "root", // Default SSH user for backend schema
+            os: os,
+            fastpanel_user: login,
+            fastpanel_password_blob_id: blobId,
+            fastpanel_url: payload_url,
+            fastpanel_status: "installed",
+          });
+        },
       });
+      if (ok) onClose();
     }
   };
 
@@ -195,8 +206,20 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
           </div>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Password</label>
-            <Inp type="password" value={password} onChange={e=>{setPassword((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
-            {errors.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.password}</div>}
+            {/* Как и на install, в вебе поля нет вовсе: записать секрет из
+                браузера физически невозможно (шифрует Rust мастер-ключом из
+                keychain). Разница в том, что здесь пароль обязателен — сервер
+                у уже стоящей панели без него нерабочий, поэтому создавать его
+                из браузера нельзя вообще, и кнопки сохранения там нет: ниже
+                вместо неё OpenInDesktop. */}
+            {isTauri() ? (
+              <>
+                <Inp type="password" value={fastpanelPassword.value} onChange={e=>{fastpanelPassword.setValue((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
+                {errors.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.password}</div>}
+              </>
+            ) : (
+              <DesktopOnlyNote what="Saving secrets" />
+            )}
           </div>
         </>
       )}
@@ -205,11 +228,11 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       {/* Ошибка сохранения — в самой форме, а не в `alert`: она про поле, к
           которому пользователь сейчас вернётся, и текст у неё тот же, что в
           модалке SSH на карточке сервера. */}
-      {sshPassword.error && (
-        <div role="alert" style={{padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{sshPassword.error}</div>
+      {secret.error && (
+        <div role="alert" style={{padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secret.error}</div>
       )}
       {isTauri() ? (
-        <Btn variant="primary" onClick={handleAdd} disabled={sshPassword.saving || create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{sshPassword.saving || create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
+        <Btn variant="primary" onClick={handleAdd} disabled={secret.saving || create.isPending} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{secret.saving || create.isPending ? "Adding..." : tab==="install"?"Add Server":"Save"}</Btn>
       ) : (
         <OpenInDesktop
           variant="primary"
