@@ -59,4 +59,48 @@ describe("ProvisionResultModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  // `onClose` здесь — не «свернуть окно», а уничтожить единственную копию
+  // паролей. В очереди из двадцати модалок разной высоты промах мимо Done в
+  // затемнение — вопрос времени, а стоит он FTP-аккаунта, войти в который уже
+  // никто не сможет.
+  it("не закрывается кликом в затемнение — это уничтожило бы пароли", () => {
+    const onClose = vi.fn();
+    const { container } = render(
+      <ProvisionResultModal domain="example.com" result={RESULT} onClose={onClose} />,
+    );
+
+    const backdrop = container.firstElementChild as HTMLElement;
+    fireEvent.click(backdrop);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText("ftp-pw-secret")).toBeTruthy();
+  });
+
+  // Пачка результатов от одного bulk-прогона: без счётчика пользователь не
+  // знает ни сколько паролей ещё впереди, ни что очередь вообще есть.
+  it("называет своё место в очереди показов, когда их несколько", () => {
+    const { rerender } = render(
+      <ProvisionResultModal
+        domain="#1"
+        result={RESULT}
+        onClose={() => {}}
+        position={1}
+        total={3}
+      />,
+    );
+    expect(screen.getByText(/1 of 3/)).toBeTruthy();
+
+    // Одиночный provision счётчиком не мусорит.
+    rerender(
+      <ProvisionResultModal
+        domain="#1"
+        result={RESULT}
+        onClose={() => {}}
+        position={1}
+        total={1}
+      />,
+    );
+    expect(screen.queryByText(/1 of 1/)).toBeNull();
+  });
 });

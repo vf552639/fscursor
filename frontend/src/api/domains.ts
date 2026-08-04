@@ -531,6 +531,12 @@ export interface BulkProvisionDesktopResult {
   idempotency_key: string;
   status: "ok" | "failed" | "already_ran";
   error?: string;
+  /**
+   * Статус ПРЕДЫДУЩЕГО прогона — только при `already_ran`. `running` и `done` —
+   * разные новости: у `running` прогон могли оборвать крашем, и тогда «пароли
+   * уже показаны» неправда (см. `BulkProvisionOut` в Rust).
+   */
+  previous_status?: string;
   items: BulkProvisionItem[];
 }
 
@@ -547,6 +553,10 @@ export interface BulkProvisionOutcome {
   status: "ok" | "failed" | "already_ran";
   /** Причина обрыва прогона — только при `failed`. */
   error?: string;
+  /** Ключ прогона: то, что пользователю есть чем назвать проблему в поддержке. */
+  idempotencyKey: string;
+  /** Статус предыдущего прогона — только при `already_ran`. */
+  previousStatus?: string;
   results: ProvisionOutcome[];
   failed: Array<{ domainId: string; error: string }>;
   /** Домены, до которых прогон не дошёл. */
@@ -554,20 +564,30 @@ export interface BulkProvisionOutcome {
 }
 
 /**
- * Одна строка для тоста об исходе массового прогона.
+ * Заголовочная строка об исходе массового прогона.
  *
  * Отдельная чистая функция, а не шаблон внутри воркспейса, по двум причинам:
- * её проверяет тест, и она обязана НЕ КАСАТЬСЯ `results[].result` — тост
+ * её проверяет тест, и она обязана НЕ КАСАТЬСЯ `results[].result` — текст
  * уезжает в DOM и в скриншоты, а там лежат пароли.
+ *
+ * Про `already_ran` говорится РАЗНОЕ для `running` и `done`. Слепив их, мы
+ * врали бы в половине случаев: `running` мог остаться от прогона, убитого
+ * крашем на середине, — тогда «пароли уже показаны» неправда, их никто не
+ * видел, а половина доменов не тронута.
  */
 export function summarizeBulkProvision(o: BulkProvisionOutcome): string {
   if (o.status === "already_ran") {
-    // Ровно то, что раньше выглядело как пустой успех: прогон с этим набором
-    // доменов уже был, его пароли показаны один раз и второй раз их не покажет
-    // никто — сервер их не знает по определению.
+    if (o.previousStatus === "running") {
+      return (
+        "Bulk provision: a run over exactly this set of domains is already marked as " +
+        "in progress, so nothing was started again. If that run was interrupted, retry " +
+        "later or change the set."
+      );
+    }
     return (
-      "Bulk provision: this run already happened — nothing was started again, " +
-      "and its passwords cannot be shown a second time."
+      "Bulk provision: this exact set of domains was already provisioned by an earlier " +
+      "run, so nothing was started again. Credentials are shown once, so that run's " +
+      "passwords cannot be shown again."
     );
   }
   const parts = [`${o.results.length} provisioned`];
@@ -593,7 +613,15 @@ function parseBulkProvisionResult(res: BulkProvisionDesktopResult): BulkProvisio
       skipped.push(item.domain_id);
     }
   }
-  return { status: res.status, error: res.error, results, failed, skipped };
+  return {
+    status: res.status,
+    error: res.error,
+    idempotencyKey: res.idempotency_key,
+    previousStatus: res.previous_status,
+    results,
+    failed,
+    skipped,
+  };
 }
 
 /**
@@ -621,21 +649,39 @@ function claimProvisionGate(domainIds: number[]): () => void {
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
-  for (const domainId of domainIds) {
-    const claim = queryClient.getMutationCache().build(queryClient, {
-      mutationKey: PROVISION_DOMAIN_KEY,
-      mutationFn: async (vars: ProvisionDomainVars) => {
-        await held;
-        return { domain_id: String(vars.domainId) };
-      },
-    });
-    // `void` + `catch`: заявка живёт своей жизнью, а её промис никого не
-    // интересует — ждём мы сам прогон.
-    void claim
-      .execute({ domainId, domainName: `#${domainId}`, withDb: false })
-      .catch(() => {});
+  try {
+    for (const domainId of domainIds) {
+      const claim = queryClient.getMutationCache().build(queryClient, {
+        mutationKey: PROVISION_DOMAIN_KEY,
+        mutationFn: async (vars: ProvisionDomainVars) => {
+          await held;
+          return { domain_id: String(vars.domainId) };
+        },
+      });
+      // `void` + `catch`: заявка живёт своей жизнью, а её промис никого не
+      // интересует — ждём мы сам прогон.
+      void claim.execute(gateClaimVars(domainId)).catch(() => {});
+    }
+  } catch (e) {
+    // Провал на середине набора оставил бы уже поставленные заявки висеть
+    // вечно — то есть навсегда погасил бы ⚙ на части доменов.
+    release();
+    throw e;
   }
   return release;
+}
+
+/**
+ * `variables` заявки гейта.
+ *
+ * `bulkGateClaim` — маркер, а не украшение: читатель `MutationCache` (страница
+ * `Domains`, `runProvisionDomain`, любой отладчик) иначе не отличит заявку от
+ * настоящего запроса на provision. `domainName` и `withDb` у заявки выдуманы —
+ * поля осмысленные, значения ничего не значат, потому что никакого provision
+ * заявка не делает.
+ */
+function gateClaimVars(domainId: number): ProvisionDomainVars & { bulkGateClaim: true } {
+  return { domainId, domainName: `#${domainId}`, withDb: false, bulkGateClaim: true };
 }
 
 /** Домены набора, по которым provision уже летит (кнопкой, ссылкой или другим bulk). */
@@ -667,10 +713,14 @@ export async function runBulkProvisionDomains(
   if (!isTauri()) {
     throw new Error(desktopOnly("Provisioning"));
   }
+  // Дубликаты убираем ДО всего: `ids=1,1,1` заводил три заявки на домен 1 и
+  // трижды провижинил его в Rust — то есть трижды создавал FTP-аккаунт, из
+  // которых пользователь увидел бы три разных пароля к одному логину.
+  const ids = [...new Set(domainIds)];
   // Гейт ключуется числовым id — тем же, что кладёт в `variables` страница.
   // Нечисловой id ссылки гейту не соответствует ничему; такой домен всё равно
   // отобьёт Rust («domain not in local cache»), и он попадёт в отчёт как failed.
-  const numeric = domainIds.map(Number).filter((n) => Number.isInteger(n));
+  const numeric = ids.map(Number).filter((n) => Number.isInteger(n));
   const busy = alreadyProvisioning(numeric);
   if (busy.length > 0) {
     throw new Error(
@@ -681,7 +731,7 @@ export async function runBulkProvisionDomains(
   try {
     const res = await invokeSynced<BulkProvisionDesktopResult>("provision_bulk", {
       userId,
-      domainIds,
+      domainIds: ids,
     });
     return parseBulkProvisionResult(res);
   } finally {

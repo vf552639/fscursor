@@ -102,10 +102,11 @@ describe("runBulkProvisionDomains — отчёт вместо ключа иде�
     expect(out.status).toBe("failed");
   });
 
-  it("говорит словами, что прогон уже был и паролей у него нет", async () => {
+  it("про завершённый прогон говорит, что его пароли уже не показать", async () => {
     mocks.invokeSynced.mockResolvedValue(
       report({
         status: "already_ran",
+        previous_status: "done",
         items: [
           { domain_id: "1", outcome: "skipped" },
           { domain_id: "2", outcome: "skipped" },
@@ -119,8 +120,51 @@ describe("runBulkProvisionDomains — отчёт вместо ключа иде�
     expect(out.results).toHaveLength(0);
     // Пустой успех выглядел бы как «готово», хотя показать пароли уже некому.
     const text = summarizeBulkProvision(out);
-    expect(text).toMatch(/already happened/i);
-    expect(text).toMatch(/cannot be shown a second time/i);
+    expect(text).toMatch(/already provisioned by an earlier run/i);
+    expect(text).toMatch(/cannot be shown again/i);
+  });
+
+  // Строка `running` снимается только явными ветками внутри процесса, поэтому
+  // она остаётся и после краша посреди прогона. Сказать про неё «пароли уже
+  // показаны» — соврать дважды: прогон не прошёл, и паролей никто не видел.
+  it("про незакрытый прогон НЕ утверждает, что его пароли уже показывали", async () => {
+    mocks.invokeSynced.mockResolvedValue(
+      report({
+        status: "already_ran",
+        previous_status: "running",
+        items: [{ domain_id: "1", outcome: "skipped" }],
+      }),
+    );
+
+    const out = await runBulkProvisionDomains("user-1", ["1"]);
+
+    expect(out.previousStatus).toBe("running");
+    const text = summarizeBulkProvision(out);
+    expect(text).toMatch(/in progress/i);
+    expect(text).toMatch(/interrupted/i);
+    expect(text).not.toMatch(/cannot be shown/i);
+    expect(text).not.toMatch(/already provisioned/i);
+  });
+
+  // Ключ прогона — единственное, чем пользователь может назвать проблему в
+  // поддержке: команда адресует прогон только им.
+  it("доносит ключ идемпотентности до вызывающего", async () => {
+    mocks.invokeSynced.mockResolvedValue(
+      report({ idempotency_key: "abc123", items: [doneItem("1", "PW-1")] }),
+    );
+    const out = await runBulkProvisionDomains("user-1", ["1"]);
+    expect(out.idempotencyKey).toBe("abc123");
+  });
+
+  // `ids=1,1,1` заводил три заявки гейта на один домен и трижды провижинил его:
+  // три FTP-аккаунта под одним логином, из которых рабочий — последний.
+  it("схлопывает дубликаты id из ссылки", async () => {
+    mocks.invokeSynced.mockResolvedValue(report({ items: [doneItem("1", "PW-1")] }));
+
+    await runBulkProvisionDomains("user-1", ["1", "1", "1"]);
+
+    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+    expect(mocks.invokeSynced.mock.calls[0][1]).toMatchObject({ domainIds: ["1"] });
   });
 
   it("тост про исход не содержит ни одного пароля", async () => {
@@ -242,6 +286,29 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
           .findAll({ mutationKey: PROVISION_DOMAIN_KEY, status: "pending" }),
       ).toHaveLength(0),
     );
+  });
+
+  // Провал на середине набора оставил бы уже поставленные заявки висеть вечно,
+  // то есть навсегда погасил бы ⚙ на части доменов.
+  it("не оставляет висеть заявки, если гейт не удалось занять целиком", async () => {
+    const cache = queryClient.getMutationCache();
+    const realBuild = cache.build.bind(cache);
+    let calls = 0;
+    vi.spyOn(cache, "build").mockImplementation(((...args: Parameters<typeof realBuild>) => {
+      calls += 1;
+      if (calls === 2) throw new Error("cache exploded");
+      return realBuild(...args);
+    }) as typeof realBuild);
+
+    await expect(runBulkProvisionDomains("user-1", ["1", "2"])).rejects.toThrow("cache exploded");
+
+    await vi.waitFor(() =>
+      expect(
+        cache.findAll({ mutationKey: PROVISION_DOMAIN_KEY, status: "pending" }),
+      ).toHaveLength(0),
+    );
+    // И по SSH при этом никто не пошёл.
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
   });
 
   it("отпускает гейт и когда прогон упал целиком", async () => {

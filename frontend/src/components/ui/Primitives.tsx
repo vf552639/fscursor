@@ -149,8 +149,12 @@ export function Sel({value, onChange, children, style}: any){
   </select>;
 }
 
-export function Modal({title, onClose, children, width=480}: any){
-  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+// `closeOnBackdrop={false}` — для модалок, чей `onClose` УНИЧТОЖАЕТ единственную
+// копию показанного (пароли FTP/БД/панели). Промах мимо кнопки Done не должен
+// стоить пароля к уже созданному аккаунту, а в очереди из двадцати модалок,
+// которые ещё и разной высоты, такой промах — вопрос времени.
+export function Modal({title, onClose, children, width=480, closeOnBackdrop=true}: any){
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>{if(closeOnBackdrop&&e.target===e.currentTarget)onClose();}}>
     <div style={{background:"#fff",borderRadius:14,width,maxWidth:"95vw",boxShadow:"0 20px 60px rgba(0,0,0,0.18)",padding:28,position:"relative",maxHeight:"90vh",overflowY:"auto"}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
         <div style={{fontSize:18,fontWeight:700,color:"#111"}}>{title}</div>

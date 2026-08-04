@@ -19,10 +19,15 @@ export function ProvisionResultModal({
   domain,
   result,
   onClose,
+  position = 0,
+  total = 0,
 }: {
   domain: string;
   result: ProvisionDesktopResult;
   onClose: () => void;
+  /** Номер в очереди показов и её длина — см. `useShowOnceQueue`. */
+  position?: number;
+  total?: number;
 }) {
   const secretBlock = (
     title: string,
@@ -67,8 +72,21 @@ export function ProvisionResultModal({
   );
 
   return (
-    <Modal title={`Provisioned ${domain}`} onClose={onClose} width={520}>
+    // `closeOnBackdrop={false}`: `onClose` здесь — это `dismiss`, то есть
+    // уничтожение единственной копии паролей. Клик мимо кнопки Done не имеет
+    // права стоить FTP-аккаунта, войти в который уже никто не сможет.
+    <Modal
+      title={`Provisioned ${domain}`}
+      onClose={onClose}
+      width={520}
+      closeOnBackdrop={false}
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {total > 1 && (
+          <div style={{ fontSize: 12.5, color: "#6b7280", fontWeight: 500 }}>
+            {position} of {total} — each set of credentials is shown once
+          </div>
+        )}
         {result.ssl_issued !== undefined && (
           <div>
             <Badge variant={result.ssl_issued ? "green" : "yellow"}>

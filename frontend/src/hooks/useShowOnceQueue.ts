@@ -25,14 +25,49 @@ export interface ShowOnceQueue<T> {
   push: (item: T) => void;
   /** Убрать показанное и открыть следующее. На пустой очереди — no-op. */
   dismiss: () => void;
+  /**
+   * Номер показываемого в текущей серии, начиная с 1 (`0` — показывать нечего).
+   *
+   * Нужен не для красоты: массовый прогон кладёт сюда результаты сразу пачкой,
+   * и без «3 из 20» пользователь не знает ни сколько ещё паролей впереди, ни
+   * что очередь вообще есть — а закрыв последний, не понимает, все ли он
+   * увидел.
+   */
+  position: number;
+  /** Длина текущей серии. Обнуляется, когда очередь опустела. */
+  total: number;
+}
+
+interface QueueState<T> {
+  items: T[];
+  /** Сколько всего положили в текущую серию — «из скольких» показываем. */
+  total: number;
 }
 
 export function useShowOnceQueue<T>(): ShowOnceQueue<T> {
-  const [items, setItems] = useState<T[]>([]);
+  const [state, setState] = useState<QueueState<T>>({ items: [], total: 0 });
   // Функциональные апдейты, а не `[...items, item]`: два результата, пришедшие
   // в одном тике (или из замыканий разных рендеров), иначе схлопнулись бы в
   // один — ровно та потеря, ради которой заведена очередь.
-  const push = useCallback((item: T) => setItems((q) => [...q, item]), []);
-  const dismiss = useCallback(() => setItems((q) => q.slice(1)), []);
-  return { current: items.length > 0 ? items[0] : null, push, dismiss };
+  const push = useCallback(
+    (item: T) => setState((s) => ({ items: [...s.items, item], total: s.total + 1 })),
+    [],
+  );
+  const dismiss = useCallback(
+    () =>
+      setState((s) => {
+        const items = s.items.slice(1);
+        // Опустела — серия закончилась, следующий счёт начинается с нуля.
+        // Иначе одиночный provision через час показывал бы «21 из 21».
+        return items.length === 0 ? { items, total: 0 } : { items, total: s.total };
+      }),
+    [],
+  );
+  return {
+    current: state.items.length > 0 ? state.items[0] : null,
+    push,
+    dismiss,
+    position: state.items.length > 0 ? state.total - state.items.length + 1 : 0,
+    total: state.total,
+  };
 }

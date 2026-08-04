@@ -18,11 +18,13 @@ function Harness() {
       <button onClick={() => queue.push("B")}>push B</button>
       <button onClick={queue.dismiss}>dismiss</button>
       <div data-testid="current">{queue.current ?? "—"}</div>
+      <div data-testid="pos">{`${queue.position}/${queue.total}`}</div>
     </div>
   );
 }
 
 const current = () => screen.getByTestId("current").textContent;
+const pos = () => screen.getByTestId("pos").textContent;
 
 afterEach(cleanup);
 
@@ -56,6 +58,27 @@ describe("useShowOnceQueue", () => {
 
     fireEvent.click(screen.getByText("push A"));
     expect(current()).toBe("A");
+  });
+
+  // Массовый прогон кладёт результаты пачкой. Без «2 из 3» пользователь не
+  // знает, сколько паролей ещё впереди, и не понимает, все ли он увидел.
+  it("считает место в серии и обнуляет счёт, когда серия кончилась", () => {
+    render(<Harness />);
+    expect(pos()).toBe("0/0");
+
+    fireEvent.click(screen.getByText("push A"));
+    fireEvent.click(screen.getByText("push B"));
+    expect(pos()).toBe("1/2");
+
+    fireEvent.click(screen.getByText("dismiss"));
+    expect(pos()).toBe("2/2");
+
+    fireEvent.click(screen.getByText("dismiss"));
+    // Серия кончилась — следующий одиночный показ не должен назваться «3 из 3».
+    expect(pos()).toBe("0/0");
+
+    fireEvent.click(screen.getByText("push A"));
+    expect(pos()).toBe("1/1");
   });
 
   it("держит стабильные `push` и `dismiss`", () => {

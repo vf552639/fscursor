@@ -230,13 +230,14 @@ describe("DesktopWorkspace — владелец результатов provision
 
   it("показывает результат каждого домена bulk-провижининга — по одному", async () => {
     mocks.invokeSynced.mockResolvedValue({
-      idempotency_key: "k",
+      idempotency_key: "k-run",
       status: "failed",
       error: "failed on domain 3: ssh: connect: refused",
       items: [
         { domain_id: "1", outcome: "done", result: result("1", "PW-A") },
         { domain_id: "2", outcome: "done", result: result("2", "PW-B") },
         { domain_id: "3", outcome: "failed", error: "ssh: connect: refused" },
+        { domain_id: "4", outcome: "skipped" },
       ],
     });
     vi.stubGlobal("confirm", () => true);
@@ -245,28 +246,46 @@ describe("DesktopWorkspace — владелец результатов provision
       { id: 1, name: "a.com" },
       { id: 2, name: "b.com" },
       { id: 3, name: "c.com" },
+      { id: 4, name: "d.com" },
     ]);
     await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
     const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
 
-    handler(["sdmp://bulk-provision?ids=1,2,3"]);
+    handler(["sdmp://bulk-provision?ids=1,2,3,4"]);
 
     // Раньше bulk отдавал наружу один ключ идемпотентности, а `Ok` каждого
     // домена отбрасывал: N созданных FTP-аккаунтов и ни одного пароля к ним.
     expect(await screen.findByText("PW-A-ftp")).toBeTruthy();
     // И второй результат не затёрт первым — очередь показов, а не один слот.
     expect(screen.queryByText("PW-B-ftp")).toBeNull();
+    // Пользователь видит, что паролей будет несколько и сколько именно.
+    expect(screen.getByText(/1 of 2/)).toBeTruthy();
+    // И итог не лезет поверх паролей: сначала то, что существует в единственном
+    // экземпляре, потом то, что никуда не денется.
+    expect(screen.queryByText("Bulk provision stopped")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(await screen.findByText("PW-B-ftp")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
 
-    // Про упавший домен пользователю сказано, и сказано без паролей.
-    const toast = await screen.findByText(/Bulk provision:/);
-    expect(toast.textContent).toContain("2 provisioned");
-    expect(toast.textContent).toContain("#3: ssh: connect: refused");
-    expect(toast.textContent).not.toContain("PW-");
+    // Итог прогона дождался, пока прочитают ВСЕ пароли, и требует явного
+    // закрытия. Тостом он жил бы 2200 мс под этими самыми модалками, и «прогон
+    // оборвался на третьем домене» пользователь не увидел бы никогда.
+    expect(await screen.findByText("Bulk provision stopped")).toBeTruthy();
+    const report = document.body.textContent ?? "";
+    expect(report).toContain("2 provisioned");
+    expect(report).toContain("1 not started");
+    expect(report).toContain("ssh: connect: refused");
+    // Хвост назван поимённо: без id повтор по нему собрать не из чего.
+    expect(report).toContain("#4");
+    expect(report).toContain("Run key: k-run");
+    // И ни одного пароля на экране итога.
+    expect(report).not.toContain("PW-");
 
     expect(JSON.stringify(localStorage)).not.toContain("PW-");
     expect(JSON.stringify(sessionStorage)).not.toContain("PW-");
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByText("Bulk provision stopped")).toBeNull();
   });
 
   it("на время bulk-прогона гасит ⚙ у каждого домена набора", async () => {

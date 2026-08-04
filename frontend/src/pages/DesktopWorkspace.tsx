@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Dashboard from "./Dashboard";
 import Servers from "./Servers";
@@ -16,8 +16,9 @@ import { apiPost } from "../api/client";
 import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
 import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
 import { ProvisionResultModal } from "../components/ProvisionResultModal";
+import { BulkProvisionReportModal } from "../components/BulkProvisionReportModal";
 import { useShowOnceQueue } from "../hooks/useShowOnceQueue";
-import { summarizeBulkProvision, type ProvisionOutcome } from "../api/domains";
+import type { BulkProvisionOutcome, ProvisionOutcome } from "../api/domains";
 
 /**
  * Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`).
@@ -121,6 +122,9 @@ export default function DesktopWorkspace() {
   // глазах у читающего пароли, а взять их больше негде.
   const fpQueue = useShowOnceQueue<InstallFastpanelResult>();
   const provisionQueue = useShowOnceQueue<ProvisionOutcome>();
+  // Итог массового прогона — тоже очередь и тоже экран, а не тост: он переживает
+  // и модалки с паролями, которые сам породил, и уход пользователя за кофе.
+  const bulkReportQueue = useShowOnceQueue<BulkProvisionOutcome>();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tweaks, setTweaks] = useState(false);
   const [tw, setTw] = useState(TWEAK_DEFAULTS);
@@ -164,10 +168,17 @@ export default function DesktopWorkspace() {
     }
   };
 
+  // Таймер предыдущего тоста гасим: без этого второй тост живёт остаток чужого
+  // таймера и исчезает раньше, чем его успевают прочитать.
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showToast = (message: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(message);
-    setTimeout(() => setToast(null), 2200);
+    toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
 
   useEffect(() => {
     if (!isTauri() || !userId) return;
@@ -187,9 +198,10 @@ export default function DesktopWorkspace() {
             // один слот значило бы потерять все, кроме последнего. Очередь для
             // того и заведена.
             for (const outcome of res.bulkProvision.results) provisionQueue.push(outcome);
-            // Тост — про исход прогона целиком (упавшие, незапущенные, «уже
-            // было»); паролей он не касается, см. `summarizeBulkProvision`.
-            showToast(summarizeBulkProvision(res.bulkProvision));
+            // Итог — отдельным экраном ПОСЛЕ паролей, а не тостом: тост живёт
+            // 2200 мс под этими самыми модалками, и «прогон оборвался на
+            // третьем домене» пользователь просто не увидит.
+            bulkReportQueue.push(res.bulkProvision);
           }
         } catch (e) {
           showToast(e instanceof Error ? e.message : String(e));
@@ -675,6 +687,16 @@ export default function DesktopWorkspace() {
           domain={provisionQueue.current.domain}
           result={provisionQueue.current.result}
           onClose={provisionQueue.dismiss}
+          position={provisionQueue.position}
+          total={provisionQueue.total}
+        />
+      )}
+      {/* Строго после паролей: сначала то, что существует в единственном
+          экземпляре, потом итог — он никуда не денется. */}
+      {!provisionQueue.current && bulkReportQueue.current && (
+        <BulkProvisionReportModal
+          outcome={bulkReportQueue.current}
+          onClose={bulkReportQueue.dismiss}
         />
       )}
 

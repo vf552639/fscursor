@@ -21,7 +21,10 @@ export function FastPanelCredsModal({
   onClose: () => void;
 }) {
   return (
-    <Modal title="FastPanel installed" onClose={onClose} width={520}>
+    // `closeOnBackdrop={false}` по той же причине, что у `ProvisionResultModal`:
+    // `onClose` гасит единственную копию пароля панели, добытую 30-минутной
+    // установкой. Клик мимо Done не должен её стоить.
+    <Modal title="FastPanel installed" onClose={onClose} width={520} closeOnBackdrop={false}>
       <div
         style={{
           fontSize: 12.5,
