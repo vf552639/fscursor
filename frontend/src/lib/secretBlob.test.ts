@@ -25,11 +25,17 @@ function setTauri(on: boolean) {
 }
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const EXISTING_ID = "11111111-2222-4333-8444-555555555555";
 
+/**
+ * Именно ПОСЛЕДНИЙ вызов: сценарий «правка после создания» шлёт два, и `.find()`
+ * молча проверял бы аргументы первого. (`findLast` не берём — `lib` проекта
+ * ES2020, метода в типах нет.)
+ */
 function lastPutArgs(): Record<string, unknown> {
-  const call = mocks.invokeIfTauri.mock.calls.find((c) => c[0] === "vault_put_blob");
-  if (!call) throw new Error("vault_put_blob не вызывалась");
-  return call[1] as Record<string, unknown>;
+  const calls = mocks.invokeIfTauri.mock.calls.filter((c: unknown[]) => c[0] === "vault_put_blob");
+  if (calls.length === 0) throw new Error("vault_put_blob не вызывалась");
+  return calls[calls.length - 1][1] as Record<string, unknown>;
 }
 
 beforeEach(() => {
@@ -43,9 +49,41 @@ afterEach(() => {
   useAuthStore.getState().clear();
 });
 
+describe("BLOB_KIND", () => {
+  it("значения зафиксированы: они уезжают в БД и в audit-метаданные", () => {
+    expect(BLOB_KIND).toEqual({
+      serverSshPassword: "server_ssh_password",
+      serverFastpanelPassword: "server_fastpanel_password",
+      registrarApiKey: "registrar_api_key",
+      registrarApiSecret: "registrar_api_secret",
+      cloudflareApiToken: "cloudflare_api_token",
+    });
+    // Ограничение колонки `blob_kind` — String(64).
+    for (const v of Object.values(BLOB_KIND)) expect(v.length).toBeLessThanOrEqual(64);
+  });
+
+  it("компилятор не пускает произвольную строку в blobKind", () => {
+    // Проверку делает `tsc --noEmit`: если тип `blobKind` когда-нибудь ослабнет
+    // до `string`, директива станет неиспользованной и сборка упадёт. Дыра была
+    // реальной — два соседних позиционных `string` позволяли записать сам
+    // пароль в `blob_kind` и в `audit_log.metadata`.
+    const bad: Parameters<typeof putSecretBlob>[0] = {
+      plaintext: "p",
+      // @ts-expect-error — сырая строка вместо значения BLOB_KIND.
+      blobKind: "s3cret-password",
+      existingBlobId: null,
+    };
+    expect(bad.blobKind).toBe("s3cret-password");
+  });
+});
+
 describe("putSecretBlob", () => {
   it("новому секрету выдаёт свежий uuid и шлёт camelCase-аргументы", async () => {
-    const id = await putSecretBlob("s3cret", BLOB_KIND.serverSshPassword);
+    const id = await putSecretBlob({
+      plaintext: "s3cret",
+      blobKind: BLOB_KIND.serverSshPassword,
+      existingBlobId: null,
+    });
 
     expect(id).toMatch(UUID_V4);
     expect(mocks.invokeIfTauri).toHaveBeenCalledTimes(1);
@@ -59,29 +97,63 @@ describe("putSecretBlob", () => {
   });
 
   it("двум новым секретам выдаёт разные id", async () => {
-    const a = await putSecretBlob("a", BLOB_KIND.serverSshPassword);
-    const b = await putSecretBlob("b", BLOB_KIND.serverSshPassword);
+    const a = await putSecretBlob({
+      plaintext: "a",
+      blobKind: BLOB_KIND.serverSshPassword,
+      existingBlobId: null,
+    });
+    const b = await putSecretBlob({
+      plaintext: "b",
+      blobKind: BLOB_KIND.serverSshPassword,
+      existingBlobId: null,
+    });
     expect(a).not.toBe(b);
   });
 
   it("при правке переиспользует существующий blobId, а не заводит новый", async () => {
     // Версионирование блоба — на сервере: правка обязана перезаписать ТОТ ЖЕ id,
     // иначе у сущности останется ссылка на старую версию секрета.
-    const existing = "11111111-2222-4333-8444-555555555555";
-    const id = await putSecretBlob("new-pass", BLOB_KIND.serverSshPassword, existing);
+    const created = await putSecretBlob({
+      plaintext: "old-pass",
+      blobKind: BLOB_KIND.serverSshPassword,
+      existingBlobId: null,
+    });
+    const edited = await putSecretBlob({
+      plaintext: "new-pass",
+      blobKind: BLOB_KIND.serverSshPassword,
+      existingBlobId: created,
+    });
 
-    expect(id).toBe(existing);
-    expect(lastPutArgs().blobId).toBe(existing);
+    expect(edited).toBe(created);
+    expect(lastPutArgs()).toEqual({
+      userId: "user-1",
+      blobId: created,
+      blobKind: "server_ssh_password",
+      plaintextB64: "bmV3LXBhc3M=",
+    });
   });
 
-  it("пустой existingBlobId считает отсутствующим", async () => {
-    const id = await putSecretBlob("p", BLOB_KIND.serverSshPassword, null);
+  it.each([
+    ["null", null],
+    ['пустая строка (useState("") под id)', ""],
+    ["undefined (TS запрещает, но JS-вызов возможен)", undefined],
+  ])("existingBlobId = %s считается отсутствующим", async (_name, existing) => {
+    const id = await putSecretBlob({
+      plaintext: "p",
+      blobKind: BLOB_KIND.serverSshPassword,
+      existingBlobId: existing as string | null,
+    });
     expect(id).toMatch(UUID_V4);
+    expect(lastPutArgs().blobId).toBe(id);
   });
 
   it("не-ASCII пароль доезжает байт в байт (btoa бы упал)", async () => {
     const secret = "Пароль-Ω-🔑-пробел ";
-    await putSecretBlob(secret, BLOB_KIND.cloudflareApiToken);
+    await putSecretBlob({
+      plaintext: secret,
+      blobKind: BLOB_KIND.cloudflareApiToken,
+      existingBlobId: null,
+    });
 
     const b64 = lastPutArgs().plaintextB64 as string;
     expect(new TextDecoder().decode(b64ToU8(b64))).toBe(secret);
@@ -89,16 +161,39 @@ describe("putSecretBlob", () => {
 
   it("вне Tauri бросает общей фразой и не зовёт команду", async () => {
     setTauri(false);
-    await expect(putSecretBlob("s", BLOB_KIND.serverSshPassword)).rejects.toThrow(
-      /runs in the SDMP desktop app/,
-    );
+    await expect(
+      putSecretBlob({
+        plaintext: "s",
+        blobKind: BLOB_KIND.serverSshPassword,
+        existingBlobId: null,
+      }),
+    ).rejects.toThrow(/runs in the SDMP desktop app/);
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
   });
 
   it("без userId бросает и не зовёт команду", async () => {
     useAuthStore.setState({ userId: null });
-    await expect(putSecretBlob("s", BLOB_KIND.serverSshPassword)).rejects.toThrow(/user id missing/);
+    await expect(
+      putSecretBlob({
+        plaintext: "s",
+        blobKind: BLOB_KIND.serverSshPassword,
+        existingBlobId: null,
+      }),
+    ).rejects.toThrow(/user id missing/);
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+  });
+
+  it("не глотает падение команды и не отдаёт id", async () => {
+    // Иначе форма сохранила бы сущность со ссылкой на несуществующий блоб —
+    // ровно тот итог, ради устранения которого модуль и заведён.
+    mocks.invokeIfTauri.mockRejectedValueOnce(new Error("keychain locked"));
+    await expect(
+      putSecretBlob({
+        plaintext: "s",
+        blobKind: BLOB_KIND.serverSshPassword,
+        existingBlobId: null,
+      }),
+    ).rejects.toThrow(/keychain locked/);
   });
 
   it("генерит валидный уникальный uuid v4 и без crypto.randomUUID", async () => {
@@ -108,8 +203,13 @@ describe("putSecretBlob", () => {
     Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true });
     expect(crypto.randomUUID).toBeUndefined();
     try {
-      const a = await putSecretBlob("s", BLOB_KIND.serverSshPassword);
-      const b = await putSecretBlob("s", BLOB_KIND.serverSshPassword);
+      const args = {
+        plaintext: "s",
+        blobKind: BLOB_KIND.serverSshPassword,
+        existingBlobId: null,
+      };
+      const a = await putSecretBlob(args);
+      const b = await putSecretBlob(args);
       // Формат проверяем полным regex'ом: биты версии и варианта — часть id,
       // который уедет в БД ссылкой на секрет, константа или v-less строка тут
       // должны падать.
@@ -126,13 +226,15 @@ describe("putSecretBlob", () => {
 
 describe("deleteSecretBlob", () => {
   it("передаёт { blobId }", async () => {
-    await deleteSecretBlob("abc-123");
-    expect(mocks.invokeIfTauri).toHaveBeenCalledWith("vault_delete_blob", { blobId: "abc-123" });
+    // Настоящий uuid: на бэкенде `blob_id` — path-параметр `uuid.UUID`, и
+    // фикстура вида "abc-123" учила бы формату, на котором прилетит 422.
+    await deleteSecretBlob(EXISTING_ID);
+    expect(mocks.invokeIfTauri).toHaveBeenCalledWith("vault_delete_blob", { blobId: EXISTING_ID });
   });
 
   it("вне Tauri бросает и не зовёт команду", async () => {
     setTauri(false);
-    await expect(deleteSecretBlob("abc-123")).rejects.toThrow(/runs in the SDMP desktop app/);
+    await expect(deleteSecretBlob(EXISTING_ID)).rejects.toThrow(/runs in the SDMP desktop app/);
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
   });
 });
