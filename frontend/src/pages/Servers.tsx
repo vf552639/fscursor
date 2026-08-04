@@ -173,12 +173,9 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
             <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={e=>setOs((e.target as any).value)} style={{width:"100%"}}><option>Ubuntu 22.04 LTS (x86_64)</option><option>Ubuntu 20.04 LTS (x86_64)</option><option>Debian 12 (x86_64)</option></Sel></div>
             <div>
               <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label>
-              {/* В вебе поля нет вовсе, а не «есть, но не сохранится»: шифрует
-                  Rust мастер-ключом из keychain, так что записать секрет из
-                  браузера физически невозможно. Поле, в которое дали набрать
-                  пароль, обещало бы сохранение — и обмануло бы уже после того,
-                  как секрет набран. Сервер без SSH завести можно и в вебе:
-                  кнопка формы там и так ведёт в десктоп (OpenInDesktop ниже). */}
+              {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Сервер
+                  без SSH завести можно и в вебе: кнопка формы там и так ведёт
+                  в десктоп (OpenInDesktop ниже). */}
               {isTauri() ? (
                 <>
                   <Inp type="password" value={sshPassword.value} onChange={e=>{sshPassword.setValue((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="••••••••" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
@@ -213,10 +210,9 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
           </div>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Password</label>
-            {/* Как на install выше: в вебе поля нет вовсе — шифрует Rust
-                мастер-ключом из keychain. Кнопки сохранения в вебе нет ни на
-                одной вкладке (ниже вместо неё OpenInDesktop), так что сервер
-                без пароля панели отсюда и не завести. */}
+            {/* Как на install выше. Кнопки сохранения в вебе нет ни на одной
+                вкладке (ниже вместо неё OpenInDesktop), так что сервер без
+                пароля панели отсюда и не завести. */}
             {isTauri() ? (
               <>
                 <Inp type="password" value={fastpanelPassword.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{fastpanelPassword.setValue(e.target.value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>

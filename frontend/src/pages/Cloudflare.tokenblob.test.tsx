@@ -1,18 +1,18 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 
 import Cloudflare, { AddCfAccountModal } from "./Cloudflare";
 import { useDeleteCloudflareAccount } from "../api/cloudflare";
-import { b64ToU8 } from "../lib/b64";
 import {
   setTauri,
   UUID_V4,
   putBlobArgs,
   putBlobCalls,
-  deletedBlobIds,
+  blobPlaintext,
+  expectBlobsGoneAfterEntity,
+  expectDeleteIgnoresBlobFailure,
   renderWithClient,
-  renderHookWithClient,
   secretBlobLifecycle,
   BLOB_USER_ID,
   DESKTOP_NOTE,
@@ -129,7 +129,7 @@ describe("Cloudflare — api_token через блоб", () => {
     // записанный как `server_ssh_password`, найдёт не тот потребитель.
     expect(blob.blobKind).toBe("cloudflare_api_token");
     expect(blob.blobId).toMatch(UUID_V4);
-    expect(new TextDecoder().decode(b64ToU8(blob.plaintextB64))).toBe(TOKEN);
+    expect(blobPlaintext(blob)).toBe(TOKEN);
 
     const [url, body] = mocks.apiPost.mock.calls[0];
     expect(url).toBe("/cloudflare/accounts");
@@ -254,12 +254,12 @@ describe("Cloudflare — api_token через блоб", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "✕" }));
 
-    await waitFor(() => expect(deletedBlobIds(mocks.invokeIfTauri)).toEqual([EXISTING_BLOB]));
-    expect(mocks.apiDelete).toHaveBeenCalledWith("/cloudflare/accounts/5");
-    // Порядок обратен записи: сначала сущность, потом блоб. Наоборот — это
-    // живой аккаунт со ссылкой на стёртый блоб, если DELETE не доедет.
-    const deleteBlobCall = mocks.invokeIfTauri.mock.invocationCallOrder[0];
-    expect(mocks.apiDelete.mock.invocationCallOrder[0]).toBeLessThan(deleteBlobCall);
+    await expectBlobsGoneAfterEntity({
+      apiDelete: mocks.apiDelete,
+      invokeIfTauri: mocks.invokeIfTauri,
+      url: "/cloudflare/accounts/5",
+      blobIds: [EXISTING_BLOB],
+    });
   });
 
   it("упавшая уборка блоба не делает удаление аккаунта проваленным", async () => {
@@ -267,14 +267,31 @@ describe("Cloudflare — api_token через блоб", () => {
     mocks.apiDelete.mockResolvedValue(undefined);
     mocks.invokeIfTauri.mockRejectedValue(new Error("blob storage down"));
 
-    const { result } = renderHookWithClient(() => useDeleteCloudflareAccount());
     // Осиротевший блоб не виден никому и ничему не мешает, а красное на
     // удалённом аккаунте — это вопрос «так удалился или нет?», ответа на
-    // который у пользователя нет.
-    await act(async () => {
-      await result.current.mutateAsync(ACC as any);
-    });
+    // который у пользователя нет. `ACC` идёт в хук без каста: заодно держим его
+    // сигнатуру `Pick<CloudflareAccount, "id" | "api_token_blob_id">`.
+    await expectDeleteIgnoresBlobFailure(useDeleteCloudflareAccount, ACC);
     expect(mocks.apiDelete).toHaveBeenCalledWith("/cloudflare/accounts/5");
-    expect(result.current.isError).toBe(false);
+  });
+
+  it("пробел в поле токена не перезаписывает живой блоб", async () => {
+    // `" "` проходил и «поле пустое?» формы, и проверку пустоты в хуке, и
+    // уезжал в `putSecretBlob` с СУЩЕСТВУЮЩИМ blob_id — то есть затирал рабочий
+    // токен пробелом, а вернуть его можно было только перенабором. Ровно тот же
+    // класс потери, ради которого затевался спринт, только на шаг позже.
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...ACC });
+
+    renderPage();
+    await openEditModal();
+    fireEvent.change(screen.getByPlaceholderText("Leave empty to keep current"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(mocks.apiPut.mock.calls[0][1]).not.toHaveProperty("api_token_blob_id");
   });
 });

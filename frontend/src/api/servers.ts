@@ -162,11 +162,7 @@ export function useUpdateServer(id: number) {
   });
 }
 
-/**
- * Аргумент — сам сервер, а не его id: вместе с сервером уходят и оба его блоба,
- * а ссылки на них знает только отрисованная сущность. Порядок и то, почему
- * провал уборки не роняет удаление, — в `forgetSecretBlobs`.
- */
+/** Аргумент — сущность, а не id: ссылки на блобы знает только она (`forgetSecretBlobs`). */
 export function useDeleteServer() {
   return useMutation({
     mutationFn: async (

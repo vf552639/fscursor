@@ -1,17 +1,18 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 
 import Settings, { AddRegistrarModal } from "./Settings";
 import { useDeleteRegistrarAccount } from "../api/registrars";
-import { b64ToU8 } from "../lib/b64";
 import {
   setTauri,
   UUID_V4,
   putBlobCalls,
+  blobPlaintext,
   deletedBlobIds,
+  expectBlobsGoneAfterEntity,
+  expectDeleteIgnoresBlobFailure,
   renderWithClient,
-  renderHookWithClient,
   secretBlobLifecycle,
   DESKTOP_NOTE,
 } from "../test/secretBlobKit";
@@ -93,10 +94,6 @@ function blobOfKind(kind: string) {
   return calls[0];
 }
 
-function plaintext(call: Record<string, any>) {
-  return new TextDecoder().decode(b64ToU8(call.plaintextB64));
-}
-
 describe("Settings — ключ и секрет регистратора через блобы", () => {
   secretBlobLifecycle();
 
@@ -117,10 +114,10 @@ describe("Settings — ключ и секрет регистратора чер�
 
     const key = blobOfKind("registrar_api_key");
     const secret = blobOfKind("registrar_api_secret");
-    expect(plaintext(key)).toBe(API_KEY);
+    expect(blobPlaintext(key)).toBe(API_KEY);
     // Перепутанные виды секретов компилируются и проходят серверную валидацию:
     // IP уехал бы в блоб ключа, а команда регистратора получила бы их наоборот.
-    expect(plaintext(secret)).toBe(CLIENT_IP);
+    expect(blobPlaintext(secret)).toBe(CLIENT_IP);
     expect(key.blobId).toMatch(UUID_V4);
     expect(secret.blobId).toMatch(UUID_V4);
 
@@ -215,7 +212,7 @@ describe("Settings — ключ и секрет регистратора чер�
     const key = blobOfKind("registrar_api_key");
     // Новый id здесь = аккаунт продолжает ходить в API со старым ключом.
     expect(key.blobId).toBe(KEY_BLOB);
-    expect(plaintext(key)).toBe("rotated-key");
+    expect(blobPlaintext(key)).toBe("rotated-key");
 
     const [url, body] = mocks.apiPut.mock.calls[0];
     expect(url).toBe("/registrars/accounts/3");
@@ -294,15 +291,12 @@ describe("Settings — ключ и секрет регистратора чер�
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "✕" }));
 
-    await waitFor(() =>
-      expect(deletedBlobIds(mocks.invokeIfTauri)).toEqual([KEY_BLOB, SECRET_BLOB]),
-    );
-    expect(mocks.apiDelete).toHaveBeenCalledWith("/registrars/accounts/3");
-    // Порядок обратен записи: сначала сущность, потом блобы. Наоборот — это
-    // живой аккаунт со стёртыми секретами, если DELETE не доедет.
-    expect(mocks.apiDelete.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.invokeIfTauri.mock.invocationCallOrder[0],
-    );
+    await expectBlobsGoneAfterEntity({
+      apiDelete: mocks.apiDelete,
+      invokeIfTauri: mocks.invokeIfTauri,
+      url: "/registrars/accounts/3",
+      blobIds: [KEY_BLOB, SECRET_BLOB],
+    });
   });
 
   it("упавшая уборка блоба не отменяет удаление и не мешает второму блобу", async () => {
@@ -310,13 +304,30 @@ describe("Settings — ключ и секрет регистратора чер�
     mocks.apiDelete.mockResolvedValue(undefined);
     mocks.invokeIfTauri.mockRejectedValue(new Error("blob storage down"));
 
-    const { result } = renderHookWithClient(() => useDeleteRegistrarAccount());
     // Осиротевший блоб не виден никому, а красное на удалённом аккаунте — это
     // вопрос «так удалился или нет?», ответа на который у пользователя нет.
-    await act(async () => {
-      await result.current.mutateAsync(NAMECHEAP as any);
-    });
-    expect(result.current.isError).toBe(false);
+    // Падение на первом id не отменяет попытку по второму — иначе второй секрет
+    // оставался бы в хранилище всегда, когда первый уже не удаётся стереть.
+    await expectDeleteIgnoresBlobFailure(useDeleteRegistrarAccount, NAMECHEAP);
     expect(deletedBlobIds(mocks.invokeIfTauri)).toEqual([KEY_BLOB, SECRET_BLOB]);
+  });
+
+  it("пробел в поле ключа не перезаписывает живой блоб", async () => {
+    // `" "` проходил и «поле тронуто?» формы, и проверку пустоты в хуке, и
+    // уезжал в `putSecretBlob` с СУЩЕСТВУЮЩИМ blob_id — то есть затирал рабочий
+    // ключ пробелом, а вернуть его можно было только перенабором.
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...NAMECHEAP });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+    fireEvent.change(screen.getByPlaceholderText("Leave empty to keep current key"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(mocks.apiPut.mock.calls[0][1]).not.toHaveProperty("api_key_blob_id");
   });
 });

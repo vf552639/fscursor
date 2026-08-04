@@ -155,11 +155,7 @@ export function useUpdateCloudflareAccount(id: number) {
   });
 }
 
-/**
- * Аргумент — сам аккаунт, а не его id: вместе с аккаунтом уходит и его блоб, а
- * ссылку на блоб знает только отрисованная сущность. Порядок и то, почему
- * провал уборки не роняет удаление, — в `forgetSecretBlobs`.
- */
+/** Аргумент — сущность, а не id: ссылку на блоб знает только она (`forgetSecretBlobs`). */
 export function useDeleteCloudflareAccount() {
   return useMutation({
     mutationFn: async (account: Pick<CloudflareAccount, "id" | "api_token_blob_id">) => {

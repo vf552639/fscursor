@@ -23,7 +23,7 @@ import { RevealSecret } from "../components/RevealSecret";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
 import { isTauri } from "../lib/runtime";
 import { BLOB_KIND } from "../lib/secretBlob";
-import { useSecretSave } from "../hooks/useSecretSave";
+import { useMultiSecretSave, useSecretSave } from "../hooks/useSecretSave";
 
 /** Зона в UI. `nameServers` приходит вместе со списком зон из `cf_list_zones`. */
 export interface CfZoneRef {
@@ -349,7 +349,6 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         key={acc.id}
         acc={acc}
         onEdit={() => setEditingAcc(acc)}
-        // Аккаунт целиком, а не id: вместе с ним уходит и его блоб.
         onDelete={() => { if (!confirm(`Delete account ${acc.name}?`)) return; deleteAcc.mutate(acc); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
@@ -432,7 +431,12 @@ export function AddCfAccountModal({ onClose, onStatus }: {
     if (ok) onClose();
   };
 
-  return <Modal title="Add Cloudflare Account" onClose={onClose} width={460}>
+  // Пока идёт запись блоба или POST, уходить нельзя: размонтированная форма
+  // унесёт с собой хук, и `setError` упавшего создания приземлится в пустоту —
+  // канала для этой ошибки у страницы нет. Окно — целый round-trip.
+  const closeIfIdle = () => { if (!accToken.saving) onClose(); };
+
+  return <Modal title="Add Cloudflare Account" onClose={closeIfIdle} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label>
@@ -445,15 +449,16 @@ export function AddCfAccountModal({ onClose, onStatus }: {
       </div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token</label>
-        {/* В вебе поля нет вовсе, а не «есть, но не сохранится»: шифрует Rust
-            мастер-ключом из keychain, так что записать секрет из браузера
-            физически невозможно. Поле, в которое дали набрать токен, обещало
-            бы сохранение — и обмануло бы уже после того, как токен набран.
-            Страница в вебе сюда и не пускает (на месте кнопки заметка), но это
-            ПЕРВЫЙ рубеж, а этот — последний: он переживёт второй вход. */}
+        {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Страница в
+            вебе сюда и не пускает (на месте кнопки заметка), но это ПЕРВЫЙ
+            рубеж, а этот — последний: он переживёт второй вход.
+            `trim` на вводе: токен копируют из панели, и `\n` в хвосте иначе
+            зашифруется как часть секрета — «сохранено» и 403 на Test
+            connection. Заодно кнопка ниже и сохраняемое значение перестают
+            быть двумя разными понятиями «пусто». */}
         {isTauri() ? (
           <>
-            <Inp type="password" value={accToken.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>accToken.setValue(e.target.value)} placeholder="••••••••••••••••"/>
+            <Inp type="password" value={accToken.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>accToken.setValue(e.target.value.trim())} placeholder="••••••••••••••••"/>
             <div style={{fontSize:11.5,color:"#9ca3af",marginTop:4}}>Requires Zone:Read, DNS:Edit permissions</div>
           </>
         ) : (
@@ -465,12 +470,13 @@ export function AddCfAccountModal({ onClose, onStatus }: {
       <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{accToken.error}</div>
     )}
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      {/* Кнопки сохранения в вебе нет по той же причине, что и поля: сохранять
-          нечем. Cancel остаётся всегда — форма обязана иметь выход. */}
+      {/* Кнопки сохранения в вебе нет по той же причине, что и поля. Cancel
+          остаётся всегда (форма обязана иметь выход), но гаснет на время
+          сохранения: см. `closeIfIdle`. */}
       {isTauri() && (
-        <Btn variant="primary" disabled={accToken.saving || !accName.trim() || !accToken.value.trim()} onClick={handleAddAcc} style={{flex:1,justifyContent:"center"}}>{accToken.saving ? "Adding..." : "Add Account"}</Btn>
+        <Btn variant="primary" disabled={accToken.saving || !accName.trim() || !accToken.value} onClick={handleAddAcc} style={{flex:1,justifyContent:"center"}}>{accToken.saving ? "Adding..." : "Add Account"}</Btn>
       )}
-      <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
+      <Btn variant="secondary" disabled={accToken.saving} onClick={closeIfIdle} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;
 }
@@ -717,65 +723,74 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
 function EditCfAccountModal({ account, onClose }: { account: any; onClose: () => void }) {
   const [name, setName] = useState(account.name || "");
   const [accountId, setAccountId] = useState(account.account_id || "");
-  const token = useSecretSave("API token");
+  // Многополевой хук на одном поле, а не `useSecretSave`: секрет здесь
+  // ОПЦИОНАЛЬНЫЙ, и «не меняем токен» выражается пустым `secrets` — тем же
+  // `Partial`, что у регистратора. Иначе понадобился бы второй путь сохранения
+  // мимо хука, со своим `saving` и своим каналом ошибки.
+  const secrets = useMultiSecretSave({ apiToken: "API token" });
   const update = useUpdateCloudflareAccount(account.id);
-  const saving = token.saving || update.isPending;
-
-  const patch = (blobId?: string) => ({
-    name: name.trim(),
-    account_id: accountId.trim() || null,
-    ...(blobId ? { api_token_blob_id: blobId } : {}),
-  });
 
   const handleSave = async () => {
-    // «Оставь пустым, чтобы сохранить текущий» на форме с ОДНИМ секретом — это
-    // «не звать `save` вовсе»: он пустое значение и не примет (пустой блоб
-    // означал бы настроенный, но нерабочий токен). Переименование аккаунта без
-    // перенабора токена — обычный PUT без `api_token_blob_id`, и на нём сервер
-    // оставляет прежнюю ссылку.
-    if (!token.value) {
-      update.mutate(patch(), { onSuccess: onClose });
-      return;
-    }
-    const ok = await token.save({
-      blobKind: BLOB_KIND.cloudflareApiToken,
-      // Это ПРАВКА: переписываем именно текущий блоб. Новый id оставил бы
-      // аккаунт указывать на прежний токен — «сохранено», а в Cloudflare едет
-      // старый секрет. Версии блоба ведёт сервер внутри одного id.
-      existingBlobId: account.api_token_blob_id ?? null,
-      persist: async (blobId) => { await update.mutateAsync(patch(blobId)); },
+    // Токен копируют из панели Cloudflare, и в хвосте приезжает `\n` или
+    // пробел. Без `trim` он шифровался бы как часть секрета: аккаунт
+    // «сохранён», а Test connection отвечает 403 — и связи с формой у этого
+    // отказа нет. Поле трим тоже делает, здесь — страховка на случай, что
+    // значение придёт мимо onChange.
+    const typed = secrets.values.apiToken.trim();
+    const ok = await secrets.saveAll({
+      // Пустой `secrets` — это «оставь пустым, чтобы сохранить текущий»:
+      // блобов не пишем, `persist` всё равно зовётся, PUT уходит без
+      // `api_token_blob_id`, и сервер оставляет прежнюю ссылку.
+      secrets: typed
+        ? {
+            // Это ПРАВКА: переписываем именно текущий блоб. Новый id оставил бы
+            // аккаунт указывать на прежний токен — «сохранено», а в Cloudflare
+            // едет старый секрет. Версии блоба ведёт сервер внутри одного id.
+            apiToken: {
+              blobKind: BLOB_KIND.cloudflareApiToken,
+              existingBlobId: account.api_token_blob_id ?? null,
+            },
+          }
+        : {},
+      persist: async (blobIds) => {
+        await update.mutateAsync({
+          name: name.trim(),
+          account_id: accountId.trim() || null,
+          ...(blobIds.apiToken ? { api_token_blob_id: blobIds.apiToken } : {}),
+        });
+      },
     });
     if (ok) onClose();
   };
 
-  // Ошибка хука первее: она уже содержит текст провалившегося PUT, а `update.error`
-  // на том же пути показал бы его вторым красным блоком.
-  const error = token.error ?? (update.error ? String((update.error as any)?.message || "Could not save account") : null);
+  // Пока идёт запись блоба или PUT, уходить нельзя: размонтированная форма
+  // унесёт с собой хук, и `setError` упавшего сохранения приземлится в пустоту —
+  // канала для этой ошибки у страницы нет. Окно — целый round-trip.
+  const closeIfIdle = () => { if (!secrets.saving) onClose(); };
 
-  return <Modal title={`Edit ${account.name}`} onClose={onClose} width={460}>
+  return <Modal title={`Edit ${account.name}`} onClose={closeIfIdle} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Label</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label><Inp value={accountId} onChange={e=>setAccountId((e.target as any).value)} placeholder="Cloudflare account id" /></div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token (optional)</label>
-        {/* Как и в форме создания: в вебе поля нет, потому что записать секрет
-            оттуда физически нечем. Переименовать аккаунт в вебе при этом можно —
-            для этого секрет и не нужен. Плейсхолдер — только про «оставь
-            пустым»: `api_token_masked` теперь маскирует ХВОСТ blob_id, а не
-            токена, и на месте плейсхолдера читался бы как подсказка о токене. */}
+        {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Переименовать
+            аккаунт в вебе при этом можно: для этого секрет не нужен.
+            Плейсхолдер — только про «оставь пустым»: `api_token_masked` теперь
+            маскирует хвост blob_id, а не токена (см. карточку аккаунта). */}
         {isTauri() ? (
-          <Inp type="password" value={token.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>token.setValue(e.target.value)} placeholder="Leave empty to keep current" />
+          <Inp type="password" value={secrets.values.apiToken} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiToken", e.target.value.trim())} placeholder="Leave empty to keep current" />
         ) : (
           <DesktopOnlyNote what="Saving secrets" />
         )}
       </div>
     </div>
-    {error && (
-      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{error}</div>
+    {secrets.error && (
+      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
     )}
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      <Btn variant="primary" disabled={saving || !name.trim()} onClick={handleSave} style={{flex:1,justifyContent:"center"}}>{saving ? "Saving..." : "Save"}</Btn>
-      <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
+      <Btn variant="primary" disabled={secrets.saving || !name.trim()} onClick={handleSave} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Saving..." : "Save"}</Btn>
+      <Btn variant="secondary" disabled={secrets.saving} onClick={closeIfIdle} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;
 }

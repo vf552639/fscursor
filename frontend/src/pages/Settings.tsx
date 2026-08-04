@@ -45,7 +45,6 @@ export default function Settings(){
   const registrars = registrarsData || [];
 
   const [tab,setTab]=useState("registrars"); const [showAdd,setSA]=useState(false);
-  
 
   const [testing,setTest]=useState<any>({}); const [testRes,setRes]=useState<any>({});
   const [editingRegistrar, setEditingRegistrar] = useState<any | null>(null);
@@ -99,13 +98,8 @@ export default function Settings(){
     {tab==="registrars"&&<>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
         <div style={{fontSize:14,fontWeight:600,color:"#111"}}>Registrar Accounts <span style={{fontSize:13,fontWeight:400,color:"#9ca3af"}}>({registrars.length})</span></div>
-        {/* В вебе объяснение стоит НА МЕСТЕ кнопки, а не за ней: аккаунт без
-            ключа бесполезен целиком, поэтому в браузере форма не открывается
-            вовсе. Кнопка, открывающая окно, где нет ничего кроме Cancel, — это
-            тупик, о котором узнаёшь после клика. Дип-линка не заводим: хоста
-            `add-registrar` `parseDeepLinkAction` не знает, ссылка вернула бы
-            {handled:false} и только тостила бы — ровно то, что уже делает
-            предсуществующий `add-server` в `Servers.tsx` и что записано в долг. */}
+        {/* В вебе на месте кнопки заметка, а не форма за ней: почему так и
+            почему без дип-линка — тот же блок в `Cloudflare.tsx`. */}
         {isTauri() ? (
           <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Registrar</Btn>
         ) : (
@@ -151,7 +145,6 @@ export default function Settings(){
               {testRes[r.id]&&<Badge variant={testRes[r.id]==="ok"?"green":"red"}>{testRes[r.id]==="ok"?"✓ Connected":"✕ Failed"}</Badge>}
               <Btn size="sm" variant="secondary" onClick={()=>handleTest(r.id)} disabled={testing[r.id]}>{testing[r.id]?"Testing…":"🔌 Test"}</Btn>
               <Btn size="sm" variant="secondary" onClick={() => setEditingRegistrar(r)}>✎ Edit</Btn>
-              {/* Аккаунт целиком, а не id: вместе с ним уходят и оба его блоба. */}
               <Btn size="sm" variant="danger" onClick={() => { if (!confirm(`Delete registrar ${r.name}?`)) return; deleteReg.mutate(r); }}>✕</Btn>
             </div>
           </div>
@@ -285,7 +278,24 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
     if (ok) onClose();
   };
 
-  return <Modal title="Add Registrar Account" onClose={onClose} width={480}>
+  // Провайдер меняет НАБОР полей — как вкладка в `Servers.tsx` (`handleTabChange`),
+  // и по тем же причинам сбрасывает набранное: Client IP, набранный для
+  // Namecheap, на Hostiq в сохранение уже не попадёт, а плейнтекст жил бы до
+  // размонтирования; ошибка «Client IP is required» после переключения ссылалась
+  // бы на поле, которого на экране нет. Во время записи блоба не пускаем вовсе:
+  // `setError` упавшей записи приземлился бы на форму с другим набором полей.
+  const switchProvider = (next: RegistrarProvider) => {
+    if (secrets.saving || next === provider) return;
+    setProvider(next);
+    secrets.reset();
+  };
+
+  // Пока идёт запись блобов или POST, уходить нельзя: размонтированная форма
+  // унесёт с собой хук, и `setError` упавшего создания приземлится в пустоту —
+  // канала для этой ошибки у страницы нет. Окно — целый round-trip.
+  const closeIfIdle = () => { if (!secrets.saving) onClose(); };
+
+  return <Modal title="Add Registrar Account" onClose={closeIfIdle} width={480}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={e=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
@@ -294,24 +304,24 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
             ["hostiq","Hostiq","H","#fff7ed","#ea580c"],
             ["namecheap","Namecheap","N","#fef2f2","#dc2626"]
           ].map(([k,l,ic,bg,c])=>(
-            <div key={k} onClick={()=>setProvider(k as any)} style={{padding:"12px 16px",border:`2px solid ${provider===k?"#2563eb":"#e5e7eb"}`,borderRadius:9,cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"all 0.15s",background:provider===k?"#eff4ff":"#fff"}}>
+            <div key={k} onClick={()=>switchProvider(k as RegistrarProvider)} style={{padding:"12px 16px",border:`2px solid ${provider===k?"#2563eb":"#e5e7eb"}`,borderRadius:9,cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"all 0.15s",background:provider===k?"#eff4ff":"#fff"}}>
               <div style={{width:32,height:32,borderRadius:7,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:c,fontSize:14}}>{ic}</div>
               <span style={{fontSize:13.5,fontWeight:600,color:provider===k?"#2563eb":"#374151"}}>{l}</span>
             </div>
           ))}
         </div>
       </div>
-      {/* В вебе полей секретов нет вовсе, а не «есть, но не сохранятся»:
-          шифрует Rust мастер-ключом из keychain, так что записать их из
-          браузера физически невозможно. Поле, в которое дали набрать ключ,
-          обещало бы сохранение — и обмануло бы уже после того, как ключ
-          набран. */}
+      {/* Почему в вебе полей нет вовсе — JSDoc `DesktopOnlyNote`.
+          `trim` на вводе: ключ копируют из панели регистратора, и `\n` в
+          хвосте иначе зашифруется как часть секрета — «сохранено» и отказ
+          API без всякой связи с формой. Client IP с пробелом просто не
+          совпадёт с whitelist. */}
       {provider==="hostiq"?<>
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
           {isTauri() ? (
-            <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••••••••••"/>
+            <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="••••••••••••••••"/>
           ) : (
             <DesktopOnlyNote what="Saving secrets" />
           )}
@@ -322,7 +332,7 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
             {isTauri() ? (
-              <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="••••••••"/>
+              <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="••••••••"/>
             ) : (
               <DesktopOnlyNote what="Saving secrets" />
             )}
@@ -334,7 +344,7 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
                 Namecheap отвечает отказом по whitelist. */}
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP</label>
             {isTauri() ? (
-              <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value)} placeholder="127.0.0.1"/>
+              <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value.trim())} placeholder="127.0.0.1"/>
             ) : (
               <DesktopOnlyNote what="Saving secrets" />
             )}
@@ -346,19 +356,16 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
     {secrets.error && (
       <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
     )}
-    {/* Из веба сюда не попасть: кнопка, открывающая форму, там заменена
-        заметкой. Флаг оставлен именно поэтому — вход в модалку задаёт один
-        стейт, и второй его источник вернул бы в браузер и поля секретов, и
-        кнопку сохранения. Последний рубеж дешевле, чем разбор, кто ещё
-        зовёт `setSA`. Страница в вебе сюда и не пускает (на месте кнопки
-        заметка), но это ПЕРВЫЙ рубеж, а этот — последний. */}
+    {/* Страница в вебе сюда не пускает (на месте кнопки заметка) — но это
+        ПЕРВЫЙ рубеж, а этот последний: он переживёт второго вызывающего. */}
     {isTauri() && (
       <div style={{display:"flex",gap:8,marginTop:22}}>
         <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>
       </div>
     )}
-    {/* Cancel остаётся всегда: форма обязана иметь выход. */}
-    <div style={{marginTop:8}}><Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
+    {/* Cancel есть всегда (форма обязана иметь выход), но гаснет на время
+        сохранения: см. `closeIfIdle`. */}
+    <div style={{marginTop:8}}><Btn variant="secondary" disabled={secrets.saving} onClick={closeIfIdle} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
   </Modal>;
 }
 
@@ -368,7 +375,6 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
   const update = useUpdateRegistrarAccount(registrar.id);
   const hasClientIp = usesClientIp(String(registrar.provider || ""));
-  const saving = secrets.saving || update.isPending;
 
   const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
     name: name.trim(),
@@ -381,15 +387,18 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
     // «Оставь пустым, чтобы сохранить текущий» — это и есть `Partial` у
     // `saveAll`: в `secrets` кладём ТОЛЬКО тронутые поля, у остальных сущность
     // сохраняет прежний `*_blob_id`. Иначе переименование аккаунта требовало бы
-    // перенабрать и ключ, и IP.
+    // перенабрать и ключ, и IP. Пустой `secrets` (тронуто ничего) — это тоже
+    // рабочий путь: блобов нет, `persist` всё равно зовётся, PUT уходит без
+    // ссылок; отдельная ветка мимо хука дала бы второй `saving` и второй канал
+    // ошибки на ту же кнопку.
+    //
+    // `trim` — потому что " " прошёл бы и проверку пустоты в хуке, и запись:
+    // рабочий блоб перезаписался бы пробелом, а восстановить его можно только
+    // перенабором. Поле трим тоже делает, здесь — страховка.
     const touched = {
-      apiKey: secrets.values.apiKey !== "",
-      apiSecret: hasClientIp && secrets.values.apiSecret !== "",
+      apiKey: secrets.values.apiKey.trim() !== "",
+      apiSecret: hasClientIp && secrets.values.apiSecret.trim() !== "",
     };
-    if (!touched.apiKey && !touched.apiSecret) {
-      update.mutate(patch({}), { onSuccess: onClose });
-      return;
-    }
     const ok = await secrets.saveAll({
       secrets: {
         // Это ПРАВКА: переписываем именно текущие блобы. Новый id оставил бы
@@ -407,21 +416,20 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
     if (ok) onClose();
   };
 
-  // Ошибка хука первее: она уже содержит текст провалившегося PUT, а
-  // `update.error` на том же пути дал бы второй красный блок про то же самое.
-  const error = secrets.error ?? (update.error ? String((update.error as any)?.message || "Could not save account") : null);
+  // Пока идёт запись блобов или PUT, уходить нельзя: размонтированная форма
+  // унесёт с собой хук, и `setError` упавшего сохранения приземлится в пустоту.
+  const closeIfIdle = () => { if (!secrets.saving) onClose(); };
 
-  return <Modal title={`Edit ${registrar.name}`} onClose={onClose} width={460}>
+  return <Modal title={`Edit ${registrar.name}`} onClose={closeIfIdle} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} /></div>
-      {/* Как и в форме создания: в вебе полей нет, потому что записать секрет
-          оттуда физически нечем. Переименовать аккаунт в вебе при этом можно —
-          для этого секреты и не нужны. */}
+      {/* Почему в вебе полей нет — JSDoc `DesktopOnlyNote`. Переименовать
+          аккаунт в вебе при этом можно: для этого секреты не нужны. */}
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key (optional)</label>
         {isTauri() ? (
-          <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value)} placeholder="Leave empty to keep current key" />
+          <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="Leave empty to keep current key" />
         ) : (
           <DesktopOnlyNote what="Saving secrets" />
         )}
@@ -430,19 +438,19 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP (optional)</label>
           {isTauri() ? (
-            <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value)} placeholder="Leave empty to keep current IP" />
+            <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value.trim())} placeholder="Leave empty to keep current IP" />
           ) : (
             <DesktopOnlyNote what="Saving secrets" />
           )}
         </div>
       )}
     </div>
-    {error && (
-      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{error}</div>
+    {secrets.error && (
+      <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
     )}
     <div style={{display:"flex",gap:8,marginTop:20}}>
-      <Btn variant="primary" disabled={saving || !name.trim()} onClick={handleSave} style={{flex:1,justifyContent:"center"}}>{saving ? "Saving..." : "Save"}</Btn>
-      <Btn variant="secondary" onClick={onClose} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
+      <Btn variant="primary" disabled={secrets.saving || !name.trim()} onClick={handleSave} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Saving..." : "Save"}</Btn>
+      <Btn variant="secondary" disabled={secrets.saving} onClick={closeIfIdle} style={{flex:1,justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;
 }

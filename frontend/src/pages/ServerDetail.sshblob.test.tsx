@@ -10,7 +10,7 @@ import {
   UUID_V4,
   putBlobArgs,
   putBlobCalls,
-  deletedBlobIds,
+  expectBlobsGoneAfterEntity,
   secretBlobLifecycle,
   DESKTOP_NOTE,
 } from "../test/secretBlobKit";
@@ -241,15 +241,12 @@ describe("ServerDetail — SSH-пароль через блоб", () => {
     renderDetail(withFp);
     fireEvent.click(await screen.findByText("✕ Delete"));
 
-    await waitFor(() =>
-      expect(deletedBlobIds(mocks.invokeIfTauri)).toEqual([EXISTING_BLOB, FP_BLOB]),
-    );
-    expect(mocks.apiDelete).toHaveBeenCalledWith("/servers/7");
-    // Порядок обратен записи: сначала сущность, потом блобы. Наоборот — это
-    // живой сервер со стёртым паролем, если DELETE не доедет.
-    expect(mocks.apiDelete.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.invokeIfTauri.mock.invocationCallOrder[0],
-    );
+    await expectBlobsGoneAfterEntity({
+      apiDelete: mocks.apiDelete,
+      invokeIfTauri: mocks.invokeIfTauri,
+      url: "/servers/7",
+      blobIds: [EXISTING_BLOB, FP_BLOB],
+    });
   });
 
   it.each([

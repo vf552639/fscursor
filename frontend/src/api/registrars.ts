@@ -106,11 +106,7 @@ export function useUpdateRegistrarAccount(id: number) {
   });
 }
 
-/**
- * Аргумент — сам аккаунт, а не его id: вместе с аккаунтом уходят и оба его
- * блоба, а ссылки на них знает только отрисованная сущность. Порядок и то,
- * почему провал уборки не роняет удаление, — в `forgetSecretBlobs`.
- */
+/** Аргумент — сущность, а не id: ссылки на блобы знает только она (`forgetSecretBlobs`). */
 export function useDeleteRegistrarAccount() {
   return useMutation({
     mutationFn: async (

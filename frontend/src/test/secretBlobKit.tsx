@@ -1,8 +1,9 @@
 import React from "react";
-import { render, renderHook, cleanup } from "@testing-library/react";
+import { render, renderHook, cleanup, waitFor, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, beforeEach, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, expect, vi, type Mock } from "vitest";
 
+import { b64ToU8 } from "../lib/b64";
 import { useAuthStore } from "../store/auth";
 
 /**
@@ -62,27 +63,29 @@ export function secretBlobLifecycle() {
 }
 
 /**
- * Формы секретов живут под react-query. `retry: false` — не украшение: с
- * ретраями упавший POST доезжает до формы через задержки, и тест на «ошибка
- * показана, сервер не создан» ловил бы её не с первого прохода.
+ * `retry: false` — не украшение: с ретраями упавший POST доезжает до формы
+ * через задержки, и тест на «ошибка показана, сервер не создан» ловил бы её не
+ * с первого прохода.
  */
-export function renderWithClient(node: React.ReactElement) {
-  const client = new QueryClient({
+function makeClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);
+}
+
+/** Формы секретов живут под react-query. */
+export function renderWithClient(node: React.ReactElement) {
+  return render(<QueryClientProvider client={makeClient()}>{node}</QueryClientProvider>);
 }
 
 /**
  * То же окружение для хука без экрана. Нужно там, где утверждение — про исход
- * САМОЙ мутации: удаление блобов при удалении сущности best-effort, и «провал
- * уборки не сделал удаление проваленным» через страницу не видно вовсе —
- * ошибку такой мутации на этих экранах никто не рисует.
+ * САМОЙ мутации: уборка блобов best-effort, и «провал уборки не сделал
+ * удаление проваленным» через страницу не видно вовсе — ошибку такой мутации
+ * на этих экранах никто не рисует.
  */
 export function renderHookWithClient<T>(hook: () => T) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  const client = makeClient();
   return renderHook(hook, {
     wrapper: ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -111,9 +114,49 @@ export function putBlobArgs(invokeIfTauri: Mock): Record<string, any> {
   return calls[0];
 }
 
+/** Плейнтекст, уехавший в блоб: команда получает его в base64. */
+export function blobPlaintext(call: Record<string, any>): string {
+  return new TextDecoder().decode(b64ToU8(call.plaintextB64));
+}
+
 /** Id, которые форма попросила стереть: удаление сущности снимает и её блобы. */
 export function deletedBlobIds(invokeIfTauri: Mock): string[] {
   return invokeIfTauri.mock.calls
     .filter((c: unknown[]) => c[0] === "vault_delete_blob")
     .map((c: unknown[]) => (c[1] as { blobId: string }).blobId);
+}
+
+/**
+ * Общая проверка пути удаления: блобы сняты, и сняты ПОСЛЕ самой сущности.
+ * Порядок — половина утверждения: обратный оставил бы живую сущность со
+ * стёртым блобом, если DELETE не доедет (`forgetSecretBlobs`).
+ */
+export async function expectBlobsGoneAfterEntity(args: {
+  apiDelete: Mock;
+  invokeIfTauri: Mock;
+  url: string;
+  blobIds: string[];
+}): Promise<void> {
+  const { apiDelete, invokeIfTauri, url, blobIds } = args;
+  await waitFor(() => expect(deletedBlobIds(invokeIfTauri)).toEqual(blobIds));
+  expect(apiDelete).toHaveBeenCalledWith(url);
+  expect(apiDelete.mock.invocationCallOrder[0]).toBeLessThan(
+    invokeIfTauri.mock.invocationCallOrder[0],
+  );
+}
+
+/**
+ * Упавшая уборка не делает удаление проваленным. Хук передаётся как есть,
+ * поэтому `entity` проверяется его же сигнатурой `Pick<…>` — тест заодно
+ * держит и её.
+ */
+export async function expectDeleteIgnoresBlobFailure<E>(
+  useDeleteEntity: () => { mutateAsync: (e: E) => Promise<unknown>; isError: boolean },
+  entity: E,
+): Promise<void> {
+  const { result } = renderHookWithClient(useDeleteEntity);
+  await act(async () => {
+    await result.current.mutateAsync(entity);
+  });
+  expect(result.current.isError).toBe(false);
 }
