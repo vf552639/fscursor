@@ -6,6 +6,7 @@ import { invokeSynced } from "../lib/localCache";
 // на клиенте, и HTTP-роутов под них на бэкенде нет и не будет (в
 // `routes/cloudflare.py` только CRUD аккаунтов). Веб — «только смотрит».
 import { isTauri, requireDesktop } from "../lib/runtime";
+import { forgetSecretBlobs } from "../lib/secretBlob";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -37,14 +38,22 @@ export interface CloudflareTestResponse {
 export interface CloudflareAccountCreate {
   name: string;
   account_id?: string | null;
-  api_token: string;
+  /**
+   * Ссылка на блоб от `putSecretBlob` — единственный способ передать токен.
+   * Поля `api_token` здесь нет намеренно: серверная схема его не объявляет и с
+   * `extra="ignore"` молча выбрасывает (200 OK и `NULL` в колонке), поэтому в
+   * TS оно давало зелёную компиляцию на пути, который теряет секрет. Без него
+   * это ошибка типа, а не молчаливая потеря.
+   */
+  api_token_blob_id?: string | null;
   is_active?: boolean;
 }
 
 export interface CloudflareAccountUpdate {
   name?: string;
   account_id?: string | null;
-  api_token?: string;
+  /** См. `CloudflareAccountCreate`. При правке — ТОТ ЖЕ id. */
+  api_token_blob_id?: string | null;
   is_active?: boolean;
 }
 
@@ -146,9 +155,17 @@ export function useUpdateCloudflareAccount(id: number) {
   });
 }
 
+/**
+ * Аргумент — сам аккаунт, а не его id: вместе с аккаунтом уходит и его блоб, а
+ * ссылку на блоб знает только отрисованная сущность. Порядок и то, почему
+ * провал уборки не роняет удаление, — в `forgetSecretBlobs`.
+ */
 export function useDeleteCloudflareAccount() {
   return useMutation({
-    mutationFn: (id: number) => apiDelete(`/cloudflare/accounts/${id}`),
+    mutationFn: async (account: Pick<CloudflareAccount, "id" | "api_token_blob_id">) => {
+      await apiDelete(`/cloudflare/accounts/${account.id}`);
+      await forgetSecretBlobs([account.api_token_blob_id]);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: cloudflareKeys.accounts }),
   });
 }

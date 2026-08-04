@@ -115,3 +115,31 @@ export async function deleteSecretBlob(blobId: string): Promise<void> {
   requireDesktop("Deleting secrets");
   await invokeIfTauri<void>("vault_delete_blob", { blobId });
 }
+
+/**
+ * Убрать блобы удалённой сущности. Порядок ОБРАТЕН записи: сущность удаляют
+ * первой, блобы — после. Наоборот получается живая сущность со ссылкой на
+ * стёртый блоб, если удаление сущности не доехало: UI показывает секрет
+ * настроенным, а каждая команда падает на расшифровке, и починить это можно
+ * только перенабрав секрет. Остаток обратного порядка — осиротевший блоб: его
+ * не видно нигде и он ничему не мешает (то же, что при упавшем сохранении
+ * сущности, см. `putSecretBlob`).
+ *
+ * Поэтому и провал глотаем: удаление сервера/аккаунта УЖЕ состоялось, и
+ * красное поверх него — это вопрос «так удалилось или нет?», ответа на который
+ * у пользователя нет. По той же причине падение на первом id не отменяет
+ * попытку по второму. Вне десктопа звать нечего: `deleteSecretBlob` бросает
+ * `requireDesktop`, и этот бросок ловится тем же `catch`.
+ */
+export async function forgetSecretBlobs(blobIds: (string | null | undefined)[]): Promise<void> {
+  for (const blobId of blobIds) {
+    if (!blobId) continue;
+    try {
+      await deleteSecretBlob(blobId);
+    } catch (e: unknown) {
+      // Только в консоль: id — не секрет, а сам факт нужен, когда в хранилище
+      // потом находят блоб без хозяина.
+      console.warn(`orphan secret blob ${blobId}:`, e);
+    }
+  }
+}
