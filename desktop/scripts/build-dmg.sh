@@ -95,8 +95,17 @@ preflight() {
   # читает весь вывод `rustc -vV` до конца сам — в отличие от `grep -q` в
   # пайпе (см. разбор SIGPIPE-капкана в dev-signing.sh:113-117), обрывать
   # верхнюю команду раньше времени некому.
+  # `|| die` висит прямо на присваивании, не на следующей строке: под
+  # pipefail статус пайпа — это статус ПОСЛЕДНЕЙ команды, упавшей с ошибкой,
+  # а не обязательно последней по порядку. Если rustc упадёт (например,
+  # rustup-шим без выставленного default toolchain), а awk на пустом
+  # stdin как обычно завершится нулём, pipefail всё равно вернёт код rustc —
+  # и простое присваивание уронит весь скрипт через set -e раньше, чем
+  # выполнится проверка на следующей строке. Без своего die тут был бы голый
+  # exit 1 без единого ❌.
   local host_target
-  host_target="$(rustc -vV | awk '/^host:/{print $2}')"
+  host_target="$(rustc -vV | awk '/^host:/{print $2}')" \
+    || die "rustc есть в PATH, но не отвечает на 'rustc -vV' (см. ошибку выше). Возможно, не задан тулчейн: rustup default stable"
   [ -n "$host_target" ] \
     || die "Не смог определить хост-таргет: 'rustc -vV' не вернул строку host:."
 
@@ -119,6 +128,32 @@ preflight() {
   fi
 
   ok "Тулчейн на месте: cargo, rustc, node, npm; $target_note."
+
+  # Место на диске цель preflight-а сформулирована как «не давать tauri
+  # build упасть посреди сборки через десять минут» — а самый банальный
+  # способ так упасть здесь и сейчас — нехватка диска: полная release-сборка
+  # Rust-бинарника, сборка фронта (vite) и создание временного rw-образа dmg
+  # (bundle_dmg.sh, тот же размер, что итоговый .app) в сумме легко уходят
+  # за несколько гигабайт. Смотрим том, где растёт target/release и куда
+  # пишется dmg — каталог src-tauri, а не корень диска (это может быть
+  # другой том). Пороги — не измеренные точно, а взятые с запасом: 10 GiB —
+  # комфортный уровень, при котором сборка почти наверняка не упрётся в
+  # диск; 2 GiB — уровень, ниже которого начинать бессмысленно (cargo обычно
+  # падает на "No space left on device" не сразу, а после долгой линковки).
+  # Конкретное число свободного места на этой машине сегодня в код не
+  # зашиваем — это факт про машину, не инвариант скрипта.
+  local avail_kb
+  avail_kb="$(df -k "$SRC_TAURI_DIR" | awk 'NR==2{print $4}')" || true
+  if [[ "$avail_kb" =~ ^[0-9]+$ ]]; then
+    local avail_gb=$(( avail_kb / 1024 / 1024 ))
+    if (( avail_kb < 2 * 1024 * 1024 )); then
+      die "Свободно ~${avail_gb} GiB под $SRC_TAURI_DIR — для release-сборки мало. Освободи место, например: cargo clean (в src-tauri/) снимет target/debug."
+    elif (( avail_kb < 10 * 1024 * 1024 )); then
+      warn "Свободно ~${avail_gb} GiB под $SRC_TAURI_DIR — release-сборка может не влезть. При нехватке освободи target/debug: cargo clean (в src-tauri/)."
+    fi
+  else
+    warn "Не смог определить свободное место на диске (df не отработал как ожидалось) — пропускаю эту проверку."
+  fi
 }
 
 # ── Зависимости ──────────────────────────────────────────────────────────
@@ -138,37 +173,52 @@ preflight() {
 #
 # mode="install" — ставит недостающее; mode="report" — только сообщает (для
 # --check), сборку не запускает и ничего не меняет на диске.
+#
+# Проверяем не сам каталог node_modules, а конкретный файл-маркер внутри —
+# `-d node_modules` считает готовым и частично распакованный каталог после
+# прерванного npm ci/install (правдоподобно при нынешней нехватке места на
+# диске): дальше это всплывёт неочевидной ошибкой из недр tauri-cli, а не
+# здесь, где причина ясна. Маркер выбран под каждый каталог свой:
+#   - desktop: node_modules/@tauri-apps/cli/package.json — это ЕДИНСТВЕННАЯ
+#     причина, по которой desktop/node_modules вообще нужен (npm run tauri
+#     дёргает именно этот бинарь), так что смысл проверять его напрямую.
+#   - frontend: node_modules/.package-lock.json — служебный файл, который
+#     сам npm пишет, отражая фактическое состояние установленного дерева;
+#     в frontend/ нет одного «того самого» пакета, зато есть этот маркер
+#     от самого npm, ближайший доступный аналог «install точно завершился».
 handle_node_modules() {
-  local dir="$1" label="$2" mode="$3"
+  local dir="$1" label="$2" mode="$3" marker="$4"
 
-  if [ -d "$dir/node_modules" ]; then
+  if [ -e "$dir/$marker" ]; then
     ok "$label/node_modules уже на месте."
     return 0
   fi
 
   if [ "$mode" = "report" ]; then
-    warn "$label/node_modules нет — при сборке будет установлен."
+    warn "$label/node_modules нет или неполный (нет $marker) — при сборке будет (пере)установлен."
     return 0
   fi
 
   if [ -f "$dir/package-lock.json" ]; then
-    step "$label/node_modules нет — ставлю по package-lock.json (npm ci)…"
+    step "$label/node_modules нет или неполный — ставлю по package-lock.json (npm ci)…"
     ( cd "$dir" && npm ci )
   else
     step "$label/node_modules нет, лок-файла тоже нет — ставлю (npm install)…"
     ( cd "$dir" && npm install )
   fi
+  [ -e "$dir/$marker" ] \
+    || die "npm install/ci в $label/ отработал без ошибки, но $marker всё равно не появился — что-то не так с установкой."
   ok "$label/node_modules установлен."
 }
 
 install_deps() {
-  handle_node_modules "$DESKTOP_DIR" "desktop" "install"
-  handle_node_modules "$FRONTEND_DIR" "frontend" "install"
+  handle_node_modules "$DESKTOP_DIR" "desktop" "install" "node_modules/@tauri-apps/cli/package.json"
+  handle_node_modules "$FRONTEND_DIR" "frontend" "install" "node_modules/.package-lock.json"
 }
 
 report_deps() {
-  handle_node_modules "$DESKTOP_DIR" "desktop" "report"
-  handle_node_modules "$FRONTEND_DIR" "frontend" "report"
+  handle_node_modules "$DESKTOP_DIR" "desktop" "report" "node_modules/@tauri-apps/cli/package.json"
+  handle_node_modules "$FRONTEND_DIR" "frontend" "report" "node_modules/.package-lock.json"
 }
 
 # Версию приложения (а не версию npm-пакета оболочки из desktop/package.json)
@@ -206,10 +256,27 @@ run_build() {
   # разобран в dev-signing.sh:113-117 (`head` закрывает пайп раньше, чем `ls`
   # допишет вывод, `ls` получает SIGPIPE, pipefail валит код всей цепочки).
   # Массив-глоб этой ловушки не знает.
+  #
+  # Но глоб `*.dmg` слепо берёт первый файл по алфавиту — а в bundle/dmg/
+  # может лежать чужой результат: (а) tauri удаляет только dmg с ТОЧНО
+  # совпадающим именем, так что dmg прошлой версии остаётся рядом; (б) сам
+  # tauri (bundle_dmg.sh, DMG_TEMP_NAME="$DMG_DIR/rw.$$.${DMG_NAME}") пишет
+  # промежуточный rw-образ, который остаётся после прерванной сборки и тоже
+  # подходит под *.dmg — а порядок глоба зависит от LC_COLLATE, так что
+  # предсказать, что окажется первым, нельзя. Поэтому: отфильтровываем
+  # `rw.*` явно и оставляем только файлы с текущей версией в имени; если
+  # после этого — не ровно один файл, это тоже повод упасть, а не гадать.
+  local nullglob_was_set=0
+  shopt -q nullglob && nullglob_was_set=1
   shopt -s nullglob
-  local dmgs=( "$SRC_TAURI_DIR"/target/release/bundle/dmg/*.dmg )
-  shopt -u nullglob
-  (( ${#dmgs[@]} )) || die "Сборка прошла, но .dmg в bundle/dmg/ не появился."
+  local dmgs=() f
+  for f in "$SRC_TAURI_DIR"/target/release/bundle/dmg/*.dmg; do
+    case "${f##*/}" in rw.*) continue ;; esac
+    case "${f##*/}" in *"${version}"*) dmgs+=( "$f" ) ;; esac
+  done
+  (( nullglob_was_set )) || shopt -u nullglob
+  (( ${#dmgs[@]} == 1 )) \
+    || die "Ожидал ровно один .dmg версии ${version} в bundle/dmg/, нашёл ${#dmgs[@]}: ${dmgs[*]:-нет ни одного}"
   ok "dmg:  ${dmgs[0]}"
 
   local app_path="$SRC_TAURI_DIR/target/release/bundle/macos/SDMP.app"
@@ -220,7 +287,7 @@ run_build() {
     echo
     warn "Убедись, что backend уже поднят на http://localhost:8100 — приложение стучится туда."
     step "Открываю ${app_path}…"
-    open "$app_path"
+    open "$app_path" || die "open вернул ошибку — launchd отказался открыть $app_path."
   else
     echo
     echo "Подсказка: передай --run, чтобы сразу открыть .app, или запусти вручную: open \"$app_path\""
@@ -230,6 +297,11 @@ run_build() {
 preflight
 if [ "$CHECK_ONLY" -eq 1 ]; then
   report_deps
+  # read_version() сама объявлена как «провалидировать конфиг заранее» —
+  # --check должен ловить битый tauri.conf.json тоже, а не только тулчейн
+  # и node_modules.
+  version_from_check="$(read_version)"
+  ok "tauri.conf.json: version=$version_from_check — валиден."
   ok "Preflight пройден, --check — сборку не запускаю."
   exit 0
 fi
