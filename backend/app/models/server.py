@@ -28,6 +28,12 @@ class Server(Base, TimestampMixin):
     ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     ssh_user: Mapped[str] = mapped_column(String(64), default="root", nullable=False)
     os: Mapped[Optional[str]] = mapped_column(String(64))
+    # Хостинг-провайдер — свободный текст (миграция `015_server_provider`).
+    # Ширина колонки совпадает с `PROVIDER_MAX_LEN` в `core/validators.py`:
+    # схема отвергает более длинное значение 422-м, чтобы Postgres не отвечал
+    # за него 500-м. NULL означает «провайдер не указан» — это законное
+    # состояние, а не недозаполненная строка.
+    provider: Mapped[Optional[str]] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="new", nullable=False)
     purchase_date: Mapped[Optional[date]] = mapped_column(Date)
     expiry_date: Mapped[Optional[date]] = mapped_column(Date)

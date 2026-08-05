@@ -1,9 +1,11 @@
 from app.core.validators import (
+    PROVIDER_MAX_LEN,
     is_valid_domain,
     is_valid_email,
     is_valid_fastpanel_url,
     is_valid_fastpanel_user,
     is_valid_ipv4,
+    is_valid_provider,
     normalize_domain,
 )
 
@@ -60,3 +62,22 @@ def test_is_valid_fastpanel_user() -> None:
     # может; правила обеих сторон обязаны совпадать.
     assert not is_valid_fastpanel_user("")
     assert not is_valid_fastpanel_user("fast user")
+
+
+def test_is_valid_provider() -> None:
+    """Провайдер: пробелы внутри можно, управляющие и длиннее колонки — нельзя."""
+    assert is_valid_provider("Hetzner")
+    # Пробел внутри — законная часть имени («Hetzner Online», «OVH Cloud»), в
+    # отличие от логина панели, где `is_valid_fastpanel_user` его запрещает.
+    assert is_valid_provider("Hetzner Online")
+    # Управляющие символы: `\n` дробит строку аудит-лога на две, `\x1b` —
+    # escape-последовательность терминала. Тот же запрет, что у соседей выше,
+    # и по той же причине — значение уезжает в БД, в аудит и в UI.
+    assert not is_valid_provider("Het\nzner")
+    assert not is_valid_provider("Het\x1bzner")
+    assert not is_valid_provider("Het\x7fzner")
+    # Ровно ширина колонки `servers.provider` — граница проходит по ней, а не
+    # рядом: на 65 символах Postgres ответил бы `StringDataRightTruncation`,
+    # то есть 500 вместо 422.
+    assert is_valid_provider("x" * PROVIDER_MAX_LEN)
+    assert not is_valid_provider("x" * (PROVIDER_MAX_LEN + 1))
