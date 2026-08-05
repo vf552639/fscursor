@@ -137,18 +137,25 @@ def _carries_text(annotation: object) -> bool:
     return not any(annotation is safe for safe in NON_TEXT_TYPES)
 
 
-def plaintext_secret_fields(model: type[BaseModel]) -> list[str]:
+def plaintext_secret_fields(
+    model: type[BaseModel], allowed: frozenset = ALLOWED_TEXT_FIELDS
+) -> list[str]:
     """Поля модели, похожие на плейнтекст-секрет, — как есть, без вердикта.
 
     Отдельной функцией, а не инлайном в тесте, чтобы контроли ниже проверяли
     ровно тот код, который ходит по настоящим схемам.
+
+    `allowed` параметром, а не константой внутри, ради одного потребителя —
+    `test_allowed_text_field_is_still_needed` снимает проверяемую запись и
+    смотрит, ловится ли поле без неё. Иначе тот тест повторял бы правила
+    детектора у себя, и устаревшую запись сторожила бы копия логики.
     """
     found = []
     for name, field in model.model_fields.items():
         lowered = name.lower()
         if lowered.endswith(BLOB_REF_SUFFIX):
             continue
-        if f"{model.__name__}.{name}" in ALLOWED_TEXT_FIELDS:
+        if f"{model.__name__}.{name}" in allowed:
             continue
         if not any(marker in lowered for marker in SECRET_NAME_MARKERS):
             continue
@@ -280,6 +287,31 @@ def test_excluded_modules_are_actually_excluded():
         "auth-схемы стали недостижимы — исключение больше ничего не значит"
     )
     assert all(m.__module__ not in EXCLUDED_MODULES for m in all_guarded_models())
+
+
+@pytest.mark.parametrize("entry", sorted(ALLOWED_TEXT_FIELDS))
+def test_allowed_text_field_is_still_needed(entry: str):
+    """Каждое исключение всё ещё что-то исключает — по образцу соседа выше.
+
+    Список исключений умирает не взрывом, а тишиной: поле переименовали, схему
+    удалили, маркер убрали из `SECRET_NAME_MARKERS` — запись осталась висеть,
+    и следующий читатель считает её действующим разрешением. Хуже того, запись
+    с именем ЖИВОГО поля, но по другой причине, молча разоружила бы гард для
+    него.
+
+    Проверяется не только «поле есть», но и «без этой записи детектор бы на
+    него ругнулся»: первое переживает удаление маркера, второе — нет. Один
+    случай на запись, чтобы в выводе pytest было видно, какая протухла.
+    """
+    model_name, _, field_name = entry.partition(".")
+    models = [m for m in all_guarded_models() if m.__name__ == model_name]
+    assert models, f"{entry}: схемы {model_name} больше нет под гардом"
+    for model in models:
+        assert field_name in model.model_fields, f"{entry}: у схемы нет поля {field_name}"
+        assert field_name in plaintext_secret_fields(model, allowed=ALLOWED_TEXT_FIELDS - {entry}), (
+            f"{entry}: детектор не ругается на это поле и без записи — "
+            f"исключение больше ничего не исключает"
+        )
 
 
 @pytest.mark.parametrize(

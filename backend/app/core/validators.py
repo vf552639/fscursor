@@ -59,6 +59,13 @@ def is_valid_fastpanel_url(value: str) -> bool:
     Правила ровно четыре: никаких `@`, схема `http(s)`, authority вида
     `хост:порт`, никаких управляющих символов. Полноценным URL-валидатором это
     не притворяется: путь и запрос не разбираются вовсе.
+
+    Копий правила три, и это все: `sanitize_panel_url` в
+    `desktop/src-tauri/src/provision/fastpanel_install.rs` (там значение
+    чистится, а не отвергается — адрес свежей панели больше нигде не
+    существует) и `fastpanelUrlError` в `frontend/src/lib/fastpanelInput.ts`
+    (там оно же говорится человеку до отправки формы, иначе 422 приезжает в
+    неё как `[object Object]`). Правишь одно — правь все три.
     """
     if _CONTROL_CHARS_RE.search(value):
         return False
@@ -93,6 +100,7 @@ def is_valid_fastpanel_user(value: str) -> bool:
     Три правила ровно повторяют то, что даёт разбор на десктопе: `(\\S+)` в
     `provision/fastpanel_install.rs` не может вернуть ни пустую строку, ни
     значение с пробелом, а `sanitize_panel_user` отвергает управляющие символы.
+    Третья копия — `fastpanelUserError` в `frontend/src/lib/fastpanelInput.ts`.
     Расхождения тут дороги — см. парный `is_valid_fastpanel_url`.
 
     Пустая строка — отказ по той же причине, что и у URL: колонка с `""`

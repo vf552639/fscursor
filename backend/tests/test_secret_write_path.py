@@ -52,6 +52,8 @@ import asyncio
 import base64
 import json
 import os
+import pathlib
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -64,7 +66,7 @@ from sqlalchemy import select, update
 from app.auth.models import User
 from app.blobs.models import BlobStorage
 from app.core.database import AsyncSessionLocal
-from app.main import _input_is_unsafe_to_echo, app
+from app.main import SECRET_NAME_MARKERS, _input_is_unsafe_to_echo, app
 from app.models.registrar_account import RegistrarAccount
 from app.models.server import Server
 
@@ -803,6 +805,60 @@ def test_predicate_hides_input(err: dict):
 def test_predicate_keeps_input(err: dict):
     """Иначе «починка» вида «снять input вообще» прошла бы незамеченной."""
     assert _input_is_unsafe_to_echo(err) is False
+
+
+# Расхождения `SECRET_NAME_MARKERS` с десктопным `SECRET_KEY_MARKERS`, которые
+# разрешены и расписаны в комментарии у самого кортежа (`app/main.py`).
+# Меняешь состав списка — обнови и этот набор, и тот комментарий: тест краснеет
+# ровно затем, чтобы правка не прошла мимо объяснения.
+DOCUMENTED_MARKER_DIVERGENCES = frozenset({"_b64", "_blob_id", "fastpanel_url"})
+
+_DESKTOP_REDACT_RS = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "desktop"
+    / "src-tauri"
+    / "src"
+    / "audit_redact.rs"
+)
+
+
+def test_marker_lists_diverge_exactly_as_documented():
+    """Два списка секретоподобных имён расходятся ровно на задокументированное.
+
+    Комментарий у `SECRET_NAME_MARKERS` перечисляет расхождения по пунктам и
+    называет их число. Держался этот счёт на внимательности, и дважды её не
+    хватило: сначала список разъехался с десктопным, потом фаза 2 добавила
+    восьмой маркер и оставила в шапке «их два». Тест переводит перечень из
+    обещания в проверяемое утверждение.
+
+    Читается именно Rust-исходник, а не копия списка в тесте: копия разъехалась
+    бы с оригиналом тем же способом, каким разъезжается комментарий.
+
+    Skip, если десктопного дерева рядом нет (бэкенд собирают и отдельно от
+    него). Это единственная уступка: сравнивать не с чем, а падать из-за
+    отсутствия чужого каталога — значит научить команду игнорировать этот тест.
+    """
+    if not _DESKTOP_REDACT_RS.exists():
+        pytest.skip("рядом нет десктопного дерева — сравнивать не с чем")
+
+    source = _DESKTOP_REDACT_RS.read_text(encoding="utf-8")
+    match = re.search(r"const SECRET_KEY_MARKERS[^=]*=\s*\[([^\]]*)\]", source)
+    assert match, "в audit_redact.rs больше нет SECRET_KEY_MARKERS — тест ослеп"
+    desktop = frozenset(re.findall(r'"([^"]+)"', match.group(1)))
+    assert desktop, "список маркеров в audit_redact.rs разобран пустым"
+
+    backend = frozenset(SECRET_NAME_MARKERS)
+    assert backend - desktop == DOCUMENTED_MARKER_DIVERGENCES, (
+        "состав расхождений с десктопным списком изменился — обнови набор здесь "
+        "и перечень в комментарии у SECRET_NAME_MARKERS (app/main.py)"
+    )
+    # Обратное направление — своё утверждение, а не следствие: маркер, живущий
+    # только в десктопе, означал бы, что имя глушится в аудите, но эхом в 422
+    # возвращается.
+    assert desktop - backend == frozenset(), (
+        "в десктопном списке появился маркер, которого нет на бэкенде: "
+        "имя глушится в аудите, но его значение вернётся клиенту в 422"
+    )
 
 
 @pytest.mark.asyncio

@@ -166,10 +166,12 @@ pub fn parse_fastpanel_credentials(output: &str) -> FpCredentials {
 /// authority — `user@evil.com`, и без проверки наружу уехал бы
 /// `https://evil.com/...`.
 ///
-/// Парное правило на бэкенде — `is_valid_fastpanel_url` в
-/// `backend/app/core/validators.py`; там то же значение не чистится, а
-/// отвергается 422-ым. Расходиться правилам нельзя, и опасное направление
-/// именно это: если бэкенд станет строже здешней очистки, PUT со свежими
+/// Копий правила три, и это все: `is_valid_fastpanel_url` в
+/// `backend/app/core/validators.py` (там значение не чистится, а отвергается
+/// 422-ым) и `fastpanelUrlError` в `frontend/src/lib/fastpanelInput.ts` (там
+/// оно же говорится человеку до отправки формы). Расходиться правилам нельзя,
+/// и опасное направление именно это: если бэкенд станет строже здешней
+/// очистки, PUT со свежими
 /// метаданными панели отвергнется ЦЕЛИКОМ — `server_write_back_body` шлёт
 /// `fastpanel_status`/`fastpanel_url`/`fastpanel_user` одним телом, а
 /// `log_write_back_failure` провал write-back'а не бросает, только логирует.
@@ -236,8 +238,9 @@ fn cut_at_control(s: &str) -> &str {
 /// Тут же захват — `(\S+)` сразу после разделителя, и цветной вывод отдаёт
 /// `\x1b[32mfastuser\x1b[0m` целиком: обрезка по первому управляющему символу
 /// дала бы пустую строку, то есть тот же потерянный логин, но молча и под
-/// видом значения. Парное правило на бэкенде — `is_valid_fastpanel_user`
-/// в `backend/app/core/validators.py`.
+/// видом значения. Копии правила — `is_valid_fastpanel_user` в
+/// `backend/app/core/validators.py` и `fastpanelUserError` в
+/// `frontend/src/lib/fastpanelInput.ts`.
 fn sanitize_panel_user(raw: &str) -> Option<String> {
     if raw.bytes().any(|b| b.is_ascii_control()) {
         tracing::warn!(
