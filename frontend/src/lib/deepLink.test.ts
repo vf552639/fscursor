@@ -1,4 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// Ради одного теста — «чем спрашивает дефолт». Остальные передают свой
+// `confirmAction` третьим аргументом и мока не касаются. Пока дефолтную ветку не
+// проверял никто, в ней стоял `window.confirm`: в десктопе он не показывает
+// ничего и возвращает `false`, то есть КАЖДАЯ `sdmp://`-ссылка молча
+// отменялась.
+const mocks = vi.hoisted(() => ({ confirmAction: vi.fn() }));
+vi.mock("./confirmDialog", () => ({ confirmAction: mocks.confirmAction }));
+
 import {
   parseSdmpDeepLink,
   parseDeepLinkAction,
@@ -75,6 +84,20 @@ describe("handleSdmpDeepLinkInTauri", () => {
     expect(res).toEqual({ handled: true, cancelled: true });
     expect(asked).toHaveLength(1);
     expect(asked[0]).toContain("server #9");
+  });
+
+  it("по умолчанию спрашивает через общий confirmAction, а не через window.confirm", async () => {
+    mocks.confirmAction.mockResolvedValue(false);
+    const windowConfirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    // Третий аргумент не передан — работает дефолт.
+    const res = await handleSdmpDeepLinkInTauri("sdmp://install-fastpanel?serverId=9", "user-1");
+
+    expect(res).toEqual({ handled: true, cancelled: true });
+    expect(mocks.confirmAction).toHaveBeenCalledTimes(1);
+    expect(mocks.confirmAction.mock.calls[0][0]).toContain("server #9");
+    expect(windowConfirm).not.toHaveBeenCalled();
+    windowConfirm.mockRestore();
   });
 
   it("never prompts for links that are not ours", async () => {

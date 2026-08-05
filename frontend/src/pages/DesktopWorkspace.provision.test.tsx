@@ -25,7 +25,15 @@ const mocks = vi.hoisted(() => ({
   apiPost: vi.fn(),
   invokeSynced: vi.fn(),
   onOpenUrl: vi.fn(),
+  confirmAction: vi.fn(),
 }));
+
+// Подтверждение ссылки спрашивает нативный диалог, а не `window.confirm`:
+// последний в десктопном webview не показывает ничего и возвращает `false`
+// (см. `lib/confirmDialog.ts`), из-за чего КАЖДАЯ `sdmp://`-ссылка молча
+// отменялась. Поэтому здесь мок модуля, а не `stubGlobal("confirm")`: подмена
+// глобали проверяла бы путь, которым приложение больше не ходит.
+vi.mock("../lib/confirmDialog", () => ({ confirmAction: mocks.confirmAction }));
 
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
@@ -216,7 +224,7 @@ describe("DesktopWorkspace — владелец результатов provision
 
   it("показывает результат provision, запущенного по sdmp://-ссылке", async () => {
     mocks.invokeSynced.mockResolvedValue(result("42", "PW-LINK"));
-    vi.stubGlobal("confirm", () => true);
+    mocks.confirmAction.mockResolvedValue(true);
 
     renderWorkspace([{ id: 42, name: "example.com" }]);
     await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
@@ -245,7 +253,7 @@ describe("DesktopWorkspace — владелец результатов provision
         { domain_id: "4", outcome: "skipped" },
       ],
     });
-    vi.stubGlobal("confirm", () => true);
+    mocks.confirmAction.mockResolvedValue(true);
 
     renderWorkspace([
       { id: 1, name: "a.com" },
@@ -311,7 +319,7 @@ describe("DesktopWorkspace — владелец результатов provision
             items: [{ domain_id: "1", outcome: "failed", error: "ssh: connect: refused" }],
           },
     );
-    vi.stubGlobal("confirm", () => true);
+    mocks.confirmAction.mockResolvedValue(true);
 
     renderWorkspace([{ id: 1, name: "a.com" }]);
     await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
@@ -331,7 +339,7 @@ describe("DesktopWorkspace — владелец результатов provision
   it("на время bulk-прогона гасит ⚙ у каждого домена набора", async () => {
     let finish: (v: unknown) => void = () => {};
     mocks.invokeSynced.mockImplementation(() => new Promise((r) => (finish = r)));
-    vi.stubGlobal("confirm", () => true);
+    mocks.confirmAction.mockResolvedValue(true);
 
     renderWorkspace([
       { id: 1, name: "a.com" },

@@ -25,7 +25,13 @@ const mocks = vi.hoisted(() => ({
   invokeSynced: vi.fn(),
   /** Только мутации: чтения разводит роутер в `mockInvoke`. */
   mutate: vi.fn(),
+  confirmAction: vi.fn(),
 }));
+
+// Вопрос «удалять?» задаёт нативный диалог Tauri, которого в jsdom нет: без
+// мока `confirmAction` поймала бы отсутствие плагина и вернула `false` — тест
+// проверял бы отказ, а не удаление.
+vi.mock("../lib/confirmDialog", () => ({ confirmAction: mocks.confirmAction }));
 
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
@@ -452,7 +458,7 @@ describe("Cloudflare — мутации в десктопе", () => {
 
   it("удаляет запись через cf_delete_dns_record", async () => {
     setTauri(true);
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.confirmAction.mockResolvedValue(true);
     mocks.mutate.mockResolvedValue(undefined);
 
     renderPage();
@@ -475,7 +481,7 @@ describe("Cloudflare — мутации в десктопе", () => {
 
   it("во время удаления гасит крестик только у своей строки", async () => {
     setTauri(true);
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.confirmAction.mockResolvedValue(true);
     mockInvoke({ records: [RECORD, { ...RECORD, id: "rec-2", name: "api.example.com" }] });
     // Удаление «зависает»: мутация остаётся pending.
     mocks.mutate.mockReturnValue(new Promise(() => {}));

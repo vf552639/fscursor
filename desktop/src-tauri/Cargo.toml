@@ -15,6 +15,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-deep-link = "2"
+# Нативные диалоги «да/нет». Не украшение: webview на macOS рисует JS-диалоги
+# (`alert`/`confirm`/`prompt`) только если UI-делегат реализует
+# `runJavaScriptConfirmPanelWithMessage:…`, а делегат wry (0.55) не реализует ни
+# одного JS-панельного метода — WKWebView в этом случае панель не показывает и
+# отдаёт `false`. То есть `window.confirm` в десктопе всегда «нет» без вопроса:
+# отсюда и не принимался SSH-ключ, и молча не срабатывали все кнопки удаления.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

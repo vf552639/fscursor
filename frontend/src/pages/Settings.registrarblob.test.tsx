@@ -35,7 +35,13 @@ const mocks = vi.hoisted(() => ({
   apiPut: vi.fn(),
   apiDelete: vi.fn(),
   invokeIfTauri: vi.fn(),
+  confirmAction: vi.fn(),
 }));
+
+// Вопрос «удалять?» задаёт нативный диалог Tauri, которого в jsdom нет: без
+// мока `confirmAction` поймала бы отсутствие плагина и вернула `false` — тест
+// проверял бы отказ, а не удаление.
+vi.mock("../lib/confirmDialog", () => ({ confirmAction: mocks.confirmAction }));
 
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
@@ -327,7 +333,7 @@ describe("Settings — ключ и секрет регистратора чер�
 
   it("удаление аккаунта снимает оба его блоба — после самого удаления", async () => {
     setTauri(true);
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.confirmAction.mockResolvedValue(true);
     mocks.apiDelete.mockResolvedValue(undefined);
 
     renderPage();

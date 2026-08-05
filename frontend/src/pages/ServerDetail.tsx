@@ -8,6 +8,7 @@ import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
 import { isTauri } from "../lib/runtime";
+import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useSecretSave } from "../hooks/useSecretSave";
 import type { InstallFastpanelResult } from "../lib/deepLink";
@@ -185,8 +186,8 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     );
   };
 
-  const handleDelete = () => {
-    if(confirm("Delete server?")) {
+  const handleDelete = async () => {
+    if (await confirmAction("Delete server?")) {
       delSrv.mutate(s!, { onSuccess: () => onBack("servers") });
     }
   };
@@ -471,7 +472,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               {filtered.map((d: any)=><tr key={d.id} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
                 <td style={{padding:"10px 14px",fontWeight:600,fontSize:13,color:"#111"}}>{d.domain_name}</td><td style={{padding:"10px 14px"}}><Badge variant="gray">{d.status}</Badge></td><td style={{padding:"10px 14px"}}><Badge variant={d.ns_status==="ok"?"green":d.ns_status==="error"?"red":"yellow"}>{d.ns_status==="ok"?"✓":"⏳"}</Badge></td><td style={{padding:"10px 14px"}}><RowActions actions={[
                   { icon: "✎", title: "Edit domain", onClick: () => setEditingDomain(d) },
-                  { icon: "✕", title: "Delete domain", variant: "danger", onClick: () => { if (!confirm(`Delete ${d.domain_name}?`)) return; deleteDomain.mutate(d.id); } },
+                  { icon: "✕", title: "Delete domain", variant: "danger", onClick: async () => { if (!(await confirmAction(`Delete ${d.domain_name}?`))) return; deleteDomain.mutate(d.id); } },
                 ]}/></td>
               </tr>)}
               {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found{s.has_ssh && isFPInstalled ? '. Click "Sync Domains" to pull sites from FastPanel.' : ""}</td></tr>}

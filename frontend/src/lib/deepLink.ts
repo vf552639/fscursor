@@ -1,3 +1,4 @@
+import { confirmAction as nativeConfirm } from "./confirmDialog";
 import { invokeSynced } from "./localCache";
 import {
   runBulkProvisionDomains,
@@ -123,16 +124,19 @@ export function describeDeepLinkAction(action: DeepLinkAction): string {
 }
 
 /** Подтверждение выполнения. Возврат `false` — не выполнять. */
-export type ConfirmDeepLink = (message: string) => boolean;
+export type ConfirmDeepLink = (message: string) => boolean | Promise<boolean>;
 
-// window.confirm, а не Modal: подтверждение здесь — это gate перед вызовом,
-// который стартует сразу, а обработчик ссылки живёт вне рендера React (внутри
-// колбэка onOpenUrl). Modal потребовал бы прокинуть pending-действие в стейт и
-// ждать ответ через промис; window.confirm — синхронный, блокирующий, его нельзя
-// подделать содержимым страницы, и ровно им же в DesktopWorkspace подтверждается
-// столь же критичный `ssh:host-key-prompt`.
-const defaultConfirm: ConfirmDeepLink = (message) =>
-  typeof window === "undefined" ? false : window.confirm(message);
+// Нативный диалог, а не Modal и не `window.confirm`. Не Modal — потому что
+// подтверждение здесь это gate перед вызовом, который стартует сразу, а
+// обработчик ссылки живёт вне рендера React (внутри колбэка onOpenUrl); Modal
+// потребовал бы прокинуть pending-действие в стейт. Не `window.confirm` —
+// потому что в десктопе он не показывает ничего и возвращает `false`
+// (см. `confirmDialog.ts`): пока здесь стоял он, КАЖДАЯ `sdmp://`-ссылка молча
+// отменялась, и выглядело это как «ссылки не работают».
+//
+// Свойство, ради которого диалог тут вообще есть, нативный сохраняет: его
+// нельзя подделать содержимым страницы, а страница по ссылке приходит чужая.
+const defaultConfirm: ConfirmDeepLink = nativeConfirm;
 
 /**
  * Handle deep links inside Tauri: provision / bulk provision / install FastPanel.
@@ -149,7 +153,7 @@ export async function handleSdmpDeepLinkInTauri(
   const action = parseDeepLinkAction(url);
   if (!action || !userId) return { handled: false };
 
-  if (!confirmAction(describeDeepLinkAction(action))) {
+  if (!(await confirmAction(describeDeepLinkAction(action)))) {
     return { handled: true, cancelled: true };
   }
 

@@ -10,14 +10,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * — одна строчка `listen(...)`, а решение принимает и публикует именно он.
  */
 
-const mocks = vi.hoisted(() => ({ invokeIfTauri: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invokeIfTauri: vi.fn(), confirmAction: vi.fn() }));
 
 vi.mock("./tauri-invoke", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeIfTauri: mocks.invokeIfTauri,
 }));
 
+// Мокается ради ОДНОГО теста — «чем спрашивает дефолт». Остальные подсовывают
+// свой `confirmHost` и до этого мока не доходят; ровно поэтому мок и нужен:
+// пока дефолтную ветку не проверял никто, в ней спокойно жил `window.confirm`,
+// который в десктопе не показывает ничего и возвращает `false`.
+vi.mock("./confirmDialog", () => ({ confirmAction: mocks.confirmAction }));
+
 import {
+  describeHostKey,
   handleHostKeyPrompt,
   resetHostKeyStateForTests,
   sshExecWithHostKeyRetry,
@@ -106,11 +113,10 @@ describe("sshExecWithHostKeyRetry", () => {
   });
 
   /**
-   * Второй из двух возможных порядков, и в жизни он ОСНОВНОЙ: `window.confirm`
-   * блокирует поток, поэтому пока висит диалог, отказ `ssh_exec` до JS не
-   * доезжает — к `catch` решение уже принято и лежит в карте. Здесь этот
-   * порядок задан явно: событие и ответ на него проходят целиком, пока первый
-   * `ssh_exec` ещё висит.
+   * Второй из двух возможных порядков, и в жизни он ОСНОВНОЙ: событие Rust
+   * эмитит перед тем, как вернуть ошибку, поэтому к `catch` решение обычно уже
+   * опубликовано и лежит в карте. Здесь этот порядок задан явно: событие и
+   * ответ на него проходят целиком, пока первый `ssh_exec` ещё висит.
    */
   it("отвечает и на решение, принятое РАНЬШЕ отказа ssh_exec", async () => {
     let failFirstExec: () => void = () => {};
@@ -151,8 +157,15 @@ describe("sshExecWithHostKeyRetry", () => {
     const asked = vi.fn(() => true);
 
     const first = handleHostKeyPrompt(PROMPT, asked);
-    // Второе событие приходит, пока запись первого ещё идёт.
+    // Второе событие приходит, пока запись первого ещё идёт. Оба вызова — в
+    // одном такте, без `await` между ними: дедуп обязан работать именно так,
+    // потому что события из Rust приходят одно за другим, не давая JS вдохнуть.
     const second = handleHostKeyPrompt(PROMPT, asked);
+    // А вот до записи ключа дело доходит только через микротаски: вопрос
+    // асинхронный (нативный диалог), и синхронно `ssh_accept_host_key` не
+    // зовётся. Без этой уступки `saveDone` разблокировал бы вызов, которого
+    // ещё не было.
+    await drainMicrotasks();
     saveDone();
 
     await expect(first).resolves.toBe("accepted");
@@ -162,6 +175,80 @@ describe("sshExecWithHostKeyRetry", () => {
     expect(
       mocks.invokeIfTauri.mock.calls.filter((c: unknown[]) => c[0] === "ssh_accept_host_key"),
     ).toHaveLength(1);
+  });
+
+  /**
+   * Тот путь, которым вопрос ходит в жизни. Нативный диалог отвечает ПРОМИСОМ:
+   * `window.confirm` в десктопном webview не показывает ничего и возвращает
+   * `false` (см. `confirmDialog.ts`), поэтому пока ответ ждали синхронно,
+   * незнакомый ключ нельзя было принять ни разу.
+   *
+   * Ответ приходит с задержкой — человек читает отпечаток, а не жмёт мгновенно;
+   * ожидание при этом обязано пережить `decisionTimeoutMs`, потому что таймаут
+   * отмеряет ПРИХОД СОБЫТИЯ, а не время на размышление.
+   */
+  it("доводит до конца вопрос, на который ответили не сразу и промисом", async () => {
+    mocks.invokeIfTauri.mockImplementation(async (cmd: string) => {
+      if (cmd === "ssh_accept_host_key") return null;
+      if (execCalls().length === 1) throw new Error("api: HOST_KEY_UNKNOWN");
+      return [0, "ok"];
+    });
+    let answer: (trusted: boolean) => void = () => {};
+    const asked = vi.fn(() => new Promise<boolean>((r) => (answer = r)));
+
+    const run = sshExecWithHostKeyRetry(TARGET, { decisionTimeoutMs: 20 });
+    await handleHostKeyPromptSoon(asked as unknown as () => boolean);
+
+    // Диалог висит дольше таймаута ожидания события — и это не отказ.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(execCalls()).toHaveLength(1);
+
+    answer(true);
+    await expect(run).resolves.toEqual([0, "ok"]);
+    expect(execCalls()).toHaveLength(2);
+  });
+
+  /**
+   * Вопрос может сорваться, а не получить ответ: у плагина нет разрешения, окно
+   * закрыли. Мимо ждущего это пройти не должно — иначе он молчит все 15 секунд
+   * таймаута и объявляет «не подтверждено», хотя настоящая причина известна
+   * прямо сейчас.
+   */
+  it("сорвавшийся вопрос доносит до ждущего, а не заставляет ждать таймаут", async () => {
+    mocks.invokeIfTauri.mockImplementation(async (cmd: string) => {
+      if (cmd === "ssh_exec") throw new Error("api: HOST_KEY_UNKNOWN");
+      throw new Error(`ssh_accept_host_key звать нельзя: вопрос сорвался (${cmd})`);
+    });
+    const broken = () => {
+      throw new Error("dialog plugin is not allowed");
+    };
+
+    const run = sshExecWithHostKeyRetry(TARGET, { decisionTimeoutMs: 5_000 });
+    await handleHostKeyPromptSoon(broken);
+
+    // Текст настоящий, а не «was not confirmed»; и приходит он сразу, что
+    // доказывает пятисекундный таймаут: дождаться его тест бы не успел.
+    await expect(run).rejects.toThrow("dialog plugin is not allowed");
+    expect(execCalls()).toHaveLength(1);
+  });
+
+  /**
+   * Единственный тест про ДЕФОЛТНЫЙ способ спросить — и заведён он потому, что
+   * его отсутствие уже стоило нам работающего SSH. Все остальные тесты передают
+   * свой `confirmHost`, поэтому подмена дефолта на `window.confirm` не роняла
+   * ни одного из них, а в десктопе означала «незнакомый ключ принять нельзя
+   * никогда»: WKWebView без JS-панелей в делегате не показывает диалог и отдаёт
+   * `false`.
+   */
+  it("спрашивает через общий confirmAction, а не через window.confirm", async () => {
+    mocks.confirmAction.mockResolvedValue(false);
+    const windowConfirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await expect(handleHostKeyPrompt(PROMPT)).resolves.toBe("declined");
+
+    expect(mocks.confirmAction).toHaveBeenCalledWith(describeHostKey(PROMPT));
+    expect(windowConfirm).not.toHaveBeenCalled();
+    windowConfirm.mockRestore();
   });
 
   it("ошибку не про ключ хоста отдаёт как есть, без вопросов пользователю", async () => {

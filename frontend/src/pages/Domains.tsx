@@ -15,6 +15,7 @@ import BulkSetupWizard from "../components/BulkSetupWizard";
 import MultiTaskProgressModal from "../components/MultiTaskProgressModal";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
+import { confirmAction } from "../lib/confirmDialog";
 
 /**
  * Заглушка для обязательного `desktopOnClick` у `OpenInDesktop` там, где сам
@@ -482,8 +483,8 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
     setSel(new Set());
   };
 
-  const handleBulkDelete = () => {
-    if (!confirm(`Удалить ${sel.size} доменов?`)) return;
+  const handleBulkDelete = async () => {
+    if (!(await confirmAction(`Удалить ${sel.size} доменов?`))) return;
     Promise.all(Array.from(sel).map(id => deleteDomain.mutateAsync(id)))
       .then(() => setSel(new Set()));
   };
@@ -659,8 +660,8 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
                           icon: "✕",
                           title: "Delete domain",
                           variant: "danger" as const,
-                          onClick: () => {
-                            if (!confirm(`Delete ${d.domain}?`)) return;
+                          onClick: async () => {
+                            if (!(await confirmAction(`Delete ${d.domain}?`))) return;
                             deleteDomain.mutate(d.id);
                           },
                         },

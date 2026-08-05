@@ -22,6 +22,7 @@ import { useDomains, type Domain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
 import { isTauri } from "../lib/runtime";
+import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave, useSecretSave } from "../hooks/useSecretSave";
 
@@ -349,7 +350,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         key={acc.id}
         acc={acc}
         onEdit={() => setEditingAcc(acc)}
-        onDelete={() => { if (!confirm(`Delete account ${acc.name}?`)) return; deleteAcc.mutate(acc); }}
+        onDelete={async () => { if (!(await confirmAction(`Delete account ${acc.name}?`))) return; deleteAcc.mutate(acc); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
         domainZones={zonesOfAccount(domains, acc.id)}
@@ -677,7 +678,7 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
                 // Блокируем ТУ САМУЮ строку, а не всю таблицу: мутация одна на
                 // весь список, и `isPending` без сверки с `variables` гасил бы
                 // крестики у всех записей разом.
-                { icon: "✕", title: "Delete DNS record", variant: "danger", disabled: !canExecute || (deleteRecord.isPending && deleteRecord.variables === r.id), onClick: () => { dismissBanner(); if (!confirm(`Delete DNS record ${r.name}?`)) return; deleteRecord.mutate(r.id); } },
+                { icon: "✕", title: "Delete DNS record", variant: "danger", disabled: !canExecute || (deleteRecord.isPending && deleteRecord.variables === r.id), onClick: async () => { dismissBanner(); if (!(await confirmAction(`Delete DNS record ${r.name}?`))) return; deleteRecord.mutate(r.id); } },
               ]}/></td>
             </tr>
           ))}

@@ -28,6 +28,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
+        // Единственный способ спросить у человека «да/нет» в десктопе:
+        // `window.confirm` в webview не показывает ничего и возвращает `false`
+        // (подробности у зависимости в `Cargo.toml`).
+        .plugin(tauri_plugin_dialog::init())
         .manage(SyncHandle(Mutex::new(None)))
         .manage(api)
         .invoke_handler(tauri::generate_handler![
