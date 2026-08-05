@@ -10,8 +10,11 @@
 # отложено намеренно). Без явного --bundles dmg `tauri build` попробует
 # собрать все три и упадёт на отсутствующих Windows/Linux-тулчейнах.
 #
-# ПОЧЕМУ ТОЛЬКО host-арка (aarch64). Universal-бинарь (aarch64+x86_64) —
-# отдельная задача Stage 5; собирать его сейчас — YAGNI.
+# ПОЧЕМУ ТОЛЬКО host-арка. Universal-бинарь (aarch64+x86_64) — отдельная
+# задача Stage 5; собирать его сейчас — YAGNI. Какая именно арка host —
+# скрипт узнаёт у `rustc -vV`, а не хардкодит: на Intel-маке это x86_64, на
+# Apple Silicon — aarch64, и preflight должен спрашивать/советовать ставить
+# ровно тот таргет, что нужен здесь и сейчас.
 #
 # ПОЧЕМУ СБОРКА ПО УМОЛЧАНИЮ НИЧЕГО НЕ ОТКРЫВАЕТ. Скрипт должен годиться и
 # для «просто собери артефакт» (повторный прогон, будущий CI) — неожиданно
@@ -25,9 +28,13 @@
 
 set -euo pipefail
 
-die() { echo "❌ $*" >&2; exit 1; }
+die()  { echo "❌ $*" >&2; exit 1; }
 step() { echo "→ $*"; }
-ok() { echo "✅ $*"; }
+ok()   { echo "✅ $*"; }
+# Предупреждения — тоже в stderr, а не в stdout: это не часть «полезного
+# вывода» команды (путей к артефактам), и вызывающая сторона (CI, `npm run
+# dmg`), которая парсит только stdout, не должна принять warning за путь.
+warn() { echo "⚠️  $*" >&2; }
 
 # Пути считаем от расположения скрипта, а не от cwd: скрипт должен работать
 # при запуске из любой директории (например `cd /tmp && /path/to/build-dmg.sh`).
@@ -48,7 +55,8 @@ usage() {
   (без флагов)  собрать .dmg и .app, пути напечатать, ничего не открывать
   --run         после сборки открыть получившийся .app (backend должен уже
                 слушать на http://localhost:8100 — приложение стучится туда)
-  --check       выполнить только preflight-проверки тулчейна, без сборки
+  --check       выполнить только preflight-проверки тулчейна и зависимостей,
+                без сборки (--run вместе с ним игнорируется)
   -h, --help    показать эту справку
 EOF
 }
@@ -61,6 +69,10 @@ for arg in "$@"; do
     *) die "Неизвестный аргумент: $arg (см. --help)" ;;
   esac
 done
+
+if [ "$CHECK_ONLY" -eq 1 ] && [ "$RUN_APP" -eq 1 ]; then
+  warn "--check и --run вместе: --check главнее — ни сборки, ни открытия не будет."
+fi
 
 # ── Preflight ────────────────────────────────────────────────────────────
 # Проверяем тулчейн заранее и печатаем понятную причину с командой-фиксом,
@@ -78,16 +90,35 @@ preflight() {
   command -v npm >/dev/null 2>&1 \
     || die "npm не найден. Поставь Node.js (например через nvm)."
 
-  # Без rustup таргет проверить нечем (тулчейн мог быть поставлен напрямую) —
-  # в этом случае просто пропускаем проверку, а не падаем на ровном месте.
+  # Триплет хоста узнаём у самого rustc, а не хардкодим: на Intel-маке это
+  # x86_64-apple-darwin, на Apple Silicon — aarch64-apple-darwin. `awk` тут
+  # читает весь вывод `rustc -vV` до конца сам — в отличие от `grep -q` в
+  # пайпе (см. разбор SIGPIPE-капкана в dev-signing.sh:113-117), обрывать
+  # верхнюю команду раньше времени некому.
+  local host_target
+  host_target="$(rustc -vV | awk '/^host:/{print $2}')"
+  [ -n "$host_target" ] \
+    || die "Не смог определить хост-таргет: 'rustc -vV' не вернул строку host:."
+
+  # Без rustup таргет проверить нечем (тулчейн мог быть поставлен напрямую).
+  # В этом случае НЕ рапортуем успех молча — печатаем честное «не проверял»,
+  # а не выдаём непроверенный таргет за подтверждённый. Ровно такая немая
+  # «мягкая проверка» с mock-хранилищем уже стоила этому репозитория рабочего
+  # продукта (коммит 26bf693, см. dev-signing.sh).
+  local target_note
   if command -v rustup >/dev/null 2>&1; then
     local targets
     targets="$(rustup target list --installed 2>/dev/null || true)"
-    [[ "$targets" == *"aarch64-apple-darwin"* ]] \
-      || die "Таргет aarch64-apple-darwin не установлен. Выполни: rustup target add aarch64-apple-darwin"
+    if [[ "$targets" == *"$host_target"* ]]; then
+      target_note="таргет $host_target установлен"
+    else
+      die "Таргет $host_target не установлен. Выполни: rustup target add $host_target"
+    fi
+  else
+    target_note="таргет не проверял (rustup не в PATH)"
   fi
 
-  ok "Тулчейн на месте: cargo, rustc, node, npm, aarch64-apple-darwin."
+  ok "Тулчейн на месте: cargo, rustc, node, npm; $target_note."
 }
 
 # ── Зависимости ──────────────────────────────────────────────────────────
@@ -97,58 +128,98 @@ preflight() {
 # фронта упадёт ПОСЛЕ старта tauri build, с менее понятной ошибкой из недр
 # tauri-cli. Решение: ставим оба одинаково — команда должна правда делать
 # всё, а не половину, и это ровно тот edge case, что упомянут в плане.
-install_deps() {
-  if [ -d "$DESKTOP_DIR/node_modules" ]; then
-    ok "desktop/node_modules уже на месте."
-  else
-    step "desktop/node_modules нет — ставлю (нужен @tauri-apps/cli)…"
-    ( cd "$DESKTOP_DIR" && npm install )
-    ok "desktop/node_modules установлен."
+#
+# `npm ci`, когда есть package-lock.json (он есть в обоих каталогах): `npm
+# install` вправе подправить лок-файл под текущий npm/registry и оставить
+# грязное рабочее дерево с версиями, отличными от зафиксированных. `npm ci`
+# ставит строго по локу и падает, если он рассинхронизирован с package.json,
+# — то есть либо ставит именно то, что закоммичено, либо честно сообщает,
+# что не может.
+#
+# mode="install" — ставит недостающее; mode="report" — только сообщает (для
+# --check), сборку не запускает и ничего не меняет на диске.
+handle_node_modules() {
+  local dir="$1" label="$2" mode="$3"
+
+  if [ -d "$dir/node_modules" ]; then
+    ok "$label/node_modules уже на месте."
+    return 0
   fi
 
-  if [ -d "$FRONTEND_DIR/node_modules" ]; then
-    ok "frontend/node_modules уже на месте."
-  else
-    step "frontend/node_modules нет — ставлю…"
-    ( cd "$FRONTEND_DIR" && npm install )
-    ok "frontend/node_modules установлен."
+  if [ "$mode" = "report" ]; then
+    warn "$label/node_modules нет — при сборке будет установлен."
+    return 0
   fi
+
+  if [ -f "$dir/package-lock.json" ]; then
+    step "$label/node_modules нет — ставлю по package-lock.json (npm ci)…"
+    ( cd "$dir" && npm ci )
+  else
+    step "$label/node_modules нет, лок-файла тоже нет — ставлю (npm install)…"
+    ( cd "$dir" && npm install )
+  fi
+  ok "$label/node_modules установлен."
+}
+
+install_deps() {
+  handle_node_modules "$DESKTOP_DIR" "desktop" "install"
+  handle_node_modules "$FRONTEND_DIR" "frontend" "install"
+}
+
+report_deps() {
+  handle_node_modules "$DESKTOP_DIR" "desktop" "report"
+  handle_node_modules "$FRONTEND_DIR" "frontend" "report"
 }
 
 # Версию приложения (а не версию npm-пакета оболочки из desktop/package.json)
-# Tauri берёт из tauri.conf.json — оттуда же читаем и мы, чтобы имя .dmg не
-# разъехалось с тем, что реально соберёт tauri-cli.
+# Tauri берёт из tauri.conf.json — оттуда же читаем и мы, только чтобы
+# провалидировать конфиг заранее и не тратить десять минут сборки на ошибку,
+# которая была видна с самого начала. Сам путь к .dmg версией больше не
+# зашиваем (см. run_build) — имя ищем глобом.
 read_version() {
   [ -f "$TAURI_CONF" ] || die "Не найден $TAURI_CONF"
-  node -e 'console.log(require(process.argv[1]).version)' "$TAURI_CONF"
+
+  local version
+  version="$(node -e 'console.log(require(process.argv[1]).version)' "$TAURI_CONF" 2>/dev/null)" \
+    || die "Не смог прочитать version из $TAURI_CONF — похоже, битый JSON."
+  [[ "$version" =~ ^[0-9]+\.[0-9]+ ]] \
+    || die "В $TAURI_CONF нет валидного поля version (получил «${version}»)."
+
+  echo "$version"
 }
 
 run_build() {
-  local version dmg_path app_path
+  local version
   version="$(read_version)"
-  dmg_path="$SRC_TAURI_DIR/target/release/bundle/dmg/SDMP_${version}_aarch64.dmg"
-  app_path="$SRC_TAURI_DIR/target/release/bundle/macos/SDMP.app"
+  step "Версия из tauri.conf.json: $version"
 
   step "Собираю .dmg (npm run tauri build -- --bundles dmg)…"
-  ( cd "$DESKTOP_DIR" && npm run tauri build -- --bundles dmg )
+  ( cd "$DESKTOP_DIR" && npm run tauri build -- --bundles dmg ) \
+    || die "Сборка tauri упала — смотри вывод выше."
 
   echo
-  if [ -e "$dmg_path" ]; then
-    ok "dmg:  $dmg_path"
-  else
-    echo "⚠️  Ожидаемый .dmg не найден: $dmg_path (возможно, версия или схема имени изменились)"
-  fi
-  if [ -e "$app_path" ]; then
-    ok "app:  $app_path"
-  else
-    echo "⚠️  Ожидаемый .app не найден: $app_path"
-  fi
+
+  # Имя .dmg ищем глобом, а не собираем строкой (SDMP_<version>_<arch>.dmg):
+  # если tauri когда-нибудь поменяет схему имени, скрипт должен это заметить
+  # и упасть с понятной причиной, а не молча разойтись с реальностью.
+  # НЕ через `ls | head -1` — под pipefail это тот же SIGPIPE-капкан, что
+  # разобран в dev-signing.sh:113-117 (`head` закрывает пайп раньше, чем `ls`
+  # допишет вывод, `ls` получает SIGPIPE, pipefail валит код всей цепочки).
+  # Массив-глоб этой ловушки не знает.
+  shopt -s nullglob
+  local dmgs=( "$SRC_TAURI_DIR"/target/release/bundle/dmg/*.dmg )
+  shopt -u nullglob
+  (( ${#dmgs[@]} )) || die "Сборка прошла, но .dmg в bundle/dmg/ не появился."
+  ok "dmg:  ${dmgs[0]}"
+
+  local app_path="$SRC_TAURI_DIR/target/release/bundle/macos/SDMP.app"
+  [ -e "$app_path" ] || die "Сборка прошла, но .app не найден: $app_path"
+  ok "app:  $app_path"
 
   if [ "$RUN_APP" -eq 1 ]; then
-    [ -e "$app_path" ] || die "Не могу открыть — $app_path не существует."
     echo
-    echo "⚠️  Убедись, что backend уже поднят на http://localhost:8100 — приложение стучится туда."
-    step "Открываю $app_path…"
+    warn "Убедись, что backend уже поднят на http://localhost:8100 — приложение стучится туда."
+    step "Открываю ${app_path}…"
     open "$app_path"
   else
     echo
@@ -158,6 +229,7 @@ run_build() {
 
 preflight
 if [ "$CHECK_ONLY" -eq 1 ]; then
+  report_deps
   ok "Preflight пройден, --check — сборку не запускаю."
   exit 0
 fi
