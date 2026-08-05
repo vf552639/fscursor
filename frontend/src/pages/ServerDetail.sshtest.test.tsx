@@ -4,7 +4,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import ServerDetail from "./ServerDetail";
-import { runSshTest, SSH_TEST_COMMAND } from "../api/servers";
+import { runSshTest } from "../api/servers";
 import { u8ToB64 } from "../lib/b64";
 import { setTauri, secretBlobLifecycle, BLOB_USER_ID } from "../test/secretBlobKit";
 
@@ -138,9 +138,11 @@ describe("ServerDetail — SSH Test через десктоп", () => {
     expect(exec.port).toBe(2222);
     expect(exec.user).toBe("deploy");
     expect(exec.password).toBe(SSH_PW);
-    // Команда — часть контракта: «безобидная» значит ничего не меняющая, и её
-    // подмена на что-то с побочным эффектом обязана ломать тест.
-    expect(exec.command).toBe(SSH_TEST_COMMAND);
+    // Литерал, а НЕ импортированная `SSH_TEST_COMMAND`: сверка константы с
+    // самой собой — тавтология, при которой `rm -rf /tmp/x; echo sdmp-ssh-ok`
+    // проезжает зелёным на живой сервер. Команда — часть контракта («безобидная»
+    // = ничего не меняющая), и записана она здесь ровно один раз.
+    expect(exec.command).toBe("echo sdmp-ssh-ok");
 
     // Пароль живёт ровно до вызова. Кэш мутаций — главный подозреваемый:
     // `variables` и `data` он держит ещё gcTime и после `reset()`.
@@ -178,6 +180,25 @@ describe("ServerDetail — SSH Test через десктоп", () => {
     expect(await screen.findByText(/exit 127/)).toBeTruthy();
   });
 
+  it("нулевой код без нашего маркера успехом не считается", async () => {
+    setTauri(true);
+    mocks.invokeIfTauri.mockImplementation(async (cmd: string) => {
+      if (cmd === "vault_decrypt_blob") return u8ToB64(new TextEncoder().encode(SSH_PW));
+      // Так выглядит оборванный канал: `ssh_exec` отдаёт код `-1`, когда сервер
+      // закрыл его, не прислав ExitStatus (ssh/client.rs), а на пустой строке и
+      // `0` ничего не доказывает. Отличить «связь есть» от «канал схлопнулся»
+      // можно только по вернувшейся строке.
+      return [0, ""];
+    });
+
+    renderDetail();
+    fireEvent.click(await screen.findByText("SSH Test"));
+
+    const banner = await screen.findByText(/SSH Test:/);
+    expect(banner.textContent).toMatch(/no output/);
+    expect(banner.textContent).not.toMatch(/responded/);
+  });
+
   it("в вебе кнопки нет — вместо неё общая фраза продукта", async () => {
     setTauri(false);
     renderDetail();
@@ -197,8 +218,28 @@ describe("ServerDetail — SSH Test через десктоп", () => {
   });
 });
 
-describe("runSshTest — сервер без ssh_password_blob_id", () => {
+describe("runSshTest — отказы до выхода на сервер", () => {
   secretBlobLifecycle();
+
+  /**
+   * Функция экспортирована, и звать её из веба будет не только кнопка, которой
+   * там нет. Запрет должен стоять в САМОЙ функции и объясняться её же словами:
+   * без него отказ приезжал бы из `readSecretBlob` («Reading secrets…»), то
+   * есть пользователь читал бы про чтение секретов вместо проверки SSH.
+   */
+  it("в вебе не выполняется вовсе и объясняет это фразой про SSH", async () => {
+    setTauri(false);
+
+    await expect(
+      runSshTest({
+        ip_address: "10.0.0.7",
+        ssh_port: 22,
+        ssh_user: "root",
+        ssh_password_blob_id: SSH_BLOB,
+      }),
+    ).rejects.toThrow("Testing SSH runs in the SDMP desktop app.");
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+  });
 
   /**
    * Такого сервера кнопка не показывает (`has_ssh` = «блоб есть»), но тип поля

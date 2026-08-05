@@ -242,10 +242,17 @@ export default function DesktopWorkspace() {
   useEffect(() => {
     if (!isTauri()) return;
     let unlisten: (() => void) | undefined;
+    // Подписка ставится асинхронно, а размонтирование её не ждёт: без флага
+    // слушатель, доехавший после cleanup, остался бы висеть навсегда — и на
+    // hot reload их копилось бы по одной на перезагрузку, то есть по лишнему
+    // `confirm` на каждый незнакомый ключ.
+    let cancelled = false;
     void listenHostKeyPrompts(() => showToast("Could not save host key")).then((off) => {
-      unlisten = off;
+      if (cancelled) off();
+      else unlisten = off;
     });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);

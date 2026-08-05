@@ -218,7 +218,10 @@ export async function runSshTest(server: SshTarget): Promise<SshTestResult> {
     // Кнопка такого сервера не показывает (`has_ssh` на бэкенде и есть «блоб
     // есть»), но поле nullable, и без этой ветки сюда приехал бы
     // `vault_decrypt_blob(blobId: undefined)` с «invalid args» на экране.
-    throw new Error("This server has no SSH password saved — add one first (Изменить SSH).");
+    // Кнопку формы по имени не зовём: её подпись зависит от состояния
+    // («Добавить SSH» ровно там, где эта фраза и достижима, «Изменить SSH» —
+    // где недостижима), и назвать её значило бы указать не на ту.
+    throw new Error("This server has no SSH password saved — add SSH access first.");
   }
   const [code, output] = await sshExecWithHostKeyRetry({
     host: server.ip_address,
@@ -234,8 +237,10 @@ export async function runSshTest(server: SshTarget): Promise<SshTestResult> {
     };
   }
   // Вывод показываем как есть: он от чужой машины и объясняет отказ лучше любой
-  // нашей формулировки (`ssh_exec` отдаёт и stdout, и stderr).
-  const tail = output.trim();
+  // нашей формулировки (`ssh_exec` отдаёт и stdout, и stderr). Но с потолком:
+  // длину нам никто не обещал — при подмене команды или болтливом профиле
+  // шелла сюда приехали бы килобайты чужого текста прямо в баннер.
+  const tail = output.trim().slice(0, 300);
   return { success: false, message: `exit ${code}${tail ? `: ${tail}` : " with no output"}` };
 }
 

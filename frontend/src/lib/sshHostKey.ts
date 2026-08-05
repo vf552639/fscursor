@@ -1,8 +1,8 @@
 import { invokeIfTauri } from "./tauri-invoke";
 
 /**
- * TOFU для ключей SSH-хостов: один вопрос пользователю на один незнакомый ключ
- * и один способ довести до конца вызов, оборвавшийся из-за него.
+ * TOFU для ключей SSH-хостов: один вопрос пользователю на один незнакомый
+ * отпечаток и один способ довести до конца вызов, оборвавшийся из-за него.
  *
  * Почему это отдельный модуль, а не состояние страницы. `ssh_exec` на
  * незнакомом ключе делает две вещи РАЗНЫМИ каналами: эмитит событие
@@ -63,13 +63,30 @@ let seq = 0;
 const decisions = new Map<string, Published>();
 const waiters = new Map<string, Array<(entry: Published) => void>>();
 
+/**
+ * Заданные и ещё не закрытые вопросы, по `host:port:fingerprint`. Rust эмитит
+ * событие на КАЖДУЮ попытку коннекта (`ssh_exec` и сессия провижина — разные
+ * попытки), поэтому две операции к одному незнакомому хосту приносят два
+ * одинаковых события. Без этой карты человек видел бы два одинаковых диалога
+ * подряд, а `append_known_host` дописал бы в known_hosts две одинаковые строки
+ * — он пишет без дедупа.
+ *
+ * Отпечаток — часть ключа намеренно: другой отпечаток того же хоста это уже
+ * ДРУГОЙ вопрос (сменился ключ или в канале кто-то третий), и молча отвечать
+ * на него прошлым «да» нельзя.
+ */
+const inFlight = new Map<string, Promise<HostKeyDecision>>();
+
 const addr = (host: string, port: number) => `${host}:${port}`;
 
-/** Только для тестов: карта модульная и пережила бы файл (см. `seq`). */
+/** Только для тестов: карты модульные и пережили бы файл (см. `seq`). */
 export function resetHostKeyStateForTests(): void {
+  // В прод-бандле пусто: сбрасывать состояние живого приложения этим нельзя.
+  if (!import.meta.env.DEV) return;
   seq = 0;
   decisions.clear();
   waiters.clear();
+  inFlight.clear();
 }
 
 function publish(key: string, decided: Promise<HostKeyDecision>): void {
@@ -141,12 +158,28 @@ export function handleHostKeyPrompt(
   confirmHost: (message: string) => boolean = defaultConfirm,
 ): Promise<HostKeyDecision> {
   const { host, port, fingerprint } = prompt;
-  const decided: Promise<HostKeyDecision> = confirmHost(describeHostKey(prompt))
-    ? invokeIfTauri<void>("ssh_accept_host_key", { host, port, fingerprint }).then(
-        (): HostKeyDecision => "accepted",
-        (): HostKeyDecision => "save-failed",
-      )
-    : Promise.resolve<HostKeyDecision>("declined");
+  const asked = `${addr(host, port)}:${fingerprint}`;
+  let decided = inFlight.get(asked);
+  if (!decided) {
+    decided = confirmHost(describeHostKey(prompt))
+      ? invokeIfTauri<void>("ssh_accept_host_key", { host, port, fingerprint }).then(
+          (): HostKeyDecision => "accepted",
+          (): HostKeyDecision => "save-failed",
+        )
+      : Promise.resolve<HostKeyDecision>("declined");
+    inFlight.set(asked, decided);
+    // Держим ровно пока вопрос открыт. Дальше событие про тот же отпечаток —
+    // уже новая ситуация: known_hosts либо пополнился (и события не будет
+    // вовсе), либо запись не помогла — и об этом надо спросить, а не отвечать
+    // за человека прошлым ответом.
+    const settled = decided;
+    void settled.finally(() => {
+      if (inFlight.get(asked) === settled) inFlight.delete(asked);
+    });
+  }
+  // Публикуем на КАЖДОЕ событие, в том числе на дедуплицированное: своей
+  // попытки ждёт каждый вызов, и «уже спросили» для него означает ответ, а не
+  // тишину до таймаута.
   publish(addr(host, port), decided);
   return decided;
 }
