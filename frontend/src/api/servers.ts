@@ -3,8 +3,9 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { queryClient } from "./queryClient";
 import { invokeSynced } from "../lib/localCache";
-import { desktopOnly, isTauri } from "../lib/runtime";
-import { forgetSecretBlobs } from "../lib/secretBlob";
+import { desktopOnly, isTauri, requireDesktop } from "../lib/runtime";
+import { forgetSecretBlobs, readSecretBlob } from "../lib/secretBlob";
+import { sshExecWithHostKeyRetry } from "../lib/sshHostKey";
 import { useAuthStore } from "../store/auth";
 import type { InstallFastpanelResult } from "../lib/deepLink";
 
@@ -175,9 +176,80 @@ export function useDeleteServer() {
   });
 }
 
-export function useTestSsh(id: number) {
+/**
+ * Что нужно знать, чтобы дойти до сервера по SSH. Сущность, а не id: пароль
+ * лежит блобом, ссылку на который знает только она, — ровно по той же причине,
+ * что и у `useDeleteServer`.
+ */
+export type SshTarget = Pick<
+  Server,
+  "ip_address" | "ssh_port" | "ssh_user" | "ssh_password_blob_id"
+>;
+
+/**
+ * Команда проверки связи. Выбрана по трём требованиям сразу: ничего не меняет
+ * на живом сервере, есть везде (это builtin любого sh, в отличие от `uptime -p`
+ * или `systemctl`, которых нет в урезанных образах) и даёт узнаваемый маркер в
+ * stdout. Маркер не украшение: `ssh_exec` возвращает `-1` вместо кода возврата,
+ * если сервер закрыл канал, не прислав `ExitStatus`, — по одному коду «связь
+ * есть» отличить от «канал оборвался» нельзя, а по вернувшейся строке можно.
+ *
+ * Экспортируется ради теста: подмена на команду с побочным эффектом обязана
+ * ломать сборку тестов, а не тихо проехать в живой прогон.
+ */
+export const SSH_TEST_COMMAND = "echo sdmp-ssh-ok";
+const SSH_TEST_MARKER = "sdmp-ssh-ok";
+
+/**
+ * Проверка SSH — ТОЛЬКО десктоп. Эндпоинта `POST /servers/{id}/test-ssh` на
+ * бэкенде нет и быть не может: пароль хранится блобом под мастер-ключом,
+ * которого у сервера нет. (До этой правки фронт его звал и получал 404 —
+ * остаток переезда выполнения в десктоп.)
+ *
+ * Путь целиком: блоб → плейнтекст → `ssh_exec` → результат. Плейнтекст
+ * появляется прямо в аргументах вызова и нигде не именуется: попади он в
+ * `variables`/`data` мутации, react-query держал бы его ещё gcTime и после
+ * `reset()` (см. `readSecretBlob`). Поэтому наружу уходит только «удалось/нет»
+ * и текст для человека.
+ */
+export async function runSshTest(server: SshTarget): Promise<SshTestResult> {
+  requireDesktop("Testing SSH");
+  if (!server.ssh_password_blob_id) {
+    // Кнопка такого сервера не показывает (`has_ssh` на бэкенде и есть «блоб
+    // есть»), но поле nullable, и без этой ветки сюда приехал бы
+    // `vault_decrypt_blob(blobId: undefined)` с «invalid args» на экране.
+    throw new Error("This server has no SSH password saved — add one first (Изменить SSH).");
+  }
+  const [code, output] = await sshExecWithHostKeyRetry({
+    host: server.ip_address,
+    port: server.ssh_port || 22,
+    user: server.ssh_user || "root",
+    password: await readSecretBlob(server.ssh_password_blob_id),
+    command: SSH_TEST_COMMAND,
+  });
+  if (code === 0 && output.includes(SSH_TEST_MARKER)) {
+    return {
+      success: true,
+      message: `${server.ssh_user || "root"}@${server.ip_address}:${server.ssh_port || 22} responded.`,
+    };
+  }
+  // Вывод показываем как есть: он от чужой машины и объясняет отказ лучше любой
+  // нашей формулировки (`ssh_exec` отдаёт и stdout, и stderr).
+  const tail = output.trim();
+  return { success: false, message: `exit ${code}${tail ? `: ${tail}` : " with no output"}` };
+}
+
+/**
+ * Аргументов у мутации нет намеренно: `variables` react-query переживают
+ * `reset()`, и класть туда что-либо, связанное с секретом, нельзя. Всё нужное
+ * замыкается на сущности сервера.
+ */
+export function useTestSsh(server: SshTarget | undefined) {
   return useMutation({
-    mutationFn: () => apiPost<SshTestResult>(`/servers/${id}/test-ssh`),
+    mutationFn: async (): Promise<SshTestResult> => {
+      if (!server) throw new Error("Server is still loading — try again in a moment.");
+      return runSshTest(server);
+    },
   });
 }
 

@@ -56,7 +56,8 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   // Mutations
   const delSrv = useDeleteServer();
-  const testSsh = useTestSsh(server?.id || 0);
+  // Сущность, а не id: ссылку на блоб с паролем знает только она (`SshTarget`).
+  const testSsh = useTestSsh(s);
   // Проп передаём напрямую, без обёртки. Опции мутации это не стабилизирует —
   // `mutationFn` всё равно инлайновое замыкание, а ключ всё равно новый массив,
   // так что shallowEqualObjects ложна на каждом рендере (безвредно: setOptions
@@ -195,13 +196,22 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {/* Не OpenInDesktop: хоста `ssh-test` в parseDeepLinkAction нет, ссылка
+            вела бы в {handled:false} и только тостила бы сама себя. Та же
+            развилка и по той же причине, что у «Изменить SSH» ниже. */}
         {s.has_ssh ? (
-          <OpenInDesktop
-            action={`ssh-test?serverId=${s.id}`}
-            label={testSsh.isPending ? "Testing..." : "SSH Test"}
-            desktopOnClick={() => testSsh.mutate()}
-            disabled={testSsh.isPending}
-          />
+          isTauri() ? (
+            <Btn
+              size="sm"
+              variant="secondary"
+              onClick={() => testSsh.mutate()}
+              disabled={testSsh.isPending}
+            >
+              {testSsh.isPending ? "Testing..." : "SSH Test"}
+            </Btn>
+          ) : (
+            <DesktopOnlyNote what="Testing SSH" />
+          )
         ) : null}
         {s.has_ssh ? (
           <OpenInDesktop
@@ -260,7 +270,21 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
       </div>
     )}
 
-    {testSsh.data && <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: testSsh.data.success ? "#dcfce7" : "#fee2e2", color: testSsh.data.success ? "#166534" : "#991b1b", fontSize: 13}}>SSH Test: {testSsh.data.message}</div>}
+    {/* Отказ ДО выполнения команды (заперт keychain, не принятый ключ хоста,
+        отказ в коннекте) — это ошибка мутации, а не её результат: без неё клик
+        по кнопке выглядел бы как клик в пустоту.
+
+        Ветвление, а не два блока подряд: react-query не стирает `data` на
+        старте следующей попытки, поэтому рядом с красным «не удалось» висел бы
+        зелёный ответ прошлого прогона. Обратный порядок безопасен — `error` на
+        старте как раз обнуляется. */}
+    {testSsh.isError ? (
+      <div role="alert" style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
+        SSH Test failed: {(testSsh.error as any)?.message || "unknown error"}
+      </div>
+    ) : testSsh.data ? (
+      <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: testSsh.data.success ? "#dcfce7" : "#fee2e2", color: testSsh.data.success ? "#166534" : "#991b1b", fontSize: 13}}>SSH Test: {testSsh.data.message}</div>
+    ) : null}
     {syncDomains.data && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: syncDomains.data.error ? "#fee2e2" : "#dcfce7", color: syncDomains.data.error ? "#991b1b" : "#166534", fontSize: 13}}>
         {syncDomains.data.error

@@ -11,6 +11,7 @@ import Settings from "./Settings";
 import { useUnreadCount } from "../api/notifications";
 import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
+import { listenHostKeyPrompts } from "../lib/sshHostKey";
 import { isTauri } from "../lib/runtime";
 import { apiPost } from "../api/client";
 import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
@@ -232,27 +233,18 @@ export default function DesktopWorkspace() {
     };
   }, [userId]);
 
+  // Единственная в приложении подписка на `ssh:host-key-prompt`, и это не
+  // случайность: событие получают ВСЕ слушатели окна, так что вторая подписка
+  // (например, своя на странице сервера) означала бы два одинаковых `confirm`
+  // подряд на один ключ. Отсюда же вопрос задаётся и для тех вызовов, которые
+  // умеют повториться после принятия ключа, — ответ они забирают из того же
+  // модуля (`sshExecWithHostKeyRetry`).
   useEffect(() => {
     if (!isTauri()) return;
     let unlisten: (() => void) | undefined;
-    (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<{ host: string; port: number; fingerprint: string }>(
-        "ssh:host-key-prompt",
-        (event) => {
-          const { host, port, fingerprint } = event.payload;
-          const ok = window.confirm(
-            `Unknown SSH host key for ${host}:${port}\n\n${fingerprint}\n\nTrust this host and save the key?`,
-          );
-          if (ok) {
-            void invokeIfTauri("ssh_accept_host_key", { host, port, fingerprint }).catch(() => {
-              setToast("Could not save host key");
-              setTimeout(() => setToast(null), 2200);
-            });
-          }
-        },
-      );
-    })();
+    void listenHostKeyPrompts(() => showToast("Could not save host key")).then((off) => {
+      unlisten = off;
+    });
     return () => {
       unlisten?.();
     };

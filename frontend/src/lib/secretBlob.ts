@@ -1,4 +1,4 @@
-import { u8ToB64 } from "./b64";
+import { b64ToU8, u8ToB64 } from "./b64";
 import { requireDesktop } from "./runtime";
 import { invokeIfTauri } from "./tauri-invoke";
 import { useAuthStore } from "../store/auth";
@@ -102,6 +102,41 @@ export async function putSecretBlob(args: {
     plaintextB64: u8ToB64(new TextEncoder().encode(plaintext)),
   });
   return blobId;
+}
+
+/**
+ * Достать секрет из блоба — обратная сторона `putSecretBlob` и единственный
+ * путь плейнтекста ОБРАТНО в JS. Нужна тем действиям, которые выполняет сам
+ * фронт через Tauri-команду, принимающую пароль аргументом (`ssh_exec`);
+ * командам, которые резолвят сервер сами (`install_fastpanel`, `provision_*`),
+ * она не нужна — там плейнтекст не покидает Rust, и так лучше.
+ *
+ * Только десктоп: расшифровывает Rust мастер-ключом из системного keychain.
+ * В вебе тот же блоб показывает `RevealSecret` — там ключ разворачивается из
+ * пароля в самом браузере, и это осознанно другой путь: он для ПОКАЗА секрета
+ * человеку, а не для передачи его в исполняющую команду.
+ *
+ * ГЛАВНОЕ про возвращённое значение: это плейнтекст живого секрета, и жить он
+ * обязан ровно до вызова, которому предназначен. Нельзя класть его в
+ * `useState`, в `variables`/`data` мутации react-query (оттуда его не убирает
+ * даже `reset()` — запись живёт ещё gcTime, см. JSDoc `putSecretBlob` и
+ * `useInstallFastPanel`), в логи и в локальный кэш. Принятый в проекте способ —
+ * получить его прямо в аргументах вызова (`password: await
+ * readSecretBlob(id)`), чтобы у плейнтекста не было имени, которое переживёт
+ * выражение.
+ *
+ * Команда отдаёт base64 (плейнтекст — произвольные байты), разворачиваем через
+ * TextDecoder: секрет может быть кириллическим или с эмодзи.
+ */
+export async function readSecretBlob(blobId: string): Promise<string> {
+  requireDesktop("Reading secrets");
+  const userId = useAuthStore.getState().userId;
+  if (!userId) {
+    throw new Error("Desktop: unlock session (user id missing)");
+  }
+  // Ключи аргументов Tauri v2 — camelCase (`rename_all` по умолчанию).
+  const plaintextB64 = await invokeIfTauri<string>("vault_decrypt_blob", { userId, blobId });
+  return new TextDecoder().decode(b64ToU8(plaintextB64));
 }
 
 /**
