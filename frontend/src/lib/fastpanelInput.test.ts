@@ -28,6 +28,12 @@ describe("fastpanelUrlError", () => {
     // значении, которое уезжает в колонку и в аудит.
     expect(fastpanelUrlError("https://admin:s3cr3t@192.168.1.100:8888/")).toMatch(/credential/i);
     expect(fastpanelUrlError("https://admin@192.168.1.100:8888")).toMatch(/credential/i);
+    // Пароль с `/` внутри по RFC уже не userinfo: authority кончается на `/`
+    // и равна `admin:12` — идеальному «хост:порт», — а логин с паролем
+    // проезжали как путь. Отсюда правило «`@` где угодно — отказ», и `@` в
+    // пути отвергается заодно (панельного адреса с ним не бывает).
+    expect(fastpanelUrlError("https://admin:12/345@192.168.1.100:8888")).toMatch(/credential/i);
+    expect(fastpanelUrlError("https://192.168.1.100:8888/mail@example")).toMatch(/credential/i);
   });
 
   it("отвергает адрес без схемы и без порта — с разным текстом", () => {

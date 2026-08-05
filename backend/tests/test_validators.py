@@ -36,8 +36,11 @@ def test_is_valid_fastpanel_url() -> None:
     # на значение. Долг №10.
     assert not is_valid_fastpanel_url("https://admin:s3cr3t@203.0.113.10:8888/")
     assert not is_valid_fastpanel_url("https://admin@203.0.113.10:8888")
-    # `@` в пути к userinfo отношения не имеет и URL не портит.
-    assert is_valid_fastpanel_url("https://203.0.113.10:8888/mail@example")
+    # Пароль с `/` внутри — по RFC это уже не userinfo: authority кончается на
+    # первом `/` и равна `admin:12`, идеальному «хост:порт», а логин с паролем
+    # проезжали как путь. Отсюда правило «`@` где угодно — отказ».
+    assert not is_valid_fastpanel_url("https://203.0.113.10:8888/mail@example")
+    assert not is_valid_fastpanel_url("https://admin:12/345@203.0.113.10:8888")
     # Не http(s), без порта, с управляющим символом — не адрес панели.
     assert not is_valid_fastpanel_url("ftp://203.0.113.10:8888")
     assert not is_valid_fastpanel_url("https://203.0.113.10")
