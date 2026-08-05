@@ -42,7 +42,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 }));
 
-let idleTimer: ReturnType<typeof window.setTimeout> | null = null;
+// Explicit `number` (not `ReturnType<typeof window.setTimeout>`): with `@types/node`
+// installed, the global `setTimeout` ambient declaration merges with DOM's `Window.setTimeout`,
+// and `ReturnType<...>` picks up Node's `Timeout` overload even though the browser call below
+// still resolves to (and returns) the DOM overload's `number`.
+let idleTimer: number | null = null;
 
 /** Reset the 5-minute idle timer that clears `masterKey` (web secrets). */
 export function bumpMasterKeyActivity(): void {

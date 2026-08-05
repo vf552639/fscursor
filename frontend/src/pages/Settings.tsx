@@ -218,7 +218,7 @@ export default function Settings(){
     {editingRegistrar && <EditRegistrarModal registrar={editingRegistrar} onClose={() => setEditingRegistrar(null)} />}
     {editingSystem && <Modal title={`Edit ${editingSystem.key}`} onClose={() => setEditingSystem(null)} width={420}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Value</label><Inp value={editingSystem.value} onChange={e=>setEditingSystem((p)=>p?({...p, value:(e.target as any).value}):p)} /></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Value</label><Inp value={editingSystem.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setEditingSystem((p)=>p?({...p, value:(e.target as any).value}):p)} /></div>
       </div>
       <div style={{display:"flex",gap:8,marginTop:20}}>
         <Btn variant="primary" style={{flex:1,justifyContent:"center"}} disabled={updateSystemConfig.isPending} onClick={() => {
@@ -298,7 +298,7 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
 
   return <Modal title="Add Registrar Account" onClose={closeIfIdle} width={480}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={e=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           {[
@@ -318,7 +318,7 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
           API без всякой связи с формой. Client IP с пробелом просто не
           совпадёт с whitelist. */}
       {provider==="hostiq"?<>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
           {isTauri() ? (
@@ -328,7 +328,7 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </>:<>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} placeholder="your_namecheap_username"/></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder="your_namecheap_username"/></div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
@@ -426,8 +426,8 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
 
   return <Modal title={`Edit ${registrar.name}`} onClose={closeIfIdle} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={e=>setApiUser((e.target as any).value)} /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} /></div>
       {/* Почему в вебе полей нет — JSDoc `DesktopOnlyNote`. Переименовать
           аккаунт в вебе при этом можно: для этого секреты не нужны. */}
       <div>

@@ -441,12 +441,12 @@ export function AddCfAccountModal({ onClose, onStatus }: {
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label>
-        <Inp value={accName} onChange={e=>{setAccName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., Main CF Account" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>
+        <Inp value={accName} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setAccName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., Main CF Account" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>
         {errors.name && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.name}</div>}
       </div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label>
-        <Inp value={accId} onChange={e=>setAccId((e.target as any).value)} placeholder="abc123def456..."/>
+        <Inp value={accId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setAccId((e.target as any).value)} placeholder="abc123def456..."/>
       </div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token</label>
@@ -689,10 +689,10 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
     {showDns&&<Modal title="Add DNS Record" onClose={()=>setShowDns(false)} width={460}>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:12}}>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={recordType} onChange={e=>setRecordType((e.target as any).value)} style={{width:"100%"}}>{DNS_TYPES.map(t=><option key={t}>{t}</option>)}</Sel></div>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={recordName} onChange={e=>setRecordName((e.target as any).value)} placeholder="@ or subdomain"/></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={recordType} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setRecordType((e.target as any).value)} style={{width:"100%"}}>{DNS_TYPES.map(t=><option key={t}>{t}</option>)}</Sel></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={recordName} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setRecordName((e.target as any).value)} placeholder="@ or subdomain"/></div>
         </div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Content</label><Inp value={recordContent} onChange={e=>setRecordContent((e.target as any).value)} placeholder="IP address or value"/></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Content</label><Inp value={recordContent} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setRecordContent((e.target as any).value)} placeholder="IP address or value"/></div>
         {needsPriority && (
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Priority</label>
@@ -701,7 +701,7 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
           </div>
         )}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={recordTtl} onChange={e=>setRecordTtl((e.target as any).value)} style={{width:"100%"}}><option value="1">Auto</option><option value="300">5 min</option><option value="3600">1 hour</option><option value="86400">1 day</option></Sel></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={recordTtl} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setRecordTtl((e.target as any).value)} style={{width:"100%"}}><option value="1">Auto</option><option value="300">5 min</option><option value="3600">1 hour</option><option value="86400">1 day</option></Sel></div>
           <div style={{paddingTop:22}}><label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={recordProxied} onChange={e=>setRecordProxied((e.target as any).checked)}/><span>Proxied (orange cloud)</span></label></div>
         </div>
       </div>
@@ -771,8 +771,8 @@ function EditCfAccountModal({ account, onClose }: { account: any; onClose: () =>
 
   return <Modal title={`Edit ${account.name}`} onClose={closeIfIdle} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Label</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label><Inp value={accountId} onChange={e=>setAccountId((e.target as any).value)} placeholder="Cloudflare account id" /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Label</label><Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account ID</label><Inp value={accountId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setAccountId((e.target as any).value)} placeholder="Cloudflare account id" /></div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token (optional)</label>
         {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Переименовать
@@ -817,10 +817,10 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
   return <Modal title={`Edit record ${record.name}`} onClose={onClose} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:12}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={type} onChange={e=>setType((e.target as any).value)} style={{width:"100%"}}>{DNS_TYPES.map(t=><option key={t}>{t}</option>)}</Sel></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Type</label><Sel value={type} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setType((e.target as any).value)} style={{width:"100%"}}>{DNS_TYPES.map(t=><option key={t}>{t}</option>)}</Sel></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
       </div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Content</label><Inp value={content} onChange={e=>setContent((e.target as any).value)} /></div>
+      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Content</label><Inp value={content} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setContent((e.target as any).value)} /></div>
       {needsPriority && (
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Priority</label>
@@ -828,7 +828,7 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
         </div>
       )}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={ttl} onChange={e=>setTtl((e.target as any).value)} style={{width:"100%"}}>{ttlOptions.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}</Sel></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>TTL</label><Sel value={ttl} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setTtl((e.target as any).value)} style={{width:"100%"}}>{ttlOptions.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}</Sel></div>
         <div style={{paddingTop:22}}><label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={proxied} onChange={e=>setProxied((e.target as any).checked)} /><span>Proxied</span></label></div>
       </div>
     </div>

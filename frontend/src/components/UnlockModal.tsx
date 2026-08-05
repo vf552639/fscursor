@@ -38,7 +38,11 @@ export function UnlockModal({ onClose }: { onClose: () => void }) {
       <label style={{ fontSize: 12, fontWeight: 500, color: "#374151", display: "block", marginBottom: 6 }}>
         Master password
       </label>
-      <Inp type="password" value={password} onChange={(e) => setPassword((e.target as HTMLInputElement).value)} />
+      <Inp
+        type="password"
+        value={password}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword((e.target as HTMLInputElement).value)}
+      />
       {error ? (
         <p style={{ color: "#b91c1c", fontSize: 13, marginTop: 8 }}>{error}</p>
       ) : null}

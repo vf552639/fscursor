@@ -485,9 +485,9 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     {showSshModal && (
       <Modal title={s.has_ssh ? "Изменить SSH-доступ" : "Добавить SSH-доступ"} onClose={closeSshModal} width={420}>
         <div style={{display:"flex", flexDirection:"column", gap:14}}>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH User</label><Inp value={sshUser} onChange={e=>setSshUser((e.target as any).value)} placeholder="e.g., root"/></div>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label><Inp type="password" value={sshPassword.value} onChange={e=>sshPassword.setValue((e.target as any).value)} placeholder="••••••••"/></div>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Port</label><Inp type="number" value={sshPort} onChange={e=>setSshPort(Number((e.target as any).value))} placeholder="22"/></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH User</label><Inp value={sshUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setSshUser((e.target as any).value)} placeholder="e.g., root"/></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label><Inp type="password" value={sshPassword.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>sshPassword.setValue((e.target as any).value)} placeholder="••••••••"/></div>
+          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Port</label><Inp type="number" value={sshPort} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setSshPort(Number((e.target as any).value))} placeholder="22"/></div>
         </div>
         {sshPassword.error && (
           <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
@@ -552,10 +552,10 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
   return (
     <>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={e=>setName((e.target as any).value)} /></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Purchase Date</label><Inp type="date" value={purchaseDate} onChange={e=>setPurchaseDate((e.target as any).value)} /></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Expiry Date</label><Inp type="date" value={expiryDate} onChange={e=>setExpiryDate((e.target as any).value)} /></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={zoneId} onChange={e=>setZoneId((e.target as any).value)} /></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Purchase Date</label><Inp type="date" value={purchaseDate} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setPurchaseDate((e.target as any).value)} /></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Expiry Date</label><Inp type="date" value={expiryDate} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setExpiryDate((e.target as any).value)} /></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={zoneId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setZoneId((e.target as any).value)} /></div>
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
         <Btn variant="primary" disabled={isSaving || !name.trim()} onClick={() => onSave({ domain_name: name.trim(), purchase_date: purchaseDate || null, expiry_date: expiryDate || null, cloudflare_zone_id: zoneId || null })} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>

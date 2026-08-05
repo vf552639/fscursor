@@ -194,7 +194,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
       </div>
       <div>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Server Name</label>
-        <Inp value={name} onChange={e=>{setName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., production-web-01" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>
+        <Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setName((e.target as any).value); if(errors.name) setErrors(prev=>({...prev, name:""}));}} placeholder="e.g., production-web-01" style={{borderColor: errors.name ? "#dc2626" : undefined}}/>
         {errors.name && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.name}</div>}
       </div>
       
@@ -203,13 +203,13 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
             <div>
               <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>IP Address</label>
-              <Inp value={ip} onChange={e=>{handleIpChange((e.target as any).value); if(errors.ip) setErrors(prev=>({...prev, ip:""}));}} placeholder="e.g., 192.168.1.100" style={{borderColor: errors.ip ? "#dc2626" : undefined}}/>
+              <Inp value={ip} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{handleIpChange((e.target as any).value); if(errors.ip) setErrors(prev=>({...prev, ip:""}));}} placeholder="e.g., 192.168.1.100" style={{borderColor: errors.ip ? "#dc2626" : undefined}}/>
               {errors.ip && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.ip}</div>}
             </div>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Login</label><Inp value={login} onChange={e=>setLogin((e.target as any).value)} placeholder="e.g., root"/></div>
+            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Login</label><Inp value={login} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setLogin((e.target as any).value)} placeholder="e.g., root"/></div>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={e=>setOs((e.target as any).value)} style={{width:"100%"}}><option>Ubuntu 22.04 LTS (x86_64)</option><option>Ubuntu 20.04 LTS (x86_64)</option><option>Debian 12 (x86_64)</option></Sel></div>
+            <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setOs((e.target as any).value)} style={{width:"100%"}}><option>Ubuntu 22.04 LTS (x86_64)</option><option>Ubuntu 20.04 LTS (x86_64)</option><option>Debian 12 (x86_64)</option></Sel></div>
             <div>
               <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label>
               {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Сервер
@@ -217,7 +217,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
                   в десктоп (OpenInDesktop ниже). */}
               {isTauri() ? (
                 <>
-                  <Inp type="password" value={sshPassword.value} onChange={e=>{sshPassword.setValue((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="••••••••" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
+                  <Inp type="password" value={sshPassword.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{sshPassword.setValue((e.target as any).value); if(errors.password) setErrors(prev=>({...prev, password:""}));}} placeholder="••••••••" style={{borderColor: errors.password ? "#dc2626" : undefined}}/>
                   {errors.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.password}</div>}
                 </>
               ) : (
@@ -230,12 +230,12 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
         <>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel URL</label>
-            <Inp value={fastpanelUrl} onChange={e=>{setFastpanelUrl((e.target as any).value); if(errors.fastpanelUrl) setErrors(prev=>({...prev, fastpanelUrl:""}));}} placeholder="https://192.168.1.100:8888" style={{borderColor: errors.fastpanelUrl ? "#dc2626" : undefined}}/>
+            <Inp value={fastpanelUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setFastpanelUrl((e.target as any).value); if(errors.fastpanelUrl) setErrors(prev=>({...prev, fastpanelUrl:""}));}} placeholder="https://192.168.1.100:8888" style={{borderColor: errors.fastpanelUrl ? "#dc2626" : undefined}}/>
             {errors.fastpanelUrl && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.fastpanelUrl}</div>}
           </div>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS (optional)</label>
-            <Sel value={os} onChange={e=>setOs((e.target as any).value)} style={{width:"100%"}}>
+            <Sel value={os} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setOs((e.target as any).value)} style={{width:"100%"}}>
               <option value="">Auto-detect on first metrics check</option>
               <option>Ubuntu 22.04 LTS (x86_64)</option>
               <option>Ubuntu 20.04 LTS (x86_64)</option>
@@ -244,7 +244,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
           </div>
           <div>
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Login</label>
-            <Inp value={login} onChange={e=>{setLogin((e.target as any).value); if(errors.login) setErrors(prev=>({...prev, login:""}));}} placeholder="Enter login" style={{borderColor: errors.login ? "#dc2626" : undefined}}/>
+            <Inp value={login} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setLogin((e.target as any).value); if(errors.login) setErrors(prev=>({...prev, login:""}));}} placeholder="Enter login" style={{borderColor: errors.login ? "#dc2626" : undefined}}/>
             {errors.login && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.login}</div>}
           </div>
           <div>

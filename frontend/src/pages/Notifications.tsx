@@ -140,7 +140,7 @@ export default function Notifications({ onNav }: { onNav?: (pg: string, ctx?: an
                     <Btn
                       size="sm"
                       variant="secondary"
-                      onClick={(e) => { e.stopPropagation(); markRead.mutate({ ids: [n.id] }); }}
+                      onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); markRead.mutate({ ids: [n.id] }); }}
                       disabled={markRead.isPending || n.is_read}
                     >
                       Mark read
@@ -148,7 +148,7 @@ export default function Notifications({ onNav }: { onNav?: (pg: string, ctx?: an
                     <Btn
                       size="sm"
                       variant="danger"
-                      onClick={(e) => { e.stopPropagation(); deleteNotification.mutate(n.id); }}
+                      onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); deleteNotification.mutate(n.id); }}
                       disabled={deleteNotification.isPending}
                     >
                       Delete
