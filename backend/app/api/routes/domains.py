@@ -95,6 +95,11 @@ async def export_failed_domains_csv(
     )
 
 
+# ГРАНИЦА: ниже этой строки новый GET с постоянным путём (`/stats`,
+# `/export.csv`, …) объявлять нельзя — его перехватит `/{domain_id}` и клиент
+# получит 422 вместо ответа. Все статик-GET-и идут выше, рядом с
+# `failed-export.csv`. Про методы, отличные от GET, речи нет: при несовпадении
+# метода Starlette продолжает перебор, поэтому POST-маршруты ниже безопасны.
 @router.get("/{domain_id}", response_model=DomainResponse)
 async def get_domain(
     domain_id: int,
