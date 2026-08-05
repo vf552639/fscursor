@@ -24,10 +24,26 @@
 //! их туда некуда. Эти две проверки — вторая линия, на случай сырых тел и
 //! будущих полей; добавляя поле в write-back-структуру, полагаться на них как
 //! на единственную защиту нельзя.
+//!
+//! У аудита вторая линия ещё тоньше, и об этом надо знать явно:
+//! [`redact_check_metadata`] — `debug_assert`, в release-сборке его в бинарнике
+//! нет вовсе, так что там он не ловит ничего. Вдобавок он висит внутри
+//! `ApiClient::audit_log`, а мимо неё есть прямая дорога: команда
+//! `commands::api::api_request` отдаёт тело в `ApiClient::request_raw`, и то
+//! уходит в сеть как есть — включая `POST audit/log`, собранный вебвью. То
+//! есть чистота аудит-метаданных обеспечивается там, где они собираются
+//! (`commands::provision`, `commands::cloudflare`, `commands::registrars`), а
+//! этот гард лишь громко падает в dev, если её нарушили.
 
 /// Секретоподобные ИМЕНА полей. Сравниваются как подстрока имени в нижнем
 /// регистре, поэтому `db_password` и `ftp_password` ловятся одним маркером.
-const SECRET_KEY_MARKERS: [&str; 3] = ["password", "auth_key", "api_key"];
+///
+/// `secret` и `token` — не «на всякий случай»: в системе есть блобы видов
+/// `registrar_api_secret` и `cloudflare_api_token`, а плейнтекст этих ключей
+/// живёт в десктопе (`commands::cloudflare`, `commands::registrars`). Имена
+/// `api_secret`/`api_token` маркер `api_key` не покрывает, и без этих двух
+/// строчек токен Cloudflare, положенный в metadata, уехал бы в аудит как есть.
+const SECRET_KEY_MARKERS: [&str; 5] = ["password", "auth_key", "api_key", "secret", "token"];
 
 /// Суффиксы имён, которые секретом не являются по построению: `*_blob_id` — это
 /// ссылка на зашифрованный блоб, а не его содержимое.
@@ -63,7 +79,9 @@ fn find_secret_key(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Debug-only проверка аудит-метаданных.
+/// Debug-only проверка аудит-метаданных: вторая линия, не защита (в release
+/// её нет, и мимо `audit_log` есть `api_request`/`request_raw` — см. модульный
+/// комментарий).
 pub fn redact_check_metadata(v: &serde_json::Value) {
     debug_assert!(
         find_secret_key(v).is_none(),
@@ -115,6 +133,11 @@ mod tests {
             "fastpanel_status": "installed",
             "fastpanel_password_blob_id": "6f1a0c66-0b3a-4a1e-9c7c-2f9a4d1a77e1",
             "ssh_password_blob_id": "8c2b1d77-1c4b-4b2f-8d8d-3f0b5e2b88f2",
+            // Реальные имена из локального кэша (`commands::cloudflare`,
+            // `commands::registrars`): маркеры `token`/`secret` не должны
+            // превращать ссылку на блоб в «секрет».
+            "api_token_blob_id": "3a5d2e11-7b6c-4d3e-8f1a-9c0b2d4e6f80",
+            "api_secret_blob_id": "5b7f3c22-8d9e-4a1b-9c2d-0e1f3a5b7c90",
         });
         assert_eq!(ensure_no_secrets(&v), Ok(()));
     }
@@ -128,6 +151,41 @@ mod tests {
             ensure_no_secrets(&json!({"password_blob_id_extra": "x"})),
             Err("password_blob_id_extra".to_string())
         );
+    }
+
+    // `api_key` не покрывает `api_token`/`api_secret`, а блобы именно таких
+    // видов в системе есть (`cloudflare_api_token`, `registrar_api_secret`).
+    #[test]
+    fn ensure_no_secrets_rejects_api_token_and_api_secret_names() {
+        assert_eq!(
+            ensure_no_secrets(&json!({"api_token": "cf-plaintext"})),
+            Err("api_token".to_string())
+        );
+        assert_eq!(
+            ensure_no_secrets(&json!({"api_secret": "hostiq-plaintext"})),
+            Err("api_secret".to_string())
+        );
+    }
+
+    // Тот же охват, но на пути аудита: metadata собирается вручную в
+    // provision/cloudflare/registrars, и плейнтекст-токен там — та ошибка,
+    // которую гард обязан поймать в dev-сборке.
+    #[test]
+    #[should_panic(expected = "secret-named field")]
+    fn redact_check_metadata_catches_an_api_token_in_metadata() {
+        redact_check_metadata(&json!({
+            "action": "cf.zone.create",
+            "metadata": {"zone": "example.com", "api_token": "cf-plaintext"},
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "secret-named field")]
+    fn redact_check_metadata_catches_an_api_secret_in_metadata() {
+        redact_check_metadata(&json!({
+            "action": "registrar.ns_set",
+            "metadata": {"api_secret": "hostiq-plaintext"},
+        }));
     }
 
     #[test]
