@@ -9,7 +9,8 @@ page is about producing the artifact, not consuming one.
 - [Rust](https://rustup.rs/) (`cargo`, `rustc`) with the macOS target for your Mac:
   `aarch64-apple-darwin` on Apple Silicon, `x86_64-apple-darwin` on Intel. Install via
   `rustup target add <target>` if missing — the build script's preflight check tells
-  you which one.
+  you which one, *if* `rustup` itself is on your `PATH`; without it, the check is
+  skipped and a missing target only surfaces once `tauri build` fails.
 - Node.js and npm.
 - Backend running on `localhost:8100` — only needed to actually *use* the app after
   building (see below), not to build it.
@@ -27,7 +28,8 @@ From the repo root:
 
 Equivalently, from `desktop/`: `npm run dmg`.
 
-This runs a preflight check (toolchain, disk space, `tauri.conf.json` version), then
+This runs a preflight check (toolchain, rustup target, disk space), installs npm
+dependencies if missing, validates the `version` field in `tauri.conf.json`, then runs
 `tauri build --bundles dmg` for your host architecture only — no Windows/Linux
 bundles, no universal binary. By default it only builds and prints the artifact
 paths; it does not open the app.
@@ -35,9 +37,9 @@ paths; it does not open the app.
 Other modes:
 
 ```
-./desktop/scripts/build-dmg.sh --run     # build, then open the resulting .app
-./desktop/scripts/build-dmg.sh --check   # preflight only, no build
-./desktop/scripts/build-dmg.sh --help    # usage
+./desktop/scripts/build-dmg.sh --run       # build, then open the resulting .app
+./desktop/scripts/build-dmg.sh --check     # preflight only, no build
+./desktop/scripts/build-dmg.sh -h|--help   # usage
 ```
 
 If the build fails during the frontend step, check the `tsc` output — that means
@@ -65,12 +67,17 @@ only added when a file is downloaded through a browser or messenger), so it open
 a normal double-click — no Gatekeeper right-click dance. That dance is only for a
 `.dmg` someone *downloaded*, and it's already covered in [`INSTALL.md`](INSTALL.md).
 
-The app talks to `http://localhost:8100/api` by default (`SDMP_API_URL` env var
-overrides it). Without a backend listening there, the app opens but shows an empty
-screen or a network error — that's expected, not a build problem.
+The app talks to `http://localhost:8100/api` by default; the `SDMP_API_URL` env var
+overrides this and it already works today (all API calls from the desktop shell go
+through the Rust `api_request` command, not the webview's own `fetch`, so the CSP
+`connect-src` allowlist doesn't gate them). Without a backend listening there, the app
+opens but shows an empty screen or a network error — that's expected, not a build
+problem.
 
 ## Not yet in scope
 
 Apple signing/notarization, a universal (`aarch64`+`x86_64`) binary, Windows/Linux
-bundles, a CI workflow producing checksums, and a configurable backend URL/CSP are all
-deferred — see `plan.md` / `stage5.md`.
+bundles, and a CI workflow producing checksums are all deferred — see `plan.md` /
+`stage5.md`. Making the CSP `connect-src` allowlist itself configurable (it's
+currently fixed to `localhost:8100` and `*.sdmp.app`) is tracked separately in
+`plans/2026-08-04-local-dmg-build.md`.

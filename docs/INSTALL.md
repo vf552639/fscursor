@@ -14,10 +14,10 @@ SDMP ships unsigned binaries during the MVP phase. macOS and Windows will warn y
 
 ## macOS (Apple Silicon and Intel)
 
-1. Download `SDMP-<version>-aarch64.dmg` (Apple Silicon) or `SDMP-<version>-x86_64.dmg` (Intel).
+1. Download `SDMP_<version>_aarch64.dmg` (Apple Silicon) or `SDMP_<version>_x86_64.dmg` (Intel).
 2. Verify checksum:
    ```
-   shasum -a 256 ~/Downloads/SDMP-*.dmg
+   shasum -a 256 ~/Downloads/SDMP_*.dmg
    ```
    Compare with the value on the releases page.
 3. Open the `.dmg`. Drag SDMP to Applications.
