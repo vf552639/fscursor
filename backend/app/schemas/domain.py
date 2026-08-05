@@ -115,19 +115,6 @@ class BulkSetNSResponse(BaseModel):
     task_ids: list[str]
 
 
-class DomainFtpCredentials(BaseModel):
-    domain_id: int
-    ftp_user: Optional[str] = None
-    ftp_password: Optional[str] = None
-
-
-class DomainDbCredentials(BaseModel):
-    domain_id: int
-    db_name: Optional[str] = None
-    db_user: Optional[str] = None
-    db_password: Optional[str] = None
-
-
 class CreateSiteRequest(BaseModel):
     site_only: bool = False
 
