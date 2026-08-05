@@ -42,6 +42,9 @@ def test_is_valid_fastpanel_url() -> None:
     assert not is_valid_fastpanel_url("ftp://203.0.113.10:8888")
     assert not is_valid_fastpanel_url("https://203.0.113.10")
     assert not is_valid_fastpanel_url("https://203.0.113.10:8888/\x1b[0m")
+    # Порт — ASCII-цифры. `\d` вместо `[0-9]` пропустил бы юникодные, и правило
+    # разошлось бы с парным регексом десктопа (`[0-9]`).
+    assert not is_valid_fastpanel_url("https://203.0.113.10:४४४४")
 
 
 def test_is_valid_fastpanel_user() -> None:
@@ -50,3 +53,7 @@ def test_is_valid_fastpanel_user() -> None:
     # лога, `\x1b` — escape-последовательность терминала.
     assert not is_valid_fastpanel_user("fast\nuser")
     assert not is_valid_fastpanel_user("fast\x1buser")
+    # Пустая строка и пробел — то, чего разбор на десктопе (`(\S+)`) вернуть не
+    # может; правила обеих сторон обязаны совпадать.
+    assert not is_valid_fastpanel_user("")
+    assert not is_valid_fastpanel_user("fast user")

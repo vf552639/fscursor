@@ -8,6 +8,7 @@ import { isTauri } from "../lib/runtime";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
+import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 
 export function AddServerModal({onClose}: {onClose: ()=>void}){
   const [tab,setTab]=useState("install");
@@ -41,8 +42,13 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
       else if (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip.trim())) newErrors.ip = "Invalid IP address format";
       if (!sshPassword.value) newErrors.password = "SSH Password is required for installation";
     } else {
-      if (!fastpanelUrl.trim()) newErrors.fastpanelUrl = "FastPanel URL is required";
-      if (!login.trim()) newErrors.login = "Login is required";
+      // Не только «поле не пустое»: схему записи на бэкенде теперь стережёт
+      // валидатор (`fastpanel_url` без userinfo, с http(s) и портом), а его
+      // 422 приезжает в форму как `[object Object]` — см. `lib/fastpanelInput`.
+      const urlError = fastpanelUrlError(fastpanelUrl);
+      if (urlError) newErrors.fastpanelUrl = urlError;
+      const loginError = fastpanelUserError(login);
+      if (loginError) newErrors.login = loginError;
       if (!fastpanelPassword.value) newErrors.password = "Password is required";
     }
     
@@ -95,7 +101,11 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
         // Fallback for simple strings like "192.168.1.1:8888"
         payload_ip = fastpanelUrl.replace(/https?:\/\//, '').split(':')[0].split('/')[0];
       }
-      payload_url = fastpanelUrl || `https://${payload_ip}:8888`;
+      // Обрезанное — ровно то, что проверил `fastpanelUrlError`. Прежний
+      // фолбэк на `https://${payload_ip}:8888` убран: пустое поле сюда больше
+      // не доходит, а собранный из огрызка URL противоречил бы тому, что
+      // человек видит в поле.
+      payload_url = fastpanelUrl.trim();
     }
 
     if (tab === "install") {

@@ -35,9 +35,9 @@ def _checked_fastpanel_url(value: Optional[str]) -> Optional[str]:
 
 
 def _checked_fastpanel_user(value: Optional[str]) -> Optional[str]:
-    """Отвергнуть логин панели с управляющими символами. См. `_checked_fastpanel_url`."""
+    """Отвергнуть логин панели с пробелами, управляющими или пустой. См. выше."""
     if value is not None and not is_valid_fastpanel_user(value):
-        raise ValueError("must not contain control characters")
+        raise ValueError("must be non-empty and free of spaces and control characters")
     return value
 
 

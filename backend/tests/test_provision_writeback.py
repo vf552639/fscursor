@@ -403,7 +403,7 @@ async def test_server_update_accepts_fastpanel_result_fields():
 
 
 @pytest.mark.asyncio
-async def test_server_write_rejects_fastpanel_url_with_embedded_credentials():
+async def test_server_write_rejects_credentials_in_url_and_control_chars_in_user():
     """URL панели со встроенными кредами не доезжает до колонки — 422.
 
     `https://admin:s3cr3t@ip:8888/` — это пароль панели внутри значения. Обе

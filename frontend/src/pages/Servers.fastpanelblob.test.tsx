@@ -154,6 +154,27 @@ describe("AddServerModal — пароль FastPanel через блоб", () => 
     expect((screen.getByPlaceholderText("Enter password") as HTMLInputElement).value).toBe(FP_PW);
   });
 
+  it("URL с кредами внутри не уходит на сервер и не жжёт блоб", async () => {
+    // Схема `ServerCreate` такой URL отвергает (долг №10), а её 422 приезжает
+    // в форму как `[object Object]` — значит промах должен ловиться здесь и
+    // называться словами. Блоб при этом не пишется вовсе: порядок в `handleAdd`
+    // — сначала `validate()`, потом `save()`, и провал проверки не должен
+    // оставлять в хранилище пароль от несозданного сервера.
+    setTauri(true);
+    const { onClose } = renderModal();
+    openConnectTab();
+    fillConnectTab(FP_PW);
+    fireEvent.change(screen.getByPlaceholderText("https://192.168.1.100:8888"), {
+      target: { value: "https://fastuser:panelpw@10.0.0.9:8888" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText(/must not be stored in the URL/)).toBeTruthy();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("в вебе connect не даёт ни поля, ни кнопки — только путь в десктоп", async () => {
     setTauri(false);
     const { container } = renderModal();
