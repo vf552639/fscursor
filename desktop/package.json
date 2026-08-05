@@ -5,7 +5,8 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "dmg": "./scripts/build-dmg.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
