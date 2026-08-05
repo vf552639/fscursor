@@ -300,7 +300,13 @@ struct ProvisionFailure {
 /// `SshError` в этом же крейте.
 fn ssh_cause(msg: &str) -> &'static str {
     let m = msg.trim_start_matches("ssh: ");
-    if m == "auth failed" {
+    // `starts_with`, а не равенство: у `SshError::Auth` за словами «auth failed»
+    // идёт хвост с `user@host:port` и подсказкой, что чинить. С точным
+    // сравнением добавление этого хвоста уронило бы класс в
+    // `CAUSE_COMMAND_FAILED` — то есть провалившийся по паролю провижининг
+    // рассказывал бы пользователю «команда не отработала на сервере», и никакой
+    // компилятор про это не сказал бы.
+    if m.starts_with("auth failed") {
         CAUSE_SSH_AUTH
     } else if m.starts_with("connect:") {
         CAUSE_SSH_CONNECT
@@ -1799,8 +1805,9 @@ mod tests {
     // Anything that is not the timeout must keep its original message.
     #[test]
     fn exec_error_passes_through_non_timeout_errors() {
-        let e = exec_error("fastpanel installer", FP_INSTALL_TIMEOUT, SshError::Auth);
-        assert_eq!(e.to_string(), "ssh: auth failed");
+        let e = exec_error("fastpanel installer", FP_INSTALL_TIMEOUT, auth_err());
+        // Начало текста: хвост `SshError::Auth` — диагностика для человека.
+        assert!(e.to_string().starts_with("ssh: auth failed"), "{e}");
         let e = exec_error(
             "fastpanel installer",
             FP_INSTALL_TIMEOUT,
@@ -1916,10 +1923,23 @@ mod tests {
         assert!(!cert_good_enough(&info, now));
     }
 
+    /// Отказ аутентификации для тестов. Поля обязательны с тех пор, как текст
+    /// стал называть, под каким логином стучались, — см. `SshError::Auth`.
+    fn auth_err() -> SshError {
+        SshError::Auth {
+            user: "root".into(),
+            host: "10.0.0.1".into(),
+            port: 22,
+        }
+    }
+
     // Варианты без вывода команды диагностику терять не должны.
     #[test]
     fn db_error_passes_through_errors_without_command_output() {
-        assert_eq!(db_error(SshError::Auth).to_string(), "ssh: auth failed");
+        // Начало текста, а не весь: хвост с логином и подсказкой — часть
+        // диагностики для человека, и прибивать её ассертом значило бы
+        // запретить её улучшать.
+        assert!(db_error(auth_err()).to_string().starts_with("ssh: auth failed"), "{}", db_error(auth_err()));
         assert_eq!(
             db_error(SshError::Connect("refused".into())).to_string(),
             "ssh: connect: refused"
@@ -2713,7 +2733,7 @@ mod tests {
                 "provision failed at prepare",
             ),
             (
-                ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth),
+                ProvisionFailure::at(STEP_SSH_CONNECT, auth_err()),
                 "provision failed at ssh_connect: ssh authentication failed",
             ),
             (
@@ -2778,7 +2798,7 @@ mod tests {
     // (`site_user`, `db_name`, `ssl_status`).
     #[test]
     fn domain_failure_write_back_body_touches_only_the_status_and_the_error() {
-        let f = ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth);
+        let f = ProvisionFailure::at(STEP_SSH_CONNECT, auth_err());
         assert_eq!(
             serde_json::to_string(&domain_failure_write_back_body(&f)).unwrap(),
             "{\"status\":\"failed\",\"last_provision_error\":\
@@ -2886,14 +2906,14 @@ mod tests {
             .await;
 
         let api = ApiClient::new(format!("{}/api", srv.uri()));
-        let outcome = Err(ProvisionFailure::at(STEP_SSH_CONNECT, SshError::Auth));
+        let outcome = Err(ProvisionFailure::at(STEP_SSH_CONNECT, auth_err()));
 
         let (result, write_back_failed) = finish_provision(&api, "42", outcome).await;
 
         assert!(write_back_failed, "провал записи не доехал до вызывающего");
         // И причина осталась прежней: «write-back failed» её не заменил.
         match result {
-            Err(e) => assert_eq!(e.to_string(), "ssh: auth failed"),
+            Err(e) => assert!(e.to_string().starts_with("ssh: auth failed"), "{e}"),
             Ok(_) => panic!("провал прочитался как успех"),
         }
     }

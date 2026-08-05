@@ -17,8 +17,27 @@ use zeroize::Zeroize;
 pub enum SshError {
     #[error("connect: {0}")]
     Connect(String),
-    #[error("auth failed")]
-    Auth,
+    /// Сервер дошёл до аутентификации и отказал.
+    ///
+    /// Текст называет `user@host:port` намеренно: без него на экране остаётся
+    /// «auth failed», по которому нельзя отличить «пароль не тот» от «логин не
+    /// тот» — а логин у нас берётся из поля сервера с молчаливым дефолтом
+    /// `root`, и именно он чаще всего и не тот. Пароль, разумеется, не
+    /// упоминается ничем, кроме факта, что он был.
+    ///
+    /// Вторая подсказка — про `PasswordAuthentication`: у образов, где парольный
+    /// вход выключен, отказ выглядит ровно так же, и без этой строки человек
+    /// будет перебирать пароли на сервере, который их вообще не принимает.
+    #[error(
+        "auth failed for {user}@{host}:{port} — the server rejected the saved password. \
+         Check the SSH user (it defaults to root) and re-enter the password; \
+         if the server has PasswordAuthentication disabled, no password will ever work."
+    )]
+    Auth {
+        user: String,
+        host: String,
+        port: u16,
+    },
     #[error("host key mismatch")]
     HostKeyMismatch,
     #[error("host key unknown — approve fingerprint in UI: {fingerprint}")]
@@ -149,7 +168,11 @@ pub async fn connect(opts: ConnectOptions<'_>) -> Result<SshSession, SshError> {
         .map_err(|e| SshError::Session(e.to_string()))?;
     pwd.zeroize();
     if !auth_ok {
-        return Err(SshError::Auth);
+        return Err(SshError::Auth {
+            user: opts.user.to_string(),
+            host: opts.host.to_string(),
+            port: opts.port,
+        });
     }
     Ok(SshSession { handle })
 }
@@ -226,5 +249,27 @@ mod tests {
         append_known_host(&p, "h:2222", "xyz").unwrap();
         assert_eq!(read_known_host(&p, hp).unwrap().as_deref(), Some("abc123"));
         assert_eq!(read_known_host(&p, "h:2222").unwrap().as_deref(), Some("xyz"));
+    }
+
+    /// Отказ аутентификации — единственная ошибка SSH, по которой пользователь
+    /// обязан что-то СДЕЛАТЬ, а не просто повторить. Поэтому текст проверяется
+    /// тестом: голое «auth failed» (а именно так и было) не отличает «пароль не
+    /// тот» от «логин не тот», хотя логин берётся из поля сервера с молчаливым
+    /// дефолтом `root` и чаще всего виноват именно он.
+    #[test]
+    fn auth_error_names_the_login_it_tried_and_the_two_ways_to_fix_it() {
+        let msg = SshError::Auth {
+            user: "deploy".into(),
+            host: "10.0.0.7".into(),
+            port: 2222,
+        }
+        .to_string();
+
+        // Что именно пробовали — иначе «не тот логин» неотличим от «не тот пароль».
+        assert!(msg.contains("deploy@10.0.0.7:2222"), "{msg}");
+        // Обе причины названы: перебирать пароль бессмысленно на сервере,
+        // который парольный вход не принимает вовсе.
+        assert!(msg.contains("root"), "{msg}");
+        assert!(msg.contains("PasswordAuthentication"), "{msg}");
     }
 }
