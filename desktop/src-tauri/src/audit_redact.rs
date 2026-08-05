@@ -28,10 +28,12 @@
 //! У аудита вторая линия ещё тоньше, и об этом надо знать явно:
 //! [`redact_check_metadata`] — `debug_assert`, в release-сборке его в бинарнике
 //! нет вовсе, так что там он не ловит ничего. Вдобавок он висит внутри
-//! `ApiClient::audit_log`, а мимо неё есть прямая дорога: команда
-//! `commands::api::api_request` отдаёт тело в `ApiClient::request_raw`, и то
-//! уходит в сеть как есть — включая `POST audit/log`, собранный вебвью. То
-//! есть чистота аудит-метаданных обеспечивается там, где они собираются
+//! `ApiClient::audit_log`, а мимо неё есть дорога: команда
+//! `commands::api::api_request` принимает произвольные метод и путь и отдаёт
+//! тело в `ApiClient::request_raw` как есть, гарда там нет вовсе. Сегодня
+//! вебвью зовёт только `GET /audit/log`, так что этой дорогой аудит никто не
+//! пишет, — но написать `POST audit/log` мимо гарда ничто не мешает. То есть
+//! чистота аудит-метаданных обеспечивается там, где они собираются
 //! (`commands::provision`, `commands::cloudflare`, `commands::registrars`), а
 //! этот гард лишь громко падает в dev, если её нарушили.
 
@@ -43,6 +45,10 @@
 /// живёт в десктопе (`commands::cloudflare`, `commands::registrars`). Имена
 /// `api_secret`/`api_token` маркер `api_key` не покрывает, и без этих двух
 /// строчек токен Cloudflare, положенный в metadata, уехал бы в аудит как есть.
+///
+/// У списка есть парный сосед по смыслу — `SECRET_NAME_MARKERS` в
+/// `backend/app/main.py` (глушит эхо значения в 422). Списки НЕ копии:
+/// расхождения там намеренные и расписаны на месте. Меняешь один — прочти оба.
 const SECRET_KEY_MARKERS: [&str; 5] = ["password", "auth_key", "api_key", "secret", "token"];
 
 /// Суффиксы имён, которые секретом не являются по построению: `*_blob_id` — это
@@ -167,27 +173,6 @@ mod tests {
         );
     }
 
-    // Тот же охват, но на пути аудита: metadata собирается вручную в
-    // provision/cloudflare/registrars, и плейнтекст-токен там — та ошибка,
-    // которую гард обязан поймать в dev-сборке.
-    #[test]
-    #[should_panic(expected = "secret-named field")]
-    fn redact_check_metadata_catches_an_api_token_in_metadata() {
-        redact_check_metadata(&json!({
-            "action": "cf.zone.create",
-            "metadata": {"zone": "example.com", "api_token": "cf-plaintext"},
-        }));
-    }
-
-    #[test]
-    #[should_panic(expected = "secret-named field")]
-    fn redact_check_metadata_catches_an_api_secret_in_metadata() {
-        redact_check_metadata(&json!({
-            "action": "registrar.ns_set",
-            "metadata": {"api_secret": "hostiq-plaintext"},
-        }));
-    }
-
     #[test]
     fn ensure_no_secrets_rejects_auth_key_and_api_key_names() {
         assert_eq!(
@@ -241,5 +226,28 @@ mod tests {
     #[should_panic(expected = "secret-named field")]
     fn redact_check_metadata_still_catches_a_secret_named_field() {
         redact_check_metadata(&json!({"metadata": {"db_password": "s3cret"}}));
+    }
+
+    // Тот же охват, что у `ensure_no_secrets_rejects_api_token_and_api_secret_names`,
+    // но на пути аудита: metadata собирается вручную в
+    // provision/cloudflare/registrars, и плейнтекст-токен там — та ошибка,
+    // которую гард обязан поймать в dev-сборке. `expected` — имя поля, а не
+    // общее «secret-named field»: иначе тест зеленел бы от любой сработки.
+    #[test]
+    #[should_panic(expected = "api_token")]
+    fn redact_check_metadata_catches_an_api_token_in_metadata() {
+        redact_check_metadata(&json!({
+            "action": "cf.zone.create",
+            "metadata": {"zone": "example.com", "api_token": "cf-plaintext"},
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "api_secret")]
+    fn redact_check_metadata_catches_an_api_secret_in_metadata() {
+        redact_check_metadata(&json!({
+            "action": "registrar.ns_set",
+            "metadata": {"api_secret": "hostiq-plaintext"},
+        }));
     }
 }
