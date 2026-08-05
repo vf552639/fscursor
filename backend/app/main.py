@@ -21,7 +21,11 @@ from app.core.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_ALEMBIC_HEAD = "014_recovery_auth_key"
+# Обновляется ВМЕСТЕ с новой миграцией, в том же коммите: страж ниже роняет
+# старт приложения, если голова в БД разошлась с этой строкой. Забыть его —
+# значит получить упавший бэкенд сразу после `alembic upgrade head` (так и
+# случилось при добавлении `015_server_provider`).
+EXPECTED_ALEMBIC_HEAD = "015_server_provider"
 
 
 @asynccontextmanager
