@@ -59,6 +59,42 @@ async def list_domains(
     return [DomainResponse.model_validate(d) for d in items]
 
 
+# ВНИМАНИЕ: маршрут обязан быть объявлен ВЫШЕ `GET /{domain_id}`.
+# Starlette перебирает маршруты в порядке объявления, поэтому динамический
+# `/{domain_id}` перехватил бы `/failed-export.csv` первым: строка не парсится
+# в `int`, и вместо CSV клиент получал 422. Не «прибирайте» файл, складывая
+# GET-и вместе, — порядок здесь несущий.
+@router.get("/failed-export.csv")
+async def export_failed_domains_csv(
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    result = await db.execute(
+        select(Domain)
+        .where(Domain.user_id == user.id, Domain.status == DomainStatus.FAILED.value)
+        .order_by(Domain.updated_at.desc())
+    )
+    rows = result.scalars().all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["domain_name", "status", "last_provision_error", "updated_at"])
+    for row in rows:
+        writer.writerow(
+            [
+                row.domain_name,
+                row.status,
+                row.last_provision_error or "",
+                row.updated_at.isoformat(),
+            ]
+        )
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=failed_domains.csv"},
+    )
+
+
 @router.get("/{domain_id}", response_model=DomainResponse)
 async def get_domain(
     domain_id: int,
@@ -248,37 +284,6 @@ async def bulk_assign_cloudflare(
     )
     await db.commit()
     return DomainBulkAssignResponse(updated=updated)
-
-
-@router.get("/failed-export.csv")
-async def export_failed_domains_csv(
-    user: User = Depends(get_current_user_or_401),
-    db: AsyncSession = Depends(get_db),
-) -> StreamingResponse:
-    result = await db.execute(
-        select(Domain)
-        .where(Domain.user_id == user.id, Domain.status == DomainStatus.FAILED.value)
-        .order_by(Domain.updated_at.desc())
-    )
-    rows = result.scalars().all()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["domain_name", "status", "last_provision_error", "updated_at"])
-    for row in rows:
-        writer.writerow(
-            [
-                row.domain_name,
-                row.status,
-                row.last_provision_error or "",
-                row.updated_at.isoformat(),
-            ]
-        )
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=failed_domains.csv"},
-    )
 
 
 @router.post("/bulk-import", response_model=DomainBulkImportResponse)

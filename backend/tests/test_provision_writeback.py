@@ -26,6 +26,8 @@
 
 import asyncio
 import base64
+import csv
+import io
 import uuid
 from datetime import datetime, timezone
 
@@ -368,6 +370,57 @@ async def test_plaintext_password_in_put_lands_in_no_column_of_the_domain():
                            for attr in sa_inspect(AuditLog).mapper.column_attrs)
                 ]
                 assert audit_leaked == [], f"плейнтекст виден в audit_log: {audit_leaked}"
+        finally:
+            await _purge(Domain, domain_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_export_csv_is_reachable_and_contains_the_failed_domain():
+    """`GET /api/domains/failed-export.csv` отдаёт CSV, а не ошибку разбора пути.
+
+    Статик-маршрут жил в файле **ниже** `GET /{domain_id}`, а Starlette
+    перебирает маршруты в порядке объявления: `failed-export.csv` попадал в
+    динамический, не парсился в `int` и возвращал 422. Выгрузка провалившихся
+    доменов была недостижима с самого своего появления.
+
+    Проверяется не только статус и `Content-Type`, но и тело: 200 с
+    `text/csv` вернул бы и пустой ответ, и чужой CSV. Здесь разбирается
+    заголовок колонок и ищется строка ровно про тот домен, который тест только
+    что уронил, — с его текстом ошибки. Это же и позитивный контроль: если
+    выборка перестанет отбирать `status = failed`, строки не окажется.
+    """
+    dom = f"{uuid.uuid4().hex[:8]}.example.com"
+    err = "provision failed at create_site: the command failed on the server"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"wb-csv-{uuid.uuid4().hex[:8]}@example.com")
+        r = await c.post("/api/domains", json={"domain_name": dom})
+        assert r.status_code == 201, r.text
+        domain_id = r.json()["id"]
+        try:
+            r = await c.put(
+                f"/api/domains/{domain_id}",
+                json={"status": "failed", "last_provision_error": err},
+            )
+            assert r.status_code == 200, r.text
+
+            r = await c.get("/api/domains/failed-export.csv")
+            assert r.status_code == 200, (
+                f"статик-маршрут затенён динамическим `/{{domain_id}}`: {r.text}"
+            )
+            assert r.headers["content-type"].startswith("text/csv"), r.headers["content-type"]
+            assert "failed_domains.csv" in r.headers.get("content-disposition", "")
+
+            rows = list(csv.reader(io.StringIO(r.text)))
+            assert rows[0] == [
+                "domain_name",
+                "status",
+                "last_provision_error",
+                "updated_at",
+            ], rows[0]
+            row = next((x for x in rows[1:] if x[0] == dom), None)
+            assert row is not None, f"упавшего домена нет в выгрузке: {rows}"
+            assert row[1] == "failed", row
+            assert row[2] == err, row
         finally:
             await _purge(Domain, domain_id)
 
