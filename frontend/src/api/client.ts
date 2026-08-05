@@ -16,6 +16,39 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Превратить `detail` из ответа бэкенда в строку для человека.
+ *
+ * Ответ 422 от FastAPI — это НЕ строка, а список объектов
+ * `{loc, msg, type}` (по одному на провалившееся поле). `String()` на нём
+ * возвращает `[object Object]`, и пользователь видел ровно это: ни что не так,
+ * ни какое поле виновато. Путь достижим обычной опечаткой — например, URL
+ * FastPanel без порта в форме «Connect Existing Fastpanel».
+ *
+ * `loc` начинается с источника (`body`/`query`/`path`) — он пользователю
+ * ничего не говорит, поэтому в текст идёт остаток пути. Если после отброса
+ * источника ничего не осталось (ошибка на теле целиком) — только `msg`.
+ *
+ * Строковый `detail` (401/403/404 и прочие ручные `HTTPException`) обязан
+ * доходить дословно — на это есть отдельный тест.
+ */
+export function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return String(item);
+      const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+      const field = Array.isArray(loc) ? loc.slice(1).join(".") : "";
+      const text = typeof msg === "string" ? msg : JSON.stringify(item);
+      return field ? `${field}: ${text}` : text;
+    });
+    return parts.join("; ");
+  }
+  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  return String(detail);
+}
+
 export const http = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
@@ -39,7 +72,7 @@ http.interceptors.response.use(
       (typeof data === "object" && data && (data.detail || data.message)) ||
       error.message ||
       "Request failed";
-    return Promise.reject(new ApiError(status, String(message), data));
+    return Promise.reject(new ApiError(status, formatErrorDetail(message), data));
   }
 );
 
@@ -90,7 +123,7 @@ async function tauriRequest<T>(
       ((resp.body as { detail?: unknown }).detail ||
         (resp.body as { message?: unknown }).message)) ||
     `HTTP ${resp.status}`;
-  throw new ApiError(resp.status, String(detail), resp.body);
+  throw new ApiError(resp.status, formatErrorDetail(detail), resp.body);
 }
 
 export async function apiGet<T>(url: string, config?: AxiosRequestConfig): Promise<T> {

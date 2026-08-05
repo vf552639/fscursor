@@ -52,8 +52,20 @@ pub fn forget_master_key(user_id: &str) -> Result<(), KeychainError> {
 mod tests {
     use super::*;
 
+    /// Тест НЕ помечен `#[ignore]` намеренно, хотя и ходит в системное
+    /// хранилище.
+    ///
+    /// Пока он был отключён, `keyring` стоял в `Cargo.toml` без платформенной
+    /// фичи и собирался с mock-стором: `set_password` отвечал `Ok(())`, ничего
+    /// не сохранив, а `get_password` — всегда `NoEntry`. Мастер-ключ не
+    /// сохранялся ни разу, `vault_put_blob` падал на `keychain: locked`, и
+    /// **ни один секрет нельзя было записать** — при 191 зелёном тесте.
+    /// Единственный тест, который бы это поймал, стоял с `#[ignore]`.
+    ///
+    /// Цена возврата `#[ignore]` — ровно такая же дыра, поэтому его здесь быть
+    /// не должно. Если в CI тест упрётся в заблокированную связку ключей,
+    /// разблокировать её в раннере, а не глушить тест.
     #[test]
-    #[ignore = "requires OS keychain; run manually with --ignored"]
     fn keychain_roundtrip() {
         let user = "test_user_id_for_unit_tests";
         let key = [13u8; 32];

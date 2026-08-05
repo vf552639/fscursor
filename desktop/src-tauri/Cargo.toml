@@ -24,7 +24,13 @@ base64 = "0.22"
 
 # Crypto and storage (used in Stage 2; pin now to keep workspace consistent)
 dryoc = "0.6"
-keyring = "3"
+# ВНИМАНИЕ: `keyring` объявлен ПО ПЛАТФОРМАМ ниже, а не здесь. У этого крейта
+# хранилище включается фичей, и `keyring = "3"` без фич собирается с mock-стором:
+# `set_password` возвращает `Ok(())`, ничего не сохранив, а `get_password` всегда
+# отвечает `NoEntry`. Ровно это и было: мастер-ключ «сохранялся» при логине,
+# `load_master_key` возвращал `None`, и любая запись секрета падала на
+# `keychain: locked` — то есть путь записи секретов не работал вовсе.
+# Не переносить обратно в общую секцию без фич.
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
 tiny-bip39 = "1"
 zeroize = { version = "1.8", features = ["derive"] }
@@ -48,6 +54,21 @@ http = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Хранилище мастер-ключа — по одному backend'у на платформу (см. комментарий у
+# `dryoc`). macOS — Keychain Services, Windows — Credential Manager, Linux —
+# Secret Service (`crypto-rust`, чтобы не тянуть системный OpenSSL).
+# `linux-native` (keyutils) намеренно НЕ берём: он живёт до перезагрузки, а
+# мастер-ключ обязан её переживать — иначе пользователь теряет доступ к своим
+# секретам после ребута.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [features]
 default = []

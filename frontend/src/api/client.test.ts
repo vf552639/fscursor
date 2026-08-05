@@ -58,4 +58,44 @@ describe("api client — desktop routes HTTP through the Rust session", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(401);
   });
+
+  // 422 от FastAPI приходит СПИСКОМ объектов (`{loc, msg, type}`), а не строкой.
+  // `String(detail)` на нём давал пользователю `[object Object]` — сообщение, по
+  // которому нельзя понять ни что не так, ни какое поле виновато. Форма ответа
+  // взята с живого бэкенда: `POST /api/auth/login/finish` без `auth_key_b64`.
+  it("turns a FastAPI 422 detail list into a readable message with the field name", async () => {
+    invokeMock.mockResolvedValue({
+      status: 422,
+      body: {
+        detail: [{ type: "missing", loc: ["body", "auth_key_b64"], msg: "Field required" }],
+      },
+    });
+    const err = (await apiPost("/auth/login/finish", {}).catch((e) => e)) as ApiError;
+    expect(err.message).not.toContain("[object Object]");
+    expect(err.message).toContain("auth_key_b64");
+    expect(err.message).toContain("Field required");
+  });
+
+  it("joins several validation errors instead of showing only the first", async () => {
+    invokeMock.mockResolvedValue({
+      status: 422,
+      body: {
+        detail: [
+          { loc: ["body", "email"], msg: "value is not a valid email address" },
+          { loc: ["body", "fastpanel_url"], msg: "URL must not carry credentials" },
+        ],
+      },
+    });
+    const err = (await apiPost("/servers", {}).catch((e) => e)) as ApiError;
+    expect(err.message).toContain("email");
+    expect(err.message).toContain("fastpanel_url");
+  });
+
+  // Страховка от «починили 422, сломали всё остальное»: строковый detail —
+  // самый частый ответ бэкенда (401/403/404), он обязан дойти дословно.
+  it("keeps a plain string detail untouched", async () => {
+    invokeMock.mockResolvedValue({ status: 401, body: { detail: "invalid credentials" } });
+    const err = (await apiGet("/servers").catch((e) => e)) as ApiError;
+    expect(err.message).toBe("invalid credentials");
+  });
 });
