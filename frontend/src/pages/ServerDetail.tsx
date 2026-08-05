@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
-import { useServer, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
+import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
+import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -10,6 +11,9 @@ import { isTauri } from "../lib/runtime";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useSecretSave } from "../hooks/useSecretSave";
 import type { InstallFastpanelResult } from "../lib/deepLink";
+
+/** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
+const PROVIDER_LIST_ID = "server-detail-provider-options";
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
   server?: any,
@@ -40,8 +44,19 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const sshPassword = useSecretSave("SSH password");
   const [editingDomain, setEditingDomain] = useState<any | null>(null);
 
+  // Правка провайдера. Обычным `useState`, а не `useSecretSave`: провайдер —
+  // не секрет, он едет полем сущности и хранится плейнтекстом в колонке.
+  const [showProviderModal, setShowProviderModal] = useState(false);
+  const [provider, setProvider] = useState("");
+  const [providerErr, setProviderErr] = useState<string | null>(null);
+
   // Queries
   const { data: s } = useServer(server?.id);
+  // Подсказки провайдеров берём из общего списка серверов — того же запроса,
+  // что уже загрузила страница Servers (ключ ["servers"]), так что сюда приходят
+  // из кэша. Отдельного эндпоинта «список провайдеров» нет намеренно: второй
+  // источник тех же значений умел бы разойтись с первым.
+  const { data: serversList } = useServers();
   const { data: domainsData } = useDomains({ server_id: server?.id });
   const domains = domainsData ?? [];
   
@@ -137,6 +152,39 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     if (ok) setShowSshModal(false);
   };
 
+  // Как и у SSH-формы: поле заполняется ТЕКУЩИМ значением сервера. Пустая форма
+  // правки читается как «стереть» тем, кто открыл её просто посмотреть.
+  const openProviderModal = () => {
+    setProvider(s?.provider || "");
+    setProviderErr(null);
+    setShowProviderModal(true);
+  };
+
+  const handleSaveProvider = () => {
+    // Проверка до отправки — по той же причине, что и в форме добавления:
+    // 422 от схемы приезжает сюда строкой вида «provider: String should have at
+    // most 64 characters», а не фразой про поле.
+    const err = providerError(provider);
+    if (err) {
+      setProviderErr(err);
+      return;
+    }
+    // Ровно одно поле в теле: PUT, собранный из всего состояния страницы,
+    // переписал бы заодно ssh_user и ssh_port дефолтами формы.
+    //
+    // Отказ кладём в СВОЁ состояние, а не читаем `updateServer.isError`: тот же
+    // хук сохраняет и SSH-доступ, и его провалившаяся мутация висела бы в
+    // `isError` до следующей — открытая потом форма провайдера встречала бы
+    // пользователя красным баннером про чужую ошибку.
+    updateServer.mutate(
+      { provider: providerPayload(provider) },
+      {
+        onSuccess: () => setShowProviderModal(false),
+        onError: (e: any) => setProviderErr(e?.message || "Не удалось сохранить"),
+      },
+    );
+  };
+
   const handleDelete = () => {
     if(confirm("Delete server?")) {
       delSrv.mutate(s!, { onSuccess: () => onBack("servers") });
@@ -155,6 +203,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   const statusBadgeVariant = uiStatus === "error" ? "red" : uiStatus === "new" ? "gray" : "green";
   const osLabel = s.os_pretty || s.os || null;
+  const providers = providerOptions(serversList?.items || []);
   const hasAnyMetrics = [
     s.cpu_usage_pct,
     s.ram_used_mb,
@@ -377,11 +426,22 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         </Card>}
 
         <Card>
-          <CHd><CTi>🖥 Server Information</CTi></CHd>
+          {/* Правка — мутация, а значит только десктоп. Не OpenInDesktop: хоста
+              `server-provider` в parseDeepLinkAction нет, ссылка вела бы в
+              {handled:false} и только тостила бы сама себя — та же развилка и по
+              той же причине, что у «Изменить SSH» выше. */}
+          <CHd><CTi>🖥 Server Information</CTi>{isTauri() ? (
+            <Btn size="sm" variant="secondary" onClick={openProviderModal}>✎ Provider</Btn>
+          ) : (
+            <DesktopOnlyNote what="Editing servers" />
+          )}</CHd>
           <CBo style={{padding:"6px 20px 14px"}}>
             {[
               ["Name",s.name],
               ["IP",s.ip_address],
+              // Рядом с OS: такой же описательный атрибут железа, и глаз ищет их
+              // вместе.
+              ["Provider",s.provider || "—"],
               ["OS",osLabel || "—"],
               ["Uptime", formatUptime(s.uptime_seconds)],
               ["Status",<Badge key="status" variant={statusBadgeVariant}>{uiStatus}</Badge>],
@@ -435,6 +495,37 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         )}
         <div style={{marginTop:22}}>
           <Btn variant="primary" onClick={handleSaveSsh} disabled={sshPassword.saving} style={{width:"100%",justifyContent:"center"}}>{sshPassword.saving ? "Saving..." : "Save"}</Btn>
+        </div>
+      </Modal>
+    )}
+    {showProviderModal && (
+      <Modal title="Hosting Provider" onClose={()=>setShowProviderModal(false)} width={420}>
+        <div>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Hosting Provider <span style={{color:"#9ca3af",fontWeight:400}}>(optional)</span></label>
+          {/* Свободный текст с подсказками, как и в форме добавления: список
+              провайдеров нигде не зафиксирован, но значение служит ключом
+              группировки для фильтра — «hetzner» рядом с «Hetzner» дали бы двух
+              разных провайдеров. */}
+          <Inp
+            value={provider}
+            list={PROVIDER_LIST_ID}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setProvider(e.target.value); setProviderErr(null);}}
+            placeholder="e.g., Hetzner"
+            style={{borderColor: providerErr ? "#dc2626" : undefined}}
+          />
+          <datalist id={PROVIDER_LIST_ID}>
+            {providers.map(p=><option key={p} value={p}/>)}
+          </datalist>
+          <div style={{fontSize:11.5,color:"#9ca3af",marginTop:6}}>Очистите поле, чтобы убрать провайдера.</div>
+        </div>
+        {providerErr && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {providerErr}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          <Btn variant="primary" onClick={handleSaveProvider} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={()=>setShowProviderModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
         </div>
       </Modal>
     )}

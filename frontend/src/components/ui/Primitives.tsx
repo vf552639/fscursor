@@ -135,15 +135,18 @@ export function Btn({children, variant="secondary", size="md", onClick, style, d
   >{children}</button>;
 }
 
-export function Inp({value, onChange, placeholder, type="text", style}: any){
-  return <input type={type} value={value} onChange={onChange} placeholder={placeholder}
+// `...rest` — чтобы поле могло получить то, что знает только место вызова:
+// `list` для `<datalist>` подсказок, `aria-label` там, где подписи рядом нет.
+// Без него такие поля приходилось бы писать сырым `<input>` мимо общих стилей.
+export function Inp({value, onChange, placeholder, type="text", style, ...rest}: any){
+  return <input type={type} value={value} onChange={onChange} placeholder={placeholder} {...rest}
     style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,color:"#111",background:"#f9fafb",outline:"none",boxSizing:"border-box",...style}}
     onFocus={e=>{e.currentTarget.style.borderColor="#2563eb";e.currentTarget.style.background="#fff";}}
     onBlur={e=>{e.currentTarget.style.borderColor="#e5e7eb";e.currentTarget.style.background="#f9fafb";}}/>;
 }
 
-export function Sel({value, onChange, children, style}: any){
-  return <select value={value} onChange={onChange}
+export function Sel({value, onChange, children, style, ...rest}: any){
+  return <select value={value} onChange={onChange} {...rest}
     style={{padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,color:"#111",background:"#fff",outline:"none",cursor:"pointer",...style}}>
     {children}
   </select>;

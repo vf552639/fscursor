@@ -9,13 +9,34 @@ import { BLOB_KIND } from "../lib/secretBlob";
 import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
+import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 
-export function AddServerModal({onClose}: {onClose: ()=>void}){
+/** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
+const PROVIDER_LIST_ID = "add-server-provider-options";
+
+/**
+ * Значение «фильтр по провайдеру выключен» — пустая строка, а НЕ "All", как у
+ * соседнего фильтра статусов. Статусы — закрытый список из пяти слов, и «All»
+ * с ними не столкнётся; провайдер — свободный текст, и сервер с именем
+ * провайдера «All» превратил бы выбор своего имени в «показать все». Пустой
+ * строкой имя провайдера быть не может: схема на бэкенде приводит её к `NULL`.
+ */
+const ALL_PROVIDERS = "";
+
+/**
+ * `providers` — обязательный проп, а не `useServers()` внутри: список серверов
+ * страница УЖЕ загрузила, и второй его источник умел бы с ним разойтись. И не
+ * опциональный с дефолтом `[]`: забытая передача — это молча пустые подсказки,
+ * то есть ровно тот дефект, ради которого подсказки и заводились (второй
+ * «Hetzner» с другой буквы).
+ */
+export function AddServerModal({onClose, providers}: {onClose: ()=>void, providers: string[]}){
   const [tab,setTab]=useState("install");
   const [name, setName] = useState("");
   const [ip, setIp] = useState("");
   const [login, setLogin] = useState("root");
   const [os, setOs] = useState("Ubuntu 22.04 LTS (x86_64)");
+  const [provider, setProvider] = useState("");
   const [fastpanelUrl, setFastpanelUrl] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   // По хуку на вкладку, а не одно поле `password` на обе: поля называются
@@ -35,7 +56,13 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
   const validate = () => {
     const newErrors: Record<string, string> = {};
     if (!name.trim()) newErrors.name = "Server name is required";
-    
+    // Общее для обеих вкладок: сервер заводится и той, и другой. Проверяется
+    // здесь, до `save()`, потому что порядок — «блоб → сервер»: 422 за
+    // провайдера прилетел бы уже ПОСЛЕ записи секретного блоба и оставил бы в
+    // хранилище секрет, на который никто не ссылается.
+    const provError = providerError(provider);
+    if (provError) newErrors.provider = provError;
+
     if (tab === "install") {
       if (!ip.trim()) newErrors.ip = "IP address is required";
       // Basic IP regex
@@ -122,7 +149,8 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
             ip_address: payload_ip,
             ssh_user: login,
             ssh_password_blob_id: blobId,
-            os: os
+            os: os,
+            provider: providerPayload(provider),
           });
         },
       });
@@ -140,6 +168,7 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
             ip_address: payload_ip,
             ssh_user: "root", // Default SSH user for backend schema
             os: os,
+            provider: providerPayload(provider),
             fastpanel_user: login,
             fastpanel_password_blob_id: blobId,
             fastpanel_url: payload_url,
@@ -234,6 +263,29 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
           </div>
         </>
       )}
+      {/* Вне ветвления по вкладкам: сервер заводится обеими, и поле, забытое на
+          одной из них, потеряло бы провайдера у половины серверов. Стоит
+          последним — после выбора OS и ввода пароля, как просил пользователь.
+
+          Свободный текст с подсказками, а не `<select>` с фиксированным
+          списком: провайдеров у пользователя десятки, и новый не должен
+          требовать правки кода. `datalist` при этом решает ровно ту задачу, ради
+          которой список был бы нужен: значение служит ключом группировки для
+          фильтра, и «hetzner» рядом с «Hetzner» дали бы двух разных. */}
+      <div>
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Hosting Provider <span style={{color:"#9ca3af",fontWeight:400}}>(optional)</span></label>
+        <Inp
+          value={provider}
+          list={PROVIDER_LIST_ID}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setProvider(e.target.value); if(errors.provider) setErrors(prev=>({...prev, provider:""}));}}
+          placeholder="e.g., Hetzner"
+          style={{borderColor: errors.provider ? "#dc2626" : undefined}}
+        />
+        <datalist id={PROVIDER_LIST_ID}>
+          {providers.map(p=><option key={p} value={p}/>)}
+        </datalist>
+        {errors.provider && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{errors.provider}</div>}
+      </div>
     </div>
     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
       {/* Ошибка сохранения — в самой форме, а не в `alert`: она про поле, к
@@ -260,6 +312,9 @@ export function AddServerModal({onClose}: {onClose: ()=>void}){
 export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void}){
   const [view,setView]=useState("grid");
   const [filter,setFilter]=useState("All");
+  // Отдельным состоянием, но в ТУ ЖЕ цепочку `filtered` ниже: второй механизм
+  // фильтрации показывал бы в поиске и в фильтре разные списки.
+  const [providerFilter,setProviderFilter]=useState(ALL_PROVIDERS);
   const [search,setSearch]=useState("");
   const [showAdd,setShowAdd]=useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
@@ -273,10 +328,18 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     return "new";
   };
 
+  // Один источник и для подсказок формы, и для списка фильтра: второй умел бы
+  // разойтись с первым — предложить в форме имя, которого нет в фильтре.
+  const providers = providerOptions(data?.items || []);
+
   const servers = (data?.items || []).map((s: any) => ({
     id: s.id,
     name: s.name,
     ip: s.ip_address,
+    // Обрезанным — тем же значением, что попадёт в список фильтра
+    // (`providerOptions` тоже обрезает). Иначе строка «Hetzner » дала бы пункт
+    // «Hetzner», по которому не находится ни один сервер.
+    provider: s.provider?.trim() || null,
     os: s.os_pretty || s.os || null,
     status: toUiStatus(s),
     fastpanel: s.fastpanel_status === "installed",
@@ -292,7 +355,10 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     original: s
   }));
 
-  const filtered=servers.filter(s=>(filter==="All"||s.status===filter)&&(s.name.toLowerCase().includes(search.toLowerCase())||s.ip.includes(search)));
+  // Фильтр по провайдеру — третье условие ТОЙ ЖЕ цепочки: фильтруем на клиенте,
+  // потому что список серверов и так грузится целиком и серверный фильтр без
+  // пагинации ничего не экономит.
+  const filtered=servers.filter(s=>(filter==="All"||s.status===filter)&&(providerFilter===ALL_PROVIDERS||s.provider===providerFilter)&&(s.name.toLowerCase().includes(search.toLowerCase())||s.ip.includes(search)));
   const Th=({children}: any)=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}>{children}</th>;
   
   if (isError) {
@@ -318,6 +384,14 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
           {[["grid","⊞ Grid"],["table","☰ Table"]].map(([v,l])=><button key={v} onClick={()=>setView(v)} style={{padding:"7px 14px",border:"none",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",background:view===v?"#2563eb":"#fff",color:view===v?"#fff":"#6b7280",transition:"all 0.15s"}}>{l}</button>)}
         </div>
         <Sel value={filter} onChange={(e: any)=>setFilter(e.target.value)}>{["All","active","provisioned","new","error"].map(s=><option key={s} value={s}>Status: {s}</option>)}</Sel>
+        {/* Список — только встречающиеся имена: фиксированного перечня
+            провайдеров нет, и предлагать фильтр по тому, чего в списке нет,
+            значит предлагать заведомо пустой экран. `aria-label` потому, что
+            подписи рядом нет — её роль играет префикс в каждом пункте. */}
+        <Sel aria-label="Filter by hosting provider" value={providerFilter} onChange={(e: any)=>setProviderFilter(e.target.value)}>
+          <option value={ALL_PROVIDERS}>Provider: All</option>
+          {providers.map(p=><option key={p} value={p}>Provider: {p}</option>)}
+        </Sel>
         <div style={{position:"relative"}}><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#9ca3af",fontSize:13}}>⌕</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{padding:"8px 12px 8px 30px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,outline:"none",width:170,background:"#f9fafb",fontFamily:"inherit"}}/></div>
         <Btn variant="secondary" onClick={() => setShowBulkImport(true)}>⇪ Import</Btn>
         <Btn variant="primary" onClick={()=>setShowAdd(true)}>+ Add Server</Btn>
@@ -350,7 +424,10 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                 <div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status}/><span style={{fontSize:14,fontWeight:700,color:"#111"}} title={s.last_check_error || undefined}>{s.name}</span></div>
                 <span style={{fontSize:13,color:"#9ca3af"}}>⋯</span>
               </div>
-              <div style={{fontSize:12,color:"#6b7280",marginBottom:10}}>{s.ip}</div>
+              {/* Провайдер рядом с IP, а не отдельной строкой: фильтр работает и
+                  в этом виде, и по карточке должно быть понятно, почему сервер
+                  на экране остался. */}
+              <div style={{fontSize:12,color:"#6b7280",marginBottom:10}}>{s.provider ? `${s.ip} · ${s.provider}` : s.ip}</div>
               <div style={{display:"flex",gap:6,marginBottom:12}}>{s.os ? <Badge variant="gray">{s.os}</Badge> : null}{s.fastpanel&&<Badge variant="blue">FASTPANEL</Badge>}</div>
               {hasCpu ? <MiniChart data={cpuData} color={cc}/> : <div style={{height:36,fontSize:12,color:"#9ca3af",display:"flex",alignItems:"center"}}>No metrics yet</div>}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"3px 0",marginTop:10,fontSize:12.5}}>
@@ -378,11 +455,11 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
               </EmptyState>
             ) : (
             <table style={{width:"100%",borderCollapse:"collapse"}}>
-              <thead><tr>{["Name","IP","OS","CPU","RAM","SSD","Uptime","FastPanel","Status"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
+              <thead><tr>{["Name","IP","Provider","OS","CPU","RAM","SSD","Uptime","FastPanel","Status"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={9} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                    <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
                       No servers match the current filters.
                     </td>
                   </tr>
@@ -390,6 +467,9 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                 {filtered.map(s=><tr key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
                   <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}} title={s.last_check_error || undefined}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
                   <td style={{padding:"12px 16px",fontFamily:"monospace",fontSize:13}}>{s.ip}</td>
+                  {/* Прочерк, а не пустая ячейка: пустая читается как «данные не
+                      доехали», прочерк — как «не заполнено». Так же, как у OS. */}
+                  <td style={{padding:"12px 16px",fontSize:13}}>{s.provider || <span style={{color:"#9ca3af"}}>—</span>}</td>
                   <td style={{padding:"12px 16px"}}>{s.os ? <Badge variant="gray">{s.os}</Badge> : <span style={{color:"#9ca3af"}}>—</span>}</td>
                   <td style={{padding:"12px 16px"}}>{s.cpu !== null ? <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:55,height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.cpu}%`,background:cpuColor(s.cpu)}}/></div><span style={{fontSize:12,color:"#6b7280"}}>{s.cpu}%</span></div> : <span style={{color:"#9ca3af"}}>—</span>}</td>
                   <td style={{padding:"12px 16px",fontSize:13}}>{s.ram_used !== null && s.ram_total !== null ? `${Math.round(s.ram_used / 1024)}/${Math.round(s.ram_total / 1024)} GB` : "—"}</td>
@@ -403,7 +483,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
             )}
           </div>
         </Card>}
-    {showAdd&&<AddServerModal onClose={()=>setShowAdd(false)}/>}
+    {showAdd&&<AddServerModal onClose={()=>setShowAdd(false)} providers={providers}/>}
     {showBulkImport && (
       <ServerBulkImportDialog
         onClose={() => setShowBulkImport(false)}

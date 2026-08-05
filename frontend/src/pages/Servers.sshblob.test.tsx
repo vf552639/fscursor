@@ -53,7 +53,9 @@ const SSH_PW = "s3cret-ssh-pw";
 const FP_PW = "fastpanel-pw";
 
 function renderModal(onClose = vi.fn()) {
-  return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} />) };
+  // Подсказки провайдеров тут ни при чём — пустым списком; за их содержимое
+  // отвечает Servers.provider.test.tsx.
+  return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} providers={[]} />) };
 }
 
 function fillInstallTab(password?: string) {

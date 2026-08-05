@@ -16,6 +16,8 @@ export interface Server {
   ssh_port: number;
   ssh_user: string;
   os: string | null;
+  /** Хостинг-провайдер. Свободный текст; `null` — «не указан» (пустой строки в колонке не бывает). */
+  provider: string | null;
   status: string;
   purchase_date: string | null;
   expiry_date: string | null;
@@ -65,6 +67,8 @@ export interface ServerCreate {
    */
   ssh_password_blob_id?: string | null;
   os?: string | null;
+  /** Пустое поле формы едет как `null`, а не `""` — см. `providerPayload`. */
+  provider?: string | null;
   purchase_date?: string | null;
   expiry_date?: string | null;
   fastpanel_user?: string;
@@ -82,6 +86,8 @@ export interface ServerUpdate {
   /** См. `ServerCreate.ssh_password_blob_id`. При правке — ТОТ ЖЕ id. */
   ssh_password_blob_id?: string | null;
   os?: string | null;
+  /** См. `ServerCreate.provider`. Очистка поля — это `null`, а не отсутствие ключа. */
+  provider?: string | null;
   status?: string;
   purchase_date?: string | null;
   expiry_date?: string | null;

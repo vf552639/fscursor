@@ -54,7 +54,9 @@ vi.mock("../components/ServerBulkImportDialog", () => ({ default: () => null }))
 const FP_PW = "fastpanel-pw";
 
 function renderModal(onClose = vi.fn()) {
-  return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} />) };
+  // Подсказки провайдеров тут ни при чём — пустым списком; за их содержимое
+  // отвечает Servers.provider.test.tsx.
+  return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} providers={[]} />) };
 }
 
 function openConnectTab() {
