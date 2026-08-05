@@ -761,6 +761,17 @@ UNSAFE_ERRORS = [
         {"type": "string_type", "loc": ["body", "api_secret"], "input": 1},
         id="секретное-имя-secret",
     ),
+    # Имя не секретное — секретно то, из-за чего поле отвергают: валидатор
+    # `fastpanel_url` срабатывает ровно на userinfo в URL, то есть на пароле
+    # панели внутри значения (долг №10).
+    pytest.param(
+        {
+            "type": "value_error",
+            "loc": ["body", "fastpanel_url"],
+            "input": "https://admin:S3cr3t@1.2.3.4:8888/",
+        },
+        id="url-панели-с-кредами-внутри",
+    ),
 ]
 
 SAFE_ERRORS = [

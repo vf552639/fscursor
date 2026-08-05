@@ -2,7 +2,43 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.validators import is_valid_fastpanel_url, is_valid_fastpanel_user
+
+
+def _checked_fastpanel_url(value: Optional[str]) -> Optional[str]:
+    """Отвергнуть адрес панели, в котором сидят креды или мусор.
+
+    Канонический комментарий на обе схемы записи. Значение приезжает
+    write-back'ом с десктопа после установки FastPanel; его разбор — регекс по
+    stdout инсталлятора, и `https://admin:s3cr3t@ip:8888/` он матчит наравне с
+    нормальным адресом. Дальше это значение уходит в колонку и в metadata
+    аудита, где гард редакции смотрит на ИМЕНА полей, — а имя `url` секретным
+    не выглядит.
+
+    Десктоп с этого спринта срезает userinfo сам
+    (`provision/fastpanel_install.rs`), но десктоп — не единственный возможный
+    клиент, и серверная схема закрывает дверь в БД для любого из них.
+
+    Отказ, а не тихая очистка: сервер тут получатель, а не источник. Молча
+    переписать присланное значило бы спрятать дефект клиента и развести БД с
+    тем, что клиент считает записанным; у самого клиента адрес панели есть, и
+    он может прислать его правильно.
+
+    Условие `is not None` — не то же самое, что `if value`: пустая строка
+    должна получить 422, а не проехать как «нечего проверять».
+    """
+    if value is not None and not is_valid_fastpanel_url(value):
+        raise ValueError("must be an http(s) URL with host:port and without credentials")
+    return value
+
+
+def _checked_fastpanel_user(value: Optional[str]) -> Optional[str]:
+    """Отвергнуть логин панели с управляющими символами. См. `_checked_fastpanel_url`."""
+    if value is not None and not is_valid_fastpanel_user(value):
+        raise ValueError("must not contain control characters")
+    return value
 
 
 class ServerBase(BaseModel):
@@ -40,6 +76,18 @@ class ServerCreate(ServerBase):
     fastpanel_url: Optional[str] = None
     fastpanel_status: Optional[str] = "not_installed"
 
+    # Валидаторы объявлены на каждой схеме отдельно по той же причине, что и
+    # `extra="forbid"` выше: снятие проверки роняет тест ровно этой схемы.
+    @field_validator("fastpanel_url")
+    @classmethod
+    def _validate_fastpanel_url(cls, v: Optional[str]) -> Optional[str]:
+        return _checked_fastpanel_url(v)
+
+    @field_validator("fastpanel_user")
+    @classmethod
+    def _validate_fastpanel_user(cls, v: Optional[str]) -> Optional[str]:
+        return _checked_fastpanel_user(v)
+
 
 class ServerUpdate(BaseModel):
     # См. `ServerCreate`: незнакомое поле — 422, а не тихая потеря.
@@ -58,6 +106,17 @@ class ServerUpdate(BaseModel):
     fastpanel_password_blob_id: Optional[UUID] = None
     fastpanel_url: Optional[str] = None
     fastpanel_status: Optional[str] = None
+
+    # См. `ServerCreate`: креды внутри URL и управляющие символы в логине — 422.
+    @field_validator("fastpanel_url")
+    @classmethod
+    def _validate_fastpanel_url(cls, v: Optional[str]) -> Optional[str]:
+        return _checked_fastpanel_url(v)
+
+    @field_validator("fastpanel_user")
+    @classmethod
+    def _validate_fastpanel_user(cls, v: Optional[str]) -> Optional[str]:
+        return _checked_fastpanel_user(v)
 
 
 class ServerResponse(ServerBase):

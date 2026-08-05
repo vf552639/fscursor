@@ -403,6 +403,123 @@ async def test_server_update_accepts_fastpanel_result_fields():
 
 
 @pytest.mark.asyncio
+async def test_server_write_rejects_fastpanel_url_with_embedded_credentials():
+    """URL панели со встроенными кредами не доезжает до колонки — 422.
+
+    `https://admin:s3cr3t@ip:8888/` — это пароль панели внутри значения. Обе
+    линии обороны его пропускали: регекс парсера в десктопе такой токен матчит,
+    а гард редакции аудита смотрит на **имена** полей, и имя `url` секретным не
+    выглядит. Схема — последняя дверь, общая для любого клиента, а не только
+    для нашего десктопа.
+
+    Проверяются обе схемы записи, `ServerUpdate` и `ServerCreate`: валидаторы
+    объявлены на каждой отдельно, и без второго случая снятие проверки с
+    `ServerCreate` не уронило бы ничего. `POST` — не теоретический путь: форму
+    «Connect Existing Fastpanel» (`frontend/src/pages/Servers.tsx`) пользователь
+    заполняет URL'ом руками, и `https://admin:pass@host:8888` он туда впишет
+    ровно так же, как в браузер.
+
+    Проверка по БД, а не по коду ответа: 422 сам по себе не доказывает, что
+    запись не состоялась (сервис мог бы успеть записать до валидации — не в
+    FastAPI, но тест не должен держаться на этом знании). Колонки после отказа
+    обязаны остаться такими, какими их создал POST.
+
+    Позитивный контроль в конце: тот же метод, путь и форма тела с чистым URL
+    дают 200 и пишут значение. Без него 422 могло бы приходить от опечатки в
+    пути или от `extra="forbid"` на незнакомом поле, и тест зеленел бы, не
+    проверив валидатор.
+    """
+    ip = "203.0.113.10"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"wb-url-{uuid.uuid4().hex[:8]}@example.com")
+
+        # `ServerCreate`: сервер с таким URL не заводится вовсе.
+        rejected_name = f"srv-{uuid.uuid4().hex[:6]}"
+        r = await c.post(
+            "/api/servers",
+            json={
+                "name": rejected_name,
+                "ip_address": ip,
+                "fastpanel_status": "installed",
+                "fastpanel_url": f"https://admin:s3cr3t@{ip}:8888/",
+            },
+        )
+        assert r.status_code == 422, r.text
+        assert [e["loc"] for e in r.json()["detail"]] == [["body", "fastpanel_url"]], r.text
+        assert "s3cr3t" not in r.text, r.text
+        async with AsyncSessionLocal() as s:
+            created = (
+                await s.execute(select(Server).where(Server.name == rejected_name))
+            ).scalars().all()
+            assert created == [], "отвергнутый POST всё-таки завёл сервер"
+
+        r = await c.post(
+            "/api/servers",
+            json={"name": f"srv-{uuid.uuid4().hex[:6]}", "ip_address": ip},
+        )
+        assert r.status_code == 201, r.text
+        server_id = r.json()["id"]
+        try:
+            for field, payload in (
+                (
+                    "fastpanel_url",
+                    {
+                        "fastpanel_status": "installed",
+                        "fastpanel_url": f"https://admin:s3cr3t@{ip}:8888/",
+                        "fastpanel_user": "fastuser",
+                    },
+                ),
+                (
+                    "fastpanel_user",
+                    {
+                        "fastpanel_status": "installed",
+                        "fastpanel_url": f"https://{ip}:8888/",
+                        "fastpanel_user": "fast\nuser",
+                    },
+                ),
+            ):
+                r = await c.put(f"/api/servers/{server_id}", json=payload)
+                assert r.status_code == 422, r.text
+                assert [e["loc"] for e in r.json()["detail"]] == [["body", field]], r.text
+                if field == "fastpanel_url":
+                    # Отказ не должен вернуть присланное обратно: `input` в 422
+                    # уезжает во фронтовые логи и в лог прокси (см.
+                    # `validation_error_without_secret_input` в `main.py`), а
+                    # этот отказ срабатывает ровно тогда, когда в значении сидит
+                    # пароль панели. Про `fastpanel_user` условия нет намеренно:
+                    # логин секретом не является, и его `input` в ответе
+                    # остаётся — иначе разбор 422 стал бы гаданием.
+                    assert "s3cr3t" not in r.text, r.text
+
+                async with AsyncSessionLocal() as s:
+                    server = (
+                        await s.execute(select(Server).where(Server.id == server_id))
+                    ).scalar_one()
+                    assert server.fastpanel_url is None
+                    assert server.fastpanel_user is None
+                    # Соседние поля того же тела тоже не должны были записаться.
+                    assert server.fastpanel_status == "not_installed"
+
+            r = await c.put(
+                f"/api/servers/{server_id}",
+                json={
+                    "fastpanel_status": "installed",
+                    "fastpanel_url": f"https://{ip}:8888/",
+                    "fastpanel_user": "fastuser",
+                },
+            )
+            assert r.status_code == 200, r.text
+            async with AsyncSessionLocal() as s:
+                server = (
+                    await s.execute(select(Server).where(Server.id == server_id))
+                ).scalar_one()
+                assert server.fastpanel_url == f"https://{ip}:8888/"
+                assert server.fastpanel_user == "fastuser"
+        finally:
+            await _purge(Server, server_id)
+
+
+@pytest.mark.asyncio
 async def test_user_b_cannot_write_back_to_user_a_domain():
     """Чужой домен не обновляется через `PUT` — 404, значения не меняются.
 

@@ -71,19 +71,102 @@ impl std::fmt::Debug for FpCredentials {
 /// `alice`. Порт использует `regex` (уже зависимость проекта) над всем
 /// текстом, чтобы воспроизвести эту семантику один в один, а не построчный
 /// цикл с приоритетом ключевых слов.
+///
+/// Отличие от легаси одно и намеренное: `url`/`user` проходят санитизацию
+/// (`sanitize_panel_url`/`sanitize_panel_user`) — эти два значения уезжают на
+/// сервер и в аудит, и парсер здесь единственная точка, где их можно
+/// перехватить до всех трёх потребителей (ответ команды, write-back, аудит).
 pub fn parse_fastpanel_credentials(output: &str) -> FpCredentials {
     let url = url_regex()
         .find(output)
-        .map(|m| m.as_str().trim_end_matches(['.', ',']).to_string());
+        .map(|m| m.as_str().trim_end_matches(['.', ',']))
+        .and_then(sanitize_panel_url);
     let user = user_regex()
         .captures(output)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string());
+        .and_then(|m| sanitize_panel_user(m.as_str()));
     let password = password_regex()
         .captures(output)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string());
     FpCredentials { url, user, password }
+}
+
+/// Срезать userinfo из URL панели и отвергнуть то, что панелью быть не может.
+///
+/// Зачем вообще: `url_regex` матчит `https://admin:s3cr3t@1.2.3.4:8888/` —
+/// пароль панели внутри URL. Такой URL уезжает в `servers.fastpanel_url` и в
+/// metadata аудита, а гард редакции (`audit_redact.rs`) смотрит на **имена**
+/// полей — имя `url` секретным не выглядит, и обе линии обороны пропускают
+/// значение (долг №10).
+///
+/// Userinfo именно **срезается**, а не приводит к отказу: по RFC 3986
+/// authority — это `[userinfo@]host[:port]`, то есть без userinfo остаётся тот
+/// же самый адрес панели, по которому пользователь и заходит (FastPanel
+/// логинит формой, а не HTTP Basic). Отказ здесь стоил бы дорого: адрес
+/// свежеустановленной панели больше нигде не существует.
+///
+/// Отвергаются (`None`) два класса:
+/// - управляющие ASCII-символы где угодно в токене — `\S+` их пропускает
+///   (ANSI-escape, `\x07`), а чистить их «по-умному» значит разбирать
+///   escape-последовательности; значению всё равно нельзя доверять;
+/// - authority не похожа на `хост:порт` после среза userinfo. Это не
+///   формальность: в `https://user@evil.com/path@1.2.3.4:8888` authority —
+///   `user@evil.com`, и без проверки наружу уехал бы `https://evil.com/...`.
+///
+/// Известное ограничение: IPv6-литерал (`https://[::1]:8888`) не проходит
+/// проверку хоста. Инсталлятор его не печатает — сервер заводится по IPv4
+/// `ip_address`, — а поддержка скобочной формы усложнила бы разбор ради
+/// случая, которого нет.
+fn sanitize_panel_url(raw: &str) -> Option<String> {
+    if raw.bytes().any(|b| b.is_ascii_control()) {
+        return None;
+    }
+    let (scheme, rest) = ["https://", "http://"]
+        .into_iter()
+        .find_map(|s| raw.strip_prefix(s).map(|rest| (s, rest)))?;
+
+    // Authority кончается на первом `/`, `?` или `#`; всё после — путь/запрос,
+    // и `@` там к userinfo отношения не имеет.
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    // Разделитель userinfo — ПОСЛЕДНИЙ `@` в authority (сырой `@` внутри
+    // userinfo невалиден, но `rfind` не даёт себя обмануть и в этом случае).
+    let host_port = match authority.rfind('@') {
+        Some(i) => {
+            tracing::warn!(
+                target: "provision",
+                "fastpanel installer printed credentials inside the panel URL; userinfo stripped"
+            );
+            &authority[i + 1..]
+        }
+        None => authority,
+    };
+    if !host_port_regex().is_match(host_port) {
+        tracing::warn!(
+            target: "provision",
+            "panel URL from installer has no usable host:port; dropped"
+        );
+        return None;
+    }
+    Some(format!("{scheme}{host_port}{tail}"))
+}
+
+/// Отвергнуть логин панели с управляющими символами.
+///
+/// Пробелов в значении уже нет (регекс ловит `(\S+)`), а вот `\x1b`/`\x07`
+/// проходят — и уезжают в `servers.fastpanel_user` и в аудит. Как и с URL:
+/// значение с управляющими символами недоверенное целиком, чистить его мы не
+/// беремся.
+fn sanitize_panel_user(raw: &str) -> Option<String> {
+    if raw.bytes().any(|b| b.is_ascii_control()) {
+        tracing::warn!(
+            target: "provision",
+            "panel user from installer has control characters; dropped"
+        );
+        return None;
+    }
+    Some(raw.to_string())
 }
 
 fn url_regex() -> &'static Regex {
@@ -99,6 +182,16 @@ fn user_regex() -> &'static Regex {
 fn password_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)Password\s*[:=]\s*(\S+)").unwrap())
+}
+
+/// Authority без userinfo: хост (буквы/цифры/`.`/`-`/`_`) и обязательный порт.
+///
+/// Подчёркивание в хосте по DNS невалидно, но встречается во внутренних именах,
+/// и запрет на него ничего не даёт: userinfo режется отдельно, а этот регекс
+/// только подтверждает форму «хост:порт».
+fn host_port_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9._-]+:[0-9]{1,5}$").unwrap())
 }
 
 #[cfg(test)]
@@ -257,6 +350,59 @@ mod tests {
         assert!(!debug_str.contains("s3cr3t"));
         assert!(debug_str.contains("fastuser"));
         assert!(debug_str.contains("https://1.2.3.4:8888"));
+    }
+
+    // Легаси-регекс `https?://\S+:8888\S*` матчит и `https://admin:s3cr3t@ip:8888/`
+    // — пароль панели внутри URL. Этот URL уезжает write-back'ом в
+    // `servers.fastpanel_url` и в metadata аудита, а гард редакции смотрит на
+    // ИМЕНА полей, и имя `url` секретным не выглядит. Userinfo обязана быть
+    // срезана до того, как значение покинет парсер.
+    #[test]
+    fn parse_credentials_strips_userinfo_from_panel_url() {
+        let out = "Panel URL: https://admin:s3cr3t@1.2.3.4:8888/login\n";
+        let c = parse_fastpanel_credentials(out);
+        assert_eq!(c.url.as_deref(), Some("https://1.2.3.4:8888/login"));
+    }
+
+    // Userinfo без пароля — та же userinfo: `@` в authority срезается целиком,
+    // иначе логин панели утекал бы в аудит через поле `url`.
+    #[test]
+    fn parse_credentials_strips_userinfo_without_password() {
+        let out = "Panel: http://admin@5.6.7.8:8888\n";
+        let c = parse_fastpanel_credentials(out);
+        assert_eq!(c.url.as_deref(), Some("http://5.6.7.8:8888"));
+    }
+
+    // Срезать надо ровно userinfo, а не всё до первого `@` в токене: `@` в пути
+    // (`/path@1.2.3.4:8888`) к authority отношения не имеет. Здесь authority —
+    // `user@evil.com`, после среза остаётся `evil.com` без порта, то есть на
+    // панель это не похоже вовсе → значение не отдаём. Без проверки «хост+порт»
+    // наружу уехал бы `https://evil.com/path@1.2.3.4:8888`.
+    #[test]
+    fn parse_credentials_rejects_url_whose_authority_has_no_port() {
+        let out = "See https://user@evil.com/path@1.2.3.4:8888 now\n";
+        let c = parse_fastpanel_credentials(out);
+        assert!(c.url.is_none(), "url = {:?}", c.url);
+    }
+
+    // `\S+` в регексе исключает пробелы, но не управляющие символы: ANSI-escape
+    // или `\x07` внутри токена делают значение недоверенным (оно поедет в UI,
+    // в БД и в аудит). Вычищать их «по-умному» — отдельная кроличья нора, так
+    // что такой URL не отдаём вовсе.
+    #[test]
+    fn parse_credentials_rejects_panel_url_with_control_characters() {
+        let out = "Panel URL: https://1.2.3.4:8888/\u{1b}[0m\n";
+        let c = parse_fastpanel_credentials(out);
+        assert!(c.url.is_none(), "url = {:?}", c.url);
+    }
+
+    // То же для логина: `(\S+)` пропускает `\x1b`/`\x07`, а значение уходит в
+    // `servers.fastpanel_user` и в metadata аудита.
+    #[test]
+    fn parse_credentials_rejects_user_with_control_characters() {
+        let out = "Username: fast\u{7}user\n";
+        let c = parse_fastpanel_credentials(out);
+        assert!(c.user.is_none(), "user = {:?}", c.user);
     }
 
     #[test]
