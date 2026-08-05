@@ -43,6 +43,14 @@ describe("fastpanelUrlError", () => {
   it("отвергает пустое поле", () => {
     expect(fastpanelUrlError("   ")).toMatch(/required/i);
   });
+
+  it("отвергает управляющие символы", () => {
+    // Вставка из терминала приносит ANSI-раскраску вместе с адресом. Без этой
+    // проверки форма зеленела бы, а 422 от бэкенда приезжал бы в неё как
+    // `[object Object]` — то, ради чего модуль и заводился.
+    expect(fastpanelUrlError("https://1.2.3.4:8888/\x1b[0m")).toMatch(/control/i);
+    expect(fastpanelUrlError("https://1.2.3.4:8888/x\x7fy")).toMatch(/control/i);
+  });
 });
 
 describe("fastpanelUserError", () => {
@@ -55,5 +63,9 @@ describe("fastpanelUserError", () => {
     // ловит `(\S+)`, и серверное правило повторяет его один в один.
     expect(fastpanelUserError("")).toMatch(/required/i);
     expect(fastpanelUserError("fast user")).toMatch(/space/i);
+  });
+
+  it("отвергает управляющие символы в логине", () => {
+    expect(fastpanelUserError("fast\x7fuser")).toMatch(/control/i);
   });
 });
