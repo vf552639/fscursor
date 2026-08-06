@@ -26,9 +26,24 @@ export const WARN_TEXT = "#d97706";
  */
 export const STALE_TEXT = "#a16207";
 
+/**
+ * Точка состояния сервера. Значения приезжают только из `serverUiStatus`
+ * (`lib/serverStatus`), поэтому и ключей здесь ровно два.
+ *
+ * Их было восемь: `healthy`/`warning`/`critical`/`ok`/`pending`/`paused` не
+ * производил НИКТО — кроме одной непочиненной лестницы в списке доменов,
+ * которая переводила `status === "active"` в `healthy`, минуя результат
+ * проверки. Именно живучесть этих ключей и позволяла зелёной точке спокойно
+ * стоять у подтверждённо упавшей машины: удали их раньше — и код бы упал в
+ * серый цвет, то есть заявил бы «не знаю» вместо «здоров».
+ *
+ * Всё незнакомое — серое: это «не знаем», и гадать в сторону здоровья нельзя.
+ */
 export function StatusDot({status, size=9}: {status: string, size?: number}){
-  const c: Record<string, string>={healthy:"#16a34a",warning:"#d97706",critical:"#dc2626",ok:"#16a34a",error:"#dc2626",pending:"#d97706",active:"#16a34a",paused:"#9ca3af"};
-  const g: Record<string, string>={healthy:"#bbf7d0",warning:"#fde68a",critical:"#fecaca"};
+  const c: Record<string, string>={active:"#16a34a",error:"#dc2626"};
+  // Ореол достаётся тем же двум: он усиливает утверждение, а усиливать здесь
+  // можно только то, что проверено.
+  const g: Record<string, string>={active:"#bbf7d0",error:"#fecaca"};
   const bg = c[status] || "#9ca3af";
   const shadow = g[status] ? `0 0 0 3px ${g[status]}` : "none";
   return <span style={{display:"inline-block",width:size,height:size,borderRadius:"50%",background:bg,boxShadow:shadow,flexShrink:0}}/>;

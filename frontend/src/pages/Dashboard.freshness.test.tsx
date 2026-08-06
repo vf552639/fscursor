@@ -99,6 +99,17 @@ const SERVERS = [
   },
   // Ни разу не проверялся.
   { ...BASE, id: 3, name: "web-03", ip_address: "10.0.0.3" },
+  // Упал — но последний раз проверялся до того, как монитор замолчал: факт
+  // старый, а в счётчике «Down» стоит как текущий.
+  {
+    ...BASE,
+    id: 5,
+    name: "web-05",
+    ip_address: "10.0.0.5",
+    last_check_at: ago(40 * DAY),
+    last_check_ok: false,
+    last_check_error: "timeout after 5s",
+  },
   // Отвечает, но снимку три месяца — та самая окаменелость.
   {
     ...BASE,
@@ -136,7 +147,19 @@ function renderDashboard() {
 function tile(label: string): string {
   const box = screen.getByText(label).parentElement?.parentElement;
   if (!box) throw new Error(`плитки «${label}» на экране нет`);
-  return (box.textContent || "").replace(label, "").replace("servers", "").trim();
+  // Именно первый потомок, а не текст всей плитки за вычетом известных слов:
+  // прежняя вырезка `replace(label).replace("servers")` возвращала счёт
+  // склеенным с любой новой подписью, и утверждение «Down равен двум» падало
+  // от появления квалификатора, ничего при этом про счёт не сказав. Счёт и
+  // подпись — разные предметы, у каждого свой доступ (см. `tileNote`).
+  return (box.firstElementChild?.textContent || "").trim();
+}
+
+/** Подпись под счётом: «servers» или «servers · N unverified». */
+function tileNote(label: string): string {
+  const note = screen.getByText(label).nextElementSibling;
+  if (!note) throw new Error(`подписи под плиткой «${label}» на экране нет`);
+  return (note.textContent || "").trim();
 }
 
 /** Строка «Server Health» целиком — ближайший предок имени с его же IP. */
@@ -157,13 +180,38 @@ describe("Dashboard — сводка считает только то, что и
     // Ответили двое (web-01 и web-04), упал один (web-02), про одного не знаем
     // ничего (web-03). Колонка `status` у всех четверых говорит «active».
     expect(tile("Online")).toBe("2");
-    expect(tile("Down")).toBe("1");
+    expect(tile("Down")).toBe("2");
     expect(tile("Unknown")).toBe("1");
+  });
+
+  it("«Down» не занижен, но давнее падение в нём датировано", async () => {
+    await screen.findByText("web-01");
+    // web-02 упал по проверке получасовой давности, web-05 — по проверке
+    // сорокадневной. Счёт считает обоих: ошибка в сторону тревоги дешевле —
+    // сходить и убедиться, что машина жива, стоит меньше, чем считать мёртвую
+    // живой. Но подать давний факт как текущее число значило бы повторить
+    // ровно тот дефект, который здесь и чинится, поэтому подпись его датирует.
+    expect(tile("Down")).toBe("2");
+    expect(tileNote("Down")).toBe("servers · 1 unverified");
+    // У остальных плиток квалификатора нет: «Online» требует свежего
+    // положительного ответа по построению, а «Unknown» и так про незнание.
+    expect(tileNote("Online")).toBe("servers");
+    expect(tileNote("Unknown")).toBe("servers");
   });
 
   it("плитка «Total Servers» подписана тем же разбором", async () => {
     await screen.findByText("web-01");
-    expect(screen.getByText("2 online · 1 down · 1 unknown")).toBeTruthy();
+    expect(screen.getByText("2 online · 2 down · 1 unknown")).toBeTruthy();
+  });
+
+  it("счёт упавших датирован: часть из них держится на старой проверке", async () => {
+    await screen.findByText("web-01");
+    // Само число их считает (ошибка в сторону тревоги дешевле обратной), но
+    // подать давний факт как текущее число — тот же дефект, что мы чиним.
+    expect(screen.getByText("servers · 1 unverified")).toBeTruthy();
+    // У живых такой оговорки нет и быть не может: «Online» требует свежей
+    // проверки по построению.
+    expect(within(screen.getByText("Online").parentElement as HTMLElement).getByText("servers")).toBeTruthy();
   });
 
   it("бейдж строки не зеленеет у упавшего и у непроверенного", async () => {

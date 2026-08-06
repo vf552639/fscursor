@@ -54,8 +54,17 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
   // «critical» не мог получить никто, а «healthy» получали все, включая
   // упавших и ни разу не проверенных.
   const online = servers.filter(s=>s.status==="active").length;
-  const down = servers.filter(s=>s.status==="error").length;
+  const downList = servers.filter(s=>s.status==="error");
+  const down = downList.length;
   const unknown = servers.length - online - down;
+  // Сколько из упавших держатся на старой или несуществующей проверке. Само
+  // число «Down» намеренно их считает (ошибка в сторону тревоги дешевле:
+  // сходить и убедиться, что машина жива, стоит меньше, чем считать мёртвую
+  // живой), но подать давний факт как текущее число — это ровно тот дефект,
+  // который мы тут чиним. Отсюда квалификатор: он не меняет счёт, он его
+  // датирует. `!check_at` — падение из колонки `status`, где проверки не было
+  // вовсе.
+  const downUnverified = downList.filter(s=>!s.check_at || s.check_stale).length;
 
   if (l1 || l2 || l3 || l4 || l5 || l6) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading dashboard data...</div>;
 
@@ -82,13 +91,13 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
           // «Unknown» — полноправная плитка, а не остаток: сервер без свежей
           // проверки не «в порядке» и не «упал», и молчать о нём значит снова
           // выдать незнание за здоровье.
-          {label:"Online",count:online,c:"#16a34a",bg:"#f0fdf4",br:"#bbf7d0"},
-          {label:"Down",count:down,c:"#dc2626",bg:"#fef2f2",br:"#fecaca"},
-          {label:"Unknown",count:unknown,c:"#6b7280",bg:"#f9fafb",br:"#e5e7eb"}
+          {label:"Online",count:online,c:"#16a34a",bg:"#f0fdf4",br:"#bbf7d0",note:null},
+          {label:"Down",count:down,c:"#dc2626",bg:"#fef2f2",br:"#fecaca",note:downUnverified?`${downUnverified} unverified`:null},
+          {label:"Unknown",count:unknown,c:"#6b7280",bg:"#f9fafb",br:"#e5e7eb",note:null}
         ].map(s=>(
           <div key={s.label} style={{background:s.bg,border:`1px solid ${s.br}`,borderRadius:12,padding:"16px 20px",display:"flex",alignItems:"center",gap:12}}>
             <div style={{fontSize:28,fontWeight:700,color:s.c}}>{s.count}</div>
-            <div><div style={{fontSize:13,fontWeight:600,color:s.c}}>{s.label}</div><div style={{fontSize:11.5,color:s.c,opacity:0.7}}>servers</div></div>
+            <div><div style={{fontSize:13,fontWeight:600,color:s.c}}>{s.label}</div><div style={{fontSize:11.5,color:s.c,opacity:0.7}}>{s.note ? `servers · ${s.note}` : "servers"}</div></div>
           </div>
         ))}
       </div>
