@@ -1,3 +1,4 @@
+import { formatUptime, mbToGb } from "../components/ui/Primitives";
 import type { Server } from "../api/servers";
 import type { AuditLogRow } from "../api/audit";
 
@@ -17,25 +18,12 @@ export interface ServerMetrics {
   uptime: string | null;
 }
 
-export function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  if (days > 0) return `${days} day${days === 1 ? "" : "s"}`;
-  const hours = Math.floor(seconds / 3600);
-  return `${hours}h`;
-}
-
-const round1 = (n: number) => Math.round(n * 10) / 10;
-
-/**
- * МБ → ГБ для показа. Живёт здесь, а не по месту, потому что тот же перевод
- * пишут страницы серверов и деталь сервера: пока их было три копии, две из них
- * округляли до целого (`Math.round(x / 1024)`), и один и тот же сервер значился
- * на дашборде как «1.5/4 GB», а в списке — как «2/4 GB».
- *
- * Один знак после запятой, а не целые: у машины с 1.5 ГБ занятых округление до
- * «2 GB» — это треть памяти, придуманная форматированием.
+/*
+ * Здесь жила вторая реализация `formatUptime` — «3 days» / «23h» против плотной
+ * «3d 0h» из `Primitives`. Две записи одного числа на двух экранах читаются как
+ * два разных числа, поэтому обе функции показа (аптайм и МБ→ГБ) переехали в
+ * `Primitives` — туда, где живут остальные форматтеры продукта.
  */
-export const mbToGb = (mb: number) => round1(mb / 1024);
 
 const mapNum = <T>(v: number | null | undefined, f: (n: number) => T): T | null =>
   v === null || v === undefined ? null : f(v);

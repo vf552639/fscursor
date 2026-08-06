@@ -223,6 +223,18 @@ describe("Dashboard — возраст показаний виден на пер
     expect(within(row("web-03", "10.0.0.3")).getByText("never checked")).toBeTruthy();
   });
 
+  it("аптайм подан той же плотной формой, что в списке и на детали", async () => {
+    await screen.findByText("web-01");
+    // «3d 0h», а не «3 days»: у дашборда была своя реализация того же числа, и
+    // один сервер назывался на двух экранах по-разному. Форма плотная —
+    // продукт держит много цифр в строке, и «3 days» рядом с «42%» и «2/4GB»
+    // из неё выпадает.
+    expect(within(row("web-01", "10.0.0.1")).getByText("3d 0h")).toBeTruthy();
+    // Аптайма нет — прочерк, а не «0h»: ноль здесь читался бы как «только что
+    // перезагрузился».
+    expect(within(row("web-03", "10.0.0.3")).getByText("—")).toBeTruthy();
+  });
+
   it("у каждой строки подписан возраст снимка, а протухший помечен", async () => {
     await screen.findByText("web-04");
     expect(within(row("web-01", "10.0.0.1")).getByText("metrics 12m ago")).toBeTruthy();

@@ -1,7 +1,6 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, pctColor, EmptyState, ErrorState, formatUptime, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, pctColor, mbToGb, EmptyState, ErrorState, formatUptime, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
 import { useServers, useCreateServer, type Server } from "../api/servers";
-import { mbToGb } from "./dashboardData";
 import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
