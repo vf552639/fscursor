@@ -2,7 +2,14 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from app.core.validators import (
     FASTPANEL_VERSION_MAX_LEN,
@@ -221,7 +228,13 @@ class ServerMetricsIn(BaseModel):
     Все поля опциональны, и «не прислано» не равно «ноль»: парсер десктопа
     отдаёт `null` там, где не справился, — «не смогли снять» не должно
     выглядеть как «0%». Что при этом происходит с ранее сохранённым значением,
-    решает `server_service.apply_metrics` — там же и обоснование.
+    решает `server_service.apply_metrics` — там же и контракт клиента.
+
+    Но тело без единого установленного поля — 422, а не 200. Пустой запрос
+    ничего не сообщает о сервере и делает ровно одну вещь: двигает
+    `metrics_collected_at`, омолаживая показания прошлого снимка. «Снято только
+    что» поверх недельных чисел — это не пустая операция, а ложь в UI, и
+    отвечать на неё 200-м значило бы завести самый дешёвый способ её получить.
 
     Содержимое строк не нормализуется (в отличие от `provider`, который
     набирает человек): источник — машинный парсер, у него нет «Hetzner » с
@@ -261,6 +274,19 @@ class ServerMetricsIn(BaseModel):
                 f"and free of control characters"
             )
         return v
+
+    @model_validator(mode="after")
+    def _at_least_one_metric(self) -> "ServerMetricsIn":
+        """Тело без единого установленного поля — отказ. См. шапку схемы.
+
+        `model_fields_set`, а не проверка на `None`: снимок, где парсер не смог
+        ничего разобрать, — это законный запрос из двенадцати явных `null`, и
+        он гасит протухшие числа, а не омолаживает их. Отвергается ровно
+        отсутствие полей, а не отсутствие значений.
+        """
+        if not self.model_fields_set:
+            raise ValueError("at least one metric field must be present")
+        return self
 
 
 class ServerResponse(ServerBase):

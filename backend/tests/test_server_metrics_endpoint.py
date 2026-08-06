@@ -377,14 +377,17 @@ async def test_explicit_null_clears_the_metric_but_an_omitted_field_survives():
     write-back'у provision (`test_provision_writeback.py`): сервис патчит
     `model_dump(exclude_unset=True)`.
 
-    Зачем `null` затирает: снимок атомарен. Десктоп присылает `null` там, где
-    парсер не справился, — и если оставить прошлое значение, карточка покажет
-    «снято минуту назад: диск 190 ГБ», где число недельной давности, а время
-    свежее. Протухшее значение под свежей отметкой хуже прочерка.
+    Зачем `null` затирает: по контракту десктоп шлёт снимок целиком и ставит
+    `null` там, где парсер не справился. Оставь мы прошлое значение — карточка
+    показала бы «снято минуту назад: диск 190 ГБ», где число недельной
+    давности. Протухшее значение под свежей отметкой хуже прочерка.
 
-    Зачем отсутствие поля не трогает: тело — не обязательно полный снимок.
-    Клиент, умеющий снять только версию панели, не должен стирать память и
-    диск, которых он не измерял.
+    Зачем отсутствие поля не трогает: это узкий законный случай — дозапись
+    одного показания, а не снимок. Клиент, знающий только версию панели, не
+    должен стирать память и диск, которых он не измерял. Цена такого тела
+    (отметка свежее части полей под ней) и граница, за которой оно теряет
+    смысл, — в `test_body_without_a_single_metric_is_refused` ниже и в
+    `server_service.apply_metrics`.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         server_id = await _login_and_create(c, "met-null")
@@ -405,6 +408,102 @@ async def test_explicit_null_clears_the_metric_but_an_omitted_field_survives():
             "стирает то, чего не измерял"
         )
         assert stored["kernel"] == FULL_METRICS["kernel"]
+
+
+@pytest.mark.asyncio
+async def test_body_without_a_single_metric_is_refused():
+    """Пустое тело — 422, отметка времени на месте. Частичное — законно.
+
+    Обе ветки в одном тесте, потому что они и есть граница принятого решения.
+    Пустой запрос ничего не сообщает о сервере и делает ровно одну вещь:
+    двигает `metrics_collected_at`, из-за чего протухшие числа начинают
+    выглядеть снятыми только что. Это не пустая операция, а ложь в UI, и 200 в
+    ответ был бы самым дешёвым способом её получить.
+
+    Частичное тело (дозапись одного показания) при этом остаётся законным — и
+    служит здесь позитивным контролем: без него 422 могло бы приходить от
+    чего угодно, вплоть до незарегистрированного роута, и первая половина
+    теста была бы зелёной в мире, где эндпоинт не работает вовсе. Отметка при
+    дозаписи двигается сознательно: она означает «когда сервер в последний раз
+    принял показания» (см. `server_service.apply_metrics`).
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        server_id = await _login_and_create(c, "met-empty")
+        r = await c.post(f"/api/servers/{server_id}/metrics", json=FULL_METRICS)
+        assert r.status_code == 200, r.text
+        after_full = await _stored(server_id)
+
+        r = await c.post(f"/api/servers/{server_id}/metrics", json={})
+        assert r.status_code == 422, r.text
+        assert [list(e["loc"]) for e in r.json()["detail"]] == [["body"]], r.text
+        assert await _stored(server_id) == after_full, (
+            "пустое тело сдвинуло отметку времени — протухшие числа "
+            "выглядят снятыми только что"
+        )
+
+        r = await c.post(f"/api/servers/{server_id}/metrics", json={"fastpanel_version": "2.4.0"})
+        assert r.status_code == 200, (
+            f"частичное тело не работает — 422 выше ничего не доказывает: {r.text}"
+        )
+        stored = await _stored(server_id)
+        assert stored["fastpanel_version"] == "2.4.0"
+        assert stored["ram_used_mb"] == FULL_METRICS["ram_used_mb"], "дозапись стёрла соседей"
+        assert stored["metrics_collected_at"] > after_full["metrics_collected_at"], (
+            "приём показаний не обновил отметку времени"
+        )
+
+
+@pytest.mark.asyncio
+async def test_metrics_for_a_nonexistent_server_are_404():
+    """Несуществующий id — 404, а не 500 из-под `setattr` по `None`.
+
+    Соседний случай с чужим сервером этого не покрывает: там строка есть, и
+    отсекает её проверка владельца, а здесь строки нет вовсе.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        server_id = await _login_and_create(c, "met-gone")
+        r = await c.post(f"/api/servers/{server_id + 10_000_000}/metrics", json=FULL_METRICS)
+        assert r.status_code == 404, r.text
+
+
+@pytest.mark.asyncio
+async def test_anonymous_request_is_rejected():
+    """Без сессии — 401: снимок пишет владелец, а не кто угодно с id сервера.
+
+    Идентификаторы серверов последовательные, то есть угадываются с первой
+    попытки. Роут без зависимости `get_current_user_or_401` позволил бы
+    заполнять чужие карточки произвольными числами.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as owner:
+        server_id = await _login_and_create(owner, "met-anon")
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as guest:
+            r = await guest.post(f"/api/servers/{server_id}/metrics", json=FULL_METRICS)
+            assert r.status_code == 401, r.text
+
+        assert (await _stored(server_id))["metrics_collected_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_touches_only_its_own_server():
+    """Снимок одного сервера не задевает соседний сервер того же пользователя.
+
+    Скоуп по `user_id` про это молчит: оба сервера принадлежат одному
+    владельцу, и потерянный `WHERE id = ...` (или запись через `update()` по
+    всей выборке пользователя) прошёл бы проверку владельца целиком.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        target_id = await _login_and_create(c, "met-iso")
+        neighbour_id = await _create_server(c, ip="203.0.113.41")
+
+        r = await c.post(f"/api/servers/{target_id}/metrics", json=FULL_METRICS)
+        assert r.status_code == 200, r.text
+
+        assert (await _stored(target_id))["cpu_usage_pct"] == FULL_METRICS["cpu_usage_pct"]
+        neighbour = await _stored(neighbour_id)
+        assert neighbour == dict.fromkeys(METRIC_COLUMNS), (
+            f"снимок задел соседний сервер: {neighbour}"
+        )
 
 
 @pytest.mark.asyncio
