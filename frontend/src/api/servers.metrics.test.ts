@@ -118,8 +118,11 @@ describe("runCollectMetrics — путь до сервера и обратно",
     const [url, body] = mocks.apiPost.mock.calls[0];
     expect(url).toBe("/servers/7/metrics");
     expect(body).toEqual(METRICS);
-    // Пароль живёт ровно до вызова `ssh_exec` и в тело запроса не попадает.
-    expect(JSON.stringify(body)).not.toContain(SSH_PW);
+    // Пароль живёт ровно до вызова `ssh_exec`. Смотрим на ВСЕ аргументы вызова,
+    // а не на тело: тело выше уже сверено целиком, а вот адрес и конфиг запроса
+    // — нет, и утечка секрета в query-строку или заголовок этой сверкой не
+    // ловится.
+    expect(JSON.stringify(mocks.apiPost.mock.calls)).not.toContain(SSH_PW);
   });
 
   /**

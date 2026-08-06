@@ -72,11 +72,17 @@ const NET_DEV_LINES = 64;
  * `2>/dev/null` на каждом источнике и никаких `&&`: одна недоступная секция не
  * должна ронять весь сбор.
  *
- * Порядок секций выбран на случай, когда вывод доедет не весь. Сначала дешёвые
- * и статические (`nproc`, `mem`, `disk`, `kernel`, `os`) — это те поля, потеря
- * которых заметнее всего на карточке, и они не зависят от паузы. Замеры вокруг
- * `sleep 1` идут последними, потому что обрамлять паузу они обязаны по
- * построению.
+ * Порядок секций держится на том, что МЕЖДУ ДВУМЯ ЗАМЕРАМИ не должно стоять
+ * ничего, кроме самой паузы. Отсюда статика (`nproc`, `mem`, `disk`, `kernel`,
+ * `os`) идёт до них: окажись `df` между замерами, длина окна выросла бы на
+ * время его ответа — а на сервере с протухшим маунтом или медленным диском это
+ * секунды. Само окно мы потом измеряем (разность аптаймов), так что скорость
+ * сети осталась бы верной, но окно перестало бы быть тем «сейчас», о котором
+ * говорит `cpu_usage_pct`: проценты считаются отношением дельт и растянутое
+ * окно усредняют.
+ *
+ * Спасать поля порядком не пытаемся — неполный вывод не спасается вовсе:
+ * без `#sdmp:end` разбор отказывает целиком (см. `parseServerMetrics`).
  *
  * `sleep 1` посередине обязателен. `/proc/stat` — счётчики С МОМЕНТА ЗАГРУЗКИ:
  * одиночный замер даёт среднюю загрузку за всё время работы машины, а не то,
@@ -154,17 +160,25 @@ const OS_PRETTY_KEY = "PRETTY_NAME=";
 const FALLBACK_SAMPLE_SECONDS = 1;
 
 /**
+ * Короче этого пауза не считается паузой. Заказан `sleep 1`; разность аптаймов
+ * в сотую долю секунды означает, что `sleep` не отработал и замеры пошли
+ * подряд, — а делить байты на такое окно значит умножить трафик на сотню.
+ */
+const MIN_SAMPLE_SECONDS = 0.1;
+
+/**
  * Число из чужой строки. `Number`, а не `parseInt`: `parseInt("12abc")` вернул
  * бы 12, то есть превратил бы мусор в правдоподобное показание, а `Number` на
  * том же входе честно даёт NaN → `null`.
  *
- * Запятая переводится в точку заранее: `/proc` пишет точку всегда, но эта же
- * функция разбирает и вывод утилит, который в локали вроде ru_RU приезжает как
- * `12,5`. Для `Number` это NaN, то есть поле молча пропало бы.
+ * Локальной запятой здесь не занимаемся намеренно. Все источники команды —
+ * файлы `/proc` и `df -k`, а они печатают числа сами, без локали. Перевод
+ * `,` в `.` был бы догадкой о происхождении строки и на разделителе тысяч
+ * («12,345») дал бы не отказ, а тихо неверные 12.345.
  */
 function num(token: string | undefined): number | null {
   if (!token) return null;
-  const value = Number(token.replace(",", "."));
+  const value = Number(token);
   return Number.isFinite(value) ? value : null;
 }
 
@@ -179,12 +193,18 @@ function toInt(value: number | null): number | null {
  * Строка в колонку: без управляющих символов и не длиннее колонки. И то, и
  * другое — не косметика: бэкенд отвергает такое значение, а отвергает он ВСЁ
  * тело, то есть один кривой `PRETTY_NAME` стоил бы нам всего снимка.
+ *
+ * Режем по СИМВОЛАМ, а не по единицам UTF-16, которыми меряет `slice`: эмодзи
+ * или иероглиф — это две единицы, и обрыв между ними оставляет половину
+ * суррогатной пары. Такая строка уезжает в JSON, и на той стороне это уже не
+ * внятный 422, а 500 из драйвера, то есть потеря всего снимка. Посимвольная
+ * длина заодно совпадает с той, по которой считает Postgres.
  */
 function toText(value: string | undefined, maxLen: number): string | null {
   if (!value) return null;
   // eslint-disable-next-line no-control-regex
   const clean = value.replace(/[\u0000-\u001f\u007f]/g, "").trim();
-  return clean ? clean.slice(0, maxLen) : null;
+  return clean ? [...clean].slice(0, maxLen).join("") : null;
 }
 
 /**
@@ -211,7 +231,13 @@ function splitSections(lines: string[]): Map<string, string[][]> {
   return sections;
 }
 
-/** Первый непустой замер секции: пустая секция = источника на машине нет. */
+/**
+ * Непустые строки ОДНОГО замера секции — того, что под номером `index`. Пустой
+ * результат = источника на машине нет; к следующему вхождению функция не
+ * переходит намеренно, потому что вхождения — это разные моменты времени, и
+ * подставить вместо замера «после» замер «до» значило бы посчитать дельту с
+ * самой собой.
+ */
 function sampleLines(sections: Map<string, string[][]>, name: string, index = 0): string[] {
   return (sections.get(name)?.[index] ?? []).filter((l) => l.trim() !== "");
 }
@@ -242,17 +268,22 @@ function cpuSample(sections: Map<string, string[][]>, index: number): { total: n
 }
 
 /**
- * Суммарные счётчики байт по интерфейсам, кроме `lo`. Петля — это трафик машины
- * с самой собой (у активной БД он больше внешнего), и в «сколько сервер качает
- * из сети» ему делать нечего.
+ * Счётчики байт ПО ИНТЕРФЕЙСАМ, кроме `lo`. Петля — это трафик машины с самой
+ * собой (у активной БД он больше внешнего), и в «сколько сервер качает из сети»
+ * ему делать нечего.
+ *
+ * По интерфейсам, а не одной суммой, потому что разностью двух сумм трафик
+ * считать НЕЛЬЗЯ: набор интерфейсов между замерами меняется, и подробности — в
+ * `netDelta`.
  *
  * Заголовок `/proc/net/dev` отсекается сам: в его двух строках нет `:`.
  * Интерфейсы сверх `NET_DEV_LINES` до нас не доехали — см. там же.
  */
-function netSample(sections: Map<string, string[][]>, index: number): { rx: number; tx: number } | null {
-  let rx = 0;
-  let tx = 0;
-  let seen = false;
+function netSample(
+  sections: Map<string, string[][]>,
+  index: number,
+): Map<string, { rx: number; tx: number }> | null {
+  const byIface = new Map<string, { rx: number; tx: number }>();
   for (const line of sampleLines(sections, "net", index)) {
     const at = line.indexOf(":");
     if (at < 0) continue;
@@ -261,22 +292,57 @@ function netSample(sections: Map<string, string[][]>, index: number): { rx: numb
     const cols = line.slice(at + 1).trim().split(/\s+/);
     // 8 колонок приёма, дальше передача: `bytes` передачи — девятая.
     if (cols.length < 9) continue;
-    const inBytes = num(cols[0]);
-    const outBytes = num(cols[8]);
-    if (inBytes === null || outBytes === null) continue;
-    rx += inBytes;
-    tx += outBytes;
+    const rx = num(cols[0]);
+    const tx = num(cols[8]);
+    if (rx === null || tx === null) continue;
+    byIface.set(iface, { rx, tx });
+  }
+  return byIface.size ? byIface : null;
+}
+
+/**
+ * Сколько байт прошло за паузу. Считается ПО КАЖДОМУ интерфейсу и только по
+ * тем, что есть в обоих замерах, — разность двух сумм верна лишь при
+ * неизменном наборе устройств, а он меняется, и каждый случай врёт по-своему:
+ *
+ * * интерфейс ИСЧЕЗ (контейнер остановился) — сумма проседает, разность
+ *   отрицательная, и обнуляются обе метрики, хотя по `eth0` всё считалось;
+ * * интерфейс ПОЯВИЛСЯ или въехал в окно `NET_DEV_LINES` из-за перестановки
+ *   списка — его пожизненный счётчик целиком уходит в дельту. На тихой машине
+ *   это рисует гигабиты в секунду, причём в допустимом диапазоне колонки, то
+ *   есть на карточке это выглядит правдой;
+ * * счётчик ПЕРЕПОЛНИЛСЯ (32 бита на нагруженном интерфейсе) — по-хорошему
+ *   теряется он один, а по сумме терялись бы показания целиком.
+ *
+ * Поэтому: пересечение по именам, отрицательная дельта у интерфейса — мимо
+ * него, а не мимо метрики. `null` — ни одного пригодного интерфейса.
+ */
+function netDelta(
+  before: Map<string, { rx: number; tx: number }>,
+  after: Map<string, { rx: number; tx: number }>,
+): { rx: number; tx: number } | null {
+  let rx = 0;
+  let tx = 0;
+  let seen = false;
+  for (const [iface, end] of after) {
+    const start = before.get(iface);
+    if (!start) continue;
+    const dRx = end.rx - start.rx;
+    const dTx = end.tx - start.tx;
+    // Устройство с уехавшим назад счётчиком выбрасываем целиком: переполнение и
+    // перерегистрация роняют обе стороны, и «взять только вторую» — это взять
+    // половину неизвестно чего.
+    if (dRx < 0 || dTx < 0) continue;
+    rx += dRx;
+    tx += dTx;
     seen = true;
   }
   return seen ? { rx, tx } : null;
 }
 
 /** Килобиты в секунду: так это поле рисует карточка (`/1000` → «Mb/s»). */
-function kbps(before: number, after: number, seconds: number): number | null {
-  // Счётчик не убывает; отрицательная дельта означала бы перезагрузку между
-  // замерами (за секунду — нет) или промах парсера. И то, и другое — `null`.
-  if (after < before || seconds <= 0) return null;
-  return toInt(((after - before) * 8) / 1000 / seconds);
+function kbps(bytes: number, seconds: number): number | null {
+  return toInt((bytes * 8) / 1000 / seconds);
 }
 
 /**
@@ -311,10 +377,21 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
 
   const uptimeStart = uptimeAt(sections, 0);
   const uptimeEnd = uptimeAt(sections, 1);
-  const sampled =
-    uptimeStart !== null && uptimeEnd !== null && uptimeEnd > uptimeStart
-      ? uptimeEnd - uptimeStart
-      : FALLBACK_SAMPLE_SECONDS;
+  const elapsed = uptimeStart !== null && uptimeEnd !== null ? uptimeEnd - uptimeStart : null;
+  /**
+   * Длина паузы в секундах, `null` — «мерить нечем». Три исхода, и все три
+   * про то, что делить байты на выдуманное время нельзя:
+   *
+   * * оба замера аптайма на месте и разошлись хотя бы на `MIN_SAMPLE_SECONDS` —
+   *   вот она, фактическая длина;
+   * * `/proc/uptime` не отдался вовсе — верим заказанному `sleep 1`, другого
+   *   источника у нас нет;
+   * * замеры разошлись на сотую долю секунды — значит паузы НЕ БЫЛО (`sleep`
+   *   не отработал), и подстановка единицы завысила бы скорость в сотню раз.
+   *   Прочерк честнее.
+   */
+  const sampleSeconds =
+    elapsed === null ? FALLBACK_SAMPLE_SECONDS : elapsed >= MIN_SAMPLE_SECONDS ? elapsed : null;
 
   const cpuBefore = cpuSample(sections, 0);
   const cpuAfter = cpuSample(sections, 1);
@@ -328,6 +405,7 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
 
   const netBefore = netSample(sections, 0);
   const netAfter = netSample(sections, 1);
+  const net = netBefore && netAfter && sampleSeconds !== null ? netDelta(netBefore, netAfter) : null;
 
   const mem = new Map<string, number | null>();
   for (const line of sampleLines(sections, "mem")) {
@@ -350,9 +428,15 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
     // capacity mountpoint`. Заголовок отсеется сам: там на этих местах слова.
     const total = num(parts[parts.length - 5]);
     const used = num(parts[parts.length - 4]);
-    if (total === null || used === null) continue;
+    // Ноль в размере корня — не показание, а совпавшая по форме строка шума.
+    if (total === null || used === null || total <= 0) continue;
     diskTotalKb = total;
     diskUsedKb = used;
+    // ПЕРВАЯ подходящая строка, а не последняя: спрашивали мы про один маунт,
+    // и всё, что за ним, — чужой текст в секции. Перенос длинного имени
+    // устройства это не ломает (числа в таком выводе всё равно во второй
+    // строке), а строку-шум с пятью числами в хвосте — да.
+    break;
   }
 
   // Не `split("=")`: второй аргумент `split` в JS — предел ДЛИНЫ МАССИВА, а не
@@ -362,7 +446,10 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
   const osValue = osLine?.trim().slice(OS_PRETTY_KEY.length).replace(/^["']|["']$/g, "");
 
   const metrics: ServerMetricsIn = {
-    uptime_seconds: toInt(uptimeStart),
+    // Второй замер как запасной: он про ту же машину и отличается на длину
+    // паузы, а гасить аптайм из-за пустой первой секции — терять поле на
+    // пустом месте.
+    uptime_seconds: toInt(uptimeStart ?? uptimeEnd),
     cpu_usage_pct: cpuUsage,
     cpu_count: toInt(num(sampleLines(sections, "nproc")[0]?.trim())),
     ram_used_mb:
@@ -374,8 +461,8 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
     // ровно это (`df -BG`).
     disk_used_gb: toInt(diskUsedKb === null ? null : diskUsedKb / 1024 / 1024),
     disk_total_gb: toInt(diskTotalKb === null ? null : diskTotalKb / 1024 / 1024),
-    net_in_kbps: netBefore && netAfter ? kbps(netBefore.rx, netAfter.rx, sampled) : null,
-    net_out_kbps: netBefore && netAfter ? kbps(netBefore.tx, netAfter.tx, sampled) : null,
+    net_in_kbps: net && sampleSeconds !== null ? kbps(net.rx, sampleSeconds) : null,
+    net_out_kbps: net && sampleSeconds !== null ? kbps(net.tx, sampleSeconds) : null,
     os_pretty: toText(osValue, OS_PRETTY_MAX_LEN),
     kernel: toText(sampleLines(sections, "kernel")[0], KERNEL_MAX_LEN),
   };
