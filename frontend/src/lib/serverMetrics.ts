@@ -405,6 +405,9 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
 
   const netBefore = netSample(sections, 0);
   const netAfter = netSample(sections, 1);
+  // Решение принимается здесь: без паузы дельту не считаем вовсе. Тот же
+  // `sampleSeconds !== null` ниже ничего не решает — он сужает тип для
+  // компилятора, которому неоткуда узнать, что `net` без паузы уже `null`.
   const net = netBefore && netAfter && sampleSeconds !== null ? netDelta(netBefore, netAfter) : null;
 
   const mem = new Map<string, number | null>();
@@ -423,19 +426,23 @@ export function parseServerMetrics(output: string): ServerMetricsIn | null {
   for (const line of sampleLines(sections, "disk")) {
     const parts = line.trim().split(/\s+/);
     if (parts.length < 5) continue;
+    // Спрашивали мы ровно про один маунт — вот он и есть дискриминатор: у
+    // нужной строки последний токен `/`, у заголовка `on`, у чужого маунта его
+    // точка монтирования, у строки-шума что угодно ещё. Порядком строк это не
+    // решается в принципе: шум приходит и до записи, и после неё, а числа в нём
+    // бывают правдоподобные — «диск 0 ГБ» в колонке хуже прочерка.
+    if (parts[parts.length - 1] !== "/") continue;
     // Считаем С КОНЦА: `df -P` гарантирует одну строку на запись, но имя
     // устройства бывает с пробелами, а хвост фиксирован — `blocks used avail
-    // capacity mountpoint`. Заголовок отсеется сам: там на этих местах слова.
+    // capacity mountpoint`.
     const total = num(parts[parts.length - 5]);
     const used = num(parts[parts.length - 4]);
-    // Ноль в размере корня — не показание, а совпавшая по форме строка шума.
+    // Нулевой корень отдают некоторые псевдо-ФС; показанием это не является.
     if (total === null || used === null || total <= 0) continue;
     diskTotalKb = total;
     diskUsedKb = used;
-    // ПЕРВАЯ подходящая строка, а не последняя: спрашивали мы про один маунт,
-    // и всё, что за ним, — чужой текст в секции. Перенос длинного имени
-    // устройства это не ломает (числа в таком выводе всё равно во второй
-    // строке), а строку-шум с пятью числами в хвосте — да.
+    // Первая подходящая строка: две записи про `/` бывают (bind-mount поверх
+    // корня), и брать из них последнюю — значит выбирать наугад.
     break;
   }
 
