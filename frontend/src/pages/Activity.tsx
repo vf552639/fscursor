@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Card, StatCard, Badge, Btn, Sel, fmtDT } from "../components/ui/Primitives";
-import { useTaskLogs } from "../api/tasks";
+import { useTaskLogs, type TaskStatus } from "../api/tasks";
 import { useServers } from "../api/servers";
 import { useAuditLog } from "../api/audit";
 import TaskProgressModal from "../components/TaskProgressModal";
@@ -32,6 +32,13 @@ export default function Activity(){
   // означает «сделано не всё». Жёлтый: не провал, но и не «✓».
   const stMap: Record<string, string[]>={installed:["green","✓ Installed"],ok:["green","✓ OK"],success:["green","✓ Success"],failed:["red","✕ Failed"],error:["red","✕ Error"],partial:["yellow","◐ Partial"],pending:["yellow","⏳ Pending"],running:["blue","⚙ Running"]};
   const tMap: Record<string, string>={install_fastpanel:"⚡ FastPanel Install",set_nameservers:"🔗 Set Nameservers"};
+  // Пункты фильтра — типизированным списком, а не разметкой вручную. Тип здесь
+  // рабочий, а не украшение: `TaskStatus` перечисляет `TaskLogStatus` бэкенда, и
+  // забытое в нём значение (ровно так и вышло с `partial`) теперь не
+  // компилируется, вместо того чтобы молча не иметь пункта.
+  const STATUS_FILTERS: [TaskStatus, string][] = [
+    ["success","Success"],["partial","Partial"],["failed","Failed"],["pending","Pending"],["running","Running"],
+  ];
   const filtTasks=taskLogs.filter(l=>(!fType||l.type===fType)&&(!fStat||l.status===fStat));
   const Th=({children}: any)=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}>{children}</th>;
   
@@ -74,7 +81,7 @@ export default function Activity(){
           {/* «Partial» — полноправный пункт фильтра: деградировавшие прогоны
               ищут именно поштучно («какие серверы не проверились»), а без пункта
               выбрать их можно было только глазами по всей таблице. */}
-          <Sel value={fStat} onChange={(e: any)=>setFS(e.target.value)}><option value="">All Statuses</option><option value="success">Success</option><option value="partial">Partial</option><option value="failed">Failed</option><option value="pending">Pending</option><option value="running">Running</option></Sel>
+          <Sel value={fStat} onChange={(e: any)=>setFS(e.target.value)}><option value="">All Statuses</option>{STATUS_FILTERS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</Sel>
         </div>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr>{["#","Type","Server","Status","Log Preview","Date",""].map(h=><Th key={h}>{h}</Th>)}</tr></thead>

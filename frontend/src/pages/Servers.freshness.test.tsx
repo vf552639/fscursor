@@ -160,6 +160,17 @@ const SERVERS = [
     last_check_ok: true,
     metrics_collected_at: ago(10 * MINUTE),
   },
+  // Заведён руками по SSH и отвечает. Колонка так и осталась `new` — вывести
+  // её оттуда в продукте некому, — но монитор машину опросил и получил ответ.
+  {
+    ...BASE,
+    id: 9,
+    name: "web-09",
+    ip_address: "10.0.0.9",
+    status: "new",
+    last_check_at: ago(HOUR),
+    last_check_ok: true,
+  },
   // Снимок есть и он свежий, но процент CPU из него не разобрался. Снимком он
   // быть не перестал: диск в нём настоящий, и «метрик нет» про него — ложь.
   {
@@ -324,6 +335,19 @@ describe("Servers — статус не врёт", () => {
     expect(badge.style.background).toBe("rgb(243, 244, 246)");
   });
 
+  it("ответивший сервер показан живым, даже если в колонке БД у него «new»", async () => {
+    await screen.findByText("web-09");
+    // `new` — это состояние, из которого в продукте нет выхода: `active` в
+    // колонку пишется ровно при создании сервера с уже установленной панелью.
+    // Пока колонка была сильнее ответа монитора, положительный ответ не был
+    // виден вообще нигде — то есть падение продукт показывал, а работу нет.
+    const badge = within(card("web-09")).getByText("active");
+    expect(within(card("web-09")).queryByText("new")).toBeNull();
+    // Зелёный, а не серый фон «unchecked»/«new»: цвет здесь и есть ответ.
+    expect(badge.style.background).toBe("rgb(240, 253, 244)");
+    expect(within(card("web-09")).getByText("Last check: 1h ago")).toBeTruthy();
+  });
+
   it("фильтр статусов знает про непроверенные и действительно их отбирает", async () => {
     const table = await showTable();
     const filter = screen.getByDisplayValue("Status: All") as HTMLSelectElement;
@@ -333,9 +357,15 @@ describe("Servers — статус не врёт", () => {
     expect(tableNames(table)).toEqual(["web-01", "web-08"]);
 
     // И обратное: «active» их больше не содержит — иначе выборка «живые»
-    // по-прежнему включала бы тех, о ком мы ничего не знаем.
+    // по-прежнему включала бы тех, о ком мы ничего не знаем. Зато содержит
+    // web-09: колонка у него «new», но машина ответила.
     fireEvent.change(filter, { target: { value: "active" } });
-    expect(tableNames(table)).toEqual(["web-02", "web-03", "web-05", "web-06"]);
+    expect(tableNames(table)).toEqual(["web-02", "web-03", "web-05", "web-09", "web-06"]);
+
+    // И фильтр «new» его больше не находит: он там был единственным местом,
+    // где ответивший сервер вообще попадался на глаза.
+    fireEvent.change(filter, { target: { value: "new" } });
+    expect(tableNames(table)).toEqual([]);
   });
 });
 

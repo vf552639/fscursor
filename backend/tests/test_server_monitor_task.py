@@ -37,6 +37,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy import func, select, text
 
+from app.api.routes.tasks import TERMINAL_TASK_STATUSES
 from app.auth.models import SyncState, User
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
@@ -105,11 +106,31 @@ class _World:
         self.user_id = user_id
         self.log_watermark = log_watermark
         self.ownerless_server_ids: list[int] = []
+        self.extra_user_ids: list[uuid.UUID] = []
 
-    async def server(self, host: str, *, owner: bool = True, **fields) -> int:
+    async def another_user(self) -> uuid.UUID:
+        """Второй владелец в том же прогоне — и он тоже уберётся за собой.
+
+        Нужен ровно для одного вопроса: журнал пишется по строке на владельца,
+        и с одним пользователем «своя строка» неотличима от «одна общая».
+        """
+        async with AsyncSessionLocal() as session:
+            user = User(
+                email=f"srvmon-{uuid.uuid4().hex[:8]}@example.com",
+                salt=b"\x00" * 16,
+                auth_key_hash=b"\x01" * 32,
+            )
+            session.add(user)
+            await session.commit()
+            self.extra_user_ids.append(user.id)
+            return user.id
+
+    async def server(
+        self, host: str, *, owner: bool = True, owner_id: uuid.UUID = None, **fields
+    ) -> int:
         async with AsyncSessionLocal() as session:
             server = Server(
-                user_id=self.user_id if owner else None,
+                user_id=(owner_id or self.user_id) if owner else None,
                 name=f"srv-{host.split('.')[0]}",
                 ip_address=host,
                 ssh_port=22,
@@ -137,7 +158,7 @@ class _World:
         """
         assert isinstance(probe, _Probe), "в прогон уехала заглушка мимо _Probe"
         return await server_monitor_task._monitor_servers(
-            probe=probe, user_ids=[self.user_id]
+            probe=probe, user_ids=[self.user_id, *self.extra_user_ids]
         )
 
     async def reload(self, server_id: int) -> Server:
@@ -206,10 +227,11 @@ def unscoped_run_is_a_test_failure(monkeypatch):
 async def world():
     """Пользователь теста и уборка за прогоном.
 
-    Пользователь уносит за собой серверы и уведомления по FK CASCADE. Не
-    уносит двух вещей: серверов без владельца (FK там нет) и `task_logs`
-    задачи (они пишутся с `user_id = NULL`), поэтому и то и другое убирается
-    отдельно.
+    Пользователь уносит за собой серверы, уведомления и строки журнала по FK
+    CASCADE. Не уносит серверов без владельца (FK там нет), поэтому они
+    убираются отдельно. Отдельная уборка `task_logs` оставлена намеренно: она
+    подметёт за прогоном и в том случае, если журнал однажды снова начнут
+    писать с `user_id = NULL`, — то есть тестовая БД не засорится незаметно.
     """
     async with AsyncSessionLocal() as session:
         user = User(
@@ -227,7 +249,9 @@ async def world():
     yield state
 
     async with AsyncSessionLocal() as session:
-        await session.execute(sa_delete(User).where(User.id == state.user_id))
+        await session.execute(
+            sa_delete(User).where(User.id.in_([state.user_id, *state.extra_user_ids]))
+        )
         if state.ownerless_server_ids:
             await session.execute(
                 sa_delete(Server).where(Server.id.in_(state.ownerless_server_ids))
@@ -264,7 +288,8 @@ async def test_probe_phase_is_parallel_but_bounded_by_the_semaphore():
     действительно живут одновременно.
     """
     limit = 4
-    targets = [(i, f"h{i}.probe.invalid", 22) for i in range(12)]
+    owner = uuid.uuid4()
+    targets = [(i, f"h{i}.probe.invalid", 22, owner) for i in range(12)]
     inflight = 0
     peak = 0
 
@@ -292,7 +317,8 @@ async def test_probe_results_are_keyed_by_server_not_by_arrival_order():
     раздавать по порядку прибытия, живой сервер получит чужую ошибку и уедет
     в «упал» — самый дорогой из возможных сбоев этой фичи.
     """
-    targets = [(1, "slow.probe.invalid", 22), (2, "fast.probe.invalid", 22)]
+    owner = uuid.uuid4()
+    targets = [(1, "slow.probe.invalid", 22, owner), (2, "fast.probe.invalid", 22, owner)]
 
     async def _by_host(host: str, port: int):
         if host == "slow.probe.invalid":
@@ -313,7 +339,8 @@ async def test_a_crashing_probe_does_not_take_down_the_others():
     неё. Один недосмотр там — и `gather` унёс бы весь прогон, то есть
     мониторинг всех серверов пользователя, из-за одной кривой строки.
     """
-    targets = [(1, "boom.probe.invalid", 22), (2, "ok.probe.invalid", 22)]
+    owner = uuid.uuid4()
+    targets = [(1, "boom.probe.invalid", 22, owner), (2, "ok.probe.invalid", 22, owner)]
 
     async def _explodes(host: str, port: int):
         if host == "boom.probe.invalid":
@@ -403,6 +430,65 @@ async def test_run_applies_every_result_and_logs_the_statistics(world):
     assert log.entity_type == "system"
     assert log.status == "success"
     assert log.log_text == "checked 4 servers: 2 down, 1 up"
+    # Адресат — владелец серверов. Без него строка не доедет ни до страницы
+    # Activity (`GET /tasks` фильтрует `user_id = :current_user`), ни до
+    # десктопа (`/sync/changes` выбирает по владельцу): прогон отчитался бы
+    # в пустоту, а весь UI под статус `partial` остался бы мёртвым кодом.
+    assert log.user_id == world.user_id, "журнал прогона некому прочитать"
+
+
+async def test_every_owner_gets_his_own_row_with_his_own_numbers(world):
+    """Два владельца в одном прогоне — две строки журнала, у каждой свои числа.
+
+    С одним пользователем «строка на владельца» неотличима от «одна общая», и
+    подмена прошла бы незамеченной. Числа тоже нарочно разные: сумма по всему
+    прогону («checked 3») выглядела бы правдоподобно в обеих строках, но она —
+    ответ на вопрос, которого человек не задавал, и про чужие машины.
+
+    Статус тоже свой: у второго владельца сервер сбойный, и его строка обязана
+    быть `partial`, тогда как у первого в тот же прогон — `success`. Общая
+    строка обязана была бы выбрать одно из двух и соврать одному из них.
+    """
+    other = await world.another_user()
+    mine_a, mine_b, his = _host(), _host(), _host()
+    await world.server(mine_a, last_check_ok=True)
+    await world.server(mine_b, last_check_ok=True)
+    await world.server(his, owner_id=other, last_check_ok=True)
+
+    totals = await world.run(
+        probe=_Probe({mine_a: (True, None), mine_b: (True, None), his: RuntimeError("boom")})
+    )
+
+    assert totals["checked"] == 2 and totals["failed"] == 1, "итог по прогону разошёлся"
+
+    rows = {log.user_id: log for log in await world.logs()}
+    assert set(rows) == {world.user_id, other}, f"адресаты строк: {list(rows)}"
+    assert rows[world.user_id].log_text == "checked 2 servers: 0 down, 0 up"
+    assert rows[world.user_id].status == "success"
+    assert "checked 0 servers" in rows[other].log_text
+    assert "1 not checked" in rows[other].log_text
+    assert rows[other].status == "partial"
+    # И причина сбоя — в строке того, у кого он случился, а не у соседа.
+    assert "RuntimeError: boom" in rows[other].log_text
+    assert "RuntimeError" not in rows[world.user_id].log_text
+
+
+async def test_the_journal_row_reaches_the_desktop_too(world):
+    """У строки журнала поднят `sync_version`.
+
+    `task_logs` входит в `SCOPED_MODELS` синхронизации, а `/sync/changes?since=`
+    выбирает по `sync_version > since`. Со стоящим на нуле полем строка
+    добралась бы только до веба, а десктоп увидел бы её лишь при полной
+    пересинхронизации — то есть, возможно, никогда.
+    """
+    host = _host()
+    await world.server(host, last_check_ok=True)
+
+    await world.run(probe=_Probe({host: (True, None)}))
+
+    log = (await world.logs())[0]
+    assert log.sync_version > 0, "строка журнала не попадёт в инкрементальную выдачу"
+    assert await world.sync_version() >= log.sync_version
 
 
 async def test_check_results_reach_the_desktop_via_sync_version(world):
@@ -428,7 +514,10 @@ async def test_check_results_reach_the_desktop_via_sync_version(world):
     ]
     assert all(v > version_before for v in versions), f"версия не поднялась: {versions}"
     assert len(set(versions)) == 2, "оба сервера получили одну и ту же версию"
-    assert await world.sync_version() == max(versions)
+    # Ровно +1 сверх последнего сервера — строка журнала прогона: она тоже
+    # синхронизируемая сущность и берёт следующую версию (см. `_write_task_logs`
+    # и `test_the_journal_row_reaches_the_desktop_too`).
+    assert await world.sync_version() == max(versions) + 1
 
 
 async def test_a_broken_probe_does_not_stop_the_rest_of_the_run(world, monkeypatch):
@@ -441,7 +530,7 @@ async def test_a_broken_probe_does_not_stop_the_rest_of_the_run(world, monkeypat
     Заодно проверяется, что от сбоя остаётся след. `probe` по контракту не
     бросает — значит, исключение отсюда всегда баг, и схлопнуть его в одно
     число в журнале («200 not checked») значит остаться без единой зацепки:
-    трейс нужен в `logs/errors.log`, класс ошибки — в самом журнале.
+    трейс нужен в stdout воркера, класс ошибки — в самом журнале.
     """
     logged: list[BaseException] = []
     monkeypatch.setattr(
@@ -501,8 +590,11 @@ async def test_a_write_failure_on_one_server_keeps_the_rest_of_the_run(world, mo
     handled: list[int] = []
 
     async def _touch(db, user_id, entity):
-        handled.append(entity.id)
-        if entity.id == poisoned_id:
+        # Только серверы: через ту же функцию проходит и строка журнала в конце
+        # прогона, а она к порядку записи серверов отношения не имеет.
+        if isinstance(entity, Server):
+            handled.append(entity.id)
+        if getattr(entity, "id", None) == poisoned_id:
             await db.execute(text("SELECT 1 / 0"))
         return await real_touch(db, user_id, entity)
 
@@ -532,19 +624,20 @@ async def test_a_write_failure_on_one_server_keeps_the_rest_of_the_run(world, mo
     assert broken.sync_version == 0, "недописанный сервер всё-таки поднял версию"
 
 
-async def test_a_run_without_servers_logs_checked_zero(world):
-    """Ни одного своего сервера: строка TaskLog есть, исключения нет.
+async def test_a_run_without_servers_writes_nobody_a_journal_row(world):
+    """Ни одного своего сервера: прогон не падает и не пишет никому ничего.
 
-    Пустой прогон — обычное состояние свежего аккаунта, и он не должен ни
-    падать, ни оставлять расписание без следа в журнале.
+    Пустой прогон — обычное состояние свежего аккаунта. Раньше он оставлял
+    общую строку «checked 0», и она была безобидна ровно потому, что её никто
+    не видел. Теперь строка адресная, и «checked 0 servers: 0 down, 0 up»
+    приходило бы человеку без серверов четыре раза в сутки, вечно, вытесняя со
+    страницы Activity всё осмысленное.
     """
     stats = await world.run(probe=_Probe({}))
 
     assert stats["checked"] == 0
     assert stats["down"] == 0 and stats["up"] == 0
-    logs = await world.logs()
-    assert len(logs) == 1
-    assert "checked 0" in logs[0].log_text
+    assert await world.logs() == [], "человеку без серверов написали отчёт ни о чём"
 
 
 async def test_the_selection_takes_owned_servers_and_only_the_asked_owners(
@@ -752,7 +845,7 @@ async def test_the_write_phase_goes_in_id_order_whatever_the_probe_order(world, 
     """
     hosts = [_host() for _ in range(3)]
     ids = [await world.server(host, last_check_ok=True) for host in hosts]
-    targets = [(server_id, host, 22) for server_id, host in zip(ids, hosts)]
+    targets = [(server_id, host, 22, world.user_id) for server_id, host in zip(ids, hosts)]
     results = {server_id: (True, None) for server_id in reversed(ids)}
     handled: list[int] = []
     real_touch = server_monitor_task.touch_entity_sync
@@ -766,7 +859,7 @@ async def test_the_write_phase_goes_in_id_order_whatever_the_probe_order(world, 
     async with AsyncSessionLocal() as session:
         stats, _errors = await server_monitor_task._apply_results(session, results, targets)
 
-    assert stats["checked"] == 3
+    assert stats[world.user_id]["checked"] == 3
     assert handled == sorted(ids), f"порядок записи задан не id, а порядком исходов: {handled}"
 
 
@@ -798,18 +891,23 @@ async def test_a_failing_rollback_does_not_escape_the_handler(monkeypatch):
 
 
 def test_a_clean_run_is_logged_as_success():
-    """Прогон без сбоев: статус `success` и все три числа в тексте.
+    """Прогон без сбоев: статус `success`, все три числа в тексте и адресат.
 
     Юнит поверх прогона по БД: тот показывает, что строка пишется и статус
     верен, а здесь дёшево фиксируется точный текст — числа в журнале и есть
     всё, что человек увидит о прогоне.
     """
-    log = server_monitor_task._build_task_log({"checked": 7, "down": 2, "up": 1, "undelivered": 0, "failed": 0})
+    owner = uuid.uuid4()
+    log = server_monitor_task._build_task_log(
+        {"checked": 7, "down": 2, "up": 1, "undelivered": 0, "failed": 0}, user_id=owner
+    )
 
     assert log.status == "success"
     assert log.task_type == "server_monitor"
     assert log.entity_type == "system"
-    assert log.user_id is None
+    # Без адресата строку не отдаст ни `GET /tasks`, ни `/sync/changes`: оба
+    # фильтруют по владельцу, и `user_id = NULL` не проходит ни один из них.
+    assert log.user_id == owner
     assert log.log_text == "checked 7 servers: 2 down, 1 up"
 
 
@@ -819,10 +917,38 @@ def test_a_run_with_failures_is_not_logged_as_success():
     `probe` по контракту не бросает, поэтому ненулевой `failed` означает баг,
     а не фон. Спрятать его под `success` — значит не узнать о нём никогда.
     """
-    log = server_monitor_task._build_task_log({"checked": 5, "down": 0, "up": 0, "undelivered": 0, "failed": 2})
+    log = server_monitor_task._build_task_log(
+        {"checked": 5, "down": 0, "up": 0, "undelivered": 0, "failed": 2},
+        user_id=uuid.uuid4(),
+    )
 
     assert log.status == "partial"
     assert "2 not checked" in log.log_text
+
+
+def test_the_degraded_status_ends_the_sse_stream():
+    """Статус, который пишет мониторинг, закрывает поток `/tasks/{id}/stream`.
+
+    Связка производителя с потребителем, и проверять её надо именно связкой:
+    `partial` завели в `TaskLogStatus`, показали на странице Activity, но в
+    множество терминальных статусов SSE-обработчика не донесли. Поток по такой
+    задаче не завершался бы никогда — `sleep(0.5)` крутился бы до отключения
+    клиента, держа соединение и сессию к БД на каждый тик.
+    """
+    degraded = server_monitor_task._build_task_log(
+        {"checked": 5, "down": 0, "up": 0, "undelivered": 0, "failed": 2},
+        user_id=uuid.uuid4(),
+    )
+    clean = server_monitor_task._build_task_log(
+        {"checked": 5, "down": 0, "up": 0, "undelivered": 0, "failed": 0},
+        user_id=uuid.uuid4(),
+    )
+
+    assert degraded.status in TERMINAL_TASK_STATUSES
+    assert clean.status in TERMINAL_TASK_STATUSES
+    # И обратное: незавершённые статусы поток не закрывают, иначе он обрывался
+    # бы на первом же тике, ничего не показав.
+    assert TERMINAL_TASK_STATUSES.isdisjoint({"pending", "running"})
 
 
 # --- регистрация задачи ------------------------------------------------------

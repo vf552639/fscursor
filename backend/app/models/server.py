@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -68,7 +68,14 @@ class Server(Base, TimestampMixin):
     # втором промахе подряд, и без счётчика этот порог хранить негде. В
     # `ServerResponse` намеренно не выносится — фронт читает результат
     # (`last_check_ok`/`last_check_error`), а не то, как он набирался.
-    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # `server_default` дублирует миграцию намеренно: без него ближайший
+    # `alembic revision --autogenerate` увидит расхождение модели с БД и
+    # предложит СНЯТЬ дефолт — тот самый, что поставлен в
+    # `016_server_consecutive_failures` ради безопасного backfill и ради того,
+    # чтобы вставка, не знающая про колонку, получала 0, а не отказ по NOT NULL.
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
 
     domains: Mapped[list["Domain"]] = relationship(back_populates="server")
 

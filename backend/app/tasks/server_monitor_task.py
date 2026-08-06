@@ -36,6 +36,18 @@
 (`return_exceptions=True`), и запись (`try` вокруг каждого сервера) переживают
 падение отдельного сервера, а число таких случаев уезжает в `TaskLog`.
 
+**Журнал — по строке на владельца, а не одной общей.** Обе двери, за которыми
+человек видит `task_logs`, фильтруют по владельцу: `GET /tasks` — условием
+`user_id = :current_user`, `/sync/changes` — тем же полем. Общая строка с
+`user_id = NULL` не видна поэтому никому: ни пользователю, ни оператору
+(админского интерфейса к таблице в продукте нет). Прогон, честно
+посчитавший «checked 12: 1 down», отчитывался бы в пустоту, а весь UI под
+статус `partial` на странице Activity был бы мёртвым кодом по построению.
+Статистика в строке — по серверам её адресата: «checked 12» имеет смысл
+только про свои машины. Итог по всем владельцам сразу нужен не человеку в UI,
+а оператору в момент разбора, и уходит он туда, где оператор и смотрит, — в
+лог воркера (`logger.info` в `_monitor_servers`).
+
 Выборку можно сузить до конкретных владельцев (`user_ids`); расписание зовёт
 без сужения, то есть по всем. Параметр заведён ради тестов, и почему это
 защита, а не удобство — в `_load_targets`.
@@ -63,13 +75,16 @@ logger = logging.getLogger(__name__)
 # Сколько серверов опрашиваем одновременно.
 PROBE_CONCURRENCY = 20
 
-# Сколько символов чужой ошибки уносим в `log_text`. Трейс лежит в
-# `logs/errors.log`, здесь нужен только опознавательный знак.
+# Сколько символов чужой ошибки уносим в `log_text`. Трейс уходит в stdout
+# воркера через штатный логгер (`logger.exception` ниже), здесь нужен только
+# опознавательный знак.
 MAX_LOGGED_ERROR_LEN = 120
 
-# `(id сервера, хост, порт)` — всё, что нужно опросу. ORM-объекты в фазу
-# опроса не едут: сессия к этому моменту уже закрыта.
-Target = Tuple[int, str, int]
+# `(id сервера, хост, порт, владелец)` — всё, что нужно опросу и адресации
+# журнала. ORM-объекты в фазу опроса не едут: сессия к этому моменту уже
+# закрыта. Владелец берётся здесь же, потому что журнал пишется по строке на
+# владельца, а к моменту записи строки сервера может уже не быть.
+Target = Tuple[int, str, int, uuid.UUID]
 ProbeResult = Tuple[bool, Optional[str]]
 # Сама проверка вынесена параметром: тесты подменяют её заглушкой и не
 # открывают реальных сокетов — тот же приём, что и у `probe` с её `connect`.
@@ -93,13 +108,13 @@ async def _load_targets(
     уведомления. Ограничение выборки делает чужие строки недостижимыми
     структурно, а не по счастливому стечению поведения проверяемого кода.
     """
-    stmt = select(Server.id, Server.ip_address, Server.ssh_port).where(
+    stmt = select(Server.id, Server.ip_address, Server.ssh_port, Server.user_id).where(
         Server.user_id.isnot(None)
     )
     if user_ids is not None:
         stmt = stmt.where(Server.user_id.in_(user_ids))
     rows = (await session.execute(stmt)).all()
-    return [(row.id, row.ip_address, row.ssh_port) for row in rows]
+    return [(row.id, row.ip_address, row.ssh_port, row.user_id) for row in rows]
 
 
 async def _probe_all(
@@ -125,10 +140,10 @@ async def _probe_all(
             return await probe(host, port)
 
     outcomes = await asyncio.gather(
-        *(_one(host, port) for _server_id, host, port in targets),
+        *(_one(host, port) for _server_id, host, port, _owner in targets),
         return_exceptions=True,
     )
-    server_ids = [server_id for server_id, _host, _port in targets]
+    server_ids = [server_id for server_id, _host, _port, _owner in targets]
     return dict(zip(server_ids, outcomes))
 
 
@@ -173,11 +188,25 @@ async def _check_landed(
     return landed_at is not None and landed_at >= attempted_at
 
 
+def _empty_stats() -> dict[str, int]:
+    """Нулевые счётчики одного прогона — заводятся на каждого владельца."""
+    return {"checked": 0, "down": 0, "up": 0, "undelivered": 0, "failed": 0}
+
+
+def _totals(stats: dict[uuid.UUID, dict[str, int]]) -> dict[str, int]:
+    """Сумма счётчиков по всем владельцам — итог прогона для оператора."""
+    totals = _empty_stats()
+    for owner_stats in stats.values():
+        for key, value in owner_stats.items():
+            totals[key] += value
+    return totals
+
+
 async def _apply_results(
     session: AsyncSession,
     results: dict[int, Union[ProbeResult, BaseException]],
     targets: Sequence[Target],
-) -> Tuple[dict[str, int], list[str]]:
+) -> Tuple[dict[uuid.UUID, dict[str, int]], dict[uuid.UUID, list[str]]]:
     """Записать исходы опроса — последовательно, по одному коммиту на сервер.
 
     Строка перечитывается заново: между опросом и записью прошли минуты, за
@@ -204,12 +233,24 @@ async def _apply_results(
     Проверять «а изменилось ли что-нибудь» не нужно: `apply_check_result`
     всегда двигает `last_check_at`, то есть применённый результат — это всегда
     изменение.
+
+    Счётчики и ошибки — по владельцу, потому что журнал пишется по строке на
+    владельца (см. шапку файла). Адресат берётся из `targets`, то есть тот, чьим
+    сервер был на момент выборки, а не на момент записи: строки к этому времени
+    может уже не быть (удалили, лишили владельца), а прогон затевался для того,
+    кому она принадлежала, — и «checked + failed» сходится с числом опрошенных
+    только при таком счёте. Поля же сервера пишутся, как и раньше, по
+    перечитанной строке: журнал и данные отвечают на разные вопросы.
     """
-    stats = {"checked": 0, "down": 0, "up": 0, "undelivered": 0, "failed": 0}
-    errors: list[str] = []
+    owner_of = {server_id: owner for server_id, _host, _port, owner in targets}
+    # Заводится на КАЖДОГО владельца из выборки, а не по мере первой удачи:
+    # прогон, у которого всё сломалось, обязан оставить своему человеку строку
+    # именно об этом, а не промолчать.
+    stats = {owner: _empty_stats() for owner in owner_of.values()}
+    errors: dict[uuid.UUID, list[str]] = {owner: [] for owner in owner_of.values()}
     probed_address = {
         server_id: (server_monitor.clean_host(host), port)
-        for server_id, host, port in targets
+        for server_id, host, port, _owner in targets
     }
 
     applicable: dict[int, ProbeResult] = {}
@@ -221,8 +262,8 @@ async def _apply_results(
             logger.error(
                 "server_monitor: опрос сервера %s упал", server_id, exc_info=result
             )
-            errors.append(_error_label(result))
-            stats["failed"] += 1
+            errors[owner_of[server_id]].append(_error_label(result))
+            stats[owner_of[server_id]]["failed"] += 1
         else:
             applicable[server_id] = result
 
@@ -237,6 +278,11 @@ async def _apply_results(
     # `MissingGreenlet` на первом же обращении к полю.
     for server_id in sorted(applicable):
         ok, error = applicable[server_id]
+        # Счётчики этого сервера — счётчики его владельца по выборке (см.
+        # разбор выше). Достаются один раз на итерацию: ниже к ним обращаются
+        # из полудюжины мест, и вложенный `stats[owner_of[...]][...]` в каждом
+        # читался бы хуже, чем считался.
+        owner_stats = stats[owner_of[server_id]]
         attempted_at = datetime.now(timezone.utc)
         try:
             server = await session.get(Server, server_id)
@@ -246,32 +292,32 @@ async def _apply_results(
                 # молча выпасть из статистики она не должна, иначе
                 # `checked + failed` перестанет сходиться с числом опрошенных
                 # и по журналу будет не понять, куда делись серверы.
-                stats["failed"] += 1
+                owner_stats["failed"] += 1
                 continue
             current_address = (server_monitor.clean_host(server.ip_address), server.ssh_port)
             if current_address != probed_address[server_id]:
                 # Адрес переписали, пока шёл опрос: результат относится к
                 # прежнему адресу и о нынешнем не говорит ничего.
-                stats["failed"] += 1
+                owner_stats["failed"] += 1
                 continue
 
             await touch_entity_sync(session, server.user_id, server)
             transition = await server_monitor.apply_check_result(session, server, ok, error)
             await session.commit()
 
-            stats["checked"] += 1
-            # Переходы разложены явно, а не через `stats[transition]`: тот
+            owner_stats["checked"] += 1
+            # Переходы разложены явно, а не через `owner_stats[transition]`: тот
             # молча связывал бы ключи статистики с `Literal`-значениями из
             # `server_monitor`, и переименование перехода дало бы `KeyError`
             # вместо промаха в одной строке.
             if transition == "down":
-                stats["down"] += 1
+                owner_stats["down"] += 1
             elif transition == "up":
-                stats["up"] += 1
+                owner_stats["up"] += 1
         except Exception as exc:
             # Сбой по одному серверу не должен унести остальных.
             logger.exception("server_monitor: сервер %s не обработан", server_id)
-            errors.append(_error_label(exc))
+            errors[owner_of[server_id]].append(_error_label(exc))
             # Откат обязателен: без него Postgres отвергнет в этой транзакции
             # всё подряд («current transaction is aborted»), и один сбой
             # превратится в отказ мониторинга для всех оставшихся серверов.
@@ -280,24 +326,31 @@ async def _apply_results(
                 # Проверка записана, сорвалось то, что после неё (почти всегда
                 # — доставка уведомления). Считать такую строку «не
                 # проверенной» нельзя: в БД она проверена.
-                stats["checked"] += 1
-                stats["undelivered"] += 1
+                owner_stats["checked"] += 1
+                owner_stats["undelivered"] += 1
             else:
-                stats["failed"] += 1
+                owner_stats["failed"] += 1
 
     return stats, errors
 
 
 def _error_label(exc: BaseException) -> str:
-    """Опознавательный знак ошибки для `log_text`; трейс — в `logs/errors.log`."""
+    """Опознавательный знак ошибки для `log_text`; трейс — в stdout воркера."""
     return f"{type(exc).__name__}: {exc}"[:MAX_LOGGED_ERROR_LEN]
 
 
-def _build_task_log(stats: dict[str, int], errors: Sequence[str] = ()) -> TaskLog:
-    """Итог прогона одной строкой журнала.
+def _build_task_log(
+    stats: dict[str, int], errors: Sequence[str] = (), *, user_id: uuid.UUID
+) -> TaskLog:
+    """Итог прогона по серверам ОДНОГО владельца — строкой его журнала.
 
-    Это всё, что человек увидит о прогоне, поэтому в тексте числа, а не факт
-    запуска. Три счётчика значат разное и потому не сливаются в один:
+    Это всё, что этот человек увидит о прогоне на странице Activity, поэтому в
+    тексте числа, а не факт запуска, и числа — только про его машины. Адресат
+    обязателен: строка без `user_id` не проходит ни через `GET /tasks`, ни
+    через `/sync/changes` (оба фильтруют по владельцу), то есть не существует
+    ни для кого — разбор в шапке файла.
+
+    Три счётчика значат разное и потому не сливаются в один:
 
     * `checked` — результат проверки записан в БД;
     * `undelivered` — записан, но строку не удалось довести до конца (почти
@@ -310,7 +363,7 @@ def _build_task_log(stats: dict[str, int], errors: Sequence[str] = ()) -> TaskLo
 
     Класс первой ошибки уносится в текст: прогон, написавший «200 not checked»
     без единого слова о причине, ничем не поможет — а трейсы к тому моменту
-    лежат в `logs/errors.log` вперемешку со всем остальным.
+    лежат в stdout воркера вперемешку со всем остальным.
     """
     log_text = f"checked {stats['checked']} servers: {stats['down']} down, {stats['up']} up"
     if stats["undelivered"]:
@@ -326,24 +379,53 @@ def _build_task_log(stats: dict[str, int], errors: Sequence[str] = ()) -> TaskLo
         task_type="server_monitor",
         status=TaskLogStatus.PARTIAL if degraded else TaskLogStatus.SUCCESS,
         log_text=log_text,
-        user_id=None,
+        user_id=user_id,
     )
 
 
-async def _write_task_log(stats: dict[str, int], errors: Sequence[str]) -> None:
-    """Записать итог прогона — своей сессией, отдельно от фазы записи.
+async def _write_task_logs(
+    stats: dict[uuid.UUID, dict[str, int]],
+    errors: dict[uuid.UUID, list[str]],
+) -> None:
+    """Записать журнал — по строке на каждого затронутого владельца.
 
-    Сессия та же означала бы, что журнал теряется ровно тогда, когда он нужнее
-    всего: сессию мог убить обрыв соединения на середине фазы записи, и тогда
-    прогон, не сумевший проверить ни одного сервера, не оставил бы о себе и
-    следа.
+    Сессия своя, отдельно от фазы записи. Та же означала бы, что журнал
+    теряется ровно тогда, когда он нужнее всего: сессию мог убить обрыв
+    соединения на середине фазы записи, и тогда прогон, не сумевший проверить
+    ни одного сервера, не оставил бы о себе и следа.
+
+    Кому строки не будет: тому, у кого серверов нет. Ключи `stats` приходят из
+    выборки, и человека без машин там нет по построению — а «checked 0 servers:
+    0 down, 0 up» четыре раза в сутки в пустом аккаунте это не журнал, а шум,
+    ради которого страницу Activity перестают открывать.
+
+    Коммит на строку, а не один на всех: строки независимы, и падение одной
+    (владельца удалили между фазами — FK на `users`) не должно уносить журнал
+    остальных.
+
+    `touch_entity_sync` — потому что `task_logs` входит в `SCOPED_MODELS`
+    синхронизации, а `/sync/changes?since=` выбирает по `sync_version > since`.
+    Без бампа строка добралась бы только до веба, а десктоп увидел бы её лишь
+    при полной пересинхронизации, то есть, возможно, никогда.
     """
     try:
         async with AsyncSessionLocal() as session:
-            session.add(_build_task_log(stats, errors))
-            await session.commit()
+            # Порядок фиксирован, чтобы прогон был воспроизводим — тот же довод,
+            # что у сортировки серверов по id в фазе записи.
+            for user_id in sorted(stats, key=str):
+                try:
+                    log = _build_task_log(stats[user_id], errors[user_id], user_id=user_id)
+                    await touch_entity_sync(session, user_id, log)
+                    session.add(log)
+                    await session.commit()
+                except Exception:
+                    logger.exception(
+                        "server_monitor: итог прогона не записан в журнал пользователя %s",
+                        user_id,
+                    )
+                    await _safe_rollback(session)
     except Exception:
-        logger.exception("server_monitor: итог прогона не записан в журнал")
+        logger.exception("server_monitor: журнал прогона не записан вовсе")
 
 
 async def _monitor_servers(
@@ -358,6 +440,10 @@ async def _monitor_servers(
 
     `user_ids` сужает прогон до перечисленных владельцев (см. `_load_targets`);
     расписание зовёт без него, то есть по всем.
+
+    Возвращается итог по ВСЕМ владельцам разом — это ответ задачи Celery и
+    предмет разбора для оператора, а не то, что видит человек в UI: ему
+    адресованы отдельные строки журнала со своими числами.
     """
     async with AsyncSessionLocal() as session:
         targets = await _load_targets(session, user_ids)
@@ -367,8 +453,21 @@ async def _monitor_servers(
     async with AsyncSessionLocal() as session:
         stats, errors = await _apply_results(session, results, targets)
 
-    await _write_task_log(stats, errors)
-    return stats
+    await _write_task_logs(stats, errors)
+
+    totals = _totals(stats)
+    # Итог по всем владельцам сразу — вопрос оператора, а не пользователя.
+    # Общей строкой в `task_logs` его писать некуда: `user_id = NULL` не
+    # проходит ни один из двух фильтров чтения, а админского интерфейса к
+    # таблице в продукте нет — такая строка была бы записью в никуда. Поэтому
+    # итог идёт туда, куда оператор и смотрит: в лог воркера (он же — ответ
+    # задачи в результате Celery, но за ним надо идти по id прогона).
+    logger.info(
+        "server_monitor: прогон по %s владельцам — %s",
+        len(stats),
+        ", ".join(f"{k} {v}" for k, v in totals.items()),
+    )
+    return totals
 
 
 @celery_app.task(name="app.tasks.server_monitor.check_server_reachability")

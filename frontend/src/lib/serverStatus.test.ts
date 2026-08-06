@@ -62,13 +62,32 @@ describe("serverUiStatus", () => {
     );
   });
 
-  it("свежий положительный ответ перебивает «error» в колонке БД", () => {
+  it("свежий положительный ответ перебивает ЛЮБОЕ значение колонки БД", () => {
     // Колонка `status` — не измерение: в неё пишут при заведении сервера, и
-    // «error» в ней может пережить починку машины навсегда. Дать полю из БД
-    // перекрыть свежий ответ монитора значило бы повторить исходный дефект,
-    // только в обратную сторону — поэтому измерение сильнее.
+    // сдвинуть её потом некому. Дать полю из БД перекрыть свежий ответ монитора
+    // значило бы повторить исходный дефект, только в обратную сторону, —
+    // поэтому измерение сильнее.
+    //
+    // `new` здесь важнее прочих: в него попадает почти каждый сервер продукта
+    // (`active` бэкенд ставит ровно в одном месте — при создании с уже
+    // установленной панелью), и ни одна форма из него не выводит. Пока
+    // колонка была сильнее, положительный ответ монитора не был виден
+    // НИГДЕ: бейдж «new», серая точка, пустой фильтр «active», плитка
+    // «Unknown». Падение при этом показывалось — то есть downtime продукт
+    // показывал, а uptime нет.
     expect(
       serverUiStatus({ status: "error", last_check_at: ago(HOUR), last_check_ok: true }, NOW),
+    ).toBe("active");
+    expect(
+      serverUiStatus({ status: "new", last_check_at: ago(HOUR), last_check_ok: true }, NOW),
+    ).toBe("active");
+    expect(
+      serverUiStatus({ status: "provisioned", last_check_at: ago(HOUR), last_check_ok: true }, NOW),
+    ).toBe("active");
+    // И незнакомое значение колонки свежий ответ тоже перекрывает: гадать тут
+    // не о чем — машина ответила.
+    expect(
+      serverUiStatus({ status: "whatever", last_check_at: ago(MINUTE), last_check_ok: true }, NOW),
     ).toBe("active");
   });
 
@@ -93,14 +112,19 @@ describe("serverUiStatus", () => {
     expect(serverUiStatus({ ...ALIVE, last_check_ok: null }, NOW)).toBe(UNCHECKED);
   });
 
-  it("этапы жизненного цикла проверкой не подменяются", () => {
+  it("без ответа монитора показывается этап жизненного цикла из колонки", () => {
+    // Измерения нет — остаётся то единственное, что про сервер известно.
     expect(serverUiStatus({ status: "provisioned", last_check_at: null, last_check_ok: null }, NOW)).toBe(
       "provisioned",
     );
     expect(serverUiStatus({ status: "new", last_check_at: null, last_check_ok: null }, NOW)).toBe("new");
-    // Незнакомое значение колонки — «new», а не «active»: гадать в сторону
-    // здоровья нельзя.
-    expect(serverUiStatus({ status: "whatever", last_check_at: ago(MINUTE), last_check_ok: true }, NOW)).toBe(
+    // Протухший положительный ответ этапа не отменяет — он не значит ничего.
+    expect(serverUiStatus({ status: "new", last_check_at: ago(3 * DAY), last_check_ok: true }, NOW)).toBe(
+      "new",
+    );
+    // Незнакомое значение колонки без измерения — «new», а не «active»: вот
+    // здесь гадать действительно не о чем, и гадать в сторону здоровья нельзя.
+    expect(serverUiStatus({ status: "whatever", last_check_at: null, last_check_ok: null }, NOW)).toBe(
       "new",
     );
   });
