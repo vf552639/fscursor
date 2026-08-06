@@ -109,7 +109,9 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const fpLast = fpStates[fpStates.length - 1];
   const fpRunning = fpLast?.status === "pending";
   const fpError = fpLast?.status === "error" ? fpLast.error : null;
-  const refreshMetrics = useRefreshMetrics(server?.id || 0);
+  // Сущность, а не id: метрики снимает десктоп по SSH, и ссылку на блоб с
+  // паролем знает только она (см. `useTestSsh`).
+  const refreshMetrics = useRefreshMetrics(s);
   const syncDomains = useSyncServerDomains(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
   const deleteDomain = useDeleteDomain();
