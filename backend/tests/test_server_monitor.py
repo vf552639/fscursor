@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import inspect
 import uuid
 from typing import Optional
 
@@ -209,6 +210,46 @@ async def test_repeated_success_stays_silent(sent):
 
 
 @pytest.mark.asyncio
+async def test_first_successful_check_of_a_fresh_server_is_not_a_recovery(sent):
+    """Порт ответил у сервера, который ни разу не проверялся, — это не «поднялся».
+
+    Переход вверх бывает только из подтверждённого падения (`last_check_ok is
+    False`). Стоит ослабить условие до «было не `True`» — и каждый только что
+    заведённый сервер получит `server_up` на первой же проверке: уведомление
+    ни о чём, и так на каждом сервере при заведении. Остальные успешные
+    случаи стартуют с `last_check_ok = True` и такую подмену не заметят,
+    поэтому случай нужен отдельным.
+    """
+    srv = _server(last_check_ok=None)
+    session = _FakeSession()
+
+    transition = await server_monitor.evaluate(session, srv, True, None)
+
+    assert transition is None, "первая успешная проверка выдана за восстановление"
+    assert srv.last_check_ok is True
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_success_after_a_single_miss_resets_the_counter_quietly(sent):
+    """Икота, пережившая один прогон: счётчик обнуляется, тишина.
+
+    Порог должен считать промахи **подряд**: без обнуления два промаха с
+    полугодом жизни между ними сложились бы в «падение».
+    """
+    srv = _server(last_check_ok=True)
+    session = _FakeSession()
+    await server_monitor.evaluate(session, srv, False, "timeout after 5s")
+
+    transition = await server_monitor.evaluate(session, srv, True, None)
+
+    assert transition is None
+    assert srv.consecutive_failures == 0
+    assert srv.last_check_error is None
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_never_checked_server_goes_down_only_after_two_misses(sent):
     """Сервер без единой проверки (`last_check_ok = None`) — правило то же.
 
@@ -266,6 +307,62 @@ async def test_server_without_owner_is_tracked_but_nobody_is_notified(sent):
 # --- probe -------------------------------------------------------------------
 
 
+def test_probe_defaults_are_the_ones_the_spec_asks_for():
+    """Дефолты: таймаут 5с, пауза перед ретраем 2с.
+
+    Проверяются явно, потому что во всех остальных случаях они подменены
+    нулём и малыми числами ради скорости прогона. Без этого утверждения
+    `retry_delay` мог бы уехать в 0 и в проде — и ретрай мгновенно повторял
+    бы ровно ту же сетевую икоту, ради которой он и заведён.
+    """
+    params = inspect.signature(server_monitor.probe).parameters
+
+    assert server_monitor.DEFAULT_TIMEOUT_SECONDS == 5.0
+    assert server_monitor.RETRY_DELAY_SECONDS == 2.0
+    assert params["timeout"].default == server_monitor.DEFAULT_TIMEOUT_SECONDS
+    assert params["retry_delay"].default == server_monitor.RETRY_DELAY_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_probe_actually_waits_before_the_retry():
+    """Между попытками действительно ждём.
+
+    Ретрай без паузы бессмыслен: он попадает в ту же миллисекунду сетевого
+    сбоя, из-за которого промахнулась первая попытка, и порог из двух
+    промахов подряд начинает набираться на ровном месте. Пауза здесь
+    крошечная, но проверка ловит именно её отсутствие.
+    """
+    delay = 0.05
+    connect = _Connector(ConnectionRefusedError(61, "Connection refused"), None)
+    loop = asyncio.get_running_loop()
+
+    started = loop.time()
+    await server_monitor.probe("203.0.113.10", 22, connect=connect, retry_delay=delay)
+    elapsed = loop.time() - started
+
+    assert len(connect.calls) == 2
+    assert elapsed >= delay * 0.9, f"ретрай ушёл без паузы: {elapsed:.4f}s"
+
+
+@pytest.mark.asyncio
+async def test_probe_truncates_a_monstrous_error_text():
+    """Гигантский текст ошибки обрезается.
+
+    Текст приходит с чужой стороны (сообщение резолвера, ответ прокси), а у
+    колонки `last_check_error` тип `Text` — верхней границы нет. Простыня
+    осела бы и в БД, и в тултипе карточки сервера.
+    """
+    huge = "x" * 5000
+    connect = _Connector(OSError(huge), OSError(huge))
+
+    ok, error = await server_monitor.probe(
+        "203.0.113.10", 22, connect=connect, retry_delay=0
+    )
+
+    assert ok is False
+    assert error == "x" * server_monitor.MAX_ERROR_LEN, "текст ошибки не обрезан"
+
+
 @pytest.mark.asyncio
 async def test_probe_succeeds_on_the_first_attempt_and_closes_the_socket():
     """Порт ответил: одна попытка, `(True, None)` и закрытое соединение.
@@ -319,6 +416,9 @@ async def test_probe_reports_a_hung_port_as_timeout():
 
     Без `wait_for` проверка висела бы до системного таймаута TCP, и прогон по
     сотне серверов не уложился бы в лимит задачи.
+
+    Текст сверяется целиком, вместе с числом: так видно, что ждали именно
+    переданный таймаут, а не какой-то свой.
     """
 
     async def _hangs(host: str, port: int):
@@ -329,7 +429,7 @@ async def test_probe_reports_a_hung_port_as_timeout():
     )
 
     assert ok is False
-    assert error and "timeout" in error.lower()
+    assert error == "timeout after 0.01s"
 
 
 @pytest.mark.asyncio
