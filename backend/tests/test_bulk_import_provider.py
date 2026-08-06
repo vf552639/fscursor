@@ -6,12 +6,16 @@
 колонки строка не должна ни падать, ни превращать провайдер в мусор.
 
 Индекс 5 — не новый слот. До коммита `f7d6da3` («drop plaintext server.notes»)
-`_parse_server_row` читал его как `notes`; тот коммит убрал чтение из кода, но
-не тронул `docs/ARCHITECTURE.md` / `docs/CURRENT_STATUS.md`, где формат ещё
-недавно был описан как `...,ssh_port,notes`. Эта правка переиспользует тот же
-индекс под `provider` (радиус поражения — ноль: `f7d6da3` фиксирует «verified
-0 non-null rows» на момент дропа `notes`), документация поправлена отдельно.
-`test_sixth_column_is_provider_not_notes` ниже фиксирует это решение явно.
+`_parse_server_row` читал его как `notes` (`Text`, без ограничения длины и без
+проверки символов); тот коммит убрал чтение из кода, но не тронул
+`docs/ARCHITECTURE.md` / `docs/CURRENT_STATUS.md`, где формат ещё недавно был
+описан как `...,ssh_port,notes`. Эта правка переиспользует тот же индекс под
+`provider` (`String(64)` + `_checked_provider`; радиус поражения — ноль:
+`f7d6da3` фиксирует «verified 0 non-null rows» на момент дропа `notes`),
+документация поправлена отдельно. `test_notes_era_value_over_provider_length_
+limit_now_skips_the_row` ниже фиксирует принятый регресс: notes-эровский файл
+с заметкой длиннее лимита провайдера, который раньше исправно импортировался
+бы, сегодня скипает строку.
 
 Как и в `test_server_provider.py`, утверждения — по колонке `servers.provider`,
 а не по телу ответа: `ServerBulkImportResponse` вообще не возвращает
@@ -32,6 +36,7 @@ from sqlalchemy import select, update
 
 from app.auth.models import User
 from app.core.database import AsyncSessionLocal
+from app.core.validators import PROVIDER_MAX_LEN
 from app.main import app
 from app.models.server import Server
 from app.services.bulk_import_service import _parse_server_row
@@ -127,22 +132,6 @@ def test_parse_server_row_reads_sixth_column_as_provider():
     assert parsed.provider == "Hetzner Online"
 
 
-def test_sixth_column_is_provider_not_notes():
-    """Решение зафиксировано явно: индекс 5 — `provider`, не `notes`.
-
-    До `f7d6da3` тот же индекс парсился как `notes`; коммит убрал чтение из
-    кода, но не поправил `docs/ARCHITECTURE.md` / `docs/CURRENT_STATUS.md` —
-    там до этой правки формат ещё был описан со старой `notes`. Значение ниже
-    типично для заметки («Rented via reseller»), но теперь это провайдер: тест
-    существует, чтобы следующий человек не гадал по `git blame`, что там было
-    раньше и почему.
-    """
-    row = ["srv-1", "203.0.113.1", "root", "pass", "22", "Rented via reseller"]
-    parsed = _parse_server_row(row, idx=2)
-    assert parsed is not None
-    assert parsed.provider == "Rented via reseller"
-
-
 def test_parse_server_row_without_sixth_column_leaves_provider_none():
     """Пятиколоночная строка — старый формат, провайдера в ней нет и не будет."""
     row = ["srv-1", "203.0.113.1", "root", "pass", "22"]
@@ -225,6 +214,62 @@ async def test_csv_import_without_provider_column_still_works():
 
 
 @pytest.mark.asyncio
+async def test_notes_era_value_over_provider_length_limit_now_skips_the_row():
+    """Принятый регресс, а не гипотеза: notes-эровский файл со старой семантикой
+    шестой колонки сегодня ведёт себя иначе на длинных значениях.
+
+    До `f7d6da3` шестая колонка была `notes` — `Text`, без ограничения длины и
+    без проверки символов, поэтому любая заметка исправно импортировалась бы.
+    Сегодня тот же индекс — `provider` (`String(64)` + `_checked_provider`), и
+    заметка длиннее `PROVIDER_MAX_LEN`, которая раньше прошла бы насквозь,
+    сегодня скипает всю строку через `ValidationError`. Короткое значение,
+    напротив, молча садится в `provider` — это уже покрыто
+    `test_csv_import_with_provider_column_stores_the_value`, здесь дублировать
+    незачем.
+
+    В отличие от простого «row[5] стал provider» (это и так доказывают
+    `test_parse_server_row_reads_sixth_column_as_provider` и остальной
+    юнит-блок), этот тест проверяет поведенческое следствие смены семантики —
+    через реальный HTTP+БД путь, а не через равенство константы во входе и
+    выходе одной чистой функции.
+    """
+    ip = f"203.0.113.{uuid.uuid4().int % 200 + 10}"
+    name = f"srv-{uuid.uuid4().hex[:8]}"
+    # Легальная в старом формате notes-заметка — сегодня превышает лимит
+    # провайдера ровно на один символ, чтобы граница была недвусмысленной.
+    long_note = "x" * (PROVIDER_MAX_LEN + 1)
+    csv_body = (
+        "name,ip,ssh_user,ssh_password,ssh_port,provider\n"
+        f"{name},{ip},root,pw,22,{long_note}\n"
+    ).encode()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        user_id = await _register_and_login(c, f"bulk-notes-{uuid.uuid4().hex[:8]}@example.com")
+        r = await c.post(
+            "/api/servers/bulk-import",
+            files={"file": ("servers.csv", csv_body, "text/csv")},
+            data={"has_header": "true"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["created"] == 0, body
+        assert body["skipped"] == 1, body
+
+        async with AsyncSessionLocal() as s:
+            created = (
+                await s.execute(
+                    select(Server.id).where(
+                        Server.ip_address == ip, Server.user_id == user_id
+                    )
+                )
+            ).scalar_one_or_none()
+        assert created is None, (
+            "notes-эровская длинная заметка в шестой колонке раньше создавала сервер — "
+            "сегодня обязана скипать строку, а не пройти молча"
+        )
+
+
+@pytest.mark.asyncio
 async def test_csv_import_skips_row_with_invalid_provider_without_failing_the_batch():
     """Невалидный провайдер (управляющий символ) даёт `ValidationError` на
     построении `ServerCreate` — и эта ошибка скипает только свою строку, не
@@ -272,7 +317,16 @@ async def test_csv_import_skips_row_with_invalid_provider_without_failing_the_ba
 
         assert await _stored_provider(good_ip, user_id) == "Hetzner"
         async with AsyncSessionLocal() as s:
+            # Тот же класс уязвимости, что и у `_stored_provider`: без фильтра
+            # по `user_id` коллизия `bad_ip` с чужой строкой на общей БД дала
+            # бы чужой `id` вместо `None` (или `MultipleResultsFound` при
+            # коллизии с двумя строками) — и тест ошибочно зеленел бы либо
+            # падал не по вине кода.
             bad_created = (
-                await s.execute(select(Server.id).where(Server.ip_address == bad_ip))
+                await s.execute(
+                    select(Server.id).where(
+                        Server.ip_address == bad_ip, Server.user_id == user_id
+                    )
+                )
             ).scalar_one_or_none()
         assert bad_created is None, "строка с невалидным провайдером не должна была создать сервер"
