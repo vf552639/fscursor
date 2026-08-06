@@ -1,13 +1,42 @@
+import asyncio
 import base64
 import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import update
 
 from app.auth.models import User
 from app.core.database import AsyncSessionLocal
 from app.main import app
+
+# Пользователи, заведённые тестами этого файла — только теми, что сами себя
+# сюда добавляют (см. `_purge_users_registered_by_this_test`). Старый
+# `test_sync_snapshot_includes_domain` в список не пишет и остаётся как был —
+# правка чужого поведения не входит в задачу этой правки.
+_REGISTERED_EMAILS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _purge_users_registered_by_this_test():
+    """Убрать пользователей теста — сервер и sync-состояние уедут по FK CASCADE.
+
+    Паттерн — из `test_server_provider.py`/`test_secret_write_path.py`: база
+    тестов общая с dev-окружением, и без уборки в ней копятся `sync-prov-*`.
+    """
+    _REGISTERED_EMAILS.clear()
+    yield
+    emails = list(_REGISTERED_EMAILS)
+    _REGISTERED_EMAILS.clear()
+    if emails:
+        asyncio.run(_purge_users(emails))
+
+
+async def _purge_users(emails: list[str]) -> None:
+    async with AsyncSessionLocal() as s:
+        await s.execute(sa_delete(User).where(User.email.in_(emails)))
+        await s.commit()
 
 
 def b64(b: bytes) -> str:
@@ -58,3 +87,84 @@ async def test_sync_snapshot_includes_domain():
         assert r.status_code == 200
         rows = r.json()["rows"]
         assert any(row["table"] == "domains" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_sync_snapshot_and_changes_carry_server_provider():
+    """`provider` доезжает и до `/sync/snapshot`, и до инкрементального `/sync/changes`.
+
+    План `tagprovider.md` обещает, что новый столбец не требует правок ни
+    `_to_row` (`app/sync/routes.py`), ни Rust: `fields` сериализует все колонки
+    модели generic-ом. Проверка — по значению в JSON-снапшоте, а не по факту
+    200, потому что именно значение и есть то, что десктоп положит в свой
+    локальный кеш; тест, довольный одним статусом, зеленел бы и в мире, где
+    `_to_row` явно перечисляет столбцы и `provider` в список забыли добавить.
+
+    Оба эндпоинта нужны порознь: `/snapshot` отдаёт полный набор строк,
+    `/changes` — только версии выше `since`, и у них разные фильтры в
+    `app/sync/routes.py` (`select(model)` целиком против
+    `model.sync_version > since`). Разные оба провода — почему бы не пойти к
+    десктопу.
+    """
+    email = f"sync-prov-{uuid.uuid4().hex[:8]}@example.com"
+    _REGISTERED_EMAILS.append(email)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _login(c, email)
+
+        # Версия синка ДО создания сервера — нужна как "since" для changes-пула.
+        r = await c.get("/api/sync/snapshot")
+        assert r.status_code == 200
+        version_before = r.json()["version"]
+
+        r = await c.post(
+            "/api/servers",
+            json={
+                "name": f"srv-sync-{uuid.uuid4().hex[:6]}",
+                "ip_address": "203.0.113.60",
+                "provider": "Hetzner Online",
+            },
+        )
+        assert r.status_code == 201, r.text
+        server_id = r.json()["id"]
+
+        r = await c.get("/api/sync/snapshot")
+        assert r.status_code == 200
+        rows = r.json()["rows"]
+        server_row = next(
+            row for row in rows if row["table"] == "servers" and row["id"] == str(server_id)
+        )
+        assert server_row["fields"]["provider"] == "Hetzner Online", (
+            "provider не доехал до полного sync-снапшота"
+        )
+
+        r = await c.get(f"/api/sync/changes?since={version_before}")
+        assert r.status_code == 200
+        changed_rows = r.json()["rows"]
+        changed_server_row = next(
+            row for row in changed_rows
+            if row["table"] == "servers" and row["id"] == str(server_id)
+        )
+        assert changed_server_row["fields"]["provider"] == "Hetzner Online", (
+            "provider не доехал до инкрементального /sync/changes"
+        )
+
+        # NULL-провайдер — тоже значение, а не отсутствие ключа: десктопный
+        # кеш обязан увидеть явный null и стереть старое значение, а не
+        # промолчать, оставив прежнего провайдера в локальной копии.
+        version_before_clear = r.json()["version"]
+        r = await c.put(f"/api/servers/{server_id}", json={"provider": None})
+        assert r.status_code == 200, r.text
+
+        r = await c.get(f"/api/sync/changes?since={version_before_clear}")
+        assert r.status_code == 200
+        cleared_rows = r.json()["rows"]
+        cleared_server_row = next(
+            row for row in cleared_rows
+            if row["table"] == "servers" and row["id"] == str(server_id)
+        )
+        assert "provider" in cleared_server_row["fields"], (
+            "ключ provider пропал из снапшота вместо явного null"
+        )
+        assert cleared_server_row["fields"]["provider"] is None, (
+            "очищенный провайдер не доехал до sync-снапшота как null"
+        )
