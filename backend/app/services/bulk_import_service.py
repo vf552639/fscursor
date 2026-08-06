@@ -77,6 +77,9 @@ class ServerImportRow:
     ssh_user: str
     ssh_password: str
     ssh_port: int
+    # Шестая, опциональная колонка — в конце, чтобы файлы без неё (старый
+    # формат) продолжали импортироваться без изменений.
+    provider: Optional[str] = None
 
 
 async def process_bulk_import(
@@ -142,6 +145,13 @@ def _parse_server_row(row: list[str], idx: int) -> Optional[ServerImportRow]:
         ssh_port = int(raw_port or "22")
     except ValueError:
         ssh_port = -1
+    # Провайдер — свободный текст, набранный человеком в файле, а не
+    # write-back с машины: обрезаем пробелы здесь же, как и остальные
+    # текстовые поля строки. Саму валидацию (длина, управляющие символы)
+    # намеренно не дублируем — этим занимается `_checked_provider` на
+    # `ServerCreate`, а невалидное значение уходит в errors штатным путём.
+    provider_raw = str(row[5] or "").strip() if len(row) > 5 else ""
+    provider = provider_raw or None
     return ServerImportRow(
         row=idx,
         name=name,
@@ -149,6 +159,7 @@ def _parse_server_row(row: list[str], idx: int) -> Optional[ServerImportRow]:
         ssh_user=ssh_user or "root",
         ssh_password=ssh_password,
         ssh_port=ssh_port,
+        provider=provider,
     )
 
 
@@ -220,13 +231,17 @@ async def process_server_bulk_import(
             errors.append(ServerBulkImportError(row=item.row, server=item.name, reason="IP already exists"))
             continue
 
-        payload = ServerCreate(
-            name=item.name,
-            ip_address=item.ip,
-            ssh_user=item.ssh_user,
-            ssh_port=item.ssh_port,
-        )
         try:
+            # Построение `ServerCreate` — внутри try: провайдер валидируется
+            # схемой (`_checked_provider`), и `ValidationError` невалидной
+            # строки обязана скипнуть только её, а не уронить весь импорт.
+            payload = ServerCreate(
+                name=item.name,
+                ip_address=item.ip,
+                ssh_user=item.ssh_user,
+                ssh_port=item.ssh_port,
+                provider=item.provider,
+            )
             await server_service.create(db, payload, user_id)
             existing_ips.add(item.ip)
             created += 1
