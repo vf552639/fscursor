@@ -1,9 +1,10 @@
 """Мониторинг доступности серверов: TCP-проверка и таблица переходов.
 
 Тесты юнитовые и без БД намеренно. Предмет проверки — решение, а не запись:
-`evaluate` меняет поля ORM-объекта и решает, случился ли переход, и именно это
+`apply_check_result` меняет поля ORM-объекта и решает, случился ли переход, и именно это
 решение стоит денег пользователя. Строка в `servers` и `notifications` — забота
-слоя, который вызывает `evaluate` (фаза 4 плана), у него будет свой тест.
+слоя, который вызывает `apply_check_result` (фаза 4 плана), у него будет свой
+тест.
 
 Реальный TCP не открывается ни в одном случае: коннектор подменяется
 заглушкой. Иначе тест зависел бы от сети машины, где он бежит, и «упал» в нём
@@ -26,13 +27,13 @@ from app.services import server_monitor
 
 
 class _FakeSession:
-    """Сессия-заглушка: `evaluate` от неё нужен только `flush()`."""
+    """Сессия-заглушка без единого метода.
 
-    def __init__(self) -> None:
-        self.flushes = 0
-
-    async def flush(self) -> None:
-        self.flushes += 1
+    Так и задумано: `apply_check_result` не должна ходить в БД сама — она
+    меняет поля объекта и передаёт сессию дальше, в уведомления. Любой новый
+    вызов вроде `flush()`/`commit()` тут же обвалится `AttributeError`, то
+    есть станет видимым решением, а не тихой добавкой.
+    """
 
 
 class _FakeWriter:
@@ -60,6 +61,7 @@ class _Connector:
         self._outcomes = list(outcomes)
         self.calls: list[tuple[str, int]] = []
         self.writers: list[_FakeWriter] = []
+        self.writer_cls: type[_FakeWriter] = _FakeWriter
 
     async def __call__(self, host: str, port: int):
         self.calls.append((host, port))
@@ -67,7 +69,7 @@ class _Connector:
         outcome = self._outcomes.pop(0)
         if outcome is not None:
             raise outcome
-        writer = _FakeWriter()
+        writer = self.writer_cls()
         self.writers.append(writer)
         return object(), writer
 
@@ -95,7 +97,7 @@ def sent(monkeypatch) -> list[dict]:
     calls: list[dict] = []
 
     async def _fake_create_notification(db, **kwargs) -> bool:
-        calls.append(kwargs)
+        calls.append({"db": db, **kwargs})
         return True
 
     monkeypatch.setattr(
@@ -119,7 +121,7 @@ async def test_single_miss_neither_drops_the_status_nor_notifies(sent):
     srv = _server(last_check_ok=True)
     session = _FakeSession()
 
-    transition = await server_monitor.evaluate(session, srv, False, "connection refused")
+    transition = await server_monitor.apply_check_result(session, srv, False, "connection refused")
 
     assert transition is None
     assert srv.consecutive_failures == 1
@@ -141,16 +143,17 @@ async def test_second_miss_in_a_row_confirms_the_outage_and_notifies(sent):
     srv = _server(last_check_ok=True)
     session = _FakeSession()
 
-    await server_monitor.evaluate(session, srv, False, "connection refused")
+    await server_monitor.apply_check_result(session, srv, False, "connection refused")
     first_miss_at = srv.last_check_at
 
-    transition = await server_monitor.evaluate(session, srv, False, "connection refused")
+    transition = await server_monitor.apply_check_result(session, srv, False, "connection refused")
 
     assert transition == "down"
     assert srv.consecutive_failures == 2
     assert srv.last_check_ok is False
     assert len(sent) == 1, sent
     note = sent[0]
+    assert note["db"] is session, "уведомление ушло мимо переданной сессии"
     assert note["type"] == "server_down"
     assert note["entity_type"] == "server"
     assert note["entity_id"] == srv.id
@@ -165,11 +168,11 @@ async def test_further_misses_stay_silent(sent):
     srv = _server(last_check_ok=True)
     session = _FakeSession()
     for _ in range(2):
-        await server_monitor.evaluate(session, srv, False, "timeout")
+        await server_monitor.apply_check_result(session, srv, False, "timeout")
     sent.clear()
 
     for expected in (3, 4):
-        transition = await server_monitor.evaluate(session, srv, False, "timeout")
+        transition = await server_monitor.apply_check_result(session, srv, False, "timeout")
         assert transition is None
         assert srv.consecutive_failures == expected
         assert srv.last_check_ok is False
@@ -183,10 +186,10 @@ async def test_recovery_notifies_and_clears_the_error(sent):
     srv = _server(last_check_ok=True)
     session = _FakeSession()
     for _ in range(2):
-        await server_monitor.evaluate(session, srv, False, "timeout")
+        await server_monitor.apply_check_result(session, srv, False, "timeout")
     sent.clear()
 
-    transition = await server_monitor.evaluate(session, srv, True, None)
+    transition = await server_monitor.apply_check_result(session, srv, True, None)
 
     assert transition == "up"
     assert srv.consecutive_failures == 0
@@ -204,8 +207,8 @@ async def test_repeated_success_stays_silent(sent):
     srv = _server(last_check_ok=True)
     session = _FakeSession()
 
-    assert await server_monitor.evaluate(session, srv, True, None) is None
-    assert await server_monitor.evaluate(session, srv, True, None) is None
+    assert await server_monitor.apply_check_result(session, srv, True, None) is None
+    assert await server_monitor.apply_check_result(session, srv, True, None) is None
     assert sent == []
 
 
@@ -223,7 +226,7 @@ async def test_first_successful_check_of_a_fresh_server_is_not_a_recovery(sent):
     srv = _server(last_check_ok=None)
     session = _FakeSession()
 
-    transition = await server_monitor.evaluate(session, srv, True, None)
+    transition = await server_monitor.apply_check_result(session, srv, True, None)
 
     assert transition is None, "первая успешная проверка выдана за восстановление"
     assert srv.last_check_ok is True
@@ -239,9 +242,9 @@ async def test_success_after_a_single_miss_resets_the_counter_quietly(sent):
     """
     srv = _server(last_check_ok=True)
     session = _FakeSession()
-    await server_monitor.evaluate(session, srv, False, "timeout after 5s")
+    await server_monitor.apply_check_result(session, srv, False, "timeout after 5s")
 
-    transition = await server_monitor.evaluate(session, srv, True, None)
+    transition = await server_monitor.apply_check_result(session, srv, True, None)
 
     assert transition is None
     assert srv.consecutive_failures == 0
@@ -260,9 +263,9 @@ async def test_never_checked_server_goes_down_only_after_two_misses(sent):
     srv = _server(last_check_ok=None)
     session = _FakeSession()
 
-    assert await server_monitor.evaluate(session, srv, False, "timeout") is None
+    assert await server_monitor.apply_check_result(session, srv, False, "timeout") is None
     assert srv.last_check_ok is None, "первый промах подменил «не проверялся» на «упал»"
-    assert await server_monitor.evaluate(session, srv, False, "timeout") == "down"
+    assert await server_monitor.apply_check_result(session, srv, False, "timeout") == "down"
     assert [n["type"] for n in sent] == ["server_down"]
 
 
@@ -279,8 +282,8 @@ async def test_each_outage_episode_gets_its_own_dedup_key(sent):
 
     async def _one_outage_and_recovery() -> None:
         for _ in range(2):
-            await server_monitor.evaluate(session, srv, False, "timeout")
-        await server_monitor.evaluate(session, srv, True, None)
+            await server_monitor.apply_check_result(session, srv, False, "timeout")
+        await server_monitor.apply_check_result(session, srv, True, None)
 
     await _one_outage_and_recovery()
     await _one_outage_and_recovery()
@@ -297,7 +300,7 @@ async def test_server_without_owner_is_tracked_but_nobody_is_notified(sent):
     session = _FakeSession()
 
     for _ in range(2):
-        await server_monitor.evaluate(session, srv, False, "timeout")
+        await server_monitor.apply_check_result(session, srv, False, "timeout")
 
     assert srv.last_check_ok is False
     assert srv.consecutive_failures == 2
@@ -351,6 +354,9 @@ async def test_probe_truncates_a_monstrous_error_text():
     Текст приходит с чужой стороны (сообщение резолвера, ответ прокси), а у
     колонки `last_check_error` тип `Text` — верхней границы нет. Простыня
     осела бы и в БД, и в тултипе карточки сервера.
+
+    Обрезка помечается многоточием: молча усечённый текст в тултипе не
+    отличить от полного, и читатель поверит оборванной фразе.
     """
     huge = "x" * 5000
     connect = _Connector(OSError(huge), OSError(huge))
@@ -360,7 +366,28 @@ async def test_probe_truncates_a_monstrous_error_text():
     )
 
     assert ok is False
-    assert error == "x" * server_monitor.MAX_ERROR_LEN, "текст ошибки не обрезан"
+    assert error is not None
+    assert len(error) == server_monitor.MAX_ERROR_LEN, "текст ошибки не обрезан"
+    assert error.endswith(server_monitor.TRUNCATION_MARK), "обрезка не помечена"
+
+
+@pytest.mark.asyncio
+async def test_probe_keeps_a_short_error_text_intact():
+    """Обычная ошибка не трогается: ни обрезки, ни лишнего многоточия.
+
+    Граница проверяется с двух сторон — иначе «обрезка» могла бы клеить
+    многоточие ко всем ошибкам подряд, и каждая выглядела бы неполной.
+    """
+    connect = _Connector(
+        ConnectionRefusedError(61, "Connection refused"),
+        ConnectionRefusedError(61, "Connection refused"),
+    )
+
+    _ok, error = await server_monitor.probe(
+        "203.0.113.10", 22, connect=connect, retry_delay=0
+    )
+
+    assert error == "[Errno 61] Connection refused"
 
 
 @pytest.mark.asyncio
@@ -430,6 +457,74 @@ async def test_probe_reports_a_hung_port_as_timeout():
 
     assert ok is False
     assert error == "timeout after 0.01s"
+
+
+@pytest.mark.asyncio
+async def test_probe_survives_a_unicode_error_from_the_resolver():
+    """Кривой адрес вроде `10.0.0..5` — это «недоступен», а не обвал прогона.
+
+    На пустой метке имени IDNA-кодек резолвера бросает `UnicodeError`, и он
+    **не** наследник `OSError`, то есть мимо обычного перехвата отказов сети.
+    А попасть в БД такой адрес может: `ServerBase.ip_address` не валидируется
+    вообще. Прогон фазы 4 идёт циклом по серверам пользователя — исключение
+    отсюда молча выключило бы мониторинг всех остальных машин, что для фичи
+    «узнать, что сервер упал» худший из отказов.
+    """
+    connect = _Connector(
+        UnicodeError("label empty or too long"),
+        UnicodeError("label empty or too long"),
+    )
+
+    ok, error = await server_monitor.probe("10.0.0..5", 22, connect=connect, retry_delay=0)
+
+    assert ok is False
+    assert error and "label empty" in error
+
+
+@pytest.mark.asyncio
+async def test_probe_refuses_an_empty_address_instead_of_asking_the_resolver():
+    """Пустой адрес — сразу отказ, резолвер не зовём.
+
+    `getaddrinfo("", 22)` разрешается в `127.0.0.1`/`::1`, то есть в сам
+    воркер. Сервер с пустым `ip_address` и портом, который на воркере занят,
+    отчитался бы `up`, ни разу не будучи опрошенным: мониторинг доложил бы
+    «жив» о машине, которую вообще не трогал.
+    """
+    for host in ("", "   "):
+        connect = _Connector()  # ни одного исхода: любая попытка уронит тест
+
+        ok, error = await server_monitor.probe(host, 22, connect=connect, retry_delay=0)
+
+        assert (ok, error) == (False, server_monitor.NO_ADDRESS_ERROR)
+        assert connect.calls == [], "пустой адрес всё-таки уехал в резолвер"
+
+
+@pytest.mark.asyncio
+async def test_probe_survives_a_socket_that_throws_on_close():
+    """Порт ответил — проверка успешна, даже если закрытие сокета бросило.
+
+    Настоящий `StreamWriter.wait_closed()` бросает вполне буднично
+    (`ConnectionResetError` на RST от той стороны), и без перехвата успешная
+    проверка живого сервера обвалила бы весь прогон.
+    """
+
+    class _RudeOnWait(_FakeWriter):
+        async def wait_closed(self) -> None:
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+    class _RudeOnClose(_FakeWriter):
+        def close(self) -> None:
+            raise OSError(9, "Bad file descriptor")
+
+    for writer_cls in (_RudeOnWait, _RudeOnClose):
+        connect = _Connector(None)
+        connect.writer_cls = writer_cls
+
+        result = await server_monitor.probe(
+            "203.0.113.10", 22, connect=connect, retry_delay=0
+        )
+
+        assert result == (True, None), f"{writer_cls.__name__} испортил успешную проверку"
 
 
 @pytest.mark.asyncio
