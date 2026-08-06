@@ -577,6 +577,93 @@ async def test_server_write_rejects_credentials_in_url_and_control_chars_in_user
             await _purge(Server, server_id)
 
 
+# Строки сервера, которые заполняет клиент, и значения, не влезающие в их
+# колонки. До этого круга ни одно из четырёх полей не проверялось ничем:
+# `POST /api/servers` с таким значением доезжал до драйвера и возвращал 500
+# (`StringDataRightTruncation` или `DataError: surrogates not allowed`) вместо
+# 422 с именем поля. Тот же класс, что уже закрыт у `provider` и метрик.
+CLIENT_TEXT_CASES = [
+    pytest.param("name", "x" * 256, id="name-длиннее-колонки"),
+    pytest.param("name", "A\ud800B", id="name-с-суррогатом"),
+    pytest.param("name", "srv\nfake", id="name-с-переводом-строки"),
+    pytest.param("ip_address", "A\ud800B", id="ip_address-с-суррогатом"),
+    pytest.param("ssh_user", "ro\not", id="ssh_user-с-переводом-строки"),
+    pytest.param("os", "x" * 65, id="os-длиннее-колонки"),
+]
+
+
+@pytest.mark.parametrize("field,value", CLIENT_TEXT_CASES)
+@pytest.mark.asyncio
+async def test_client_string_that_cannot_fit_the_column_is_422_not_500(field: str, value: str):
+    """Строка, не влезающая в колонку, — 422, и ни строки в БД, ни правки.
+
+    Проверяются обе схемы записи: валидаторы объявлены на `ServerCreate` и
+    `ServerUpdate` порознь (`ServerResponse` наследует ту же базу и собирается
+    из ORM, поэтому на общей базе проверка отвергала бы ЧТЕНИЕ уже лежащих
+    строк), и без второго случая снятие проверки с правки не уронило бы
+    ничего.
+
+    Утверждения по БД, а не по коду ответа: 422 сам по себе говорит лишь
+    «схема чем-то недовольна». У создания важно, что строки не появилось, у
+    правки — что прежнее значение выжило.
+
+    Позитивный контроль в конце: та же форма тела с законным значением даёт
+    200 и пишет его. Без него 422 мог бы приходить от чего угодно — например,
+    от опечатки в имени поля, — и тест был бы зелен, не проверив валидатор.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"wb-col-{uuid.uuid4().hex[:8]}@example.com")
+
+        rejected_name = f"srv-{uuid.uuid4().hex[:6]}"
+        body = {"name": rejected_name, "ip_address": "203.0.113.12", field: value}
+        r = await c.post("/api/servers", json=body)
+        assert r.status_code == 422, r.text
+        assert [list(e["loc"]) for e in r.json()["detail"]] == [["body", field]], r.text
+        async with AsyncSessionLocal() as s:
+            created = (
+                await s.execute(select(Server.id).where(Server.name == rejected_name))
+            ).scalars().all()
+            assert created == [], "отвергнутый POST всё-таки завёл сервер"
+
+        r = await c.post(
+            "/api/servers",
+            json={"name": f"srv-{uuid.uuid4().hex[:6]}", "ip_address": "203.0.113.12"},
+        )
+        assert r.status_code == 201, r.text
+        server_id = r.json()["id"]
+        try:
+            async with AsyncSessionLocal() as s:
+                before = getattr(
+                    (await s.execute(select(Server).where(Server.id == server_id))).scalar_one(),
+                    field,
+                )
+
+            r = await c.put(f"/api/servers/{server_id}", json={field: value})
+            assert r.status_code == 422, r.text
+            assert [list(e["loc"]) for e in r.json()["detail"]] == [["body", field]], r.text
+            async with AsyncSessionLocal() as s:
+                after = getattr(
+                    (await s.execute(select(Server).where(Server.id == server_id))).scalar_one(),
+                    field,
+                )
+            assert after == before, "отвергнутый PUT всё-таки переписал колонку"
+
+            legal = {"name": "srv-legal", "ip_address": "203.0.113.13", "ssh_user": "root",
+                     "os": "ubuntu-22.04"}[field]
+            r = await c.put(f"/api/servers/{server_id}", json={field: legal})
+            assert r.status_code == 200, (
+                f"законное значение тоже отвергнуто — проверка ловит не то: {r.text}"
+            )
+            async with AsyncSessionLocal() as s:
+                stored = getattr(
+                    (await s.execute(select(Server).where(Server.id == server_id))).scalar_one(),
+                    field,
+                )
+            assert stored == legal
+        finally:
+            await _purge(Server, server_id)
+
+
 @pytest.mark.asyncio
 async def test_user_b_cannot_write_back_to_user_a_domain():
     """Чужой домен не обновляется через `PUT` — 404, значения не меняются.

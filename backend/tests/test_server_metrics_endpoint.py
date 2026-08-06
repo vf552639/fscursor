@@ -240,8 +240,10 @@ async def test_metrics_of_another_users_server_are_rejected_with_404():
         # Время снимка ставит сервер. Присланное клиентом означало бы, что
         # «когда сняли» диктует та же машина, чьи часы могут врать.
         pytest.param("metrics_collected_at", id="metrics_collected_at"),
-        # Статус сервера пишет мониторинг, а не сборщик метрик: снявшийся
-        # снимок ничего не говорит о том, жив ли сервер по мнению проверки.
+        # Статус не пишет сборщик метрик: снятый снимок ничего не говорит о
+        # том, жив ли сервер по мнению проверки. Это «не здесь», а не «нигде»
+        # — `status` принимает `ServerUpdate` на `PUT` (см. `ServerMetricsIn`,
+        # где та же оговорка стоит канонически).
         pytest.param("status", id="status"),
         # Инвариант ZK: плейнтекст-секрету в теле запроса делать нечего.
         pytest.param("ssh_password", id="ssh_password"),
@@ -424,6 +426,40 @@ async def test_lone_surrogate_in_free_text_metric_is_refused_not_crashed():
         assert r.status_code == 422, r.text
         assert _error_locs(r, "os_pretty") == [["body", "os_pretty"]], r.text
         assert (await _stored(server_id))["os_pretty"] is None
+
+
+@pytest.mark.parametrize(
+    "raw_body,field",
+    [
+        pytest.param(b'{"cpu_usage_pct": NaN}', "cpu_usage_pct", id="nan"),
+        pytest.param(b'{"uptime_seconds": Infinity}', "uptime_seconds", id="infinity"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_nan_in_a_numeric_metric_is_refused_not_crashed(raw_body: bytes, field: str):
+    """`NaN`/`Infinity` — 422, а не 500 при рендере ответа.
+
+    `json.loads` в FastAPI принимает оба по умолчанию, так что до схемы они
+    доезжают и получают честный `finite_number`. Ломался ответ: имя поля не
+    секретное, `input: nan` оставался в ошибке, а `JSONResponse` рендерит тело
+    с `allow_nan=False` и падает `ValueError: Out of range float values`.
+    Пятьсотый вместо только что собранного четыреста двадцать второго — и
+    приезжал он из обработчика ошибок, а не из эндпоинта.
+
+    Отправляется сырым телом: `json=` в httpx сериализует `float('nan')` в тот
+    же `NaN`, но здесь важно, что именно уходит по проводу.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        server_id = await _login_and_create(c, "met-nan")
+
+        r = await c.post(
+            f"/api/servers/{server_id}/metrics",
+            content=raw_body,
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 422, r.text
+        assert _error_locs(r, field) == [["body", field]], r.text
+        assert (await _stored(server_id))["metrics_collected_at"] is None
 
 
 @pytest.mark.parametrize(

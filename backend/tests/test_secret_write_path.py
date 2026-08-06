@@ -58,6 +58,8 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
@@ -66,7 +68,12 @@ from sqlalchemy import select, update
 from app.auth.models import User
 from app.blobs.models import BlobStorage
 from app.core.database import AsyncSessionLocal
-from app.main import SECRET_NAME_MARKERS, _input_is_unsafe_to_echo, app
+from app.main import (
+    SECRET_NAME_MARKERS,
+    _input_is_unsafe_to_echo,
+    _without_unrenderable_input,
+    app,
+)
 from app.models.registrar_account import RegistrarAccount
 from app.models.server import Server
 
@@ -805,6 +812,66 @@ def test_predicate_hides_input(err: dict):
 def test_predicate_keeps_input(err: dict):
     """Иначе «починка» вида «снять input вообще» прошла бы незамеченной."""
     assert _input_is_unsafe_to_echo(err) is False
+
+
+# ---------------------------------------------------------------------------
+# Юниты на второй фильтр того же ответа — `_without_unrenderable_input`.
+#
+# Он про другое, чем предикат выше: не «нельзя показывать», а «физически не
+# отдаётся». Живут они здесь вместе потому, что применяются к одному и тому же
+# словарю ошибки и композируются — редакция секретов вырезает `input`, а этот
+# отрабатывает поверх её результата.
+#
+# Значения ниже не придуманы: каждое доезжает до `input` через живой запрос на
+# `POST /servers/{id}/metrics` (`json.loads` в FastAPI принимает `NaN` и
+# `Infinity`, а одиночный суррогат — законный `\\uXXXX`-эскейп), и на каждом
+# `JSONResponse.render` падает, то есть 500 вместо собранного 422.
+# ---------------------------------------------------------------------------
+
+UNRENDERABLE_INPUTS = [
+    pytest.param("A\ud800B", id="одиночный-суррогат"),
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="infinity"),
+]
+
+RENDERABLE_INPUTS = [
+    pytest.param("Ubuntu 22.04.4 LTS", id="обычная-строка"),
+    pytest.param(42, id="число"),
+    pytest.param(None, id="none"),
+    pytest.param({"nested": "value"}, id="словарь"),
+]
+
+
+@pytest.mark.parametrize("value", UNRENDERABLE_INPUTS)
+def test_unrenderable_input_is_dropped(value):
+    err = {"type": "finite_number", "loc": ["body", "cpu_usage_pct"], "input": value}
+    assert "input" not in _without_unrenderable_input(err)
+    # Остальные ключи обязаны выжить: без `type`/`loc` клиент не поймёт, что
+    # именно не так, и 422 станет бесполезен.
+    assert _without_unrenderable_input(err)["type"] == "finite_number"
+
+
+@pytest.mark.parametrize("value", RENDERABLE_INPUTS)
+def test_renderable_input_is_kept(value):
+    """Позитивный контроль: фильтр, режущий всё подряд, тоже прошёл бы верхний."""
+    err = {"type": "int_parsing", "loc": ["body", "ssh_port"], "input": value}
+    assert _without_unrenderable_input(err) == err
+
+
+def test_guard_repeats_the_renderer_flag_for_flag():
+    """Гард обязан повторять рендер точно, иначе мимо него едет 500.
+
+    Проверяется не «правильные ли флаги написаны» (это была бы копия кода), а
+    следствие: то, что гард пропустил, обязано отрендериться настоящим
+    `JSONResponse`. Ровно этим тестом ловится расхождение любого флага —
+    именно на `allow_nan` гард и разошёлся с рендером в прошлый раз.
+    """
+    for value in ("A\ud800B", float("nan"), float("inf"), "ok", 42, None):
+        err = {"type": "x", "loc": ["body", "f"], "input": value}
+        kept = _without_unrenderable_input(err)
+        payload = jsonable_encoder({"detail": [kept]})
+        # Не должно бросать ни на одном из случаев.
+        JSONResponse(content=payload).render(payload)
 
 
 # Расхождения `SECRET_NAME_MARKERS` с десктопным `SECRET_KEY_MARKERS`, которые
