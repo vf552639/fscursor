@@ -116,7 +116,7 @@
 перенесено внутрь `try` — это исправление обнажил именно провайдер (первое поле в этой цепочке,
 которое схема может отвергнуть на bulk-import сервера).
 
-Тесты: `backend/tests/test_bulk_import_provider.py` (новый, 7 тестов: юнит-уровень
+Тесты: `backend/tests/test_bulk_import_provider.py` (новый, 8 тестов: юнит-уровень
 `_parse_server_row` + интеграционные — провайдер сохраняется, обратная совместимость без
 колонки, невалидный провайдер скипает свою строку и не роняет соседние). Каждый мутацией
 проверен красным.
@@ -133,9 +133,42 @@ rows in dev DB» на момент дропа колонки), поэтому р
 седьмой индекс**, а зафиксировать переиспользование индекса 5 и поправить документацию:
 `docs/ARCHITECTURE.md:57` и `docs/CURRENT_STATUS.md:48` обновлены (второй — с исторической
 оговоркой: на дату той changelog-записи колонка ещё была `notes`, репурпоз в `provider` — позже,
-этой фазой). Тест `test_sixth_column_is_provider_not_notes` в
-`backend/tests/test_bulk_import_provider.py` фиксирует выбор явно, чтобы следующий человек не
-гадал, чем была шестая колонка раньше.
+этой фазой). Выбор сторожит тест `test_notes_era_value_over_provider_length_limit_now_skips_the_row`
+в `backend/tests/test_bulk_import_provider.py`: он гоняет notes-эровскую заметку длиннее
+`PROVIDER_MAX_LEN` и фиксирует принятый регресс — строка, которая при старой семантике колонки
+импортировалась бы, сегодня скипается. Первая версия этого стража (`test_sixth_column_is_provider_not_notes`)
+была тавтологичной — краснела только заодно с соседним юнит-тестом на индекс 5, и code review
+это доказал мутацией; заменена на поведенческий сценарий выше.
+
+## Фаза 7 — sync-покрытие (backend) [x]
+
+**Закрыта.** До этой фазы поле `provider` не было проверено ни одним тестом на путь в
+sync-кеш — `grep provider backend/tests/test_sync.py` до правки не давал ничего, а именно
+через `/sync/*` десктоп видит поля сервера. Проверено и подтверждено:
+
+- `_to_row` (`backend/app/sync/routes.py`) сериализует колонки **generic-ом** — цикл по
+  `obj.__table__.columns` без явного списка полей, `skip = {"sync_version", "sync_deleted",
+  "user_id"}`. `provider` в `skip` не входит, значит проходит насквозь без единой правки
+  Rust — утверждение плана `tagprovider.md` про «desktop не затрагивается» подтверждено, а
+  не принято на веру.
+- `test_no_plaintext_secret_schemas.py` на `provider` не ругается: имя не входит в
+  `SECRET_NAME_MARKERS` (`password`, `auth_key`, `api_key`, `token`, `secret`, `_b64`,
+  `_blob_id`) — поле несекретное, гард молчит по праву, не по недосмотру.
+
+Новый тест `backend/tests/test_sync.py::test_sync_snapshot_and_changes_carry_server_provider_including_when_cleared_to_null`
+проверяет три случая: `GET /sync/snapshot` содержит `provider` со значением; инкрементальный
+`GET /sync/changes?since=` тоже содержит его; после `PUT .../provider=null` ключ `provider`
+остаётся в `fields` со значением `null`, а не пропадает — десктопный кеш обязан увидеть явную
+очистку, а не унести старое значение молча.
+
+Мутационная проверка (внешнее ревью воспроизвело и добавило четвёртый случай): временное
+исключение `"provider"` из `skip` в `_to_row`, и отдельно — временное удаление `"servers"` из
+`SCOPED_MODELS` — в обоих случаях падает именно новый тест, соседний
+`test_sync_snapshot_includes_domain` остаётся зелёным. Оба мутанта отменены после проверки,
+`git diff` по продукционному коду — пусто.
+
+Тесты: `backend/tests/test_sync.py` — **2 passed** (старый `test_sync_snapshot_includes_domain`
++ новый sync-тест на provider).
 
 ## Проверка
 
@@ -146,11 +179,18 @@ rows in dev DB» на момент дропа колонки), поэтому р
 
 ## Итог
 
-**Реализовано целиком: фазы 1–4.** Коммиты `77aaf95` (БД + API), `9e2c793` (страж миграций),
-`34dc826` (фронт), + коммит фазы 4 (bulk-import, см. `git log`).
+**Реализовано целиком: все пять фаз этого плана** (1 — БД и API, 2 — форма и карточка,
+3 — список и фильтр, 4 — bulk-import, 5 — sync-покрытие; фаза «7» в заголовке выше — номер из
+черновика `tagprovider.md`, здесь это пятая и последняя).
 
-Тесты: backend `test_server_provider.py` + `test_validators.py` + `test_bulk_import_provider.py`
-— 19 passed; frontend — 329 passed / 40 files. Каждая правка с мутационной проверкой.
+Коммиты: `77aaf95` (БД + API), `9e2c793` (страж миграций), `34dc826` (фронт), `e4bafc4` +
+`91ec0b7` + `4a43156` (bulk-import и два круга ревью), `a846b48` + `5164e31` (sync-тест и
+фикс-круг).
+
+Тесты backend: `test_server_provider.py` (5 passed) + `test_validators.py` (7 passed) +
+`test_bulk_import_provider.py` (8 passed) + `test_sync.py` (2 passed, из них 1 — про provider)
+— **22 passed**; полный backend-набор — 195 passed. Frontend — **340 passed / 42 files**.
+Каждая правка с мутационной проверкой.
 
 **Осталось на живую приёмку** (тестами не проверяется): завести сервер с провайдером в приложении
 и увидеть его в списке, карточке и фильтре; поведение `<datalist>` в webview Tauri (в jsdom
