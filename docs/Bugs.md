@@ -32,10 +32,10 @@
    - *Impact*: `npm run build` can fail outside Docker on outdated host runtimes.
    - *Next*: Document required Node version and prefer containerized build checks.
 
-6. **Server telemetry + FastPanel domains sync need runtime verification in live compose**
-   - *Severity*: Medium
-   - *Impact*: Full SSH metrics collection (CPU/RAM/disk/network/uptime), 5-minute scheduler, and `/servers/{id}/sync-domains` are implemented, but should be validated end-to-end in running `backend`/`worker`/`beat` with real SSH/FastPanel targets.
-   - *Next*: Run checklist for success path (auto-check on create, manual refresh via `/refresh-metrics`, periodic 5-minute refresh, `sync-domains` creates/links records) and failure path (`last_check_ok=false`, error surfaced on ServerDetail and sync response).
+6. **Server telemetry + FastPanel domains sync need runtime verification in live compose** — ~~open~~ **obsolete (2026-08-06)**
+   - *Was*: Full SSH metrics collection (CPU/RAM/disk/network/uptime), 5-minute scheduler, and `/servers/{id}/sync-domains` should be validated end-to-end with real SSH/FastPanel targets.
+   - *Why obsolete*: none of that code is on the backend any more. The SSH collector, `/refresh-metrics`, `/refresh-uptime`, `/sync-domains` and the 5-minute sweep were removed with the zero-knowledge migration; the backend cannot decrypt an SSH password.
+   - *What to verify instead*: (a) Beat runs `check-server-reachability-6h` and leaves a `TaskLog(task_type="server_monitor")` per run — `success`, or `partial` with counters when some rows were not processed; (b) two probe misses in a row flip `last_check_ok` to `false` and emit one `server_down` notification per episode, and recovery emits one `server_up`; (c) the desktop **Refresh metrics** button posts to `POST /api/servers/{id}/metrics` and the card stops showing dashes. See `docs/ARCHITECTURE.md` §§ Server signals / Server reachability monitoring flow / Server metrics flow.
 
 10. **Task33 domain operations need full runtime verification against real FastPanel host**
    - *Severity*: Medium

@@ -5,10 +5,9 @@
 - FastAPI + Uvicorn
 - SQLAlchemy Async + asyncpg (Supabase **transaction pooler** when using `*.pooler.supabase.com:6543`; `NullPool` + tuned `connect_args` — see `docs/SUPABASE_DOCKER.md`)
 - Alembic (migration-driven schema updates)
-- Celery 5 + Redis (worker + beat)
-- Paramiko (SSH automation)
+- Celery 5 + Redis (worker + beat; the only periodic jobs are the daily renewal check and the 6-hourly server reachability probe)
+- **No SSH library.** Paramiko was removed with the zero-knowledge migration: SSH passwords are opaque blobs the backend cannot decrypt, so every SSH-driven flow (metrics collection, FastPanel lifecycle, domain sync) lives in the desktop (`russh`). What the backend still does about servers is a plain `asyncio` TCP connect to port 22 — `app/services/server_monitor.py`, see `docs/ARCHITECTURE.md` § Server signals
 - dnspython (`NS` resolver fallback in nameserver verification flow)
-- FastPanel CLI over SSH for site lifecycle and discovery/sync (JSON/table/fs discovery; timeouts; nested `owner` normalization — see `docs/ARCHITECTURE.md` § FastPanel domains sync)
 - `python-dateutil` (renewal threshold calculation)
 - `cryptography` (encrypted secrets at rest)
 - **Staged for auth / email (Stage 1+):** `argon2-cffi`, `bcrypt`, `itsdangerous`, `slowapi`, `pyotp`, `email-validator`, `resend` (see `backend/requirements.txt`)
