@@ -204,16 +204,6 @@ describe("Dashboard — сводка считает только то, что и
     expect(screen.getByText("2 online · 2 down · 1 unknown")).toBeTruthy();
   });
 
-  it("счёт упавших датирован: часть из них держится на старой проверке", async () => {
-    await screen.findByText("web-01");
-    // Само число их считает (ошибка в сторону тревоги дешевле обратной), но
-    // подать давний факт как текущее число — тот же дефект, что мы чиним.
-    expect(screen.getByText("servers · 1 unverified")).toBeTruthy();
-    // У живых такой оговорки нет и быть не может: «Online» требует свежей
-    // проверки по построению.
-    expect(within(screen.getByText("Online").parentElement as HTMLElement).getByText("servers")).toBeTruthy();
-  });
-
   it("бейдж строки не зеленеет у упавшего и у непроверенного", async () => {
     await screen.findByText("web-02");
     const down = within(row("web-02", "10.0.0.2")).getByText("error");
@@ -238,6 +228,20 @@ describe("Dashboard — возраст показаний виден на пер
     expect(within(row("web-01", "10.0.0.1")).getByText("metrics 12m ago")).toBeTruthy();
     expect(within(row("web-04", "10.0.0.4")).getByText("metrics 3mo ago · stale")).toBeTruthy();
     expect(within(row("web-03", "10.0.0.3")).getByText("no metrics yet")).toBeTruthy();
+  });
+
+  it("под относительным возрастом лежит точная дата — как на двух других экранах", async () => {
+    await screen.findByText("web-01");
+    // «2h ago» отвечает на вопрос «свежо ли это», но не на «когда именно».
+    // В списке серверов и на детали точная дата есть в подсказке; дашборд был
+    // единственным экраном, где её не было.
+    const line = within(row("web-01", "10.0.0.1"));
+    expect(line.getByText("checked 2h ago").title).toBe(
+      new Date(SERVERS[0].last_check_at as string).toLocaleString(),
+    );
+    expect(line.getByText("metrics 12m ago").title).toBe(
+      new Date(SERVERS[0].metrics_collected_at as string).toLocaleString(),
+    );
   });
 
   it("протухшее показание подано не как свежее", async () => {

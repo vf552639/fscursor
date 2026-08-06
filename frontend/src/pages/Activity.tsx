@@ -25,22 +25,40 @@ export default function Activity(){
   const activityLogs = auditRows ?? [];
 
   const [tab,setTab]=useState("tasks"); const [fType,setFT]=useState(""); const [fStat,setFS]=useState(""); const [openTaskId,setOpenTaskId]=useState<number | null>(null);
-  const stMap: Record<string, string[]>={installed:["green","✓ Installed"],ok:["green","✓ OK"],success:["green","✓ Success"],failed:["red","✕ Failed"],error:["red","✕ Error"],pending:["yellow","⏳ Pending"],running:["blue","⚙ Running"]};
+  // `partial` — пакетный прогон, дошедший до конца, но обработавший не всё
+  // (`TaskLogStatus.PARTIAL`, его ставит мониторинг серверов, когда часть машин
+  // проверить не удалось). Без своей строки он попадал в фолбэк `["gray", …]`,
+  // то есть выглядел статусом, которого мы не знаем, — а мы его знаем, и он
+  // означает «сделано не всё». Жёлтый: не провал, но и не «✓».
+  const stMap: Record<string, string[]>={installed:["green","✓ Installed"],ok:["green","✓ OK"],success:["green","✓ Success"],failed:["red","✕ Failed"],error:["red","✕ Error"],partial:["yellow","◐ Partial"],pending:["yellow","⏳ Pending"],running:["blue","⚙ Running"]};
   const tMap: Record<string, string>={install_fastpanel:"⚡ FastPanel Install",set_nameservers:"🔗 Set Nameservers"};
   const filtTasks=taskLogs.filter(l=>(!fType||l.type===fType)&&(!fStat||l.status===fStat));
   const Th=({children}: any)=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}>{children}</th>;
   
   if (l1 || l2) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading activity logs...</div>;
 
+  // Прогоны, сделавшие не всё. Считаются отдельно, потому что раскладка по трём
+  // спискам строк их не ловила вовсе: `partial` не совпадал ни с одним из них, и
+  // деградировавший прогон пропадал из сводки — Total его считал, а ни одна из
+  // трёх плиток нет.
+  const partial = taskLogs.filter(t=>t.status==="partial").length;
+  // В «Completed» он входит: прогон действительно завершился, и отправить его в
+  // «Failed» значило бы объявить проваленным то, что по большей части сделано.
+  // Но и слиться с успехом молча он не может — иначе «12 Completed» читается как
+  // «все двенадцать сделали свою работу целиком». Отсюда квалификатор под
+  // счётом: он не меняет число, он говорит, из чего оно. Тот же приём, что у
+  // «Down · N unverified» на дашборде.
+  const completed = taskLogs.filter(t=>t.status==="installed"||t.status==="ok"||t.status==="success").length + partial;
+
   return <>
     <div style={{marginBottom:24}}><h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Activity</h1><div style={{fontSize:13,color:"#6b7280"}}>Task logs & system events</div></div>
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:20}}>
       {[
-        ["Total Tasks",taskLogs.length,"#2563eb"],
-        ["Completed",taskLogs.filter(t=>t.status==="installed"||t.status==="ok"||t.status==="success").length,"#16a34a"],
-        ["Failed",taskLogs.filter(t=>t.status==="failed"||t.status==="error").length,"#dc2626"],
-        ["Pending / Running",taskLogs.filter(t=>t.status==="pending"||t.status==="running").length,"#d97706"]
-      ].map(([l,v,c])=><StatCard key={l as string} label={l} value={v} color={c}/>)}
+        {label:"Total Tasks",value:taskLogs.length,color:"#2563eb",sub:undefined},
+        {label:"Completed",value:completed,color:"#16a34a",sub:partial?`incl. ${partial} partial — some entities were skipped`:undefined},
+        {label:"Failed",value:taskLogs.filter(t=>t.status==="failed"||t.status==="error").length,color:"#dc2626",sub:undefined},
+        {label:"Pending / Running",value:taskLogs.filter(t=>t.status==="pending"||t.status==="running").length,color:"#d97706",sub:undefined}
+      ].map(t=><StatCard key={t.label} label={t.label} value={t.value} sub={t.sub} color={t.color}/>)}
     </div>
     <Card>
       <div style={{display:"flex",borderBottom:"1px solid #e5e7eb"}}>
@@ -53,7 +71,10 @@ export default function Activity(){
       {tab==="tasks"&&<>
         <div style={{padding:"12px 16px",display:"flex",gap:10,borderBottom:"1px solid #e5e7eb"}}>
           <Sel value={fType} onChange={(e: any)=>setFT(e.target.value)}><option value="">All Types</option><option value="install_fastpanel">FastPanel Install</option><option value="set_nameservers">Set Nameservers</option></Sel>
-          <Sel value={fStat} onChange={(e: any)=>setFS(e.target.value)}><option value="">All Statuses</option><option value="success">Success</option><option value="failed">Failed</option><option value="pending">Pending</option><option value="running">Running</option></Sel>
+          {/* «Partial» — полноправный пункт фильтра: деградировавшие прогоны
+              ищут именно поштучно («какие серверы не проверились»), а без пункта
+              выбрать их можно было только глазами по всей таблице. */}
+          <Sel value={fStat} onChange={(e: any)=>setFS(e.target.value)}><option value="">All Statuses</option><option value="success">Success</option><option value="partial">Partial</option><option value="failed">Failed</option><option value="pending">Pending</option><option value="running">Running</option></Sel>
         </div>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr>{["#","Type","Server","Status","Log Preview","Date",""].map(h=><Th key={h}>{h}</Th>)}</tr></thead>

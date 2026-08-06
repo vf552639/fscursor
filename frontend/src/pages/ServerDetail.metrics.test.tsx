@@ -152,6 +152,26 @@ const COLLECTED = [
   "#sdmp:end",
 ].join("\n");
 
+/**
+ * Карточка показания целиком (`StatCard`) — блок с подписью, значением,
+ * припиской и полосой заполнения.
+ */
+function statCard(label: string): HTMLElement {
+  const el = screen.getByText(label).parentElement;
+  if (!el) throw new Error(`карточки «${label}» на экране нет`);
+  return el;
+}
+
+/**
+ * Нарисована ли под значением полоса заполнения. Ищем по остатку разметки
+ * `StatCard` (единственный элемент страницы с анимацией ширины), а не по
+ * тест-иду: полоса — это разметка компонента, и появись она снова другим
+ * способом, проверка обязана поймать её всё равно.
+ */
+function hasBar(label: string): boolean {
+  return statCard(label).querySelectorAll('div[style*="transition"]').length > 0;
+}
+
 /** Значение строки «Server Information» по её подписи (`InfoRow`). */
 function rowValue(label: string): string {
   const row = screen.getByText(label).parentElement;
@@ -318,6 +338,30 @@ describe("ServerDetail — свежесть проверки и метрик", (
     expect(screen.queryByText(/No metrics yet/)).toBeNull();
   });
 
+  it("непрочитанный процент CPU не рисуется пустой полосой под прочерком", async () => {
+    setTauri(true);
+    // Тот же снимок без единого показания. Полоса под «—» — это утверждение
+    // «CPU 0%», которого никто не измерял: пустой жёлоб читается как нулевая
+    // загрузка. У RAM и SSD рядом её в этом случае и нет.
+    renderDetail({ ...SERVER, metrics_collected_at: ago(5 * MINUTE) });
+
+    await screen.findByText("CPU Usage");
+    expect(statCard("CPU Usage").textContent).toContain("—");
+    expect(hasBar("CPU Usage")).toBe(false);
+    expect(hasBar("RAM Usage")).toBe(false);
+    expect(hasBar("SSD Usage")).toBe(false);
+  });
+
+  it("измеренный процент CPU полосу как раз рисует", async () => {
+    setTauri(true);
+    // Обратная сторона проверки выше: без неё «полосы нет» зеленело бы и у
+    // карточки, которая перестала рисовать её вовсе.
+    renderDetail({ ...SERVER, ...WITH_READINGS, metrics_collected_at: ago(5 * MINUTE) });
+
+    await screen.findByText("CPU Usage");
+    expect(hasBar("CPU Usage")).toBe(true);
+  });
+
   it("свежий снимок подписан своим возрастом", async () => {
     setTauri(true);
     renderDetail({ ...SERVER, ...WITH_READINGS, metrics_collected_at: ago(12 * MINUTE) });
@@ -325,10 +369,21 @@ describe("ServerDetail — свежесть проверки и метрик", (
     expect(await screen.findByText("Metrics: 12m ago")).toBeTruthy();
     expect(screen.getByText("CPU Usage")).toBeTruthy();
     expect(screen.queryByText(/stale/)).toBeNull();
+    // И сама цифра не выкрашена в «протухшее»: цвет — часть утверждения.
+    expect(screen.getByText("42%").style.color).not.toBe("rgb(161, 98, 7)");
     // «Normal» рядом с числом ядер утверждалось безусловно — и при 95% CPU, и
     // на трёхмесячном снимке. Оценки, не выведенной из данных, здесь нет.
     expect(screen.queryByText(/Normal/)).toBeNull();
     expect(screen.getByText("2 vCPU")).toBeTruthy();
+  });
+
+  it("память переведена в ГБ той же формулой, что в списке и на дашборде", async () => {
+    setTauri(true);
+    renderDetail({ ...SERVER, ...WITH_READINGS, ram_used_mb: 1536, metrics_collected_at: ago(5 * MINUTE) });
+
+    // 1536 МБ — это «1.5 GB», а не «2 GB»: округление до целого дорисовывало бы
+    // машине полгигабайта занятой памяти, которых никто не измерял.
+    expect(await screen.findByText("1.5 GB")).toBeTruthy();
   });
 
   it("карточки показаний не рисуют ряд наблюдений, которого не существует", async () => {
@@ -353,7 +408,23 @@ describe("ServerDetail — свежесть проверки и метрик", (
 
     expect(await screen.findByText(/Metrics: 3mo ago · stale/)).toBeTruthy();
     // Аптайм в шапке — то же самое трёхмесячное показание, и без пометки он
-    // читается как «сервер работает 3 дня» прямо сейчас.
-    expect(screen.getByText(/Uptime: 3d 0h \(stale\)/)).toBeTruthy();
+    // читается как «сервер работает 3 дня» прямо сейчас. Пометка — та же самая
+    // словом в слово: «(stale)» здесь и «· stale» рядом были двумя редакциями
+    // одного факта.
+    expect(screen.getByText(/Uptime: 3d 0h · stale/)).toBeTruthy();
+  });
+
+  it("протухший снимок подан цветом показаний, а не прозрачностью всего блока", async () => {
+    setTauri(true);
+    renderDetail({ ...SERVER, ...WITH_READINGS, metrics_collected_at: ago(95 * DAY) });
+
+    // Тот же цвет протухшего показания, что в списке серверов и на дашборде.
+    expect((await screen.findByText("42%")).style.color).toBe("rgb(161, 98, 7)");
+    // И НЕ `opacity` на весь блок: она была третьим механизмом для того же
+    // сигнала и утаскивала заодно серые подписи («of 4 GB») до нечитаемого
+    // контраста — приписка должна читаться как раз у старого снимка.
+    const grid = screen.getByText("CPU Usage").closest('div[style*="grid-template-columns"]');
+    expect((grid as HTMLElement).style.opacity).toBe("");
+    expect(screen.getByText("of 4 GB")).toBeTruthy();
   });
 });

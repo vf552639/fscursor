@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, cpuColor, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgo, WARN_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
+import { mbToGb } from "./dashboardData";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
@@ -197,11 +198,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   if (!s) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading server details...</div>;
 
+  // Одно чтение часов на рендер — см. тот же приём в списке серверов и на
+  // дашборде: отдельный `Date.now()` в каждой функции дал бы три разных
+  // «сейчас» про один и тот же сервер.
+  const now = Date.now();
   // Лестница статусов — общая с дашбордом и списком (`lib/serverStatus`): три
   // экрана рисуют один и тот же сигнал, и переписанная на каждом заново она уже
   // разъезжалась.
-  const uiStatus = serverUiStatus(s);
-  const checkStale = isCheckStale(s.last_check_at);
+  const uiStatus = serverUiStatus(s, now);
+  const checkStale = isCheckStale(s.last_check_at, now);
   const osLabel = s.os_pretty || s.os || null;
   const providers = providerOptions(serversList?.items || []);
   // Снимок есть ровно тогда, когда есть его отметка времени: и десктопный
@@ -210,7 +215,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // константой, а не выражением по месту: `string | null` так сужается ветвлением
   // и не требует приведения типа в каждой из трёх точек показа.
   const metricsAt = s.metrics_collected_at;
-  const metricsStale = isMetricsStale(metricsAt);
+  const metricsStale = isMetricsStale(metricsAt, now);
 
   const fp = {
     url: s.fastpanel_url || `https://${s.ip_address}:8888`,
@@ -225,9 +230,24 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // Только доли, которые действительно измерены: рядов наблюдений (`genBars`)
   // у карточек больше нет — историю метрик мы не храним, и пятнадцать случайных
   // столбиков вокруг одного значения были чистой выдумкой.
-  const cpuValue = s.cpu_usage_pct ?? 0;
+  //
+  // `undefined`, а не `0`: `StatCard` при `undefined` полосу не рисует вовсе, а
+  // при нуле рисует пустой жёлоб — под значением «—» он читается как «CPU 0%»,
+  // то есть как измеренная нулевая загрузка. У RAM и SSD ниже ровно то же
+  // правило, и CPU был единственным, кто из него выпадал.
+  const cpuPct = s.cpu_usage_pct ?? undefined;
   const ramPct = s.ram_used_mb != null && s.ram_total_mb ? Math.round((s.ram_used_mb / s.ram_total_mb) * 100) : undefined;
   const diskPct = s.disk_used_gb != null && s.disk_total_gb ? Math.round((s.disk_used_gb / s.disk_total_gb) * 100) : undefined;
+
+  /**
+   * Показание карточки. Протухшее красится тем же цветом, что в списке серверов
+   * и на дашборде, а не приглушается прозрачностью всего блока: `opacity: 0.6`
+   * была третьим механизмом для одного сигнала и утаскивала заодно серые
+   * подписи («of 4 GB») примерно к 2.6:1 — то есть пряталось и то, что должно
+   * читаться. Прочерк остаётся прочерком: «показания нет» протухнуть не может.
+   */
+  const reading = (text: string | null) =>
+    text === null ? "—" : <span style={metricsStale ? {color: STALE_TEXT} : undefined}>{text}</span>;
 
   return <>
     <div style={{display:"flex",alignItems:"center",gap:6,fontSize:13,color:"#9ca3af",marginBottom:20}}>
@@ -240,7 +260,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         {/* Пометка стоит вплотную к самой цифре: аптайм здесь — часть того же
             снимка, и «3d 0h» трёхмесячной давности без неё читается как «сервер
             работает три дня» прямо сейчас. */}
-        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:STALE_TEXT}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?" (stale)":""}</span> · Added {fmtDate(s.created_at)}</div>
+        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:STALE_TEXT}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?STALE_SUFFIX:""}</span> · Added {fmtDate(s.created_at)}</div>
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -376,17 +396,18 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     {metricsAt ? (
       <div style={{marginBottom:20}}>
         {/* Подпись возраста — над самими показаниями и одна на все четыре
-            карточки: снимок атомарен, у всех полей один возраст. Протухший
-            снимок ещё и приглушается целиком — так, чтобы цифра не смотрелась
-            текущей, но и не исчезала: она настоящая, просто старая. */}
-        <div title={new Date(metricsAt).toLocaleString()} style={{fontSize:12.5,color:metricsStale?WARN_TEXT:"#6b7280",marginBottom:8}}>
-          Metrics: {formatAgo(metricsAt)}{metricsStale?" · stale, press «Refresh metrics»":""}
+            карточки: снимок атомарен, у всех полей один возраст. Пометка та же,
+            что везде в продукте (`STALE_SUFFIX`), а зов нажать кнопку добавлен
+            отдельно — кнопка есть только на этом экране, и здесь совет уместен.
+            Сами цифры при этом не исчезают: они настоящие, просто старые. */}
+        <div title={new Date(metricsAt).toLocaleString()} style={{fontSize:12.5,color:metricsStale?STALE_TEXT:"#6b7280",marginBottom:8}}>
+          Metrics: {formatAgoStale(metricsAt, metricsStale, now)}{metricsStale?" — press «Refresh metrics»":""}
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,opacity:metricsStale?0.6:1}}>
-        <StatCard label="CPU Usage" value={s.cpu_usage_pct != null ? `${s.cpu_usage_pct}%` : "—"} sub={s.cpu_count != null ? `${s.cpu_count} vCPU` : "—"} pct={s.cpu_usage_pct ?? 0} color={cpuColor(cpuValue)}/>
-        <StatCard label="RAM Usage" value={s.ram_used_mb != null ? `${Math.round(s.ram_used_mb / 1024)} GB` : "—"} sub={s.ram_total_mb != null ? `of ${Math.round(s.ram_total_mb / 1024)} GB` : "—"} pct={ramPct} color="#7c3aed"/>
-        <StatCard label="SSD Usage" value={s.disk_used_gb != null ? `${s.disk_used_gb} GB` : "—"} sub={s.disk_total_gb != null ? `of ${s.disk_total_gb} GB` : "—"} pct={diskPct} color="#0891b2"/>
-        <StatCard label="Network In" value={s.net_in_kbps != null ? `${(s.net_in_kbps / 1000).toFixed(2)} Mb/s` : "—"} sub={s.net_out_kbps != null ? `Out: ${(s.net_out_kbps / 1000).toFixed(2)} Mb/s` : "—"} pct={undefined} color="#059669"/>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
+        <StatCard label="CPU Usage" value={reading(s.cpu_usage_pct != null ? `${s.cpu_usage_pct}%` : null)} sub={s.cpu_count != null ? `${s.cpu_count} vCPU` : "—"} pct={cpuPct} color={cpuPct === undefined ? undefined : metricsStale ? STALE_TEXT : pctColor(cpuPct)}/>
+        <StatCard label="RAM Usage" value={reading(s.ram_used_mb != null ? `${mbToGb(s.ram_used_mb)} GB` : null)} sub={s.ram_total_mb != null ? `of ${mbToGb(s.ram_total_mb)} GB` : "—"} pct={ramPct} color={metricsStale?STALE_TEXT:"#7c3aed"}/>
+        <StatCard label="SSD Usage" value={reading(s.disk_used_gb != null ? `${s.disk_used_gb} GB` : null)} sub={s.disk_total_gb != null ? `of ${s.disk_total_gb} GB` : "—"} pct={diskPct} color={metricsStale?STALE_TEXT:"#0891b2"}/>
+        <StatCard label="Network In" value={reading(s.net_in_kbps != null ? `${(s.net_in_kbps / 1000).toFixed(2)} Mb/s` : null)} sub={s.net_out_kbps != null ? `Out: ${(s.net_out_kbps / 1000).toFixed(2)} Mb/s` : "—"} pct={undefined} color="#059669"/>
         </div>
       </div>
     ) : (
@@ -479,7 +500,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               ["Uptime", formatUptime(s.uptime_seconds)],
               // Возраст снимка — сразу под аптаймом, который из него и взят.
               ["Metrics", metricsAt
-                ? <span key="metrics" style={metricsStale?{color:WARN_TEXT}:undefined}>{formatAgo(metricsAt)}{metricsStale?" · stale":""}</span>
+                ? <span key="metrics" style={metricsStale?{color:STALE_TEXT}:undefined}>{formatAgoStale(metricsAt, metricsStale, now)}</span>
                 : "never"],
               ["Status",<Badge key="status" variant={statusBadgeVariant(uiStatus)}>{uiStatus}</Badge>],
               // И так же под статусом — возраст проверки, из которой он получен.
@@ -487,7 +508,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               // (десктоп по кнопке против бэкенда раз в 6 часов) и разная
               // свежесть, и общая подпись показывала бы один из них чужой.
               ["Last check", s.last_check_at
-                ? <span key="check" style={checkStale?{color:WARN_TEXT}:undefined}>{formatAgo(s.last_check_at)}{checkStale?" · stale":""}</span>
+                ? <span key="check" style={checkStale?{color:STALE_TEXT}:undefined}>{formatAgoStale(s.last_check_at, checkStale, now)}</span>
                 : "never"],
               ["Added",fmtDate(s.created_at)]
             ].map(([k,v], i)=><InfoRow key={i} k={k} v={v}/>)}

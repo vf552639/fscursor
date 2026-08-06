@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { formatAgo } from "./Primitives";
+import { formatAgo, formatAgoStale } from "./Primitives";
 
 /**
  * Возраст показания словами — чистая функция, и проверяется она отдельно от
@@ -56,5 +56,27 @@ describe("formatAgo", () => {
 
   it("неразобранная дата — прочерк, а не «NaN ago»", () => {
     expect(formatAgo("not-a-date", NOW)).toBe("—");
+  });
+});
+
+/**
+ * Хвост «возраст + пометка протухания» собирался семью копиями в трёх файлах и
+ * успел разъехаться на три редакции текста (« · stale», « · stale, press
+ * «Refresh metrics»», « (stale)»). Формулировка одна на продукт — значит и
+ * функция одна.
+ */
+describe("formatAgoStale", () => {
+  it("свежее показание — просто возраст, без хвоста", () => {
+    expect(formatAgoStale(ago(2 * HOUR), false, NOW)).toBe("2h ago");
+  });
+
+  it("протухшее — тот же возраст и пометка", () => {
+    expect(formatAgoStale(ago(95 * DAY), true, NOW)).toBe("3mo ago · stale");
+  });
+
+  it("пометка не подменяет собой возраст: старое показание остаётся датированным", () => {
+    // Одного слова «stale» мало: «сутки назад» и «три месяца назад» — разные
+    // поводы, и решение принимает человек, а не порог.
+    expect(formatAgoStale(ago(DAY + MINUTE), true, NOW)).toBe("1d ago · stale");
   });
 });

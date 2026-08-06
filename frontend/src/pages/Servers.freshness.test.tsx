@@ -172,6 +172,10 @@ const SERVERS = [
     metrics_collected_at: ago(5 * MINUTE),
     disk_used_gb: 30,
     disk_total_gb: 80,
+    // Полтора гигабайта — чтобы точность перевода МБ→ГБ была видна: у ровных
+    // 2048 МБ округление до целого и до десятых дают одну и ту же строку.
+    ram_used_mb: 1536,
+    ram_total_mb: 4096,
   },
 ];
 
@@ -262,6 +266,26 @@ describe("Servers — статус не врёт", () => {
     expect(screen.getByText("web-04").getAttribute("title")).toBe("timeout after 5s");
   });
 
+  it("причина падения читается без наведения мышью", async () => {
+    await screen.findByText("web-04");
+    // Тултип невидим, пока в него не попали мышью, а искать упавший сервер
+    // глазами по сетке из полусотни карточек надо без наведения. Тот же довод и
+    // то же решение, что у ошибки провижининга в списке доменов.
+    expect(within(card("web-04")).getByTestId("check-error").textContent).toBe("timeout after 5s");
+    // И только у подтверждённого падения: у web-05 текст ошибки уже записан
+    // (первый промах), но статус ещё зелёный, и красная строка на зелёной
+    // карточке была бы ложной тревогой.
+    expect(within(card("web-05")).queryByTestId("check-error")).toBeNull();
+  });
+
+  it("в таблице причина падения тоже строкой, а не только подсказкой", async () => {
+    const table = await showTable();
+    expect(within(row(table, "web-04")).getByTestId("check-error").textContent).toBe(
+      "timeout after 5s",
+    );
+    expect(within(row(table, "web-05")).queryByTestId("check-error")).toBeNull();
+  });
+
   it("первый неподтверждённый промах не показывает ошибку под зелёной карточкой", async () => {
     await screen.findByText("web-05");
     // Бэкенд пишет `last_check_error` уже на первом промахе, а `last_check_ok`
@@ -331,6 +355,16 @@ describe("Servers — свежесть метрик отделена от све
     expect(within(card("web-06")).queryByText("No metrics yet")).toBeNull();
     expect(within(card("web-06")).getByText("No CPU reading")).toBeTruthy();
     expect(within(card("web-06")).getByText("Metrics: 5m ago")).toBeTruthy();
+  });
+
+  it("память переведена в ГБ той же формулой, что на дашборде", async () => {
+    await screen.findByText("web-06");
+    // 1536 МБ — это «1.5 GB». Пока список округлял до целого, а дашборд до
+    // десятых, один и тот же сервер значился на двух экранах по-разному, и
+    // округление вверх дорисовывало ему полгигабайта занятой памяти.
+    expect(within(card("web-06")).getByText("1.5/4 GB")).toBeTruthy();
+    const table = await showTable();
+    expect(cellByHeader(table, "web-06", "RAM")).toBe("1.5/4 GB");
   });
 
   it("свежие метрики подписаны своим возрастом, а не возрастом проверки", async () => {

@@ -26,14 +26,25 @@ export function formatUptime(seconds: number): string {
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
+/**
+ * МБ → ГБ для показа. Живёт здесь, а не по месту, потому что тот же перевод
+ * пишут страницы серверов и деталь сервера: пока их было три копии, две из них
+ * округляли до целого (`Math.round(x / 1024)`), и один и тот же сервер значился
+ * на дашборде как «1.5/4 GB», а в списке — как «2/4 GB».
+ *
+ * Один знак после запятой, а не целые: у машины с 1.5 ГБ занятых округление до
+ * «2 GB» — это треть памяти, придуманная форматированием.
+ */
+export const mbToGb = (mb: number) => round1(mb / 1024);
+
 const mapNum = <T>(v: number | null | undefined, f: (n: number) => T): T | null =>
   v === null || v === undefined ? null : f(v);
 
 export function serverMetrics(s: Server): ServerMetrics {
   return {
     cpu: mapNum(s.cpu_usage_pct, Math.round),
-    ramUsed: mapNum(s.ram_used_mb, (n) => round1(n / 1024)),
-    ramTotal: mapNum(s.ram_total_mb, (n) => round1(n / 1024)),
+    ramUsed: mapNum(s.ram_used_mb, mbToGb),
+    ramTotal: mapNum(s.ram_total_mb, mbToGb),
     ssdUsed: mapNum(s.disk_used_gb, Math.round),
     ssdTotal: mapNum(s.disk_total_gb, Math.round),
     uptime: mapNum(s.uptime_seconds, formatUptime),

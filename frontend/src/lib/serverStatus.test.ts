@@ -62,6 +62,31 @@ describe("serverUiStatus", () => {
     );
   });
 
+  it("свежий положительный ответ перебивает «error» в колонке БД", () => {
+    // Колонка `status` — не измерение: в неё пишут при заведении сервера, и
+    // «error» в ней может пережить починку машины навсегда. Дать полю из БД
+    // перекрыть свежий ответ монитора значило бы повторить исходный дефект,
+    // только в обратную сторону — поэтому измерение сильнее.
+    expect(
+      serverUiStatus({ status: "error", last_check_at: ago(HOUR), last_check_ok: true }, NOW),
+    ).toBe("active");
+  });
+
+  it("но перебивает только СВЕЖИЙ: старое «жив» колонку не отменяет", () => {
+    // Протухший положительный ответ не значит ничего (см. выше), и «error» из
+    // колонки остаётся последним, что про сервер вообще известно.
+    expect(
+      serverUiStatus({ status: "error", last_check_at: ago(3 * DAY), last_check_ok: true }, NOW),
+    ).toBe("error");
+    expect(
+      serverUiStatus({ status: "error", last_check_at: null, last_check_ok: null }, NOW),
+    ).toBe("error");
+    // И подтверждённое падение колонку тем более не отменяет.
+    expect(
+      serverUiStatus({ status: "error", last_check_at: ago(HOUR), last_check_ok: false }, NOW),
+    ).toBe("error");
+  });
+
   it("неподтверждённый результат проверки за «жив» не считается", () => {
     // `last_check_ok === null` при заполненной отметке — состояние, которого
     // монитор не создаёт, но «жив» из него не следует.

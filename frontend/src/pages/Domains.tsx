@@ -1,6 +1,6 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, formatAgo, DIM_TEXT, WARN_TEXT } from "../components/ui/Primitives";
+import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
 import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
@@ -265,6 +265,11 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
   const serversQ = useServers();
   const registrarsQ = useRegistrarAccounts();
   const cfAccountsQ = useCloudflareAccounts();
+
+  // Одно чтение часов на рендер — тот же приём, что на трёх остальных экранах:
+  // отдельный `Date.now()` внутри каждой функции дал бы разные «сейчас» для
+  // статуса сервера и для подписи его возраста в соседней строке.
+  const now = Date.now();
 
   const domainsData = domainsQ.data ?? [];
   const servers = serversQ.data?.items || [];
@@ -605,8 +610,8 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
               // `status` монитор не трогает, поэтому подтверждённо упавшая
               // машина стояла в списке доменов зелёной точкой. Лестница общая
               // (`lib/serverStatus`), как на трёх остальных экранах.
-              const srvStatus = srv ? serverUiStatus(srv) : "";
-              const srvCheckStale = isCheckStale(srv?.last_check_at);
+              const srvStatus = srv ? serverUiStatus(srv, now) : "";
+              const srvCheckStale = isCheckStale(srv?.last_check_at, now);
               const isFocused = focusDomainId === d.id;
               return <tr key={d.id} style={isFocused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background=""; }}>
                 <td style={{padding:"11px 16px"}}><input type="checkbox" checked={sel.has(d.id)} onChange={()=>toggle(d.id)} style={{cursor:"pointer"}}/></td>
@@ -623,7 +628,7 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
                   <span style={{display:"flex",alignItems:"center",gap:5}} title={srv.last_check_ok === false ? srv.last_check_error || undefined : undefined}><StatusDot status={srvStatus} size={7}/>{srv.name}</span>
                   {/* Возраст проверки — под именем: точка без него утверждает
                       «сейчас», даже если проверке три месяца. */}
-                  <span style={{display:"block",fontSize:11,paddingLeft:12,color:srvCheckStale?WARN_TEXT:DIM_TEXT}}>{srv.last_check_at ? `checked ${formatAgo(srv.last_check_at)}${srvCheckStale?" · stale":""}` : "never checked"}</span>
+                  <span title={srv.last_check_at ? new Date(srv.last_check_at).toLocaleString() : undefined} style={{display:"block",fontSize:11,paddingLeft:12,color:srvCheckStale?STALE_TEXT:DIM_TEXT}}>{srv.last_check_at ? `checked ${formatAgoStale(srv.last_check_at, srvCheckStale, now)}` : "never checked"}</span>
                 </>:<span style={{color:"#9ca3af"}}>—</span>}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
                 <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>

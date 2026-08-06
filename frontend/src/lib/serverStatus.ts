@@ -11,9 +11,6 @@
  * решения ниже.
  */
 
-/** Свежесть проверки/снимка «сейчас», подменяемая в тестах. */
-type Now = number;
-
 /**
  * Статус «мы не знаем, отвечает ли машина». Отдельное слово, а не отсутствие
  * бейджа: пустое место читается как «показывать нечего, значит всё хорошо», то
@@ -51,19 +48,26 @@ const CHECK_STALE_MS = 18 * 60 * 60 * 1000;
 const METRICS_STALE_MS = 24 * 60 * 60 * 1000;
 
 /** Старше порога ли отметка. `null` («ничего не было») — это не «протухло». */
-function olderThan(iso: string | null | undefined, maxAgeMs: number, now: Now): boolean {
+function olderThan(iso: string | null | undefined, maxAgeMs: number, now: number): boolean {
   if (!iso) return false;
   const ts = new Date(iso).getTime();
   return !Number.isNaN(ts) && now - ts > maxAgeMs;
 }
 
-/** Протухли ли метрики этого снимка (см. `METRICS_STALE_MS`). */
-export function isMetricsStale(iso: string | null | undefined, now: Now = Date.now()): boolean {
+/**
+ * Протухли ли метрики этого снимка (см. `METRICS_STALE_MS`).
+ *
+ * `now` параметром не только ради тестов: экран берёт время ОДИН раз на рендер
+ * и раздаёт его всем трём функциям этого модуля. Иначе у одного сервера часы
+ * читались бы трижды, и на границе порога рядом оказались бы бейдж «active» и
+ * подпись «· stale» — про одну и ту же отметку.
+ */
+export function isMetricsStale(iso: string | null | undefined, now: number = Date.now()): boolean {
   return olderThan(iso, METRICS_STALE_MS, now);
 }
 
-/** Протухла ли проверка доступности (см. `CHECK_STALE_MS`). */
-export function isCheckStale(iso: string | null | undefined, now: Now = Date.now()): boolean {
+/** Протухла ли проверка доступности (см. `CHECK_STALE_MS` и `now` выше). */
+export function isCheckStale(iso: string | null | undefined, now: number = Date.now()): boolean {
   return olderThan(iso, CHECK_STALE_MS, now);
 }
 
@@ -83,6 +87,15 @@ export function isCheckStale(iso: string | null | undefined, now: Now = Date.now
  * подписан рядом со статусом во всех местах показа: строка читается как «упал,
  * данные трёхмесячной давности», а не «упал только что».
  *
+ * А вот `status === "error"` из колонки БД свежему положительному ответу
+ * УСТУПАЕТ. Асимметрия выше — про старую ОТМЕТКУ измерения; здесь же измерения
+ * нет вовсе: колонку двигает не монитор, а код заведения сервера, и «error» в
+ * ней может пережить починку машины навсегда — снимать его некому. Дать полю из
+ * БД перекрыть свежий ответ монитора значило бы повторить исходный дефект этого
+ * экрана, только зеркально. (Сегодня развилка холостая: `ServerStatus.ERROR`
+ * объявлен в `backend/app/core/constants.py`, но не присваивается никем — так
+ * что записано это правило заранее, а не по факту.)
+ *
  * Чего лестница СОЗНАТЕЛЬНО не учитывает: успешный снимок метрик. Он снимается
  * по SSH, то есть доказывает доступность машины сильнее, чем наша TCP-проверка
  * порта, и сервер со свежими метриками формально «жив», даже если монитор
@@ -93,14 +106,22 @@ export function isCheckStale(iso: string | null | undefined, now: Now = Date.now
  * ошибка от такого занижения безопасна (`unchecked` рядом с «Metrics: 10m ago»
  * читается как «проверка молчит», и это правда).
  */
-export function serverUiStatus(s: ServerStatusInput, now: Now = Date.now()): ServerUiStatus {
-  if (s.last_check_ok === false || s.status === "error") return "error";
+export function serverUiStatus(s: ServerStatusInput, now: number = Date.now()): ServerUiStatus {
+  // Подтверждённое падение — сильнее всего остального: это измерение, и оно
+  // отрицательное.
+  if (s.last_check_ok === false) return "error";
+  // «Монитор только что получил ответ». Считается один раз на вызов: ниже это
+  // условие спорит и с колонкой `status`, и с зелёным бейджем, и два отдельных
+  // чтения часов умели бы разойтись между собой.
+  const answered =
+    s.last_check_ok === true && !!s.last_check_at && !isCheckStale(s.last_check_at, now);
+  // Единственное место, где свежее измерение перебивает колонку БД, — и только
+  // для «error»: `provisioned` и `new` ниже говорят не о здоровье, а об этапе
+  // жизненного цикла, и проверка порта их не отменяет.
+  if (s.status === "error") return answered ? "active" : "error";
   if (s.status === "provisioned") return "provisioned";
   if (s.status !== "active") return "new";
-  if (s.last_check_ok !== true || !s.last_check_at || isCheckStale(s.last_check_at, now)) {
-    return UNCHECKED;
-  }
-  return "active";
+  return answered ? "active" : UNCHECKED;
 }
 
 /**
@@ -108,8 +129,12 @@ export function serverUiStatus(s: ServerStatusInput, now: Now = Date.now()): Ser
  * ни под что: `provisioned` — про этап жизненного цикла, а не про здоровье, и
  * зелёным он вводил бы в заблуждение ровно как `unchecked` (заодно у `StatusDot`
  * ключа `provisioned` нет, так что зелёный бейдж стоял бы рядом с серой точкой).
+ *
+ * Аргумент — только `ServerUiStatus`: единственный производитель этих значений
+ * — `serverUiStatus` выше, а прежнее `| string` обнуляло union и позволяло
+ * опечатке молча получить серый бейдж вместо ошибки сборки.
  */
-export function statusBadgeVariant(status: ServerUiStatus | string): string {
+export function statusBadgeVariant(status: ServerUiStatus): string {
   if (status === "error") return "red";
   if (status === "active") return "green";
   return "gray";

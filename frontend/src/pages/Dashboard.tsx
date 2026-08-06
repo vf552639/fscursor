@@ -1,6 +1,6 @@
 import React from "react";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDT, cpuColor, formatAgo, DIM_TEXT, WARN_TEXT, STALE_TEXT } from "../components/ui/Primitives";
-import { useServers } from "../api/servers";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDT, pctColor, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { useServers, type Server } from "../api/servers";
 import { useDomains } from "../api/domains";
 import { useCloudflareAccounts } from "../api/cloudflare";
 import { useRegistrarAccounts } from "../api/registrars";
@@ -17,7 +17,13 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
   const { data: qTasks, isLoading: l5 } = useTaskLogs();
   const { data: qAudit, isLoading: l6 } = useAuditLog(20);
 
-  const servers = (qServers?.items || []).map((s: any) => {
+  // Одно чтение часов на рендер, и оно раздаётся всем порогам и подписям ниже.
+  // Отдельный `Date.now()` в каждой функции — это три разных «сейчас» на один
+  // сервер, и на границе порога бейдж «active» мог бы встать рядом с подписью
+  // «· stale» про ту же самую отметку.
+  const now = Date.now();
+
+  const servers = (qServers?.items || []).map((s: Server) => {
     const m = serverMetrics(s);
     return {
       id: s.id,
@@ -33,11 +39,11 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
       // Здесь он был свой и до `last_check_*` не доходил вовсе: `status`
       // ставится при заведении сервера, поэтому подтверждённо упавшая машина
       // светилась на первом экране зелёной точкой и считалась в «Healthy».
-      status: serverUiStatus(s),
+      status: serverUiStatus(s, now),
       metrics_at: s.metrics_collected_at || null,
-      stale: isMetricsStale(s.metrics_collected_at),
+      stale: isMetricsStale(s.metrics_collected_at, now),
       check_at: s.last_check_at || null,
-      check_stale: isCheckStale(s.last_check_at),
+      check_stale: isCheckStale(s.last_check_at, now),
       fastpanel: s.fastpanel_status === "installed",
       original: s,
     };
@@ -106,8 +112,10 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
           <CHd><CTi>🖥 Server Health</CTi><Btn size="sm" onClick={()=>onNav("servers")}>View All →</Btn></CHd>
           {servers.map(s=>{
             // `cpu === null` означает «нет данных», и это «—», а не здоровый 0%.
+            // Цвет полосы считается внутри ветки, где показание уже есть:
+            // снаружи у него была ветка `pct === null ? "#e5e7eb"`, до которой
+            // не доходило управление — при `null` полоса не рисуется вовсе.
             const pct = s.cpu;
-            const bc = pct === null ? "#e5e7eb" : s.stale ? STALE_TEXT : cpuColor(pct);
             const ram = s.ram_used !== null && s.ram_total !== null ? `${s.ram_used}/${s.ram_total}GB` : "—";
             // Протухший снимок виден, но не выдаёт себя за сегодняшний: цвет
             // отличается и от свежих цифр, и от прочерков, а возраст подписан.
@@ -119,16 +127,18 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
                   <div style={{fontSize:13.5,fontWeight:600,color:"#111"}}>{s.name}</div>
                   <div style={{fontSize:11.5,color:DIM_TEXT}}>{s.ip}</div>
                   {/* Возраст проверки — под именем, вплотную к точке и бейджу,
-                      которые из неё и получены. */}
-                  <div style={{fontSize:11,color:s.check_stale?WARN_TEXT:DIM_TEXT}}>{s.check_at ? `checked ${formatAgo(s.check_at)}${s.check_stale?" · stale":""}` : "never checked"}</div>
+                      которые из неё и получены. Точная дата — в подсказке, как
+                      в списке серверов и на детали: «2h ago» отвечает на вопрос
+                      «свежо ли», но не на «когда именно». */}
+                  <div title={s.check_at ? new Date(s.check_at).toLocaleString() : undefined} style={{fontSize:11,color:s.check_stale?STALE_TEXT:DIM_TEXT}}>{s.check_at ? `checked ${formatAgoStale(s.check_at, s.check_stale, now)}` : "never checked"}</div>
                 </div>
                 <div style={{flex:1}}>
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5,color:"#6b7280",marginBottom:4}}><span style={{...dim}}>CPU {pct === null ? "—" : `${pct}%`}</span><span style={{...dim}}>RAM {ram}</span><span style={{...dim}}>SSD {s.ssd_used === null ? "—" : `${s.ssd_used}GB`}</span></div>
-                  <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>{pct === null ? null : <div style={{height:"100%",width:`${pct}%`,background:bc,borderRadius:3}}/>}</div>
+                  <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>{pct === null ? null : <div style={{height:"100%",width:`${pct}%`,background:s.stale?STALE_TEXT:pctColor(pct),borderRadius:3}}/>}</div>
                   {/* И возраст снимка — под самими показаниями. Два сигнала с
                       разными источниками и разной свежестью: доступность пишет
                       бэкенд раз в 6 часов, метрики снимает десктоп по кнопке. */}
-                  <div style={{fontSize:11,color:s.stale?WARN_TEXT:DIM_TEXT,marginTop:3}}>{s.metrics_at ? `metrics ${formatAgo(s.metrics_at)}${s.stale?" · stale":""}` : "no metrics yet"}</div>
+                  <div title={s.metrics_at ? new Date(s.metrics_at).toLocaleString() : undefined} style={{fontSize:11,color:s.stale?STALE_TEXT:DIM_TEXT,marginTop:3}}>{s.metrics_at ? `metrics ${formatAgoStale(s.metrics_at, s.stale, now)}` : "no metrics yet"}</div>
                 </div>
                 <div style={{minWidth:70,textAlign:"right",fontSize:12,color:"#6b7280",...dim}}>{s.uptime ?? "—"}</div>
                 <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
