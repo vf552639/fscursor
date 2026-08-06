@@ -63,6 +63,12 @@ class Server(Base, TimestampMixin):
     last_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     last_check_ok: Mapped[Optional[bool]] = mapped_column(Boolean)
     last_check_error: Mapped[Optional[str]] = mapped_column(Text)
+    # Промахов TCP-проверки подряд (миграция `016_server_consecutive_failures`).
+    # Служебный счётчик мониторинга: `last_check_ok` роняется в False только на
+    # втором промахе подряд, и без счётчика этот порог хранить негде. В
+    # `ServerResponse` намеренно не выносится — фронт читает результат
+    # (`last_check_ok`/`last_check_error`), а не то, как он набирался.
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     domains: Mapped[list["Domain"]] = relationship(back_populates="server")
 
