@@ -26,4 +26,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.renewal.check_domain_renewals",
         "schedule": crontab(hour=9, minute=0),
     },
+    # Раз в 6 часов: чаще незачем (TCP-проверка ловит падение, а не секунды
+    # простоя), реже — и о падении узнаёшь на следующий рабочий день.
+    "check-server-reachability-6h": {
+        "task": "app.tasks.server_monitor.check_server_reachability",
+        "schedule": crontab(minute=0, hour="*/6"),
+    },
 }

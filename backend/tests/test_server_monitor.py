@@ -411,7 +411,7 @@ async def test_probe_succeeds_on_the_first_attempt_and_closes_the_socket():
 async def test_probe_retry_is_still_a_single_check():
     """Промах, потом успех — это одна проверка с исходом «жив».
 
-    Ретрай не должен доезжать до `evaluate` отдельным промахом, иначе порог в
+    Ретрай не должен доезжать до `apply_check_result` отдельным промахом, иначе порог в
     два промаха подряд набирался бы за один прогон и икота роняла бы статус.
     """
     connect = _Connector(ConnectionRefusedError(61, "Connection refused"), None)
@@ -497,6 +497,26 @@ async def test_probe_refuses_an_empty_address_instead_of_asking_the_resolver():
 
         assert (ok, error) == (False, server_monitor.NO_ADDRESS_ERROR)
         assert connect.calls == [], "пустой адрес всё-таки уехал в резолвер"
+
+
+@pytest.mark.asyncio
+async def test_probe_strips_padding_around_the_address():
+    """Пробелы вокруг адреса срезаются, а не уезжают в резолвер.
+
+    `" 203.0.113.10 "` попадает в БД из CSV-импорта, и это валидный адрес
+    валидной машины. Отданный резолверу как есть, он даёт «имя не
+    разрешилось» — то есть мониторинг двумя прогонами позже разбудит
+    владельца живого сервера. Ложное «упал» — самый дорогой исход этой фичи:
+    после пары таких писем перестают верить и настоящим.
+    """
+    connect = _Connector(None)
+
+    ok, error = await server_monitor.probe(
+        "  203.0.113.10\n", 22, connect=connect, retry_delay=0
+    )
+
+    assert (ok, error) == (True, None)
+    assert connect.calls == [("203.0.113.10", 22)], "в резолвер уехал адрес с пробелами"
 
 
 @pytest.mark.asyncio
