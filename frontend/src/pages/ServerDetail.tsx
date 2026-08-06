@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgo, isMetricsStale } from "../components/ui/Primitives";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
@@ -15,6 +15,9 @@ import type { InstallFastpanelResult } from "../lib/deepLink";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "server-detail-provider-options";
+
+/** Цвет предупреждения и приглушённого текста — как на странице списка. */
+const WARN = "#d97706";
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
   server?: any,
@@ -198,24 +201,29 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   const uiStatus = s.last_check_ok === false || s.status === "error"
     ? "error"
+    // Тот же разбор, что на странице списка (`toUiStatus` в Servers.tsx):
+    // `status === "active"` ставится при заведении сервера и про доступность
+    // машины не говорит ничего. Пока фоновая проверка не отработала ни разу,
+    // зелёный «active» — это незнание, нарисованное как здоровье.
     : s.status === "active"
-    ? "active"
+    ? (s.last_check_at ? "active" : "unchecked")
     : s.status === "provisioned"
     ? "provisioned"
     : "new";
 
-  const statusBadgeVariant = uiStatus === "error" ? "red" : uiStatus === "new" ? "gray" : "green";
+  // Серый у всего, что не «активен» и не «упал»: `unchecked` в прежней ветке
+  // «прочее → зелёный» получил бы зелёный бейдж и врал бы ровно тем, ради чего
+  // заведён.
+  const statusBadgeVariant = uiStatus === "error" ? "red" : uiStatus === "active" || uiStatus === "provisioned" ? "green" : "gray";
   const osLabel = s.os_pretty || s.os || null;
   const providers = providerOptions(serversList?.items || []);
-  const hasAnyMetrics = [
-    s.cpu_usage_pct,
-    s.ram_used_mb,
-    s.ram_total_mb,
-    s.disk_used_gb,
-    s.disk_total_gb,
-    s.net_in_kbps,
-    s.net_out_kbps,
-  ].some((v) => v !== null && v !== undefined);
+  // Снимок есть ровно тогда, когда есть его отметка времени: и десктопный
+  // сборщик (`apply_metrics`), и удалённый серверный до него ставили её всегда,
+  // так что «цифры без отметки» — не состояние, а невозможность. Отдельной
+  // константой, а не выражением по месту: `string | null` так сужается ветвлением
+  // и не требует приведения типа в каждой из трёх точек показа.
+  const metricsAt = s.metrics_collected_at;
+  const metricsStale = isMetricsStale(metricsAt);
 
   const fp = {
     url: s.fastpanel_url || `https://${s.ip_address}:8888`,
@@ -244,7 +252,10 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:24}}>
       <div>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={uiStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1>{osLabel ? <Badge variant="gray">{osLabel}</Badge> : null}{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
-        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · Uptime: {formatUptime(s.uptime_seconds)} · Added {fmtDate(s.created_at)}</div>
+        {/* Пометка стоит вплотную к самой цифре: аптайм здесь — часть того же
+            снимка, и «3d 0h» трёхмесячной давности без неё читается как «сервер
+            работает три дня» прямо сейчас. */}
+        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:WARN}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?" (stale)":""}</span> · Added {fmtDate(s.created_at)}</div>
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -265,13 +276,26 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             <DesktopOnlyNote what="Testing SSH" />
           )
         ) : null}
+        {/* Не OpenInDesktop, по той же причине, что и у «SSH Test» выше: хоста
+            `refresh-metrics` в parseDeepLinkAction нет (и роут на бэкенде убран
+            — снимает метрики десктоп по SSH), так что ссылка вела бы в
+            {handled:false} и только тостила бы сама себя. */}
         {s.has_ssh ? (
-          <OpenInDesktop
-            action={`refresh-metrics?serverId=${s.id}`}
-            label={refreshMetrics.isPending ? "Refreshing..." : "Refresh"}
-            desktopOnClick={() => refreshMetrics.mutate()}
-            disabled={refreshMetrics.isPending}
-          />
+          isTauri() ? (
+            <Btn
+              size="sm"
+              variant="secondary"
+              onClick={() => refreshMetrics.mutate()}
+              disabled={refreshMetrics.isPending}
+            >
+              {refreshMetrics.isPending ? "Refreshing..." : "Refresh metrics"}
+            </Btn>
+          ) : (
+            // Тот же `what`, что в `requireDesktop("Collecting metrics")` внутри
+            // `runCollectMetrics`: объяснение запрета не должно разъезжаться
+            // между экраном и текстом ошибки.
+            <DesktopOnlyNote what="Collecting metrics" />
+          )
         ) : null}
         {/* Единственный способ сменить SSH-пароль: до этого модалку открывал
             только баннер «SSH не настроен», который у сервера с секретом не
@@ -337,6 +361,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     ) : testSsh.data ? (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: testSsh.data.success ? "#dcfce7" : "#fee2e2", color: testSsh.data.success ? "#166534" : "#991b1b", fontSize: 13}}>SSH Test: {testSsh.data.message}</div>
     ) : null}
+    {/* Сбор метрик отваливается там же, где и SSH Test (заперт keychain, не
+        принятый ключ хоста, отказ в коннекте), плюс своё: машина ответила, но
+        разобрать из вывода нечего. Без баннера клик по кнопке выглядел бы как
+        клик в пустоту — цифры на экране просто остались бы прежними. */}
+    {refreshMetrics.isError && (
+      <div role="alert" style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
+        Refresh metrics failed: {(refreshMetrics.error as any)?.message || "unknown error"}
+      </div>
+    )}
     {syncDomains.data && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: syncDomains.data.error ? "#fee2e2" : "#dcfce7", color: syncDomains.data.error ? "#991b1b" : "#166534", fontSize: 13}}>
         {syncDomains.data.error
@@ -355,16 +388,28 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
       </div>
     )}
 
-    {hasAnyMetrics ? (
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+    {metricsAt ? (
+      <div style={{marginBottom:20}}>
+        {/* Подпись возраста — над самими показаниями и одна на все четыре
+            карточки: снимок атомарен, у всех полей один возраст. Протухший
+            снимок ещё и приглушается целиком — так, чтобы цифра не смотрелась
+            текущей, но и не исчезала: она настоящая, просто старая. */}
+        <div title={new Date(metricsAt).toLocaleString()} style={{fontSize:12.5,color:metricsStale?WARN:"#6b7280",marginBottom:8}}>
+          Metrics: {formatAgo(metricsAt)}{metricsStale?" · stale, press «Refresh metrics»":""}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,opacity:metricsStale?0.6:1}}>
         <StatCard label="CPU Usage" value={s.cpu_usage_pct != null ? `${s.cpu_usage_pct}%` : "—"} sub={s.cpu_count != null ? `Normal · ${s.cpu_count} vCPU` : "—"} pct={s.cpu_usage_pct ?? 0} color={cpuColor(cpuValue)} chartData={cpuD}/>
         <StatCard label="RAM Usage" value={s.ram_used_mb != null ? `${Math.round(s.ram_used_mb / 1024)} GB` : "—"} sub={s.ram_total_mb != null ? `of ${Math.round(s.ram_total_mb / 1024)} GB` : "—"} pct={ramPct} color="#7c3aed" chartData={ramD}/>
         <StatCard label="SSD Usage" value={s.disk_used_gb != null ? `${s.disk_used_gb} GB` : "—"} sub={s.disk_total_gb != null ? `of ${s.disk_total_gb} GB` : "—"} pct={diskPct} color="#0891b2" chartData={ssdD}/>
         <StatCard label="Network In" value={s.net_in_kbps != null ? `${(s.net_in_kbps / 1000).toFixed(2)} Mb/s` : "—"} sub={s.net_out_kbps != null ? `Out: ${(s.net_out_kbps / 1000).toFixed(2)} Mb/s` : "—"} pct={undefined} color="#059669" chartData={netD}/>
+        </div>
       </div>
     ) : (
       <Card style={{marginBottom:20}}>
-        <div style={{padding:"18px 20px", fontSize:13, color:"#6b7280"}}>Метрики недоступны — нажмите Refresh.</div>
+        {/* Не «метрики недоступны»: недоступны они не были, их просто ни разу не
+            снимали — снимает их десктоп по кнопке, и до первого нажатия колонки
+            пусты. Кнопка названа своим именем, чтобы её было где искать. */}
+        <div style={{padding:"18px 20px", fontSize:13, color:"#6b7280"}}>No metrics yet — press «Refresh metrics» to collect them over SSH.</div>
       </Card>
     )}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
@@ -447,7 +492,16 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               ["Provider",s.provider || "—"],
               ["OS",osLabel || "—"],
               ["Uptime", formatUptime(s.uptime_seconds)],
+              // Возраст снимка — сразу под аптаймом, который из него и взят.
+              ["Metrics", metricsAt
+                ? <span key="metrics" style={metricsStale?{color:WARN}:undefined}>{formatAgo(metricsAt)}{metricsStale?" · stale":""}</span>
+                : "never"],
               ["Status",<Badge key="status" variant={statusBadgeVariant}>{uiStatus}</Badge>],
+              // И так же под статусом — возраст проверки, из которой он получен.
+              // Два сигнала, две отметки: у метрик и у проверки разные источники
+              // (десктоп по кнопке против бэкенда раз в 6 часов) и разная
+              // свежесть, и общая подпись показывала бы один из них чужой.
+              ["Last check", s.last_check_at ? formatAgo(s.last_check_at) : "never"],
               ["Added",fmtDate(s.created_at)]
             ].map(([k,v], i)=><InfoRow key={i} k={k} v={v}/>)}
           </CBo>
