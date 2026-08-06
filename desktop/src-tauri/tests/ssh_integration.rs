@@ -66,6 +66,27 @@ async fn tofu_then_exec_uname() {
         .expect("exec");
     assert_eq!(code, 0);
     assert!(out.to_lowercase().contains("linux"), "{}", out);
+
+    // Ненулевой код обязан доезжать так же, как нулевой. Без этой проверки
+    // «всегда 0» выглядело бы ровно так же зелено, как честный разбор
+    // `exit-status`, — а стоило бы дороже прежнего -1: провал команды
+    // молча читался бы как успех. 3 — произвольное некруглое число, чтобы
+    // случайное совпадение с дефолтом было заметно.
+    let (code_fail, _) = sess
+        .exec("exit 3", Duration::from_secs(30), false)
+        .await
+        .expect("exec exit 3");
+    assert_eq!(code_fail, 3, "ненулевой код возврата не доехал");
+
+    // stderr тоже собирается (`ExtendedData`), и код при этом остаётся 0:
+    // болтливая в stderr, но успешная команда не должна выглядеть провалом.
+    let (code_err, out_err) = sess
+        .exec("echo boom >&2", Duration::from_secs(30), false)
+        .await
+        .expect("exec stderr");
+    assert_eq!(code_err, 0);
+    assert!(out_err.contains("boom"), "stderr потерян: {out_err}");
+
     let _ = sess.disconnect().await;
 }
 

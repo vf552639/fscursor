@@ -211,7 +211,20 @@ impl SshSession {
                         Some(ChannelMsg::Data { data }) => output.extend_from_slice(data.as_ref()),
                         Some(ChannelMsg::ExtendedData { data, .. }) => output.extend_from_slice(data.as_ref()),
                         Some(ChannelMsg::ExitStatus { exit_status }) => exit = exit_status as i32,
-                        Some(ChannelMsg::Close) | Some(ChannelMsg::Eof) => break,
+                        // EOF — НЕ конец разговора. OpenSSH закрывает поток вывода
+                        // раньше, чем сообщает код возврата: сначала `Eof`, затем
+                        // `exit-status`, и только потом `Close`. Выход из цикла по
+                        // `Eof` терял код у КАЖДОЙ команды — `exec` всегда отдавал
+                        // -1, из-за чего «SSH Test» краснел при живой связи, а все
+                        // проверки `code != 0` в `fastpanel.rs` (установка панели,
+                        // выпуск SSL, создание сайта) считали успех провалом.
+                        // Воспроизведено на реальном OpenSSH: `tofu_then_exec_uname`
+                        // в `tests/ssh_integration.rs` падал `left: -1, right: 0`.
+                        // Так же устроен эталонный пример самого russh
+                        // (`examples/client_exec_simple.rs`): «cannot leave the loop
+                        // immediately, there might still be more data to receive».
+                        Some(ChannelMsg::Eof) => {}
+                        Some(ChannelMsg::Close) => break,
                         Some(_) => {}
                         None => break,
                     }
