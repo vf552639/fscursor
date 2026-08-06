@@ -1,5 +1,5 @@
 import React from "react";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDT, cpuColor, genBars } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDT, cpuColor, formatAgo, DIM_TEXT, WARN_TEXT, STALE_TEXT } from "../components/ui/Primitives";
 import { useServers } from "../api/servers";
 import { useDomains } from "../api/domains";
 import { useCloudflareAccounts } from "../api/cloudflare";
@@ -7,6 +7,7 @@ import { useRegistrarAccounts } from "../api/registrars";
 import { useTaskLogs } from "../api/tasks";
 import { useAuditLog } from "../api/audit";
 import { serverMetrics, auditRowToActivity, isSslExpiringSoon } from "./dashboardData";
+import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 
 export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>void}){
   const { data: qServers, isLoading: l1 } = useServers();
@@ -28,7 +29,15 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
       ssd_used: m.ssdUsed,
       ssd_total: m.ssdTotal,
       uptime: m.uptime,
-      status: s.status === "active" ? "healthy" : (s.status || "warning"),
+      // Тот же разбор, что на странице серверов и на детали (`lib/serverStatus`).
+      // Здесь он был свой и до `last_check_*` не доходил вовсе: `status`
+      // ставится при заведении сервера, поэтому подтверждённо упавшая машина
+      // светилась на первом экране зелёной точкой и считалась в «Healthy».
+      status: serverUiStatus(s),
+      metrics_at: s.metrics_collected_at || null,
+      stale: isMetricsStale(s.metrics_collected_at),
+      check_at: s.last_check_at || null,
+      check_stale: isCheckStale(s.last_check_at),
       fastpanel: s.fastpanel_status === "installed",
       original: s,
     };
@@ -40,9 +49,13 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
   const taskLogs = qTasks ?? [];
   const activityLogs = (qAudit ?? []).map(auditRowToActivity);
 
-  const healthy = servers.filter(s=>s.status==="healthy").length;
-  const warning = servers.filter(s=>s.status==="warning").length;
-  const critical = servers.filter(s=>s.status==="critical").length;
+  // Считаем ровно то, что знаем. Прежние «healthy/warning/critical» брались из
+  // колонки `status`, которая знает только `new` и `active`: «warning» и
+  // «critical» не мог получить никто, а «healthy» получали все, включая
+  // упавших и ни разу не проверенных.
+  const online = servers.filter(s=>s.status==="active").length;
+  const down = servers.filter(s=>s.status==="error").length;
+  const unknown = servers.length - online - down;
 
   if (l1 || l2 || l3 || l4 || l5 || l6) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading dashboard data...</div>;
 
@@ -54,18 +67,24 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
         </div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
-        <StatCard label="Total Servers" value={servers.length} sub={`${healthy} healthy · ${critical} critical`} color="#2563eb" chartData={[3,5,6,6,7,7,8,8]}/>
+        {/* `chartData` у плиток был константой прямо в коде — восемь столбиков
+            «роста», нарисованных руками. Ряда наблюдений у нас нет ни по одной
+            из этих величин, поэтому графиков нет тоже (см. Primitives). */}
+        <StatCard label="Total Servers" value={servers.length} sub={`${online} online · ${down} down · ${unknown} unknown`} color="#2563eb"/>
         <div onClick={() => onNav("domains")} style={{cursor:"pointer"}}>
-          <StatCard label="Total Domains" value={domains.length} sub={`${domains.filter((d: any)=>d.ns_status==="ok").length} NS configured`} color="#7c3aed" chartData={[4,6,8,9,10,11,12,12]}/>
+          <StatCard label="Total Domains" value={domains.length} sub={`${domains.filter((d: any)=>d.ns_status==="ok").length} NS configured`} color="#7c3aed"/>
         </div>
-        <StatCard label="CF Accounts" value={cfAccounts.filter((c: any)=>c.is_active).length} sub={`of ${cfAccounts.length} accounts`} color="#059669" chartData={[1,1,2,2,2,3,3,3]}/>
-        <StatCard label="Registrars" value={registrars.filter((r: any)=>r.is_active).length} sub={`of ${registrars.length} accounts`} color="#d97706" chartData={[1,1,1,2,2,2,2,2]}/>
+        <StatCard label="CF Accounts" value={cfAccounts.filter((c: any)=>c.is_active).length} sub={`of ${cfAccounts.length} accounts`} color="#059669"/>
+        <StatCard label="Registrars" value={registrars.filter((r: any)=>r.is_active).length} sub={`of ${registrars.length} accounts`} color="#d97706"/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:20}}>
         {[
-          {label:"Healthy",count:healthy,c:"#16a34a",bg:"#f0fdf4",br:"#bbf7d0"},
-          {label:"Warning",count:warning,c:"#d97706",bg:"#fffbeb",br:"#fde68a"},
-          {label:"Critical",count:critical,c:"#dc2626",bg:"#fef2f2",br:"#fecaca"}
+          // «Unknown» — полноправная плитка, а не остаток: сервер без свежей
+          // проверки не «в порядке» и не «упал», и молчать о нём значит снова
+          // выдать незнание за здоровье.
+          {label:"Online",count:online,c:"#16a34a",bg:"#f0fdf4",br:"#bbf7d0"},
+          {label:"Down",count:down,c:"#dc2626",bg:"#fef2f2",br:"#fecaca"},
+          {label:"Unknown",count:unknown,c:"#6b7280",bg:"#f9fafb",br:"#e5e7eb"}
         ].map(s=>(
           <div key={s.label} style={{background:s.bg,border:`1px solid ${s.br}`,borderRadius:12,padding:"16px 20px",display:"flex",alignItems:"center",gap:12}}>
             <div style={{fontSize:28,fontWeight:700,color:s.c}}>{s.count}</div>
@@ -77,21 +96,33 @@ export default function Dashboard({onNav}: {onNav: (page: string, ctx?: any)=>vo
         <Card>
           <CHd><CTi>🖥 Server Health</CTi><Btn size="sm" onClick={()=>onNav("servers")}>View All →</Btn></CHd>
           {servers.map(s=>{
-            // Метрик пока не пишет никто: cpu === null означает «нет данных»,
-            // и это надо показывать как «—», а не как здоровый 0%.
+            // `cpu === null` означает «нет данных», и это «—», а не здоровый 0%.
             const pct = s.cpu;
-            const bc = pct === null ? "#e5e7eb" : cpuColor(pct);
+            const bc = pct === null ? "#e5e7eb" : s.stale ? STALE_TEXT : cpuColor(pct);
             const ram = s.ram_used !== null && s.ram_total !== null ? `${s.ram_used}/${s.ram_total}GB` : "—";
+            // Протухший снимок виден, но не выдаёт себя за сегодняшний: цвет
+            // отличается и от свежих цифр, и от прочерков, а возраст подписан.
+            const dim = s.stale ? { color: STALE_TEXT } : null;
             return (
               <div key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 20px",borderBottom:"1px solid #f3f4f6",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                 <StatusDot status={s.status}/>
-                <div style={{minWidth:170}}><div style={{fontSize:13.5,fontWeight:600,color:"#111"}}>{s.name}</div><div style={{fontSize:11.5,color:"#9ca3af"}}>{s.ip}</div></div>
-                <div style={{flex:1}}>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5,color:"#6b7280",marginBottom:4}}><span>CPU {pct === null ? "—" : `${pct}%`}</span><span>RAM {ram}</span><span>SSD {s.ssd_used === null ? "—" : `${s.ssd_used}GB`}</span></div>
-                  <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>{pct === null ? null : <div style={{height:"100%",width:`${pct}%`,background:bc,borderRadius:3}}/>}</div>
+                <div style={{minWidth:170}}>
+                  <div style={{fontSize:13.5,fontWeight:600,color:"#111"}}>{s.name}</div>
+                  <div style={{fontSize:11.5,color:DIM_TEXT}}>{s.ip}</div>
+                  {/* Возраст проверки — под именем, вплотную к точке и бейджу,
+                      которые из неё и получены. */}
+                  <div style={{fontSize:11,color:s.check_stale?WARN_TEXT:DIM_TEXT}}>{s.check_at ? `checked ${formatAgo(s.check_at)}${s.check_stale?" · stale":""}` : "never checked"}</div>
                 </div>
-                <div style={{minWidth:70,textAlign:"right",fontSize:12,color:"#6b7280"}}>{s.uptime ?? "—"}</div>
-                <Badge variant={s.status==="healthy"?"green":s.status==="warning"?"yellow":"red"}>{s.status}</Badge>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5,color:"#6b7280",marginBottom:4}}><span style={{...dim}}>CPU {pct === null ? "—" : `${pct}%`}</span><span style={{...dim}}>RAM {ram}</span><span style={{...dim}}>SSD {s.ssd_used === null ? "—" : `${s.ssd_used}GB`}</span></div>
+                  <div style={{height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>{pct === null ? null : <div style={{height:"100%",width:`${pct}%`,background:bc,borderRadius:3}}/>}</div>
+                  {/* И возраст снимка — под самими показаниями. Два сигнала с
+                      разными источниками и разной свежестью: доступность пишет
+                      бэкенд раз в 6 часов, метрики снимает десктоп по кнопке. */}
+                  <div style={{fontSize:11,color:s.stale?WARN_TEXT:DIM_TEXT,marginTop:3}}>{s.metrics_at ? `metrics ${formatAgo(s.metrics_at)}${s.stale?" · stale":""}` : "no metrics yet"}</div>
+                </div>
+                <div style={{minWidth:70,textAlign:"right",fontSize:12,color:"#6b7280",...dim}}>{s.uptime ?? "—"}</div>
+                <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
               </div>
             );
           })}

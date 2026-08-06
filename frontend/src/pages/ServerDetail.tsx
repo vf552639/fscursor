@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, MiniChart, fmtDate, cpuColor, genBars, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgo, isMetricsStale } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, cpuColor, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgo, WARN_TEXT, STALE_TEXT } from "../components/ui/Primitives";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -15,9 +16,6 @@ import type { InstallFastpanelResult } from "../lib/deepLink";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "server-detail-provider-options";
-
-/** Цвет предупреждения и приглушённого текста — как на странице списка. */
-const WARN = "#d97706";
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
   server?: any,
@@ -199,22 +197,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   if (!s) return <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading server details...</div>;
 
-  const uiStatus = s.last_check_ok === false || s.status === "error"
-    ? "error"
-    // Тот же разбор, что на странице списка (`toUiStatus` в Servers.tsx):
-    // `status === "active"` ставится при заведении сервера и про доступность
-    // машины не говорит ничего. Пока фоновая проверка не отработала ни разу,
-    // зелёный «active» — это незнание, нарисованное как здоровье.
-    : s.status === "active"
-    ? (s.last_check_at ? "active" : "unchecked")
-    : s.status === "provisioned"
-    ? "provisioned"
-    : "new";
-
-  // Серый у всего, что не «активен» и не «упал»: `unchecked` в прежней ветке
-  // «прочее → зелёный» получил бы зелёный бейдж и врал бы ровно тем, ради чего
-  // заведён.
-  const statusBadgeVariant = uiStatus === "error" ? "red" : uiStatus === "active" || uiStatus === "provisioned" ? "green" : "gray";
+  // Лестница статусов — общая с дашбордом и списком (`lib/serverStatus`): три
+  // экрана рисуют один и тот же сигнал, и переписанная на каждом заново она уже
+  // разъезжалась.
+  const uiStatus = serverUiStatus(s);
+  const checkStale = isCheckStale(s.last_check_at);
   const osLabel = s.os_pretty || s.os || null;
   const providers = providerOptions(serversList?.items || []);
   // Снимок есть ровно тогда, когда есть его отметка времени: и десктопный
@@ -235,14 +222,12 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   
   const filtered = domains.filter((d: any)=>d.domain_name.toLowerCase().includes(domSearch.toLowerCase()));
   
+  // Только доли, которые действительно измерены: рядов наблюдений (`genBars`)
+  // у карточек больше нет — историю метрик мы не храним, и пятнадцать случайных
+  // столбиков вокруг одного значения были чистой выдумкой.
   const cpuValue = s.cpu_usage_pct ?? 0;
-  const cpuD = s.cpu_usage_pct != null ? genBars(cpuValue) : undefined;
   const ramPct = s.ram_used_mb != null && s.ram_total_mb ? Math.round((s.ram_used_mb / s.ram_total_mb) * 100) : undefined;
-  const ramD = s.ram_used_mb != null ? genBars(ramPct ?? 0) : undefined;
   const diskPct = s.disk_used_gb != null && s.disk_total_gb ? Math.round((s.disk_used_gb / s.disk_total_gb) * 100) : undefined;
-  const ssdD = s.disk_used_gb != null ? genBars(diskPct ?? 0) : undefined;
-  const netValue = s.net_in_kbps != null ? Math.round(s.net_in_kbps / 1000) : 0;
-  const netD = s.net_in_kbps != null ? genBars(netValue) : undefined;
 
   return <>
     <div style={{display:"flex",alignItems:"center",gap:6,fontSize:13,color:"#9ca3af",marginBottom:20}}>
@@ -255,7 +240,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         {/* Пометка стоит вплотную к самой цифре: аптайм здесь — часть того же
             снимка, и «3d 0h» трёхмесячной давности без неё читается как «сервер
             работает три дня» прямо сейчас. */}
-        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:WARN}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?" (stale)":""}</span> · Added {fmtDate(s.created_at)}</div>
+        <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:STALE_TEXT}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?" (stale)":""}</span> · Added {fmtDate(s.created_at)}</div>
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -394,14 +379,14 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             карточки: снимок атомарен, у всех полей один возраст. Протухший
             снимок ещё и приглушается целиком — так, чтобы цифра не смотрелась
             текущей, но и не исчезала: она настоящая, просто старая. */}
-        <div title={new Date(metricsAt).toLocaleString()} style={{fontSize:12.5,color:metricsStale?WARN:"#6b7280",marginBottom:8}}>
+        <div title={new Date(metricsAt).toLocaleString()} style={{fontSize:12.5,color:metricsStale?WARN_TEXT:"#6b7280",marginBottom:8}}>
           Metrics: {formatAgo(metricsAt)}{metricsStale?" · stale, press «Refresh metrics»":""}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,opacity:metricsStale?0.6:1}}>
-        <StatCard label="CPU Usage" value={s.cpu_usage_pct != null ? `${s.cpu_usage_pct}%` : "—"} sub={s.cpu_count != null ? `Normal · ${s.cpu_count} vCPU` : "—"} pct={s.cpu_usage_pct ?? 0} color={cpuColor(cpuValue)} chartData={cpuD}/>
-        <StatCard label="RAM Usage" value={s.ram_used_mb != null ? `${Math.round(s.ram_used_mb / 1024)} GB` : "—"} sub={s.ram_total_mb != null ? `of ${Math.round(s.ram_total_mb / 1024)} GB` : "—"} pct={ramPct} color="#7c3aed" chartData={ramD}/>
-        <StatCard label="SSD Usage" value={s.disk_used_gb != null ? `${s.disk_used_gb} GB` : "—"} sub={s.disk_total_gb != null ? `of ${s.disk_total_gb} GB` : "—"} pct={diskPct} color="#0891b2" chartData={ssdD}/>
-        <StatCard label="Network In" value={s.net_in_kbps != null ? `${(s.net_in_kbps / 1000).toFixed(2)} Mb/s` : "—"} sub={s.net_out_kbps != null ? `Out: ${(s.net_out_kbps / 1000).toFixed(2)} Mb/s` : "—"} pct={undefined} color="#059669" chartData={netD}/>
+        <StatCard label="CPU Usage" value={s.cpu_usage_pct != null ? `${s.cpu_usage_pct}%` : "—"} sub={s.cpu_count != null ? `${s.cpu_count} vCPU` : "—"} pct={s.cpu_usage_pct ?? 0} color={cpuColor(cpuValue)}/>
+        <StatCard label="RAM Usage" value={s.ram_used_mb != null ? `${Math.round(s.ram_used_mb / 1024)} GB` : "—"} sub={s.ram_total_mb != null ? `of ${Math.round(s.ram_total_mb / 1024)} GB` : "—"} pct={ramPct} color="#7c3aed"/>
+        <StatCard label="SSD Usage" value={s.disk_used_gb != null ? `${s.disk_used_gb} GB` : "—"} sub={s.disk_total_gb != null ? `of ${s.disk_total_gb} GB` : "—"} pct={diskPct} color="#0891b2"/>
+        <StatCard label="Network In" value={s.net_in_kbps != null ? `${(s.net_in_kbps / 1000).toFixed(2)} Mb/s` : "—"} sub={s.net_out_kbps != null ? `Out: ${(s.net_out_kbps / 1000).toFixed(2)} Mb/s` : "—"} pct={undefined} color="#059669"/>
         </div>
       </div>
     ) : (
@@ -494,14 +479,16 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               ["Uptime", formatUptime(s.uptime_seconds)],
               // Возраст снимка — сразу под аптаймом, который из него и взят.
               ["Metrics", metricsAt
-                ? <span key="metrics" style={metricsStale?{color:WARN}:undefined}>{formatAgo(metricsAt)}{metricsStale?" · stale":""}</span>
+                ? <span key="metrics" style={metricsStale?{color:WARN_TEXT}:undefined}>{formatAgo(metricsAt)}{metricsStale?" · stale":""}</span>
                 : "never"],
-              ["Status",<Badge key="status" variant={statusBadgeVariant}>{uiStatus}</Badge>],
+              ["Status",<Badge key="status" variant={statusBadgeVariant(uiStatus)}>{uiStatus}</Badge>],
               // И так же под статусом — возраст проверки, из которой он получен.
               // Два сигнала, две отметки: у метрик и у проверки разные источники
               // (десктоп по кнопке против бэкенда раз в 6 часов) и разная
               // свежесть, и общая подпись показывала бы один из них чужой.
-              ["Last check", s.last_check_at ? formatAgo(s.last_check_at) : "never"],
+              ["Last check", s.last_check_at
+                ? <span key="check" style={checkStale?{color:WARN_TEXT}:undefined}>{formatAgo(s.last_check_at)}{checkStale?" · stale":""}</span>
+                : "never"],
               ["Added",fmtDate(s.created_at)]
             ].map(([k,v], i)=><InfoRow key={i} k={k} v={v}/>)}
           </CBo>

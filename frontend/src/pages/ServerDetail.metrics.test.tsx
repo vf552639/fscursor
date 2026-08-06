@@ -260,6 +260,44 @@ describe("ServerDetail — свежесть проверки и метрик", (
     expect(screen.getByText("2h ago")).toBeTruthy();
   });
 
+  it("подтверждённое падение — красный «error» и причина баннером", async () => {
+    setTauri(true);
+    renderDetail({
+      ...SERVER,
+      last_check_at: ago(30 * MINUTE),
+      last_check_ok: false,
+      last_check_error: "timeout after 5s",
+    });
+
+    const badge = await screen.findByText("error");
+    expect(badge.style.background).toBe("rgb(254, 242, 242)");
+    expect(screen.getByText(/Uptime check failed: timeout after 5s/)).toBeTruthy();
+  });
+
+  it("первый неподтверждённый промах не поднимает баннер и не красит в error", async () => {
+    setTauri(true);
+    // Бэкенд пишет `last_check_error` уже на первом промахе, а `last_check_ok`
+    // роняет только на втором. Баннер без оглядки на статус кричал бы о падении,
+    // которого ещё не случилось, — тот же гейт, что у тултипа на списке.
+    renderDetail({
+      ...SERVER,
+      last_check_at: ago(20 * MINUTE),
+      last_check_ok: true,
+      last_check_error: "timeout after 5s",
+    });
+
+    expect(await screen.findByText("active")).toBeTruthy();
+    expect(screen.queryByText(/Uptime check failed/)).toBeNull();
+  });
+
+  it("протухшая проверка перестаёт удерживать «active»", async () => {
+    setTauri(true);
+    renderDetail({ ...SERVER, last_check_at: ago(3 * DAY), last_check_ok: true });
+
+    expect(await screen.findByText("unchecked")).toBeTruthy();
+    expect(rowValue("Last check")).toBe("3d ago · stale");
+  });
+
   it("без снимков зовёт снять их, а не рисует прочерки как показания", async () => {
     setTauri(true);
     renderDetail();
@@ -287,6 +325,26 @@ describe("ServerDetail — свежесть проверки и метрик", (
     expect(await screen.findByText("Metrics: 12m ago")).toBeTruthy();
     expect(screen.getByText("CPU Usage")).toBeTruthy();
     expect(screen.queryByText(/stale/)).toBeNull();
+    // «Normal» рядом с числом ядер утверждалось безусловно — и при 95% CPU, и
+    // на трёхмесячном снимке. Оценки, не выведенной из данных, здесь нет.
+    expect(screen.queryByText(/Normal/)).toBeNull();
+    expect(screen.getByText("2 vCPU")).toBeTruthy();
+  });
+
+  it("карточки показаний не рисуют ряд наблюдений, которого не существует", async () => {
+    setTauri(true);
+    const { container } = renderDetail({
+      ...SERVER,
+      ...WITH_READINGS,
+      metrics_collected_at: ago(12 * MINUTE),
+    });
+    await screen.findByText("CPU Usage");
+
+    // Спарклайн `MiniChart` рисовал пятнадцать столбиков шириной 4px вокруг
+    // ОДНОГО значения: истории метрик мы не храним, и форма графика заявляла
+    // колебания, которых никто не измерял. Ищем по остатку его разметки —
+    // вернись он под другим именем, тест всё равно упадёт.
+    expect(container.querySelectorAll('div[style*="border-radius: 2px 2px 0 0"]').length).toBe(0);
   });
 
   it("снимок старше суток помечен «stale» — и в подписи, и у аптайма в шапке", async () => {

@@ -145,6 +145,21 @@ const SERVERS = [
     last_check_ok: true,
     last_check_error: "timeout after 5s",
   },
+  // Этап жизненного цикла, а не здоровье: проверок не было, но и «active» в
+  // колонке нет — статус обязан остаться собой и НЕ позеленеть.
+  { ...BASE, id: 7, name: "web-07", ip_address: "10.0.0.7", status: "provisioned" },
+  // Отвечал, но давно: монитор молчит третьи сутки при шаге в 6 часов. Зелёный
+  // бейдж держался бы на позавчерашнем ответе.
+  {
+    ...BASE,
+    ...READINGS,
+    id: 8,
+    name: "web-08",
+    ip_address: "10.0.0.8",
+    last_check_at: ago(3 * DAY),
+    last_check_ok: true,
+    metrics_collected_at: ago(10 * MINUTE),
+  },
   // Снимок есть и он свежий, но процент CPU из него не разобрался. Снимком он
   // быть не перестал: диск в нём настоящий, и «метрик нет» про него — ложь.
   {
@@ -175,14 +190,17 @@ function renderServers() {
   );
 }
 
-/** Карточка сетки целиком — по имени сервера внутри неё. */
+/**
+ * Карточка сетки целиком — ближайший предок имени, в котором есть подпись
+ * «Last check:». Ищем по содержимому, а не по числу `parentElement`: счёт
+ * ступеней ломался бы от любой новой обёртки в разметке, а карточка — это
+ * ровно то, что показывает и имя, и строку проверки.
+ */
 function card(name: string): HTMLElement {
-  const title = screen.getByText(name);
-  // Имя → строка заголовка → карточка. Ближайший общий предок ищем от текста,
-  // а не по data-атрибуту: разметка у страницы плотная и без хуков для тестов.
-  const el = title.closest("div[style]")?.parentElement?.parentElement;
+  let el: HTMLElement | null = screen.getByText(name).parentElement;
+  while (el && !(el.textContent || "").includes("Last check:")) el = el.parentElement;
   if (!el) throw new Error(`карточки «${name}» на экране нет`);
-  return el as HTMLElement;
+  return el;
 }
 
 async function showTable() {
@@ -196,6 +214,15 @@ function row(table: HTMLTableElement, name: string): HTMLTableRowElement {
   );
   if (!found) throw new Error(`строки «${name}» в таблице нет`);
   return found as HTMLTableRowElement;
+}
+
+/** Имена серверов в порядке строк — чем проверяется, что фильтр сузил список. */
+function tableNames(table: HTMLTableElement): string[] {
+  return Array.from(table.querySelectorAll("tbody tr"))
+    // В ячейке имени сидит ещё и подпись под ним, поэтому вытаскиваем имя, а не
+    // берём весь текст ячейки.
+    .map((tr) => ((tr as HTMLTableRowElement).cells[0]?.textContent || "").match(/web-\d+/)?.[0])
+    .filter((n): n is string => Boolean(n));
 }
 
 function cellByHeader(table: HTMLTableElement, name: string, header: string): string {
@@ -256,12 +283,35 @@ describe("Servers — статус не врёт", () => {
     expect(cellByHeader(table, "web-02", "Checked")).toBe("2h ago");
   });
 
-  it("фильтр статусов знает про непроверенные — иначе они выпадают из всех", async () => {
-    await screen.findByText("web-01");
-    const options = Array.from(
-      (screen.getByDisplayValue("Status: All") as HTMLSelectElement).options,
-    ).map((o) => o.value);
-    expect(options).toContain("unchecked");
+  it("протухшая проверка перестаёт удерживать зелёный статус", async () => {
+    await screen.findByText("web-08");
+    // Отвечал трое суток назад при шаге проверки в 6 часов: это не «жив», это
+    // «монитор молчит». Метрики при этом свежие — сигналы независимы.
+    expect(within(card("web-08")).getByText("unchecked")).toBeTruthy();
+    expect(within(card("web-08")).getByText("Last check: 3d ago · stale")).toBeTruthy();
+    expect(within(card("web-08")).getByText("Metrics: 10m ago")).toBeTruthy();
+  });
+
+  it("этап жизненного цикла не красится зелёным и не подменяется проверкой", async () => {
+    await screen.findByText("web-07");
+    const badge = within(card("web-07")).getByText("provisioned");
+    // Зелёный в этом UI занят под «машина ответила»; вдобавок у `StatusDot`
+    // ключа `provisioned` нет, и зелёный бейдж стоял бы рядом с серой точкой.
+    expect(badge.style.background).toBe("rgb(243, 244, 246)");
+  });
+
+  it("фильтр статусов знает про непроверенные и действительно их отбирает", async () => {
+    const table = await showTable();
+    const filter = screen.getByDisplayValue("Status: All") as HTMLSelectElement;
+    expect(Array.from(filter.options).map((o) => o.value)).toContain("unchecked");
+
+    fireEvent.change(filter, { target: { value: "unchecked" } });
+    expect(tableNames(table)).toEqual(["web-01", "web-08"]);
+
+    // И обратное: «active» их больше не содержит — иначе выборка «живые»
+    // по-прежнему включала бы тех, о ком мы ничего не знаем.
+    fireEvent.change(filter, { target: { value: "active" } });
+    expect(tableNames(table)).toEqual(["web-02", "web-03", "web-05", "web-06"]);
   });
 });
 
@@ -299,14 +349,30 @@ describe("Servers — свежесть метрик отделена от све
     expect(within(card("web-03")).getByText("Last check: 1h ago")).toBeTruthy();
   });
 
-  it("протухшие цифры показаны приглушённо, свежие — нет", async () => {
+  it("протухшая цифра подана иначе и свежей, и отсутствующей", async () => {
     await screen.findByText("web-03");
     // Обе карточки показывают «42%», и без разницы в подаче старое число
     // выглядит ровно так же, как сегодняшнее.
     const stale = within(card("web-03")).getByText("42%");
     const fresh = within(card("web-02")).getByText("42%");
-    expect(stale.style.color).toBe("rgb(156, 163, 175)");
-    expect(fresh.style.color).not.toBe("rgb(156, 163, 175)");
+    expect(stale.style.color).toBe("rgb(161, 98, 7)");
+    expect(fresh.style.color).not.toBe(stale.style.color);
+    // И не серым: серый в этом UI занят под «данных нет» (прочерки), а тут
+    // данные есть — просто старые.
+    expect(stale.style.color).not.toBe("rgb(156, 163, 175)");
+  });
+
+  it("протухание метрик не протекает в колонки статуса и проверки", async () => {
+    const table = await showTable();
+    // У web-03 старый снимок, но свежая проверка: сигналы независимы, и
+    // пометка одного не должна появляться у другого.
+    expect(cellByHeader(table, "web-03", "Metrics")).toBe("3mo ago · stale");
+    expect(cellByHeader(table, "web-03", "Status")).toBe("active");
+    expect(cellByHeader(table, "web-03", "Checked")).toBe("1h ago");
+    // И наоборот: у web-08 протухла проверка, а снимок свежий.
+    expect(cellByHeader(table, "web-08", "Status")).toBe("unchecked");
+    expect(cellByHeader(table, "web-08", "Checked")).toBe("3d ago · stale");
+    expect(cellByHeader(table, "web-08", "Metrics")).toBe("10m ago");
   });
 
   it("в таблице у метрик своя колонка, и протухшие цифры так же приглушены", async () => {
@@ -317,7 +383,7 @@ describe("Servers — свежесть метрик отделена от све
 
     const staleCpu = within(row(table, "web-03")).getByText("42%");
     const freshCpu = within(row(table, "web-02")).getByText("42%");
-    expect(staleCpu.style.color).toBe("rgb(156, 163, 175)");
-    expect(freshCpu.style.color).not.toBe("rgb(156, 163, 175)");
+    expect(staleCpu.style.color).toBe("rgb(161, 98, 7)");
+    expect(freshCpu.style.color).not.toBe(staleCpu.style.color);
   });
 });

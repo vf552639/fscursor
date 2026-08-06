@@ -1,15 +1,30 @@
 import React, { useState } from "react";
 
 export const copyText = (v: string) => navigator.clipboard?.writeText(v).catch(()=>{});
-export const genBars  = (base: number) => Array.from({length:15},()=>Math.max(5,Math.min(100,base+(Math.random()-0.5)*28)));
 export const cpuColor = (v: number) => v>=80?"#dc2626":v>=60?"#d97706":"#2563eb";
 
-export function MiniChart({data, color="#2563eb"}: {data: number[], color?: string}){
-  const max=Math.max(...data,1);
-  return <div style={{display:"flex",alignItems:"flex-end",gap:2,height:36}}>
-    {data.map((v,i)=><div key={i} style={{width:4,borderRadius:"2px 2px 0 0",flexShrink:0,height:Math.max(4,(v/max)*36),background:color,opacity:0.55+(i/data.length)*0.45}}/>)}
-  </div>;
-}
+/*
+ * Здесь жили `genBars` и `MiniChart` — спарклайн из ПЯТНАДЦАТИ случайных
+ * столбиков вокруг одного текущего значения. Мы храним последний снимок, а не
+ * историю: наблюдение у нас ровно одно, и форма графика заявляла недавние
+ * колебания, которых никто не измерял, — у протухшего снимка ещё и
+ * «заканчивающиеся сейчас». Тот же дефект, что зелёный бейдж без проверки,
+ * только в самой наглядной форме, поэтому удалено, а не приглушено. Настоящий
+ * график потребует хранить историю метрик — это отдельная функция.
+ */
+
+/** Приглушённый текст: прочерки, подписи «данных нет». */
+export const DIM_TEXT = "#9ca3af";
+
+/** Пометка «протухло» — тем же цветом, что предупреждения продукта. */
+export const WARN_TEXT = "#d97706";
+
+/**
+ * Само протухшее показание. Отдельный цвет, а не `DIM_TEXT`: серым нарисованы
+ * прочерки, то есть «данных нет», а это «данные есть, но старые» — разные вещи,
+ * и различать их одной лишь подписью значит требовать её прочитать.
+ */
+export const STALE_TEXT = "#a16207";
 
 export function StatusDot({status, size=9}: {status: string, size?: number}){
   const c: Record<string, string>={healthy:"#16a34a",warning:"#d97706",critical:"#dc2626",ok:"#16a34a",error:"#dc2626",pending:"#d97706",active:"#16a34a",paused:"#9ca3af"};
@@ -168,13 +183,15 @@ export function Modal({title, onClose, children, width=480, closeOnBackdrop=true
   </div>;
 }
 
-export function StatCard({label, value, sub, pct, color="#2563eb", chartData}: any){
+// `chartData` у карточки больше нет: рисовать ряд наблюдений, которого не
+// существует, — см. комментарий на месте `MiniChart` выше. Полоса `pct`
+// осталась: это ЕДИНСТВЕННОЕ измеренное значение, показанное как есть.
+export function StatCard({label, value, sub, pct, color="#2563eb"}: any){
   return <Card>
     <div style={{padding:"18px 20px"}}>
       <div style={{fontSize:12,fontWeight:500,color:"#6b7280",marginBottom:6}}>{label}</div>
       <div style={{fontSize:22,fontWeight:700,color:"#111",lineHeight:1}}>{value}</div>
       {sub&&<div style={{fontSize:12,color:"#6b7280",marginTop:4}}>{sub}</div>}
-      {chartData&&<div style={{marginTop:10}}><MiniChart data={chartData} color={color}/></div>}
       {pct!==undefined&&<div style={{height:4,background:"#f3f4f6",borderRadius:2,marginTop:8,overflow:"hidden"}}><div style={{height:"100%",borderRadius:2,background:color,width:`${Math.min(100,pct)}%`,transition:"width 0.6s"}}/></div>}
     </div>
   </Card>;
@@ -281,20 +298,9 @@ export function formatAgo(iso: string, now: number = Date.now()): string {
   return `${Math.floor(days / 30)}mo ago`;
 }
 
-/**
- * Порог «метрики протухли». Сутки — потому что снимает их десктоп по кнопке, а
- * не расписание: сутки без открытого десктопа — обычный рабочий цикл, а
- * позавчерашнее показание описывает уже другую машину.
+/*
+ * `isMetricsStale` переехала в `lib/serverStatus`: порог протухания — правило
+ * продукта, а не форматирование, и рядом с ним живёт такой же порог для
+ * проверки доступности. Здесь остаётся `formatAgo` — она про то, КАК показать
+ * возраст, и не знает, что именно устаревает.
  */
-const METRICS_STALE_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Протухли ли метрики этого снимка. `null` — «метрик нет вовсе», и это НЕ
- * «протухли»: пометка «старые данные» там, где данных не было ни разу, врёт в
- * другую сторону.
- */
-export function isMetricsStale(iso: string | null | undefined, now: number = Date.now()): boolean {
-  if (!iso) return false;
-  const ts = new Date(iso).getTime();
-  return !Number.isNaN(ts) && now - ts > METRICS_STALE_MS;
-}

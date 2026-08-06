@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState, formatUptime, formatAgo, isMetricsStale } from "../components/ui/Primitives";
+import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, cpuColor, EmptyState, ErrorState, formatUptime, formatAgo, DIM_TEXT, WARN_TEXT, STALE_TEXT } from "../components/ui/Primitives";
 import { useServers, useCreateServer } from "../api/servers";
 import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -10,6 +10,7 @@ import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { UNCHECKED, isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "add-server-provider-options";
@@ -22,31 +23,6 @@ const PROVIDER_LIST_ID = "add-server-provider-options";
  * строкой имя провайдера быть не может: схема на бэкенде приводит её к `NULL`.
  */
 const ALL_PROVIDERS = "";
-
-/**
- * Статус «ни разу не проверялся». Слово, а не отсутствие бейджа: пустое место
- * на карточке читается как «всё в порядке, показывать нечего», а это ровно
- * противоположное — мы не знаем, отвечает машина или нет.
- *
- * Живёт константой, потому что то же слово стоит и пунктом фильтра: разойдись
- * они, фильтр молча перестал бы находить эти серверы.
- */
-const UNCHECKED = "unchecked";
-
-/** Цвет приглушённого текста страницы — им же нарисованы прочерки. */
-const DIM = "#9ca3af";
-
-/** Цвет предупреждения: им помечены протухшие показания. */
-const WARN = "#d97706";
-
-/**
- * Цвет бейджа статуса. Общий для карточек и таблицы, потому что раньше он был
- * записан в обоих видах по отдельности, и `unchecked` из «прочее → зелёный»
- * достался бы зелёный — то есть новый статус врал бы ровно тем, ради чего
- * заводился.
- */
-const statusBadgeVariant = (status: string) =>
-  status === "error" ? "red" : status === "active" || status === "provisioned" ? "green" : "gray";
 
 /**
  * `providers` — обязательный проп, а не `useServers()` внутри: список серверов
@@ -346,18 +322,6 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
 
   const { data, isPending, isError, error, refetch } = useServers();
   
-  const toUiStatus = (s: any) => {
-    if (s.last_check_ok === false || s.status === "error") return "error";
-    // `status === "active"` — это поле, выставленное при заведении сервера, а не
-    // ответ машины. Отвечает ли она, знает только фоновая проверка порта, и пока
-    // она не отработала ни разу (`last_check_at === null`), зелёный «active» —
-    // это незнание, нарисованное как здоровье. Остальные значения статуса
-    // («new», «provisioned») здоровьем и не притворяются, их не трогаем.
-    if (s.status === "active") return s.last_check_at ? "active" : UNCHECKED;
-    if (s.status === "provisioned") return "provisioned";
-    return "new";
-  };
-
   // Один источник и для подсказок формы, и для списка фильтра: второй умел бы
   // разойтись с первым — предложить в форме имя, которого нет в фильтре.
   const providers = providerOptions(data?.items || []);
@@ -371,7 +335,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     // «Hetzner», по которому не находится ни один сервер.
     provider: s.provider?.trim() || null,
     os: s.os_pretty || s.os || null,
-    status: toUiStatus(s),
+    status: serverUiStatus(s),
     fastpanel: s.fastpanel_status === "installed",
     location: "-",
     uptime: formatUptime(s.uptime_seconds),
@@ -387,6 +351,9 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     // двоих означала бы, что один из них показан чужим возрастом.
     metrics_at: s.metrics_collected_at || null,
     stale: isMetricsStale(s.metrics_collected_at),
+    // У проверки свой порог: она идёт по расписанию раз в 6 часов, и молчание
+    // дольше трёх прогонов означает не «сервер жив», а «монитор молчит».
+    check_stale: isCheckStale(s.last_check_at),
     cpu: s.cpu_usage_pct ?? null,
     ram_used: s.ram_used_mb ?? null,
     ram_total: s.ram_total_mb ?? null,
@@ -458,15 +425,15 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
             const cpuValue = s.cpu ?? 0;
             const hasCpu = s.cpu !== null;
             const hasDisk = s.ssd_used !== null && s.ssd_total !== null && s.ssd_total > 0;
-            const cpuData = hasCpu ? genBars(cpuValue) : [];
             const pct = hasDisk ? (s.ssd_used / s.ssd_total) * 100 : 0;
-            // Протухшие показания рисуются приглушённо — тем же серым, что и
-            // прочерки. Не прочерк вместо цифры: цифра настоящая, просто старая,
-            // и позавчерашний размер диска полезнее пустоты. Молча показанная
-            // старая цифра — это исходная жалоба, поэтому рядом с ней всегда
-            // стоит подпись с возрастом (ниже).
-            const dim = s.stale ? { color: DIM } : null;
-            const cc = s.stale ? DIM : cpuColor(cpuValue);
+            const hasRam = s.ram_used !== null && s.ram_total !== null;
+            // Протухшее показание не прячется и не превращается в прочерк: цифра
+            // настоящая, просто старая, и позавчерашний размер диска полезнее
+            // пустоты. Но и цветом «нет данных» (`DIM_TEXT`) она не рисуется —
+            // это разные вещи. Вредна была не старая цифра, а молчание рядом с
+            // ней, поэтому под ней всегда стоит её возраст.
+            const dim = s.stale ? { color: STALE_TEXT } : null;
+            const cc = s.stale ? STALE_TEXT : cpuColor(cpuValue);
             return <div key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,padding:"16px 18px",cursor:"pointer",transition:"box-shadow 0.15s"}} onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"} onMouseLeave={e=>e.currentTarget.style.boxShadow="none"}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
                 <div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status}/><span style={{fontSize:14,fontWeight:700,color:"#111"}} title={s.check_error || undefined}>{s.name}</span></div>
@@ -479,20 +446,32 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
               <div style={{display:"flex",gap:6,marginBottom:12}}>{s.os ? <Badge variant="gray">{s.os}</Badge> : null}{s.fastpanel&&<Badge variant="blue">FASTPANEL</Badge>}</div>
               {/* «Метрик нет» — это `metrics_collected_at === null`, и только
                   оно. Снимок, где не разобрался процент CPU, метриками быть не
-                  перестал: остальные показания в нём настоящие. */}
-              {hasCpu ? <MiniChart data={cpuData} color={cc}/> : <div style={{height:36,fontSize:12,color:DIM,display:"flex",alignItems:"center"}}>{s.metrics_at ? "No CPU reading" : "No metrics yet"}</div>}
+                  перестал: остальные показания в нём настоящие.
+
+                  На месте этой строки раньше был спарклайн из пятнадцати
+                  случайных столбиков вокруг текущего CPU (см. Primitives).
+                  Освободившееся место занято RAM — показанием, которое у нас
+                  действительно есть и которого на карточке не было. */}
+              {!hasCpu ? <div style={{fontSize:12,color:DIM_TEXT,marginBottom:2}}>{s.metrics_at ? "No CPU reading" : "No metrics yet"}</div> : null}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"3px 0",marginTop:10,fontSize:12.5}}>
                 <span style={{color:"#6b7280"}}>Uptime:</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{s.uptime}</span>
+                <span style={{color:"#6b7280"}}>RAM</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{hasRam ? `${Math.round(s.ram_used / 1024)}/${Math.round(s.ram_total / 1024)} GB` : "—"}</span>
                 <span style={{color:"#6b7280"}}>SSD Usage</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{hasDisk ? `${s.ssd_used} GB` : "—"}</span>
-                <span style={{color:"#6b7280"}}>CPU %</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{hasCpu ? `${s.cpu}%` : "—"}</span>
+                {/* Цвет числа — от самого числа (`cpuColor`), а у протухшего снимка от
+                    его возраста: спарклайн, который раньше нёс этот сигнал, был
+                    выдумкой, а порог загрузки — нет. */}
+                <span style={{color:"#6b7280"}}>CPU %</span><span style={{fontWeight:600,textAlign:"right",...(hasCpu ? {color:cc} : dim)}}>{hasCpu ? `${s.cpu}%` : "—"}</span>
               </div>
-              {hasDisk ? <div style={{marginTop:10,height:4,background:"#f3f4f6",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:cc,borderRadius:2}}/></div> : null}
+              {/* Полоса заполнения диска — единственное измерение, показанное
+                  как есть. Цвет считается от НЕЁ САМОЙ: раньше он брался от
+                  загрузки CPU, то есть диск краснел от чужой величины. */}
+              {hasDisk ? <div style={{marginTop:10,height:4,background:"#f3f4f6",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:s.stale?STALE_TEXT:cpuColor(pct),borderRadius:2}}/></div> : null}
               {/* Возраст снимка стоит вплотную к самим показаниям, а блок
                   доступности ниже отделён чертой: это два независимых сигнала
                   (десктоп по кнопке против бэкенда раз в 6 часов), и подпись
                   обязана читаться как относящаяся к своим цифрам. */}
               {s.metrics_at ? (
-                <div title={new Date(s.metrics_at).toLocaleString()} style={{fontSize:11.5,color:s.stale?WARN:DIM,marginTop:8}}>Metrics: {formatAgo(s.metrics_at)}{s.stale?" · stale":""}</div>
+                <div title={new Date(s.metrics_at).toLocaleString()} style={{fontSize:11.5,color:s.stale?WARN_TEXT:DIM_TEXT,marginTop:8}}>Metrics: {formatAgo(s.metrics_at)}{s.stale?" · stale":""}</div>
               ) : null}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10,paddingTop:10,borderTop:"1px solid #f3f4f6"}}>
                 <span style={{fontSize:12,color:"#6b7280"}}>Status</span>
@@ -503,7 +482,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                   проверка, — а вопрос ровно в этом. Точная дата осталась в
                   подсказке. «never» словом: прочерк здесь читался бы как
                   «данные не доехали». */}
-              <div title={s.last_check_at ? new Date(s.last_check_at).toLocaleString() : undefined} style={{fontSize:11.5,color:DIM,marginTop:8}}>Last check: {s.last_check_at ? formatAgo(s.last_check_at) : "never"}</div>
+              <div title={s.last_check_at ? new Date(s.last_check_at).toLocaleString() : undefined} style={{fontSize:11.5,color:s.check_stale?WARN_TEXT:DIM_TEXT,marginTop:8}}>Last check: {s.last_check_at ? formatAgo(s.last_check_at) : "never"}{s.check_stale?" · stale":""}</div>
             </div>;
           })}
           {servers.length > 0 && filtered.length === 0 ? (
@@ -533,7 +512,7 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                 {filtered.map(s=>{
                   // Тот же приём, что и в карточках: протухшее показание видно,
                   // но приглушено, и рядом стоит его возраст.
-                  const dim = s.stale ? { color: DIM } : null;
+                  const dim = s.stale ? { color: STALE_TEXT } : null;
                   return <tr key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
                   <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}} title={s.check_error || undefined}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
                   <td style={{padding:"12px 16px",fontFamily:"monospace",fontSize:13}}>{s.ip}</td>
@@ -541,14 +520,14 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                       доехали», прочерк — как «не заполнено». Так же, как у OS. */}
                   <td style={{padding:"12px 16px",fontSize:13}}>{s.provider || <span style={{color:"#9ca3af"}}>—</span>}</td>
                   <td style={{padding:"12px 16px"}}>{s.os ? <Badge variant="gray">{s.os}</Badge> : <span style={{color:"#9ca3af"}}>—</span>}</td>
-                  <td style={{padding:"12px 16px"}}>{s.cpu !== null ? <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:55,height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.cpu}%`,background:s.stale?DIM:cpuColor(s.cpu)}}/></div><span style={{fontSize:12,color:"#6b7280",...dim}}>{s.cpu}%</span></div> : <span style={{color:"#9ca3af"}}>—</span>}</td>
+                  <td style={{padding:"12px 16px"}}>{s.cpu !== null ? <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:55,height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.cpu}%`,background:s.stale?STALE_TEXT:cpuColor(s.cpu)}}/></div><span style={{fontSize:12,color:"#6b7280",...dim}}>{s.cpu}%</span></div> : <span style={{color:"#9ca3af"}}>—</span>}</td>
                   <td style={{padding:"12px 16px",fontSize:13,...dim}}>{s.ram_used !== null && s.ram_total !== null ? `${Math.round(s.ram_used / 1024)}/${Math.round(s.ram_total / 1024)} GB` : "—"}</td>
                   <td style={{padding:"12px 16px",fontSize:13,...dim}}>{s.ssd_used !== null && s.ssd_total !== null ? `${s.ssd_used}/${s.ssd_total} GB` : "—"}</td>
                   <td style={{padding:"12px 16px",fontSize:13,...dim}}>{s.uptime}</td>
-                  <td title={s.metrics_at ? new Date(s.metrics_at).toLocaleString() : undefined} style={{padding:"12px 16px",fontSize:12.5,color:s.stale?WARN:DIM}}>{s.metrics_at ? `${formatAgo(s.metrics_at)}${s.stale?" · stale":""}` : "—"}</td>
+                  <td title={s.metrics_at ? new Date(s.metrics_at).toLocaleString() : undefined} style={{padding:"12px 16px",fontSize:12.5,color:s.stale?WARN_TEXT:DIM_TEXT}}>{s.metrics_at ? `${formatAgo(s.metrics_at)}${s.stale?" · stale":""}` : "—"}</td>
                   <td style={{padding:"12px 16px"}}>{s.fastpanel?<Badge variant="blue">FASTPANEL</Badge>:<Badge variant="gray">—</Badge>}</td>
                   <td style={{padding:"12px 16px"}}><Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge></td>
-                  <td title={s.last_check_at ? new Date(s.last_check_at).toLocaleString() : undefined} style={{padding:"12px 16px",fontSize:12.5,color:DIM}}>{s.last_check_at ? formatAgo(s.last_check_at) : "never"}</td>
+                  <td title={s.last_check_at ? new Date(s.last_check_at).toLocaleString() : undefined} style={{padding:"12px 16px",fontSize:12.5,color:s.check_stale?WARN_TEXT:DIM_TEXT}}>{s.last_check_at ? formatAgo(s.last_check_at) : "never"}{s.check_stale?" · stale":""}</td>
                 </tr>;
                 })}
               </tbody>
