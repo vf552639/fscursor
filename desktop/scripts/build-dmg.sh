@@ -95,7 +95,7 @@ preflight() {
   # Триплет хоста узнаём у самого rustc, а не хардкодим: на Intel-маке это
   # x86_64-apple-darwin, на Apple Silicon — aarch64-apple-darwin. `awk` тут
   # читает весь вывод `rustc -vV` до конца сам — в отличие от `grep -q` в
-  # пайпе (см. разбор SIGPIPE-капкана в dev-signing.sh:113-117), обрывать
+  # пайпе (см. разбор SIGPIPE-капкана в desktop/dev-signing.sh:113-117), обрывать
   # верхнюю команду раньше времени некому.
   # `|| die` висит прямо на присваивании, не на следующей строке: под
   # pipefail статус пайпа — это статус ПОСЛЕДНЕЙ команды, упавшей с ошибкой,
@@ -115,7 +115,7 @@ preflight() {
   # В этом случае НЕ рапортуем успех молча — печатаем честное «не проверял»,
   # а не выдаём непроверенный таргет за подтверждённый. Ровно такая немая
   # «мягкая проверка» с mock-хранилищем уже стоила этому репозитория рабочего
-  # продукта (коммит 26bf693, см. dev-signing.sh).
+  # продукта (коммит 26bf693, см. desktop/dev-signing.sh).
   local target_note
   if command -v rustup >/dev/null 2>&1; then
     local targets
@@ -244,6 +244,8 @@ read_version() {
 # при успехе убирается сам, а после падения остаётся навсегда — и весит столько
 # же, сколько .app (десятки мегабайт). Имя каждый раз новое (в нём pid), так что
 # мусор копится молча. Чистим строго по шаблону rw.*.dmg и строго в bundle/macos/.
+# Отсюда же следует: две сборки параллельно не запускать — вторая снесёт рабочий
+# rw-образ первой. Блокировки нет намеренно (это локальный ручной скрипт).
 clean_stale_rw_images() {
   local dir="$SRC_TAURI_DIR/target/release/bundle/macos" f
   [ -d "$dir" ] || return 0
@@ -258,6 +260,12 @@ clean_stale_rw_images() {
 # Вывод сборки нужен сразу в двух видах: на экране (пользователь ждёт и хочет
 # видеть прогресс) и в файле (чтобы разобрать причину падения). Отсюда tee, а
 # код возврата берём из PIPESTATUS[0] — иначе получим код tee, который всегда 0.
+# Всё уходит в stderr (`>&2`), а не в stdout: stdout скрипта — это только его
+# собственный полезный вывод (пути к артефактам), см. комментарий к warn выше.
+# `tee -a`, а не `tee`: при повторе с CI=true в логе должны остаться ОБА прогона
+# — иначе от первого падения, ради разбора которого лог и заведён, ничего не
+# останется. Файл каждый раз новый (mktemp в run_build), так что дописывание
+# ничего чужого не подхватит.
 # Вызывать только в условии (if/||): внутри такого контекста errexit выключен,
 # и падение сборки не уронит скрипт до того, как мы решим, что с ним делать.
 run_tauri_bundle() {
@@ -267,22 +275,34 @@ run_tauri_bundle() {
     # CI=true заставляет tauri передать bundle_dmg.sh флаг --skip-jenkins, то
     # есть пропустить косметический AppleScript. Именно "true": на CI=1 tauri
     # CLI падает с «invalid value '1' for '--ci'».
-    [ "$use_ci" = "ci" ] && export CI=true
+    if [ "$use_ci" -eq 1 ]; then
+      export CI=true
+    fi
     npm run tauri build -- --bundles app,dmg
-  ) 2>&1 | tee "$log"
+  ) 2>&1 | tee -a "$log" >&2
   status=${PIPESTATUS[0]}
   return "$status"
 }
 
-# Признаки того, что упал не сам билд, а косметика: bundle_dmg.sh просит Finder
-# разложить иконки в окне DMG через osascript, а у хост-процесса шелла нет
-# разрешения Automation → Finder (агентские шеллы, ssh, CI, свежий терминал без
-# выданного TCC-доступа). Строку про Apple events tauri показывает не всегда
-# (вывод bundle_dmg.sh он глотает без --verbose), поэтому ловим и более общий
-# «error running bundle_dmg.sh»: если дело было не в этом, повтор всё равно
-# упадёт и мы честно сообщим об ошибке.
-looks_like_apple_events_denial() {
-  grep -qE 'Not authorised to send Apple events|Failed running AppleScript|-1743|error running bundle_dmg\.sh' "$1"
+# Насколько уверенно можно говорить, что упал не сам билд, а косметика:
+# bundle_dmg.sh просит Finder разложить иконки в окне DMG через osascript, а у
+# хост-процесса шелла нет разрешения Automation → Finder (агентские шеллы, ssh,
+# CI, свежий терминал без выданного TCC-доступа).
+#   apple-events — прямая улика от osascript, причину можно называть утвердительно;
+#   bundle-dmg   — tauri сказал только «error running bundle_dmg.sh» (вывод самого
+#                  bundle_dmg.sh он без --verbose глотает). Так выглядит и запрет
+#                  Apple events, и нехватка места, и занятый том — повторить с
+#                  CI=true стоит, но выдавать догадку за диагноз нельзя;
+#   none         — упало не на упаковке, повторять нечего.
+dmg_failure_signal() {
+  local log="$1"
+  if grep -qE 'Not authorised to send Apple events|Failed running AppleScript' "$log"; then
+    echo "apple-events"
+  elif grep -q 'error running bundle_dmg\.sh' "$log"; then
+    echo "bundle-dmg"
+  else
+    echo "none"
+  fi
 }
 
 BUILD_LOG=""
@@ -291,6 +311,15 @@ cleanup_build_log() {
   return 0
 }
 trap cleanup_build_log EXIT
+
+# Падение — единственная причина, ради которой лог вообще пишется: оставляем его
+# на диске (обнулив BUILD_LOG, чтобы trap не снёс) и печатаем путь. «Смотри вывод
+# выше» на длинной сборке не работает — терминальный скроллбэк её не вмещает.
+die_with_log() {
+  local log="$BUILD_LOG"
+  BUILD_LOG=""
+  die "$* Полный лог сборки: $log"
+}
 
 run_build() {
   local version
@@ -303,21 +332,32 @@ run_build() {
   clean_stale_rw_images
 
   step "Собираю .dmg и .app (npm run tauri build -- --bundles app,dmg)…"
-  if run_tauri_bundle "$BUILD_LOG" ""; then
-    :
-  elif looks_like_apple_events_denial "$BUILD_LOG"; then
+  if ! run_tauri_bundle "$BUILD_LOG" 0; then
+    local signal
+    signal="$(dmg_failure_signal "$BUILD_LOG")"
     echo
-    warn "Сборка упала на упаковке DMG: macOS не дала обратиться к Finder (Apple events)."
-    warn "Повторяю один раз с CI=true — оформление окна DMG (раскладка иконок) будет"
-    warn "пропущено. На работоспособность .dmg и .app это не влияет."
-    warn "Чтобы получить «красивый» DMG — выдай своему терминалу/IDE доступ в"
-    warn "System Settings → Privacy & Security → Automation → Finder и собери заново."
+    case "$signal" in
+      apple-events)
+        warn "Сборка упала на упаковке DMG: macOS не дала обратиться к Finder (Apple events)."
+        warn "Повторяю один раз с CI=true — оформление окна DMG (раскладка иконок) будет"
+        warn "пропущено. На работоспособность .dmg и .app это не влияет."
+        warn "Чтобы получить «красивый» DMG — выдай своему терминалу/IDE доступ в"
+        warn "System Settings → Privacy & Security → Automation → Finder и собери заново."
+        ;;
+      bundle-dmg)
+        warn "Упаковка DMG упала, причину tauri не показал. Частая причина — запрет"
+        warn "Apple events (нет доступа Automation → Finder); пробую один раз с CI=true,"
+        warn "тогда косметический AppleScript пропускается. Если и это не поможет —"
+        warn "смотри лог: бывает нехватка места на диске или занятый том."
+        ;;
+      *)
+        die_with_log "Сборка tauri упала."
+        ;;
+    esac
     echo
     clean_stale_rw_images
-    run_tauri_bundle "$BUILD_LOG" "ci" \
-      || die "Повторная сборка с CI=true тоже упала — смотри вывод выше (дело не в Apple events)."
-  else
-    die "Сборка tauri упала — смотри вывод выше."
+    run_tauri_bundle "$BUILD_LOG" 1 \
+      || die_with_log "Повторная сборка с CI=true тоже упала — значит, дело было не в Apple events."
   fi
 
   echo
@@ -326,19 +366,19 @@ run_build() {
   # если tauri когда-нибудь поменяет схему имени, скрипт должен это заметить
   # и упасть с понятной причиной, а не молча разойтись с реальностью.
   # НЕ через `ls | head -1` — под pipefail это тот же SIGPIPE-капкан, что
-  # разобран в dev-signing.sh:113-117 (`head` закрывает пайп раньше, чем `ls`
+  # разобран в desktop/dev-signing.sh:113-117 (`head` закрывает пайп раньше, чем `ls`
   # допишет вывод, `ls` получает SIGPIPE, pipefail валит код всей цепочки).
   # Массив-глоб этой ловушки не знает.
   #
-  # Но глоб `*.dmg` слепо берёт первый файл по алфавиту — а в bundle/dmg/
-  # может лежать чужой результат: (а) tauri удаляет только dmg с ТОЧНО
-  # совпадающим именем, так что dmg прошлой версии остаётся рядом; (б) сам
-  # tauri (bundle_dmg.sh, DMG_TEMP_NAME="$DMG_DIR/rw.$$.${DMG_NAME}") пишет
-  # промежуточный rw-образ, который остаётся после прерванной сборки и тоже
-  # подходит под *.dmg — а порядок глоба зависит от LC_COLLATE, так что
-  # предсказать, что окажется первым, нельзя. Поэтому: отфильтровываем
-  # `rw.*` явно и оставляем только файлы с текущей версией в имени; если
-  # после этого — не ровно один файл, это тоже повод упасть, а не гадать.
+  # Но глоб `*.dmg` слепо берёт первый файл по алфавиту — а в bundle/dmg/ может
+  # лежать чужой результат: tauri удаляет только dmg с ТОЧНО совпадающим именем,
+  # так что dmg прошлой версии остаётся рядом. Поэтому оставляем только файлы с
+  # текущей версией в имени; если после этого — не ровно один файл, это повод
+  # упасть, а не гадать. Фильтр `rw.*` — страховка, а не рабочая необходимость:
+  # промежуточный rw-образ (bundle_dmg.sh, DMG_TEMP_NAME="$DMG_DIR/rw.$$.…")
+  # tauri кладёт в bundle/macos/, а не сюда, и его уже снял clean_stale_rw_images.
+  # Порядок глоба к тому же зависит от LC_COLLATE — гадать, что окажется первым,
+  # нельзя в любом случае.
   local nullglob_was_set=0
   shopt -q nullglob && nullglob_was_set=1
   shopt -s nullglob

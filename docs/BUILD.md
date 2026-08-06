@@ -59,7 +59,12 @@ with `CI=true`, which makes Tauri skip the cosmetic AppleScript. You get a warni
 working `.dmg`/`.app` — only the window layout of the mounted DMG is plain. To get the
 pretty layout, grant your terminal/IDE access under System Settings → Privacy & Security
 → Automation → Finder and build again. If the retry fails too, the cause was something
-else and the script reports an honest error.
+else and the script reports an honest error (and keeps the full build log, printing its
+path).
+
+Note the flip side: if `CI` is already set to `true` in your environment, the very first
+build skips the AppleScript — you get a plain DMG window layout with no warning at all,
+because nothing failed.
 
 ## Artifacts
 
@@ -68,7 +73,7 @@ desktop/src-tauri/target/release/bundle/dmg/SDMP_<version>_<arch>.dmg
 desktop/src-tauri/target/release/bundle/macos/SDMP.app
 ```
 
-## Running the build
+## Running the app
 
 Either:
 
