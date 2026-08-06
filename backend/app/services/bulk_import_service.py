@@ -6,6 +6,7 @@ from typing import Optional
 from uuid import UUID
 
 from openpyxl import load_workbook
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.validators import is_valid_domain, normalize_domain
@@ -245,6 +246,17 @@ async def process_server_bulk_import(
             await server_service.create(db, payload, user_id)
             existing_ips.add(item.ip)
             created += 1
+        except ValidationError as exc:
+            # Отдельный except перед общим: голый `str(ValidationError)` — это
+            # многострочный дамп pydantic со ссылкой на docs.pydantic.dev и
+            # `input_value`, который целиком уезжает в `errors`/errors CSV.
+            # Строка вида «поле: причина» читается, а не пугает.
+            skipped += 1
+            first = exc.errors()[0]
+            field = ".".join(str(part) for part in first["loc"])
+            errors.append(
+                ServerBulkImportError(row=item.row, server=item.name, reason=f"{field}: {first['msg']}")
+            )
         except Exception as exc:
             skipped += 1
             errors.append(ServerBulkImportError(row=item.row, server=item.name, reason=f"{type(exc).__name__}: {exc}"))

@@ -54,7 +54,7 @@ Notes:
   - Beat task `app.tasks.domain.refresh_ssl_all` runs daily at `03:00 UTC` and updates `ssl_status`, `ssl_expires_at`, `ssl_issuer` for domains bound to servers.
 - **Bulk import flow:**
   - `POST /api/domains/bulk-import` supports `csv`/`xlsx` uploads, returns summary and errors CSV URL.
-  - `POST /api/servers/bulk-import` supports `csv`/`xlsx` with columns `name,ip,ssh_user,ssh_password,ssh_port,notes` (optional header row); errors CSV via `GET /api/servers/bulk-import-errors/{token}`.
+  - `POST /api/servers/bulk-import` supports `csv`/`xlsx` with columns `name,ip,ssh_user,ssh_password,ssh_port,provider` (optional header row; `provider` is the sixth column — it replaced the dropped `notes` column, see `plans/2026-08-05-server-hosting-provider.md` phase 4); errors CSV via `GET /api/servers/bulk-import-errors/{token}`.
 - **Outbound notifications (PR-3):**
   - On successful `create_notification`, the backend may call configured channels: webhook (`Webhook Enabled` + `Webhook URL` + optional `Webhook Secret` in `system_config`) and Telegram (env `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` when `Telegram Enabled` is true).
   - `POST /api/settings/notifications/test` sends a synthetic payload through the same channel logic and returns per-channel status strings for UI smoke tests.

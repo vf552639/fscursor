@@ -5,6 +5,14 @@
 этой правки, обязаны продолжать импортироваться как раньше — без шестой
 колонки строка не должна ни падать, ни превращать провайдер в мусор.
 
+Индекс 5 — не новый слот. До коммита `f7d6da3` («drop plaintext server.notes»)
+`_parse_server_row` читал его как `notes`; тот коммит убрал чтение из кода, но
+не тронул `docs/ARCHITECTURE.md` / `docs/CURRENT_STATUS.md`, где формат ещё
+недавно был описан как `...,ssh_port,notes`. Эта правка переиспользует тот же
+индекс под `provider` (радиус поражения — ноль: `f7d6da3` фиксирует «verified
+0 non-null rows» на момент дропа `notes`), документация поправлена отдельно.
+`test_sixth_column_is_provider_not_notes` ниже фиксирует это решение явно.
+
 Как и в `test_server_provider.py`, утверждения — по колонке `servers.provider`,
 а не по телу ответа: `ServerBulkImportResponse` вообще не возвращает
 провайдера, так что эхо в ответе тут в принципе невозможно и провалилось бы
@@ -15,6 +23,7 @@ import asyncio
 import base64
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -47,20 +56,27 @@ async def _purge_users(emails: list[str]) -> None:
         await s.commit()
 
 
-def b64(b: bytes) -> str:
+def _b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 
-async def _register_and_login(client: AsyncClient, email: str) -> None:
+async def _register_and_login(client: AsyncClient, email: str) -> uuid.UUID:
+    """Завести и залогинить пользователя; вернуть его `id`.
+
+    БД тестов общая: IP из диапазона `203.0.113.x` встречается в нескольких
+    файлах и, при коллизии рандома, внутри одного. `id` пользователя —
+    единственный надёжный якорь, чтобы `_stored_provider` не поймал строку
+    соседа с тем же IP.
+    """
     _REGISTERED_EMAILS.append(email)
     r = await client.post(
         "/api/auth/register",
         json={
             "email": email,
-            "salt_b64": b64(b"\x00" * 16),
-            "auth_key_b64": b64(b"\x01" * 32),
-            "recovery_blob_b64": b64(b"\x02" * 96),
-            "recovery_auth_key_b64": b64(b"\x03" * 32),
+            "salt_b64": _b64(b"\x00" * 16),
+            "auth_key_b64": _b64(b"\x01" * 32),
+            "recovery_blob_b64": _b64(b"\x02" * 96),
+            "recovery_auth_key_b64": _b64(b"\x03" * 32),
         },
     )
     assert r.status_code in (201, 409), r.text
@@ -71,18 +87,31 @@ async def _register_and_login(client: AsyncClient, email: str) -> None:
             .values(email_confirmed_at=datetime.now(timezone.utc), email_confirm_token_hash=None)
         )
         await s.commit()
+        user_id = (await s.execute(select(User.id).where(User.email == email))).scalar_one()
     r = await client.post(
         "/api/auth/login/finish",
-        json={"email": email, "auth_key_b64": b64(b"\x01" * 32)},
+        json={"email": email, "auth_key_b64": _b64(b"\x01" * 32)},
     )
     assert r.status_code == 200, r.text
+    return user_id
 
 
-async def _stored_provider(ip: str) -> object:
-    """Значение колонки `servers.provider` для сервера с данным IP — прямо из БД."""
+async def _stored_provider(ip: str, user_id: uuid.UUID) -> Optional[str]:
+    """Значение колонки `servers.provider` для сервера с данным IP у ЭТОГО пользователя.
+
+    Без фильтра по `user_id` `scalar_one()` при коллизии IP с соседним тестом
+    (общая БД, фиксированные диапазоны в `test_server_provider.py`,
+    `test_secret_write_path.py`, `test_provision_writeback.py`) вернул бы
+    `MultipleResultsFound` — отравленная строка от прерванного прогона ломала
+    бы этот тест навсегда, а не один раз.
+    """
     async with AsyncSessionLocal() as s:
         return (
-            await s.execute(select(Server.provider).where(Server.ip_address == ip))
+            await s.execute(
+                select(Server.provider).where(
+                    Server.ip_address == ip, Server.user_id == user_id
+                )
+            )
         ).scalar_one()
 
 
@@ -96,6 +125,22 @@ def test_parse_server_row_reads_sixth_column_as_provider():
     parsed = _parse_server_row(row, idx=2)
     assert parsed is not None
     assert parsed.provider == "Hetzner Online"
+
+
+def test_sixth_column_is_provider_not_notes():
+    """Решение зафиксировано явно: индекс 5 — `provider`, не `notes`.
+
+    До `f7d6da3` тот же индекс парсился как `notes`; коммит убрал чтение из
+    кода, но не поправил `docs/ARCHITECTURE.md` / `docs/CURRENT_STATUS.md` —
+    там до этой правки формат ещё был описан со старой `notes`. Значение ниже
+    типично для заметки («Rented via reseller»), но теперь это провайдер: тест
+    существует, чтобы следующий человек не гадал по `git blame`, что там было
+    раньше и почему.
+    """
+    row = ["srv-1", "203.0.113.1", "root", "pass", "22", "Rented via reseller"]
+    parsed = _parse_server_row(row, idx=2)
+    assert parsed is not None
+    assert parsed.provider == "Rented via reseller"
 
 
 def test_parse_server_row_without_sixth_column_leaves_provider_none():
@@ -138,7 +183,7 @@ async def test_csv_import_with_provider_column_stores_the_value():
     ).encode()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, f"bulk-prov-{uuid.uuid4().hex[:8]}@example.com")
+        user_id = await _register_and_login(c, f"bulk-prov-{uuid.uuid4().hex[:8]}@example.com")
         r = await c.post(
             "/api/servers/bulk-import",
             files={"file": ("servers.csv", csv_body, "text/csv")},
@@ -148,7 +193,7 @@ async def test_csv_import_with_provider_column_stores_the_value():
         body = r.json()
         assert body["created"] == 1, body
 
-        assert await _stored_provider(ip) == "Hetzner Online", (
+        assert await _stored_provider(ip, user_id) == "Hetzner Online", (
             "провайдер из шестой колонки CSV не доехал до колонки БД"
         )
 
@@ -164,7 +209,7 @@ async def test_csv_import_without_provider_column_still_works():
     ).encode()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, f"bulk-noprov-{uuid.uuid4().hex[:8]}@example.com")
+        user_id = await _register_and_login(c, f"bulk-noprov-{uuid.uuid4().hex[:8]}@example.com")
         r = await c.post(
             "/api/servers/bulk-import",
             files={"file": ("servers.csv", csv_body, "text/csv")},
@@ -174,22 +219,29 @@ async def test_csv_import_without_provider_column_still_works():
         body = r.json()
         assert body["created"] == 1, body
 
-        assert await _stored_provider(ip) is None, (
+        assert await _stored_provider(ip, user_id) is None, (
             "файл без колонки провайдера не должен ничего писать в неё"
         )
 
 
 @pytest.mark.asyncio
 async def test_csv_import_skips_row_with_invalid_provider_without_failing_the_batch():
-    """Невалидный провайдер (управляющий символ) роняет строку, а не весь файл.
+    """Невалидный провайдер (управляющий символ) даёт `ValidationError` на
+    построении `ServerCreate` — и эта ошибка скипает только свою строку, не
+    весь файл.
 
-    `ServerCreate(...)` собирается из данных строки импорта; если бы это
-    построение стояло вне `try/except`, `pydantic.ValidationError` по
-    провайдеру пробила бы наружу и превратила один плохой ряд в 500 на весь
-    импорт. Хорошая соседняя строка обязана всё равно создаться.
+    Проверяется именно этот случай (`ValidationError` от схемы), а не более
+    широкое свойство «любая ошибка строки не роняет остальные»: у
+    `server_service.create` нет `rollback` в обработке ошибок commit'а, и сбой
+    уровня БД в одной строке мог бы испортить сессию для всех последующих —
+    этот тест такой сценарий не проверяет и ничего о нём не утверждает.
     """
-    bad_ip = f"203.0.113.{uuid.uuid4().int % 200 + 10}"
-    good_ip = f"203.0.113.{(uuid.uuid4().int % 200 + 10) + 1}"
+    # Один розыгрыш октета: два независимых uuid4 из пересекающихся диапазонов
+    # иногда совпадали, и тогда «хорошая» строка с тем же IP, что и «плохая»,
+    # создавалась под её адресом, а `bad_created is None` падал не по вине кода.
+    octet = uuid.uuid4().int % 200 + 10
+    bad_ip = f"203.0.113.{octet}"
+    good_ip = f"203.0.113.{octet + 1}"
     bad_name = f"srv-bad-{uuid.uuid4().hex[:8]}"
     good_name = f"srv-good-{uuid.uuid4().hex[:8]}"
     # Управляющий символ внутри поля — CSV допускает его в кавычках.
@@ -200,7 +252,7 @@ async def test_csv_import_skips_row_with_invalid_provider_without_failing_the_ba
     ).encode()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, f"bulk-badprov-{uuid.uuid4().hex[:8]}@example.com")
+        user_id = await _register_and_login(c, f"bulk-badprov-{uuid.uuid4().hex[:8]}@example.com")
         r = await c.post(
             "/api/servers/bulk-import",
             files={"file": ("servers.csv", csv_body, "text/csv")},
@@ -210,9 +262,15 @@ async def test_csv_import_skips_row_with_invalid_provider_without_failing_the_ba
         body = r.json()
         assert body["created"] == 1, body
         assert body["skipped"] == 1, body
-        assert body["errors"], "плохая строка обязана попасть в errors"
 
-        assert await _stored_provider(good_ip) == "Hetzner"
+        # Не просто «errors непуст» — это прошло бы и при отвале строки по
+        # другой причине (например, случайной коллизии IP). Причина обязана
+        # называть именно провайдера.
+        bad_row_error = next((e for e in body["errors"] if e["server"] == bad_name), None)
+        assert bad_row_error is not None, body["errors"]
+        assert "provider" in bad_row_error["reason"].lower(), bad_row_error
+
+        assert await _stored_provider(good_ip, user_id) == "Hetzner"
         async with AsyncSessionLocal() as s:
             bad_created = (
                 await s.execute(select(Server.id).where(Server.ip_address == bad_ip))

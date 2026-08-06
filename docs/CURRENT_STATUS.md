@@ -45,7 +45,7 @@
     - `Refresh Uptime` action replaced by `Refresh`; new `Sync Domains` action and result banner on ServerDetail.
     - Empty domains state on ServerDetail now hints to use sync for FastPanel-connected hosts.
 - 2026-04-29 (**PR-2 extension + PR-3**): Servers bulk import, outbound notification channels, Settings SSL pool UI, and provisioning safety nets.
-  - **Servers:** `POST /api/servers/bulk-import` (`csv`/`xlsx`, columns `name,ip,ssh_user,ssh_password,ssh_port,notes`), `GET /api/servers/bulk-import-errors/{token}`; frontend `ServerBulkImportDialog` + **⇪ Import** on `Servers.tsx`.
+  - **Servers:** `POST /api/servers/bulk-import` (`csv`/`xlsx`, columns `name,ip,ssh_user,ssh_password,ssh_port,notes` at the time — the sixth column was `notes`; `notes` was dropped in `f7d6da3` and the sixth column was later repurposed as `provider`, see `plans/2026-08-05-server-hosting-provider.md` phase 4), `GET /api/servers/bulk-import-errors/{token}`; frontend `ServerBulkImportDialog` + **⇪ Import** on `Servers.tsx`.
   - **Cloudflare:** `create_dns_record` upserts when a record with the same `type` + `name` already exists (avoids duplicate-create failures on retries).
   - **Namecheap:** `set_nameservers` validates `CommandResponse/@Status` and surfaces XML errors via `RegistrarError`.
   - **Settings / `system_config`:** editable keys for `Webhook Enabled`, `Webhook URL`, `Webhook Secret`, `Telegram Enabled`, `Auto Temp Mail Enabled`; `POST /api/settings/notifications/test` returns `{ webhook, telegram }` status strings for smoke tests.

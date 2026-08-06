@@ -50,7 +50,7 @@ export default function ServerBulkImportDialog({
           File has header row
         </label>
         <div style={{ fontSize: 12, color: "#6b7280" }}>
-          Format: <code>name,ip,ssh_user,ssh_password,ssh_port</code>
+          Format: <code>name,ip,ssh_user,ssh_password,ssh_port,provider</code> (provider optional)
         </div>
         {error ? (
           <div style={{ fontSize: 12.5, color: "#b91c1c", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: 8 }}>
