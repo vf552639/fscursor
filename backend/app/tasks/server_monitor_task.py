@@ -35,15 +35,21 @@
 из-за одной кривой строки — худший из возможных отказов. Поэтому и опрос
 (`return_exceptions=True`), и запись (`try` вокруг каждого сервера) переживают
 падение отдельного сервера, а число таких случаев уезжает в `TaskLog`.
+
+Выборку можно сузить до конкретных владельцев (`user_ids`); расписание зовёт
+без сужения, то есть по всем. Параметр заведён ради тестов, и почему это
+защита, а не удобство — в `_load_targets`.
 """
 
 import asyncio
+import uuid
 from typing import Awaitable, Callable, Optional, Sequence, Tuple, Union
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.celery_app import celery_app
+from app.core.constants import TaskLogStatus
 from app.core.database import AsyncSessionLocal
 from app.models.server import Server
 from app.models.task_log import TaskLog
@@ -62,19 +68,29 @@ ProbeResult = Tuple[bool, Optional[str]]
 Prober = Callable[[str, int], Awaitable[ProbeResult]]
 
 
-async def _load_targets(session: AsyncSession) -> list[Target]:
+async def _load_targets(
+    session: AsyncSession,
+    user_ids: Optional[Sequence[uuid.UUID]] = None,
+) -> list[Target]:
     """Кого опрашиваем: серверы с владельцем.
 
     Строка без `user_id` пропускается ещё до опроса: уведомление по ней
     адресовать некому, и чей `sync_version` бампить — тоже неизвестно.
+
+    `user_ids` сужает прогон до перечисленных владельцев; `None` — все, и
+    именно так задачу зовёт расписание. Параметр существует ради тестов, и это
+    не удобство, а защита: тестовая БД общая с dev-окружением, прогон по
+    умолчанию берёт ВСЕ серверы, включая живые чужие, и уже случилось —
+    сорвавшийся тест записал трём настоящим машинам «упал» и разослал
+    уведомления. Ограничение выборки делает чужие строки недостижимыми
+    структурно, а не по счастливому стечению поведения проверяемого кода.
     """
-    rows = (
-        await session.execute(
-            select(Server.id, Server.ip_address, Server.ssh_port).where(
-                Server.user_id.isnot(None)
-            )
-        )
-    ).all()
+    stmt = select(Server.id, Server.ip_address, Server.ssh_port).where(
+        Server.user_id.isnot(None)
+    )
+    if user_ids is not None:
+        stmt = stmt.where(Server.user_id.in_(user_ids))
+    rows = (await session.execute(stmt)).all()
     return [(row.id, row.ip_address, row.ssh_port) for row in rows]
 
 
@@ -114,18 +130,24 @@ async def _apply_results(
     """Записать исходы опроса — последовательно, по одному коммиту на сервер.
 
     Строка перечитывается заново: между опросом и записью прошли минуты, за
-    которые сервер могли удалить или лишить владельца. Такие просто
-    пропускаются — записывать результат некуда и некому.
+    которые сервер могли удалить или лишить владельца. Записать такому
+    результат некуда и некому — он уходит в `failed`.
 
-    `touch_entity_sync` зовётся ДО `apply_check_result`, и это важно.
-    `apply_check_result` на переходе коммитит внутри себя (через
-    `create_notification`), и бамп, сделанный после, остался бы за пределами
-    того коммита: поля сервера уехали бы в БД, а версия — нет. Строка тогда
-    не попала бы в `/sync/changes?since=` (выборка идёт по
-    `sync_version > since`), и десктоп навсегда остался бы с «сервер жив» в
-    локальном кэше. Проверять «а изменилось ли что-нибудь» не нужно:
-    `apply_check_result` всегда двигает `last_check_at`, то есть применённый
-    результат — это всегда изменение.
+    `touch_entity_sync` зовётся ДО `apply_check_result`, и причина узкая.
+    В обычном ходе дел порядок не важен: бамп после тоже уехал бы в БД, просто
+    следующим `commit()`. Ломается всё на переходе, где `apply_check_result`
+    коммитит внутри себя (через `create_notification`), а СРАЗУ ПОСЛЕ того
+    коммита зовёт `dispatch_notification` — чужой вебхук и Telegram. Исходящий
+    HTTP бросить может, и тогда управление уходит в `except` ниже: поля
+    сервера уже закоммичены внутренним коммитом, а бамп, стоящий после,
+    не случится уже никогда. Строка навсегда выпадет из
+    `/sync/changes?since=` (выборка идёт по `sync_version > since`), и десктоп
+    останется с «сервер жив» в локальном кэше — при том что в БД он «упал».
+    Бамп до вызова попадает в тот же внутренний коммит, что и поля.
+
+    Проверять «а изменилось ли что-нибудь» не нужно: `apply_check_result`
+    всегда двигает `last_check_at`, то есть применённый результат — это всегда
+    изменение.
     """
     stats = {"checked": 0, "down": 0, "up": 0, "failed": 0}
     applicable = {
@@ -146,7 +168,12 @@ async def _apply_results(
             server = await session.get(Server, server_id)
             if server is None or server.user_id is None:
                 # Строку удалили или лишили владельца, пока шёл опрос:
-                # записывать результат некуда и некому.
+                # записывать результат некуда и некому. Считаем в `failed` —
+                # проверка не записана, и молча выпасть из статистики она не
+                # должна: тогда `checked + failed` перестало бы сходиться с
+                # числом опрошенных, и по журналу нельзя было бы понять, куда
+                # делись серверы.
+                stats["failed"] += 1
                 continue
             await touch_entity_sync(session, server.user_id, server)
             transition = await server_monitor.apply_check_result(session, server, ok, error)
@@ -170,8 +197,9 @@ def _task_log(stats: dict[str, int]) -> TaskLog:
     """Итог прогона одной строкой журнала.
 
     Это всё, что человек увидит о прогоне, поэтому в тексте числа, а не факт
-    запуска. `failed` упоминается только когда он есть: в норме `probe` не
-    бросает, и ненулевое значение здесь — сигнал о баге, а не фон.
+    запуска. `failed` — «результат проверки не записан»: сюда попадают и
+    упавший опрос, и отказ БД на записи, и сервер, удалённый между фазами.
+    Упоминается только когда он есть: в норме он нулевой.
     """
     log_text = (
         f"checked {stats['checked']} servers: "
@@ -183,20 +211,27 @@ def _task_log(stats: dict[str, int]) -> TaskLog:
         entity_type="system",
         entity_id=None,
         task_type="server_monitor",
-        status="success" if not stats["failed"] else "partial",
+        status=TaskLogStatus.SUCCESS if not stats["failed"] else TaskLogStatus.PARTIAL,
         log_text=log_text,
         user_id=None,
     )
 
 
-async def _monitor_servers(*, probe: Prober = server_monitor.probe) -> dict[str, int]:
+async def _monitor_servers(
+    *,
+    probe: Prober = server_monitor.probe,
+    user_ids: Optional[Sequence[uuid.UUID]] = None,
+) -> dict[str, int]:
     """Один прогон целиком: кого опрашивать → опрос веером → запись и журнал.
 
     Сессия под выборку своя и закрывается до опроса — держать её открытой
     через минуты сетевых ожиданий значило бы держать открытую транзакцию.
+
+    `user_ids` сужает прогон до перечисленных владельцев (см. `_load_targets`);
+    расписание зовёт без него, то есть по всем.
     """
     async with AsyncSessionLocal() as session:
-        targets = await _load_targets(session)
+        targets = await _load_targets(session, user_ids)
 
     results = await _probe_all(targets, probe=probe, concurrency=PROBE_CONCURRENCY)
 

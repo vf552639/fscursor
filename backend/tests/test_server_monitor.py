@@ -163,6 +163,23 @@ async def test_second_miss_in_a_row_confirms_the_outage_and_notifies(sent):
 
 
 @pytest.mark.asyncio
+async def test_the_notification_shows_a_clean_address(sent):
+    """Адрес в письме без обрамляющих пробелов.
+
+    `probe` их срезает перед опросом, а текст уведомления собирается из
+    колонки как есть — и `Port  203.0.113.10 :22 did not answer` читается как
+    опечатка отправителя. Уведомление и так приходит в плохую минуту.
+    """
+    srv = _server(ip_address="  203.0.113.10 ", last_check_ok=True)
+    session = _FakeSession()
+
+    for _ in range(2):
+        await server_monitor.apply_check_result(session, srv, False, "timeout")
+
+    assert "203.0.113.10:22" in sent[0]["message"], sent[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_further_misses_stay_silent(sent):
     """3-й и 4-й промахи: счётчик растёт, статус держится, новых писем нет."""
     srv = _server(last_check_ok=True)

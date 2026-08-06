@@ -43,6 +43,10 @@ class TaskLogStatus(StrEnum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
+    # Задача дошла до конца, но часть сущностей не обработана: у пакетных
+    # прогонов (мониторинг серверов) это обычный исход, и ни `success`, ни
+    # `failed` его не описывают.
+    PARTIAL = "partial"
 
 
 DOMAIN_REGEX = r"^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"

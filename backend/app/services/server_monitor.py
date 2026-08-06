@@ -227,7 +227,10 @@ async def _notify(
     if server.user_id is None:
         return  # строка без владельца — уведомление адресовать некому
 
-    where = f"{server.ip_address}:{server.ssh_port}"
+    # Адрес чистится так же, как перед опросом: пробелы из CSV-импорта
+    # доезжают до письма и Telegram, и `Port  203.0.113.10 :22 did not answer`
+    # читается как опечатка отправителя.
+    where = f"{server.ip_address.strip()}:{server.ssh_port}"
     if transition == "down":
         title = f"Server {server.name} is unreachable"
         message = (

@@ -6,22 +6,22 @@
 `sync_version` поднялся (иначе десктоп о падении не узнает никогда) и что один
 сбойный сервер не уносит прогон остальных.
 
-Реальный TCP не открывается: `probe` подменяется целиком. Заглушка знает
-только хосты, заведённые самим тестом, а на любой незнакомый **бросает**. Это
-не каприз: тестовая БД общая с dev-окружением, в ней лежат чужие серверы, и
-прогон задачи опрашивает их наравне с нашими. Исключение из опроса — ровно тот
-исход, при котором чужая строка не будет ни прочитана, ни изменена (задача
-такой результат пропускает), поэтому чужие данные остаются нетронутыми, а
-`checked`/`down`/`up` считаются только по нашим серверам и не зависят от того,
-что ещё лежит в базе.
+Реальный TCP не открывается ни разу: `probe` подменяется целиком.
 
-Побочная выгода: если запись перестанет пропускать сбойный опрос и начнёт,
-например, считать исключение падением сервера, чужие строки поедут в `checked`
-и тесты покраснеют.
+Прогон всегда сужен до пользователя теста — он идёт только через
+`_World.run`. Задача по построению берёт ВСЕ серверы с владельцем, а тестовая
+БД общая с dev-окружением, и цена ошибки здесь уже заплачена: прогон без
+сужения записал трём настоящим машинам «упал» и разослал их владельцу
+уведомления. Живые строки должны быть недостижимы конструкцией, а не
+корректностью проверяемого кода, — фильтр по `user_id` ровно это и даёт.
 
-Плата за это — `failed`: чужие серверы всегда добавляют в него своё, поэтому по
-БД он сверяется только через `>=`, а точные значения и статус строки журнала
-проверяются юнитом на `_task_log`.
+Заглушка `probe` вдобавок **бросает** на любом хосте, которого тест не
+заводил. Это второй рубеж: если фильтр однажды перестанет фильтровать, чужая
+строка всё равно не будет ни прочитана, ни изменена — задача сбойный опрос
+пропускает.
+
+Раз чужого в выборке нет, счётчики (`checked`/`down`/`up`/`failed`) сверяются
+точными равенствами и не зависят от того, что ещё лежит в базе.
 """
 
 import asyncio
@@ -39,6 +39,7 @@ from app.core.database import AsyncSessionLocal
 from app.models.notification import Notification
 from app.models.server import Server
 from app.models.task_log import TaskLog
+from app.services import notification_service
 from app.tasks import server_monitor_task
 
 
@@ -50,7 +51,13 @@ class _Probe:
     """Опрос-заглушка: исход задаётся по хосту.
 
     Значение `(ok, error)` — готовый исход, исключение — падение самой
-    корутины опроса. Незнакомый хост тоже даёт исключение (см. шапку файла).
+    корутины опроса, корутинная функция — исход, который надо вычислить (так
+    тест изображает медленный опрос или удаление строки прямо во время него).
+
+    Незнакомый хост даёт исключение, и через эту заглушку в файле проходит
+    КАЖДЫЙ опрос — обходных «просто верни True» нет намеренно. Иначе второй
+    рубеж (см. шапку файла) держал бы не весь файл, а только те тесты, где о
+    нём вспомнили.
     """
 
     def __init__(self, outcomes: dict[str, object]) -> None:
@@ -64,6 +71,8 @@ class _Probe:
             raise _ForeignServer(host)
         if isinstance(outcome, BaseException):
             raise outcome
+        if callable(outcome):
+            return await outcome()
         return outcome
 
     @property
@@ -107,6 +116,19 @@ class _World:
             if not owner:
                 self.ownerless_server_ids.append(server.id)
             return server.id
+
+    async def run(self, probe) -> dict[str, int]:
+        """Прогон, суженный до серверов этого теста.
+
+        Единственная точка запуска в файле — намеренно. Задача по построению
+        берёт ВСЕ серверы с владельцем, а тестовая БД общая с dev-окружением:
+        один забытый на call-site фильтр — и прогон пишет «упал» живым
+        машинам и рассылает их владельцам уведомления. Такое уже случилось,
+        и лечится оно тем, что забыть фильтр негде.
+        """
+        return await server_monitor_task._monitor_servers(
+            probe=probe, user_ids=[self.user_id]
+        )
 
     async def reload(self, server_id: int) -> Server:
         async with AsyncSessionLocal() as session:
@@ -300,11 +322,12 @@ async def test_run_applies_every_result_and_logs_the_statistics(world):
         }
     )
 
-    stats = await server_monitor_task._monitor_servers(probe=probe)
+    stats = await world.run(probe=probe)
 
     assert stats["checked"] == 3
     assert stats["down"] == 1
     assert stats["up"] == 1
+    assert stats["failed"] == 0
 
     still_alive = await world.reload(alive_id)
     assert still_alive.last_check_ok is True
@@ -328,6 +351,7 @@ async def test_run_applies_every_result_and_logs_the_statistics(world):
     assert len(logs) == 1, f"прогон написал {len(logs)} записей вместо одной"
     log = logs[0]
     assert log.entity_type == "system"
+    assert log.status == "success"
     assert "checked 3" in log.log_text
     assert "1 down" in log.log_text and "1 up" in log.log_text
 
@@ -345,7 +369,7 @@ async def test_check_results_reach_the_desktop_via_sync_version(world):
     second_id = await world.server(second, last_check_ok=True)
     version_before = await world.sync_version()
 
-    await server_monitor_task._monitor_servers(
+    await world.run(
         probe=_Probe({first: (True, None), second: (True, None)})
     )
 
@@ -370,10 +394,10 @@ async def test_a_broken_probe_does_not_stop_the_rest_of_the_run(world):
     healthy_id = await world.server(healthy, last_check_ok=True)
     probe = _Probe({broken: RuntimeError("boom"), healthy: (True, None)})
 
-    stats = await server_monitor_task._monitor_servers(probe=probe)
+    stats = await world.run(probe=probe)
 
     assert stats["checked"] == 1
-    assert stats["failed"] >= 1
+    assert stats["failed"] == 1
     untouched = await world.reload(broken_id)
     assert untouched.last_check_at is None, "сбойный опрос всё-таки записали как проверку"
     assert untouched.sync_version == 0
@@ -412,12 +436,12 @@ async def test_a_write_failure_on_one_server_keeps_the_rest_of_the_run(world, mo
 
     monkeypatch.setattr(server_monitor_task, "touch_entity_sync", _touch)
 
-    stats = await server_monitor_task._monitor_servers(
+    stats = await world.run(
         probe=_Probe({first: (True, None), poisoned: (True, None), last: (True, None)})
     )
 
     assert stats["checked"] == 2, "сбой на одном сервере унёс соседей"
-    assert stats["failed"] >= 1
+    assert stats["failed"] == 1
     for server_id in (first_id, last_id):
         survivor = await world.reload(server_id)
         assert survivor.last_check_at is not None, f"результат сервера {server_id} потерян"
@@ -433,7 +457,7 @@ async def test_a_run_without_servers_logs_checked_zero(world):
     Пустой прогон — обычное состояние свежего аккаунта, и он не должен ни
     падать, ни оставлять расписание без следа в журнале.
     """
-    stats = await server_monitor_task._monitor_servers(probe=_Probe({}))
+    stats = await world.run(probe=_Probe({}))
 
     assert stats["checked"] == 0
     assert stats["down"] == 0 and stats["up"] == 0
@@ -442,26 +466,124 @@ async def test_a_run_without_servers_logs_checked_zero(world):
     assert "checked 0" in logs[0].log_text
 
 
-async def test_servers_without_an_owner_are_never_probed(world):
-    """Строка без `user_id` не попадает даже в опрос.
+async def test_the_selection_takes_owned_servers_and_only_the_asked_owners(world):
+    """Что вообще попадает в опрос: с владельцем — да, без владельца — нет.
 
-    Такие строки в БД есть (колонка nullable), но адресовать по ним нечего:
-    уведомление некому, в чей `sync_version` бампить — неизвестно. Проверяем
-    именно то, что её не спросили: строка, доехавшая до записи, обвалила бы
+    Тест читающий и потому единственный, который зовёт продакшн-выборку без
+    сужения по пользователю: `_load_targets` только `SELECT`-ит, дотянуться до
+    чужих данных ей нечем. Сужать тут и нельзя — фильтр по `user_id` сам
+    отсекает строки с `user_id IS NULL`, и продакшн-условие `isnot(None)`
+    осталось бы непроверенным: в реальном прогоне фильтра нет, и защищает
+    только оно. Строка без владельца, доехавшая до записи, обвалила бы
     `touch_entity_sync` на `user_id = None`.
+
+    Вторым утверждением проверяется сам фильтр — тот, на котором держится
+    безопасность всех остальных тестов файла.
     """
-    orphan, owned = _host(), _host()
-    orphan_id = await world.server(orphan, owner=False, last_check_ok=True)
-    await world.server(owned, last_check_ok=True)
-    probe = _Probe({orphan: (False, "should never be asked"), owned: (True, None)})
+    orphan_id = await world.server(_host(), owner=False)
+    owned_id = await world.server(_host())
 
-    stats = await server_monitor_task._monitor_servers(probe=probe)
+    async with AsyncSessionLocal() as session:
+        everyones = await server_monitor_task._load_targets(session)
+        mine = await server_monitor_task._load_targets(session, [world.user_id])
 
-    assert orphan not in probe.asked_hosts, "сервер без владельца всё-таки опросили"
+    assert owned_id in [t[0] for t in everyones]
+    assert orphan_id not in [t[0] for t in everyones], "сервер без владельца попал в опрос"
+    assert [t[0] for t in mine] == [owned_id], "фильтр по владельцу пропустил чужие строки"
+
+
+async def test_the_real_run_probes_in_parallel_too(world):
+    """Веер включён в самом прогоне, а не только в `_probe_all`.
+
+    Отдельно проверенный семафор и отдельно проверенная константа связку не
+    доказывают: `_probe_all(..., concurrency=1)` внутри `_monitor_servers`
+    прошёл бы оба этих теста. А это ровно тот последовательный опрос, от
+    которого спека защищается словами «лимит задачи держится только на
+    параллельности»: сотня молчащих серверов по 12 секунд — двадцать минут
+    вместо одной.
+
+    Пик замеряется по живому прогону: три сервера обязаны оказаться в воздухе
+    одновременно.
+    """
+    hosts = [_host() for _ in range(3)]
+    for host in hosts:
+        await world.server(host, last_check_ok=True)
+    inflight = 0
+    peak = 0
+
+    async def _slow():
+        nonlocal inflight, peak
+        inflight += 1
+        peak = max(peak, inflight)
+        try:
+            await asyncio.sleep(0.02)
+            return True, None
+        finally:
+            inflight -= 1
+
+    stats = await world.run(probe=_Probe({host: _slow for host in hosts}))
+
+    assert stats["checked"] == 3
+    assert peak == 3, f"опрос шёл по {peak} за раз — веера в прогоне нет"
+
+
+async def test_a_failing_notification_dispatch_cannot_strand_the_version(world, monkeypatch):
+    """Упавшая доставка уведомления не оставляет строку без новой версии.
+
+    Тот самый случай, ради которого `touch_entity_sync` стоит ДО
+    `apply_check_result`. На переходе `create_notification` коммитит поля
+    сервера, а сразу после коммита идёт `dispatch_notification` — чужой вебхук
+    и Telegram. Пусть он бросит: управление уйдёт в обработчик прогона, и
+    бамп, стоявший бы ПОСЛЕ, не случится уже никогда. В БД останется «упал»
+    со старой версией, то есть строка, навсегда выпавшая из
+    `/sync/changes?since=`: десктоп будет показывать живой сервер, пока
+    кто-нибудь не тронет его руками.
+
+    Перестановка двух строк местами в остальном незаметна — обычный ход дел
+    её прощает, потому что бамп после доедет следующим коммитом.
+    """
+    host = _host()
+    server_id = await world.server(host, last_check_ok=False, consecutive_failures=3)
+
+    async def _webhook_is_down(db, payload, user_id):
+        raise RuntimeError("вебхук пользователя не ответил")
+
+    monkeypatch.setattr(notification_service, "dispatch_notification", _webhook_is_down)
+
+    stats = await world.run(probe=_Probe({host: (True, None)}))
+
+    recovered = await world.reload(server_id)
+    assert recovered.last_check_ok is True, "поля не закоммичены — сценарий не воспроизвёлся"
+    assert recovered.sync_version > 0, "поля уехали в БД, а версия осталась старой"
+    assert stats["failed"] == 1
+
+
+async def test_a_server_deleted_between_the_phases_is_counted_as_not_checked(world):
+    """Сервер, удалённый во время опроса, не пропадает из статистики молча.
+
+    Между опросом и записью проходят минуты, и строку за это время могут
+    удалить. Записывать её результат некуда, но и потерять её из счёта нельзя:
+    иначе `checked + failed` перестанет сходиться с числом опрошенных, и по
+    журналу будет не понять, куда делись серверы.
+    """
+    doomed, survivor = _host(), _host()
+    doomed_id = await world.server(doomed, last_check_ok=True)
+    await world.server(survivor, last_check_ok=True)
+
+    async def _delete_the_row_mid_probe():
+        async with AsyncSessionLocal() as session:
+            await session.execute(sa_delete(Server).where(Server.id == doomed_id))
+            await session.commit()
+        return True, None
+
+    stats = await world.run(
+        probe=_Probe({doomed: _delete_the_row_mid_probe, survivor: (True, None)})
+    )
+
     assert stats["checked"] == 1
-    untouched = await world.reload(orphan_id)
-    assert untouched.last_check_at is None
-    assert untouched.consecutive_failures == 0
+    assert stats["failed"] == 1, "исчезнувший сервер потерялся между счётчиками"
+    assert await world.reload(doomed_id) is None
+    assert (await world.logs())[0].status == "partial"
 
 
 async def test_a_repeated_run_is_idempotent(world):
@@ -473,8 +595,8 @@ async def test_a_repeated_run_is_idempotent(world):
     host = _host()
     await world.server(host, last_check_ok=False, consecutive_failures=3)
 
-    first = await server_monitor_task._monitor_servers(probe=_Probe({host: (True, None)}))
-    second = await server_monitor_task._monitor_servers(probe=_Probe({host: (True, None)}))
+    first = await world.run(probe=_Probe({host: (True, None)}))
+    second = await world.run(probe=_Probe({host: (True, None)}))
 
     assert (first["up"], second["up"]) == (1, 0)
     assert len(await world.notifications()) == 1, "повторный прогон прислал второе уведомление"
@@ -486,10 +608,9 @@ async def test_a_repeated_run_is_idempotent(world):
 def test_a_clean_run_is_logged_as_success():
     """Прогон без сбоев: статус `success` и все три числа в тексте.
 
-    Строка журнала проверяется отдельным юнитом, а не в прогоне по БД, по
-    честной причине: тестовая БД общая, чужие серверы попадают в опрос и
-    всегда дают ненулевой `failed` (см. шапку файла), так что «чистого»
-    прогона там не собрать.
+    Юнит поверх прогона по БД: тот показывает, что строка пишется и статус
+    верен, а здесь дёшево фиксируется точный текст — числа в журнале и есть
+    всё, что человек увидит о прогоне.
     """
     log = server_monitor_task._task_log({"checked": 7, "down": 2, "up": 1, "failed": 0})
 
