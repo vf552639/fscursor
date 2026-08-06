@@ -18,6 +18,8 @@ SAFE_ACTIONS = frozenset(
         "server.update",
         "server.delete",
         "server.bulk_import",
+        # Приём снимка метрик с десктопа (`POST /servers/{id}/metrics`).
+        "server.metrics",
         "cf.account.create",
         "cf.account.update",
         "cf.account.delete",

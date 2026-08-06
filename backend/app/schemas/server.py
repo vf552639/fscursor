@@ -2,10 +2,16 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from app.core.validators import (
+    FASTPANEL_VERSION_MAX_LEN,
+    KERNEL_MAX_LEN,
+    OS_PRETTY_MAX_LEN,
+    PG_BIGINT_MAX,
+    PG_INT_MAX,
     PROVIDER_MAX_LEN,
+    is_valid_column_text,
     is_valid_fastpanel_url,
     is_valid_fastpanel_user,
     is_valid_provider,
@@ -174,6 +180,87 @@ class ServerUpdate(BaseModel):
     @classmethod
     def _validate_provider(cls, v: Optional[str]) -> Optional[str]:
         return _checked_provider(v)
+
+
+# Ширина колонки на каждую строковую метрику. Словарём, а не тремя валидаторами
+# по одному на поле: правило у них буквально одно, различается только число, и
+# три копии `_checked_*` отличались бы друг от друга исключительно константой.
+_TEXT_METRIC_MAX_LEN = {
+    "os_pretty": OS_PRETTY_MAX_LEN,
+    "kernel": KERNEL_MAX_LEN,
+    "fastpanel_version": FASTPANEL_VERSION_MAX_LEN,
+}
+
+
+class ServerMetricsIn(BaseModel):
+    """Снимок метрик сервера, снятый десктопом по SSH.
+
+    После переезда на zero-knowledge бэкенд не может залогиниться на сервер:
+    SSH-пароль лежит зашифрованным блобом, ключа от которого у сервера нет.
+    Метрики снимает десктоп (принцип №3 — «desktop выполняет, web смотрит»), а
+    эта схема — дверь, через которую готовые числа попадают в колонки.
+
+    Чего здесь нет и не должно быть:
+
+    * `metrics_collected_at` — время снимка ставит сервер. Присланное клиентом
+      означало бы, что «когда сняли» диктуют часы удалённой машины;
+    * `status` и `last_check_*` — их пишет только мониторинг
+      (`services/server_monitor.py`). Снятый снимок ничего не говорит о том,
+      считается ли сервер живым;
+    * секретов в любом виде — сюда едут показания, а не креды.
+
+    Всё, что не перечислено, — 422 `extra_forbidden`: см. `ServerCreate`, там
+    записана история правила (поле `ssh_password` молча выбрасывалось, и API
+    отвечал 200, ничего не сохранив).
+
+    Границы диапазонов — не вкус, а защита от промахнувшегося парсера на чужой
+    машине: `cpu_usage_pct` — доля от 0 до 100, всё прочее неотрицательно, а
+    сверху упирается в ширину колонки Postgres (`PG_INT_MAX`/`PG_BIGINT_MAX`),
+    иначе внятный 422 превращается в 500 из драйвера.
+
+    Все поля опциональны, и «не прислано» не равно «ноль»: парсер десктопа
+    отдаёт `null` там, где не справился, — «не смогли снять» не должно
+    выглядеть как «0%». Что при этом происходит с ранее сохранённым значением,
+    решает `server_service.apply_metrics` — там же и обоснование.
+
+    Содержимое строк не нормализуется (в отличие от `provider`, который
+    набирает человек): источник — машинный парсер, у него нет «Hetzner » с
+    хвостовым пробелом, а группировкой эти поля не служат. Проверяются ровно
+    два свойства, за которые платит система, — длина и управляющие символы.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    uptime_seconds: Optional[int] = Field(default=None, ge=0, le=PG_BIGINT_MAX)
+    cpu_usage_pct: Optional[int] = Field(default=None, ge=0, le=100)
+    cpu_count: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    ram_used_mb: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    ram_total_mb: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    disk_used_gb: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    disk_total_gb: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    net_in_kbps: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    net_out_kbps: Optional[int] = Field(default=None, ge=0, le=PG_INT_MAX)
+    os_pretty: Optional[str] = None
+    kernel: Optional[str] = None
+    fastpanel_version: Optional[str] = None
+
+    @field_validator("os_pretty", "kernel", "fastpanel_version")
+    @classmethod
+    def _validate_text_metric(cls, v: Optional[str], info: ValidationInfo) -> Optional[str]:
+        """Строка с чужой машины: не длиннее колонки и без управляющих символов.
+
+        Рассуждение целиком — в `_checked_provider` выше: значение длиннее
+        колонки возвращается из Postgres 500-м вместо 422, а `\\n` внутри
+        значения рвёт строку лога надвое, и вторая половина выглядит настоящей
+        записью. Источник здесь тот же, что у `fastpanel_url`, — разбор вывода
+        чужой машины, то есть строка, которую никто не набирал и не проверял.
+        """
+        if v is not None and not is_valid_column_text(v, _TEXT_METRIC_MAX_LEN[info.field_name]):
+            raise ValueError(
+                f"must be at most {_TEXT_METRIC_MAX_LEN[info.field_name]} characters "
+                f"and free of control characters"
+            )
+        return v
 
 
 class ServerResponse(ServerBase):

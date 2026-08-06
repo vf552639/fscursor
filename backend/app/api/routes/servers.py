@@ -10,6 +10,7 @@ from app.schemas.server import (
     ServerBulkImportResponse,
     ServerCreate,
     ServerListResponse,
+    ServerMetricsIn,
     ServerResponse,
     ServerUpdate,
 )
@@ -77,6 +78,44 @@ async def update_server(
         db,
         user_id=user.id,
         action="server.update",
+        target_type="server",
+        target_id=str(server_id),
+    )
+    await db.commit()
+    return ServerResponse.model_validate(server)
+
+
+@router.post("/{server_id}/metrics", response_model=ServerResponse)
+async def submit_server_metrics(
+    server_id: int,
+    data: ServerMetricsIn,
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> ServerResponse:
+    """Принять метрики, снятые десктопом по SSH.
+
+    Сервер тут только получатель: сам он на машину не ходит и после переезда на
+    zero-knowledge не может — SSH-пароль зашифрован клиентским ключом. Что
+    именно принимается и почему с такими границами — в docstring
+    `ServerMetricsIn`; как присланное ложится в колонки — в
+    `server_service.apply_metrics`.
+
+    Запись в аудит — по общему правилу репозитория, а не для этого роута
+    отдельно: каждый мутирующий маршрут оставляет след (у серверов —
+    `create`/`update`/`delete`/`bulk_import`, все четыре), и приём метрик,
+    молча меняющий строку пользователя, был бы единственным исключением.
+    Значений в metadata нет намеренно: `os_pretty`/`kernel` — свободные строки
+    с чужой машины, читать их надо через API, а не из аудит-лога, и гард
+    `test_mutation_audit.py` смотрит на ИМЕНА ключей, то есть такой ключ
+    пропустил бы.
+    """
+    server = await server_service.apply_metrics(db, server_id, data, user.id)
+    if not server:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="server.metrics",
         target_type="server",
         target_id=str(server_id),
     )

@@ -28,6 +28,22 @@ _WHITESPACE_RE = re.compile(r"\s")
 # `StringDataRightTruncation` из Postgres, то есть в 500.
 PROVIDER_MAX_LEN = 64
 
+# Ширины строковых колонок метрик (`servers.os_pretty/kernel/fastpanel_version`)
+# — здесь и по той же причине, что `PROVIDER_MAX_LEN` выше. Значения этих
+# колонок приезжают с чужой машины (`/etc/os-release`, `uname -r`, вывод
+# инсталлятора панели), то есть длину их никто, кроме схемы, не ограничивает.
+OS_PRETTY_MAX_LEN = 255
+KERNEL_MAX_LEN = 128
+FASTPANEL_VERSION_MAX_LEN = 64
+
+# Пределы целочисленных колонок Postgres: `Integer` — 32 бита, `BigInteger` —
+# 64. Тот же размен, что и у длины строк: без верхней границы в схеме число
+# из промахнувшегося парсера доезжает до драйвера и возвращается
+# `NumericValueOutOfRange`, то есть 500 «внутренняя ошибка» вместо 422 с именем
+# поля.
+PG_INT_MAX = 2**31 - 1
+PG_BIGINT_MAX = 2**63 - 1
+
 
 def is_valid_domain(value: str) -> bool:
     if not value:
@@ -118,6 +134,23 @@ def is_valid_fastpanel_user(value: str) -> bool:
     return not (_CONTROL_CHARS_RE.search(value) or _WHITESPACE_RE.search(value))
 
 
+def is_valid_column_text(value: str, max_len: int) -> bool:
+    """Влезает ли свободная строка в колонку и свободна ли она от управляющих.
+
+    Общий минимум для значений, которые набирает человек или присылает чужая
+    машина, а мы кладём в `String(n)` и показываем в UI: имя провайдера,
+    `os_pretty`, `kernel`, `fastpanel_version`. Проверяются ровно два свойства,
+    за которые платит не пользователь, а система, — см. `is_valid_provider`
+    ниже, где оба разобраны по отдельности.
+
+    Содержимого функция не знает и знать не может: фиксированного списка
+    провайдеров нет, а дистрибутивов и версий ядра — тем более.
+    """
+    if len(value) > max_len:
+        return False
+    return not _CONTROL_CHARS_RE.search(value)
+
+
 def is_valid_provider(value: str) -> bool:
     """Годится ли значение в имя хостинг-провайдера: не длиннее колонки, без управляющих.
 
@@ -140,7 +173,8 @@ def is_valid_provider(value: str) -> bool:
     Cloud» — обычные имена. Обрамляющие пробелы срезает схема (`_checked_provider`
     в `schemas/server.py`), а не эта функция: здесь только «да/нет», как у
     соседей.
+
+    Оба правила — общие с прочими свободными строками, и живут они в
+    `is_valid_column_text` выше; здесь остаётся только ширина своей колонки.
     """
-    if len(value) > PROVIDER_MAX_LEN:
-        return False
-    return not _CONTROL_CHARS_RE.search(value)
+    return is_valid_column_text(value, PROVIDER_MAX_LEN)
