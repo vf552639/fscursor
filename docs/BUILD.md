@@ -66,6 +66,33 @@ Note the flip side: if `CI` is already set to `true` in your environment, the ve
 build skips the AppleScript — you get a plain DMG window layout with no warning at all,
 because nothing failed.
 
+## Code signing (why the keychain keeps asking)
+
+Every operation on a secret reads the master key from the macOS keychain. The keychain
+identifies the asking program by its code signature — and an unsigned build only carries
+an ad-hoc signature, where the identity *is* the code hash. Every rebuild changes that
+hash, so macOS sees a brand-new program, the ACL entry does not match, and you get the
+password prompt again, on every single operation. "Always Allow" cannot help.
+
+The fix is a stable identity. Run this once, by hand:
+
+```
+./desktop/dev-signing.sh setup
+```
+
+It creates a self-signed `SDMP Dev Signing` certificate in your login keychain. It needs
+you to confirm a system dialog, which is why the build script does not run it for you.
+
+After that, `build-dmg.sh` finds the identity and passes it to Tauri
+(`APPLE_SIGNING_IDENTITY`), so every build is signed with the same certificate — the
+identity no longer depends on the build's contents. Launch the app once, click **Always
+Allow**, and later rebuilds stay silent. If you already have `APPLE_SIGNING_IDENTITY` set
+in your environment, the script leaves it alone. Without the certificate the build still
+succeeds (ad-hoc, as before) and just prints a hint.
+
+This is *not* Apple Developer ID signing or notarization — those are about Gatekeeper and
+downloaded `.dmg`s, and are still out of scope (see below).
+
 ## Artifacts
 
 ```

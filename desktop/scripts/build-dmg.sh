@@ -47,6 +47,15 @@ FRONTEND_DIR="$(cd "$DESKTOP_DIR/../frontend" 2>/dev/null && pwd)" \
 SRC_TAURI_DIR="$DESKTOP_DIR/src-tauri"
 TAURI_CONF="$SRC_TAURI_DIR/tauri.conf.json"
 
+# Имя личности для подписи — не третий независимый хардкод, а ссылка на
+# единственный источник: его заводит `desktop/dev-signing.sh:42` (CERT_NAME).
+# Разойдётся с ним — скрипт просто перестанет находить личность.
+# Идентификатор бандла тут не задаём и задавать нельзя: `com.sdmp.desktop` из
+# `tauri.conf.json:5` и `desktop/dev-signing.sh:46` обязан совпадать, потому что
+# входит в требование, которое связка ключей запоминает в ACL. Разъедутся —
+# подпись будет считаться другой программой, и вопрос про пароль вернётся.
+SIGNING_IDENTITY_NAME="SDMP Dev Signing"
+
 RUN_APP=0
 CHECK_ONLY=0
 
@@ -305,6 +314,43 @@ dmg_failure_signal() {
   fi
 }
 
+# Без подписи tauri оставляет .app с ad-hoc-подписью, а у неё роль личности
+# играет CDHash — хеш кода. Каждая пересборка = «другая программа» для связки
+# ключей: ACL не срабатывает, пароль спрашивают снова, и «Always Allow» не
+# помогает. Стабильную личность даёт самоподписанный сертификат из
+# `desktop/dev-signing.sh`.
+#
+# Отдаём имя личности САМОМУ tauri (APPLE_SIGNING_IDENTITY), а не подписываем
+# бандл после сборки: .dmg собирается из .app в том же прогоне, и подпись
+# «после» осталась бы снаружи образа.
+#
+# Личность ищем через переменную, а не `security … | grep -q`: под pipefail
+# такой пайп врёт (разбор — в desktop/dev-signing.sh:95-99).
+setup_signing_identity() {
+  # Заданную снаружи личность не трогаем: это осознанный выбор вызывающего
+  # (например, настоящий Developer ID), и молча его подменять нельзя.
+  if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    ok "Подпись: беру личность из окружения — APPLE_SIGNING_IDENTITY=«${APPLE_SIGNING_IDENTITY}»."
+    return 0
+  fi
+
+  local identities
+  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  if [[ "$identities" == *"$SIGNING_IDENTITY_NAME"* ]]; then
+    export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY_NAME"
+    ok "Подпись: личность «${SIGNING_IDENTITY_NAME}» найдена — ею и подпишем .app."
+    return 0
+  fi
+
+  # Отсутствие сертификата — не ошибка сборки: собираем как раньше, ad-hoc.
+  warn "Личности «${SIGNING_IDENTITY_NAME}» в связке нет — .app будет подписан ad-hoc."
+  warn "Следствие: после каждой пересборки macOS снова спросит пароль от связки"
+  warn "ключей на каждую операцию с секретом (у ad-hoc подписи личность — это хеш"
+  warn "кода, он меняется от сборки к сборке, и «Always Allow» не помогает)."
+  warn "Лечится один раз: ./desktop/dev-signing.sh setup — он требует подтверждения"
+  warn "в системном окне, поэтому запускается человеком, а не отсюда."
+}
+
 BUILD_LOG=""
 cleanup_build_log() {
   [ -n "$BUILD_LOG" ] && rm -f "$BUILD_LOG"
@@ -329,6 +375,7 @@ run_build() {
   BUILD_LOG="$(mktemp -t sdmp-build-dmg)" \
     || die "Не смог создать временный файл для лога сборки (mktemp упал)."
 
+  setup_signing_identity
   clean_stale_rw_images
 
   step "Собираю .dmg и .app (npm run tauri build -- --bundles app,dmg)…"
@@ -351,6 +398,14 @@ run_build() {
         warn "смотри лог: бывает нехватка места на диске или занятый том."
         ;;
       *)
+        # Личность есть, а приватный ключ codesign не отдали (типичное
+        # errSecInternalComponent) — сборка падает на подписи, и без этой
+        # подсказки причина выглядит как «упал tauri».
+        if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] \
+           && grep -qE 'codesign|errSecInternalComponent' "$BUILD_LOG"; then
+          warn "Похоже, упало на подписи личностью «${APPLE_SIGNING_IDENTITY}»."
+          warn "Проверь личность и доступ к её приватному ключу: ./desktop/dev-signing.sh status"
+        fi
         die_with_log "Сборка tauri упала."
         ;;
     esac
