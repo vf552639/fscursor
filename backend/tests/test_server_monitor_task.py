@@ -18,10 +18,13 @@
 Заглушка `probe` вдобавок **бросает** на любом хосте, которого тест не
 заводил. Это второй рубеж: если фильтр однажды перестанет фильтровать, чужая
 строка всё равно не будет ни прочитана, ни изменена — задача сбойный опрос
-пропускает.
+пропускает. Оба рубежа снимаются разом только одним способом — вызовом задачи
+мимо `_World.run`, — и на этот случай стоит autouse-фикстура
+`unscoped_run_is_a_test_failure`: она делает такой вызов падением теста.
 
-Раз чужого в выборке нет, счётчики (`checked`/`down`/`up`/`failed`) сверяются
-точными равенствами и не зависят от того, что ещё лежит в базе.
+Раз чужого в выборке нет, счётчики (`checked`/`down`/`up`/`undelivered`/
+`failed`) сверяются точными равенствами и не зависят от того, что ещё лежит в
+базе.
 """
 
 import asyncio
@@ -31,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from celery.schedules import crontab
 from sqlalchemy import delete as sa_delete
+from sqlalchemy import update as sa_update
 from sqlalchemy import func, select, text
 
 from app.auth.models import SyncState, User
@@ -125,7 +129,13 @@ class _World:
         один забытый на call-site фильтр — и прогон пишет «упал» живым
         машинам и рассылает их владельцам уведомления. Такое уже случилось,
         и лечится оно тем, что забыть фильтр негде.
+
+        Заглушка проверяется типом, а не на слово: сырая функция вида «просто
+        верни True» отчиталась бы «жив» о любом сервере, до которого прогон
+        дотянулся, — то есть сняла бы второй рубеж (см. шапку файла) заодно с
+        первым.
         """
+        assert isinstance(probe, _Probe), "в прогон уехала заглушка мимо _Probe"
         return await server_monitor_task._monitor_servers(
             probe=probe, user_ids=[self.user_id]
         )
@@ -166,6 +176,30 @@ class _World:
         async with AsyncSessionLocal() as session:
             state = await session.get(SyncState, self.user_id)
             return state.current_version if state else 0
+
+
+@pytest.fixture(autouse=True)
+def unscoped_run_is_a_test_failure(monkeypatch):
+    """Запретить прогон без сужения по владельцу — на уровне кода, не уговоров.
+
+    Оба рубежа изоляции (фильтр по `user_id` и заглушка `_Probe`) независимы
+    относительно отказа «фильтр перестал фильтровать», но не относительно
+    отказа «кто-то позвал задачу мимо `_World.run`»: такой вызов снимает сразу
+    оба. Здесь этот вызов становится падением теста, а не записью в живую БД.
+
+    Фикстура отдаёт настоящую `_load_targets` — она нужна тесту на саму
+    выборку, единственному, кто зовёт её без сужения (и только на чтение).
+    """
+    real_load_targets = server_monitor_task._load_targets
+
+    async def _guarded(session, user_ids=None):
+        assert user_ids is not None, (
+            "прогон без сужения по владельцу дотянулся бы до живых серверов общей БД"
+        )
+        return await real_load_targets(session, user_ids)
+
+    monkeypatch.setattr(server_monitor_task, "_load_targets", _guarded)
+    return real_load_targets
 
 
 @pytest.fixture
@@ -302,14 +336,25 @@ async def test_run_applies_every_result_and_logs_the_statistics(world):
     второй промах подряд и падает, один отвечает после подтверждённого падения
     и поднимается. Статистика в `TaskLog` — единственное, что человек увидит о
     прогоне, поэтому сверяется по числам, а не по факту наличия строки.
+
+    Падений намеренно два, а восстановление одно: при симметричных числах
+    перепутанные местами счётчики «упал»/«поднялся» дали бы ту же статистику,
+    и подмена вердикта на противоположный прошла бы незамеченной.
     """
-    alive, falling, recovering = _host(), _host(), _host()
+    alive, falling, also_falling, recovering = _host(), _host(), _host(), _host()
+    six_hours_ago = datetime.now(timezone.utc) - timedelta(hours=6)
     alive_id = await world.server(alive, last_check_ok=True, consecutive_failures=0)
     falling_id = await world.server(
         falling,
         last_check_ok=True,
         consecutive_failures=1,
-        last_check_at=datetime.now(timezone.utc) - timedelta(hours=6),
+        last_check_at=six_hours_ago,
+    )
+    also_falling_id = await world.server(
+        also_falling,
+        last_check_ok=True,
+        consecutive_failures=1,
+        last_check_at=six_hours_ago,
     )
     recovering_id = await world.server(
         recovering, last_check_ok=False, consecutive_failures=4, last_check_error="timeout after 5s"
@@ -318,15 +363,16 @@ async def test_run_applies_every_result_and_logs_the_statistics(world):
         {
             alive: (True, None),
             falling: (False, "connection refused"),
+            also_falling: (False, "timeout after 5s"),
             recovering: (True, None),
         }
     )
 
     stats = await world.run(probe=probe)
 
-    assert stats["checked"] == 3
-    assert stats["down"] == 1
-    assert stats["up"] == 1
+    assert stats["checked"] == 4
+    assert stats["down"] == 2, "падения посчитаны не как падения"
+    assert stats["up"] == 1, "восстановления посчитаны не как восстановления"
     assert stats["failed"] == 0
 
     still_alive = await world.reload(alive_id)
@@ -344,16 +390,19 @@ async def test_run_applies_every_result_and_logs_the_statistics(world):
     assert back_up.consecutive_failures == 0
     assert back_up.last_check_error is None
 
+    also_fallen = await world.reload(also_falling_id)
+    assert also_fallen.last_check_ok is False
+    assert also_fallen.consecutive_failures == 2
+
     types = sorted(n.type for n in await world.notifications())
-    assert types == ["server_down", "server_up"], types
+    assert types == ["server_down", "server_down", "server_up"], types
 
     logs = await world.logs()
     assert len(logs) == 1, f"прогон написал {len(logs)} записей вместо одной"
     log = logs[0]
     assert log.entity_type == "system"
     assert log.status == "success"
-    assert "checked 3" in log.log_text
-    assert "1 down" in log.log_text and "1 up" in log.log_text
+    assert log.log_text == "checked 4 servers: 2 down, 1 up"
 
 
 async def test_check_results_reach_the_desktop_via_sync_version(world):
@@ -382,19 +431,32 @@ async def test_check_results_reach_the_desktop_via_sync_version(world):
     assert await world.sync_version() == max(versions)
 
 
-async def test_a_broken_probe_does_not_stop_the_rest_of_the_run(world):
+async def test_a_broken_probe_does_not_stop_the_rest_of_the_run(world, monkeypatch):
     """Сбой опроса одного сервера не мешает записать результат остальных.
 
     Главный сценарий отказа этой фичи: она нужна как раз тогда, когда что-то
     сломалось, и обвал всего прогона из-за одной строки означал бы тишину
     вместо оповещения по всем остальным машинам.
+
+    Заодно проверяется, что от сбоя остаётся след. `probe` по контракту не
+    бросает — значит, исключение отсюда всегда баг, и схлопнуть его в одно
+    число в журнале («200 not checked») значит остаться без единой зацепки:
+    трейс нужен в `logs/errors.log`, класс ошибки — в самом журнале.
     """
+    logged: list[BaseException] = []
+    monkeypatch.setattr(
+        server_monitor_task.logger,
+        "error",
+        lambda *a, **kw: logged.append(kw.get("exc_info")),
+    )
     broken, healthy = _host(), _host()
     broken_id = await world.server(broken, last_check_ok=True)
     healthy_id = await world.server(healthy, last_check_ok=True)
     probe = _Probe({broken: RuntimeError("boom"), healthy: (True, None)})
 
     stats = await world.run(probe=probe)
+
+    assert [type(e) for e in logged] == [RuntimeError], "упавший опрос не оставил трейса"
 
     assert stats["checked"] == 1
     assert stats["failed"] == 1
@@ -407,6 +469,7 @@ async def test_a_broken_probe_does_not_stop_the_rest_of_the_run(world):
 
     log = (await world.logs())[0]
     assert log.status == "partial", "прогон со сбоями отчитался как полностью успешный"
+    assert "RuntimeError: boom" in log.log_text, "в журнале нет ни намёка на причину"
 
 
 async def test_a_write_failure_on_one_server_keeps_the_rest_of_the_run(world, monkeypatch):
@@ -422,24 +485,42 @@ async def test_a_write_failure_on_one_server_keeps_the_rest_of_the_run(world, mo
     Сбой изображается настоящей ошибкой БД (деление на ноль внутри
     транзакции), а не питоновским исключением: питоновское транзакцию не
     ломает, и вторую мину не показало бы.
+
+    «До» и «после» здесь — не фигура речи: смысл теста держится на том, что
+    серверы обрабатываются в порядке id (`sorted()` в `_apply_results`), а
+    id идут по порядку вставки. Порядок поэтому и записывается, и сверяется —
+    иначе, потеряв сортировку, тест остался бы зелёным, доказывая меньше, чем
+    обещает его имя.
     """
     first, poisoned, last = _host(), _host(), _host()
     first_id = await world.server(first, last_check_ok=True)
     poisoned_id = await world.server(poisoned, last_check_ok=True)
     last_id = await world.server(last, last_check_ok=True)
+    assert first_id < poisoned_id < last_id, "serial id перестали расти по порядку вставки"
     real_touch = server_monitor_task.touch_entity_sync
+    handled: list[int] = []
 
     async def _touch(db, user_id, entity):
+        handled.append(entity.id)
         if entity.id == poisoned_id:
             await db.execute(text("SELECT 1 / 0"))
         return await real_touch(db, user_id, entity)
 
     monkeypatch.setattr(server_monitor_task, "touch_entity_sync", _touch)
+    traced: list[tuple] = []
+    monkeypatch.setattr(
+        server_monitor_task.logger, "exception", lambda *a, **kw: traced.append(a)
+    )
 
     stats = await world.run(
         probe=_Probe({first: (True, None), poisoned: (True, None), last: (True, None)})
     )
 
+    assert traced, "отказ записи не оставил трейса в логе"
+
+    assert handled == [first_id, poisoned_id, last_id], (
+        "порядок обработки не по id — «сосед до» и «сосед после» больше не гарантированы"
+    )
     assert stats["checked"] == 2, "сбой на одном сервере унёс соседей"
     assert stats["failed"] == 1
     for server_id in (first_id, last_id):
@@ -466,7 +547,9 @@ async def test_a_run_without_servers_logs_checked_zero(world):
     assert "checked 0" in logs[0].log_text
 
 
-async def test_the_selection_takes_owned_servers_and_only_the_asked_owners(world):
+async def test_the_selection_takes_owned_servers_and_only_the_asked_owners(
+    world, unscoped_run_is_a_test_failure
+):
     """Что вообще попадает в опрос: с владельцем — да, без владельца — нет.
 
     Тест читающий и потому единственный, который зовёт продакшн-выборку без
@@ -480,12 +563,13 @@ async def test_the_selection_takes_owned_servers_and_only_the_asked_owners(world
     Вторым утверждением проверяется сам фильтр — тот, на котором держится
     безопасность всех остальных тестов файла.
     """
+    load_targets = unscoped_run_is_a_test_failure  # настоящая, без предохранителя
     orphan_id = await world.server(_host(), owner=False)
     owned_id = await world.server(_host())
 
     async with AsyncSessionLocal() as session:
-        everyones = await server_monitor_task._load_targets(session)
-        mine = await server_monitor_task._load_targets(session, [world.user_id])
+        everyones = await load_targets(session)
+        mine = await load_targets(session, [world.user_id])
 
     assert owned_id in [t[0] for t in everyones]
     assert orphan_id not in [t[0] for t in everyones], "сервер без владельца попал в опрос"
@@ -555,7 +639,58 @@ async def test_a_failing_notification_dispatch_cannot_strand_the_version(world, 
     recovered = await world.reload(server_id)
     assert recovered.last_check_ok is True, "поля не закоммичены — сценарий не воспроизвёлся"
     assert recovered.sync_version > 0, "поля уехали в БД, а версия осталась старой"
+
+    # Проверка записана — значит, она проверена, что бы ни случилось с
+    # доставкой письма. Записать её в «не проверено» значит соврать в журнале
+    # про ту самую строку, ради которой мониторинг и заведён, — и соврать не
+    # в случайный прогон, а с повышенной вероятностью в инцидентный: вебхук
+    # пользователя нередко живёт на той же инфраструктуре, что и упавший
+    # сервер, и падает вместе с ним.
+    assert stats["checked"] == 1, "записанная проверка объявлена несостоявшейся"
+    assert stats["failed"] == 0
+    assert stats["undelivered"] == 1, "сорванная доставка не отражена в статистике"
+
+    log = (await world.logs())[0]
+    assert "checked 1" in log.log_text
+    assert "1 undelivered" in log.log_text
+    assert "not checked" not in log.log_text
+    assert log.status == "partial"
+    assert "RuntimeError" in log.log_text, "класс ошибки не доехал до журнала"
+
+
+async def test_a_result_for_a_changed_address_is_thrown_away(world):
+    """Адрес переписали, пока шёл опрос, — устаревший вердикт не применяется.
+
+    Сценарий целиком: в строке опечатка в IP, один промах уже накоплен.
+    Пользователь чинит адрес, пока идёт фаза опроса. Прежний `False` добирает
+    второй промах подряд — и живая машина объявляется упавшей, причём в письме
+    стоит НОВЫЙ адрес, которого никто не опрашивал: неверен и вердикт, и
+    адрес. Окно узкое, но это ровно тот исход, который спека называет самым
+    дорогим.
+    """
+    typo_host, fixed_host = _host(), _host()
+    server_id = await world.server(
+        typo_host, last_check_ok=True, consecutive_failures=1
+    )
+
+    async def _fix_the_address_mid_probe():
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                sa_update(Server).where(Server.id == server_id).values(ip_address=fixed_host)
+            )
+            await session.commit()
+        return False, "nodename nor servname provided"
+
+    stats = await world.run(probe=_Probe({typo_host: _fix_the_address_mid_probe}))
+
+    untouched = await world.reload(server_id)
+    assert untouched.ip_address == fixed_host
+    assert untouched.last_check_ok is True, "живой сервер уронен вердиктом о старом адресе"
+    assert untouched.consecutive_failures == 1, "протухший промах всё-таки засчитан"
+    assert untouched.last_check_at is None
+    assert stats["checked"] == 0
     assert stats["failed"] == 1
+    assert await world.notifications() == []
 
 
 async def test_a_server_deleted_between_the_phases_is_counted_as_not_checked(world):
@@ -602,6 +737,63 @@ async def test_a_repeated_run_is_idempotent(world):
     assert len(await world.notifications()) == 1, "повторный прогон прислал второе уведомление"
 
 
+async def test_the_write_phase_goes_in_id_order_whatever_the_probe_order(world, monkeypatch):
+    """Запись идёт по возрастанию id, а не в том порядке, в каком пришли исходы.
+
+    Порядок обработки — не украшение: на нём держится воспроизводимость
+    прогона (журнал и уведомления идут одинаково от запуска к запуску) и смысл
+    теста про «соседа до и соседа после». Проверять его прогоном целиком
+    бесполезно: порядок строк из `SELECT` без `ORDER BY` не определён, и на
+    практике Postgres отдаёт их по id — тест зеленел бы и без сортировки,
+    доказывая ровно ничего.
+
+    Поэтому исходы подаются в `_apply_results` напрямую и в заведомо обратном
+    порядке.
+    """
+    hosts = [_host() for _ in range(3)]
+    ids = [await world.server(host, last_check_ok=True) for host in hosts]
+    targets = [(server_id, host, 22) for server_id, host in zip(ids, hosts)]
+    results = {server_id: (True, None) for server_id in reversed(ids)}
+    handled: list[int] = []
+    real_touch = server_monitor_task.touch_entity_sync
+
+    async def _touch(db, user_id, entity):
+        handled.append(entity.id)
+        return await real_touch(db, user_id, entity)
+
+    monkeypatch.setattr(server_monitor_task, "touch_entity_sync", _touch)
+
+    async with AsyncSessionLocal() as session:
+        stats, _errors = await server_monitor_task._apply_results(session, results, targets)
+
+    assert stats["checked"] == 3
+    assert handled == sorted(ids), f"порядок записи задан не id, а порядком исходов: {handled}"
+
+
+async def test_a_failing_rollback_does_not_escape_the_handler(monkeypatch):
+    """Откат, который сам бросил, не уносит прогон.
+
+    Если сбой был обрывом соединения, то бросит именно `rollback()`. Голый
+    вызов в обработчике отдал бы это исключение наружу мимо всех перехватов —
+    и унёс бы и остаток прогона, и запись `TaskLog`, то есть ровно тот
+    инвариант, ради которого обработчик и написан. Случай нарочно узкий и
+    поэтому проверяется юнитом: поднимать ради него мёртвое соединение к БД
+    дороже, чем он того стоит.
+    """
+    traced: list[tuple] = []
+    monkeypatch.setattr(
+        server_monitor_task.logger, "exception", lambda *a, **kw: traced.append(a)
+    )
+
+    class _DeadSession:
+        async def rollback(self):
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+    await server_monitor_task._safe_rollback(_DeadSession())  # не должно бросить
+
+    assert traced, "провалившийся откат прошёл бесследно"
+
+
 # --- строка журнала ----------------------------------------------------------
 
 
@@ -612,7 +804,7 @@ def test_a_clean_run_is_logged_as_success():
     верен, а здесь дёшево фиксируется точный текст — числа в журнале и есть
     всё, что человек увидит о прогоне.
     """
-    log = server_monitor_task._task_log({"checked": 7, "down": 2, "up": 1, "failed": 0})
+    log = server_monitor_task._build_task_log({"checked": 7, "down": 2, "up": 1, "undelivered": 0, "failed": 0})
 
     assert log.status == "success"
     assert log.task_type == "server_monitor"
@@ -627,7 +819,7 @@ def test_a_run_with_failures_is_not_logged_as_success():
     `probe` по контракту не бросает, поэтому ненулевой `failed` означает баг,
     а не фон. Спрятать его под `success` — значит не узнать о нём никогда.
     """
-    log = server_monitor_task._task_log({"checked": 5, "down": 0, "up": 0, "failed": 2})
+    log = server_monitor_task._build_task_log({"checked": 5, "down": 0, "up": 0, "undelivered": 0, "failed": 2})
 
     assert log.status == "partial"
     assert "2 not checked" in log.log_text

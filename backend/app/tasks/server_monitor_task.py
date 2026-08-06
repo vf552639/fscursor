@@ -42,7 +42,9 @@
 """
 
 import asyncio
+import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional, Sequence, Tuple, Union
 
 from sqlalchemy import select
@@ -56,8 +58,14 @@ from app.models.task_log import TaskLog
 from app.services import server_monitor
 from app.sync.service import touch_entity_sync
 
+logger = logging.getLogger(__name__)
+
 # Сколько серверов опрашиваем одновременно.
 PROBE_CONCURRENCY = 20
+
+# Сколько символов чужой ошибки уносим в `log_text`. Трейс лежит в
+# `logs/errors.log`, здесь нужен только опознавательный знак.
+MAX_LOGGED_ERROR_LEN = 120
 
 # `(id сервера, хост, порт)` — всё, что нужно опросу. ORM-объекты в фазу
 # опроса не едут: сессия к этому моменту уже закрыта.
@@ -116,22 +124,70 @@ async def _probe_all(
         async with semaphore:
             return await probe(host, port)
 
-    results = await asyncio.gather(
+    outcomes = await asyncio.gather(
         *(_one(host, port) for _server_id, host, port in targets),
         return_exceptions=True,
     )
-    return {target[0]: result for target, result in zip(targets, results)}
+    server_ids = [server_id for server_id, _host, _port in targets]
+    return dict(zip(server_ids, outcomes))
+
+
+async def _safe_rollback(session: AsyncSession) -> None:
+    """Откатить, не позволив самому откату унести прогон.
+
+    `rollback()` ходит в БД и вполне может бросить — если сбой был обрывом
+    соединения, то бросит именно он. Голый `rollback()` в обработчике отдал бы
+    это исключение наружу мимо всех перехватов и унёс бы и остаток прогона, и
+    запись `TaskLog`, то есть ровно тот инвариант, ради которого обработчик и
+    написан.
+    """
+    try:
+        await session.rollback()
+    except Exception:
+        logger.exception("server_monitor: откат транзакции не удался")
+
+
+async def _check_landed(
+    session: AsyncSession, server_id: int, attempted_at: datetime
+) -> bool:
+    """Доехала ли проверка до БД, несмотря на исключение.
+
+    Вопрос не праздный: на переходе `create_notification` коммитит поля
+    сервера и уведомление и только ПОСЛЕ этого зовёт доставку. Упавшая
+    доставка выглядит для нас как сбой записи, хотя проверка записана —
+    и записать её в «не проверено» значило бы соврать в журнале про ту самую
+    строку, ради которой всё и затевалось.
+
+    Признак — свежесть `last_check_at`: `apply_check_result` ставит туда
+    момент проверки, и он новее, чем начало попытки.
+    """
+    try:
+        landed_at = (
+            await session.execute(
+                select(Server.last_check_at).where(Server.id == server_id)
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.exception("server_monitor: не удалось проверить, записан ли сервер %s", server_id)
+        return False
+    return landed_at is not None and landed_at >= attempted_at
 
 
 async def _apply_results(
     session: AsyncSession,
     results: dict[int, Union[ProbeResult, BaseException]],
-) -> dict[str, int]:
+    targets: Sequence[Target],
+) -> Tuple[dict[str, int], list[str]]:
     """Записать исходы опроса — последовательно, по одному коммиту на сервер.
 
     Строка перечитывается заново: между опросом и записью прошли минуты, за
-    которые сервер могли удалить или лишить владельца. Записать такому
-    результат некуда и некому — он уходит в `failed`.
+    которые сервер могли удалить, лишить владельца или переписать ему адрес.
+
+    Смена адреса особенно коварна: в строке была опечатка в IP и один промах,
+    пользователь чинит адрес прямо во время опроса — и устаревший `False`
+    добирает второй промах подряд, объявляет живую машину упавшей, а в письме
+    стоит НОВЫЙ адрес, которого никто не опрашивал. Поэтому результат сверяется
+    с адресом перечитанной строки и при расхождении считается протухшим.
 
     `touch_entity_sync` зовётся ДО `apply_check_result`, и причина узкая.
     В обычном ходе дел порядок не важен: бамп после тоже уехал бы в БД, просто
@@ -149,72 +205,145 @@ async def _apply_results(
     всегда двигает `last_check_at`, то есть применённый результат — это всегда
     изменение.
     """
-    stats = {"checked": 0, "down": 0, "up": 0, "failed": 0}
-    applicable = {
-        server_id: result
-        for server_id, result in results.items()
-        if not isinstance(result, BaseException)
+    stats = {"checked": 0, "down": 0, "up": 0, "undelivered": 0, "failed": 0}
+    errors: list[str] = []
+    probed_address = {
+        server_id: (server_monitor.clean_host(host), port)
+        for server_id, host, port in targets
     }
-    stats["failed"] = len(results) - len(applicable)
 
+    applicable: dict[int, ProbeResult] = {}
+    for server_id, result in results.items():
+        if isinstance(result, BaseException):
+            # `probe` по контракту не бросает, так что сюда попадает баг, а не
+            # штатный отказ сети. Одним числом в журнале такое не опознать —
+            # нужен трейс.
+            logger.error(
+                "server_monitor: опрос сервера %s упал", server_id, exc_info=result
+            )
+            errors.append(_error_label(result))
+            stats["failed"] += 1
+        else:
+            applicable[server_id] = result
+
+    # Порядок обработки задан явно и намеренно: он делает прогон
+    # воспроизводимым (журнал и уведомления идут в одном и том же порядке от
+    # запуска к запуску), а тест на изоляцию сбоев опирается на то, что
+    # соседи «до» и «после» — это соседи по id.
+    #
     # Сервер берётся по одному, а не пачкой одним `select`, и это следствие
     # обработчика ниже: `rollback()` помечает протухшими ВСЕ объекты сессии, и
     # заранее вычитанная пачка после первого же сбоя посыпалась бы
-    # `MissingGreenlet` на первом же обращении к полю. `get` попутно
-    # перечитывает строку прямо перед записью — между фазами прошли минуты.
+    # `MissingGreenlet` на первом же обращении к полю.
     for server_id in sorted(applicable):
         ok, error = applicable[server_id]
+        attempted_at = datetime.now(timezone.utc)
         try:
             server = await session.get(Server, server_id)
             if server is None or server.user_id is None:
                 # Строку удалили или лишили владельца, пока шёл опрос:
                 # записывать результат некуда и некому. Считаем в `failed` —
-                # проверка не записана, и молча выпасть из статистики она не
-                # должна: тогда `checked + failed` перестало бы сходиться с
-                # числом опрошенных, и по журналу нельзя было бы понять, куда
-                # делись серверы.
+                # молча выпасть из статистики она не должна, иначе
+                # `checked + failed` перестанет сходиться с числом опрошенных
+                # и по журналу будет не понять, куда делись серверы.
                 stats["failed"] += 1
                 continue
+            current_address = (server_monitor.clean_host(server.ip_address), server.ssh_port)
+            if current_address != probed_address[server_id]:
+                # Адрес переписали, пока шёл опрос: результат относится к
+                # прежнему адресу и о нынешнем не говорит ничего.
+                stats["failed"] += 1
+                continue
+
             await touch_entity_sync(session, server.user_id, server)
             transition = await server_monitor.apply_check_result(session, server, ok, error)
             await session.commit()
-        except Exception:
-            # Сбой записи по одному серверу (отказ БД, не дождавшаяся
-            # блокировка) не должен унести остальных. Откат обязателен:
-            # без него Postgres отвергнет в этой транзакции всё подряд
-            # («current transaction is aborted»), и один сбой превратится в
-            # отказ мониторинга для всех оставшихся серверов.
-            await session.rollback()
-            stats["failed"] += 1
-            continue
-        stats["checked"] += 1
-        if transition is not None:
-            stats[transition] += 1
-    return stats
+
+            stats["checked"] += 1
+            # Переходы разложены явно, а не через `stats[transition]`: тот
+            # молча связывал бы ключи статистики с `Literal`-значениями из
+            # `server_monitor`, и переименование перехода дало бы `KeyError`
+            # вместо промаха в одной строке.
+            if transition == "down":
+                stats["down"] += 1
+            elif transition == "up":
+                stats["up"] += 1
+        except Exception as exc:
+            # Сбой по одному серверу не должен унести остальных.
+            logger.exception("server_monitor: сервер %s не обработан", server_id)
+            errors.append(_error_label(exc))
+            # Откат обязателен: без него Postgres отвергнет в этой транзакции
+            # всё подряд («current transaction is aborted»), и один сбой
+            # превратится в отказ мониторинга для всех оставшихся серверов.
+            await _safe_rollback(session)
+            if await _check_landed(session, server_id, attempted_at):
+                # Проверка записана, сорвалось то, что после неё (почти всегда
+                # — доставка уведомления). Считать такую строку «не
+                # проверенной» нельзя: в БД она проверена.
+                stats["checked"] += 1
+                stats["undelivered"] += 1
+            else:
+                stats["failed"] += 1
+
+    return stats, errors
 
 
-def _task_log(stats: dict[str, int]) -> TaskLog:
+def _error_label(exc: BaseException) -> str:
+    """Опознавательный знак ошибки для `log_text`; трейс — в `logs/errors.log`."""
+    return f"{type(exc).__name__}: {exc}"[:MAX_LOGGED_ERROR_LEN]
+
+
+def _build_task_log(stats: dict[str, int], errors: Sequence[str] = ()) -> TaskLog:
     """Итог прогона одной строкой журнала.
 
     Это всё, что человек увидит о прогоне, поэтому в тексте числа, а не факт
-    запуска. `failed` — «результат проверки не записан»: сюда попадают и
-    упавший опрос, и отказ БД на записи, и сервер, удалённый между фазами.
-    Упоминается только когда он есть: в норме он нулевой.
+    запуска. Три счётчика значат разное и потому не сливаются в один:
+
+    * `checked` — результат проверки записан в БД;
+    * `undelivered` — записан, но строку не удалось довести до конца (почти
+      всегда упала доставка уведомления, уже после коммита проверки). Такие
+      входят и в `checked`, но в разбивку по переходам не попадают: до
+      возврата перехода дело не дошло, а сам переход виден в созданном
+      уведомлении;
+    * `failed` — результата в БД нет вовсе: упал опрос, отказала запись, или
+      строка исчезла либо сменила адрес между фазами.
+
+    Класс первой ошибки уносится в текст: прогон, написавший «200 not checked»
+    без единого слова о причине, ничем не поможет — а трейсы к тому моменту
+    лежат в `logs/errors.log` вперемешку со всем остальным.
     """
-    log_text = (
-        f"checked {stats['checked']} servers: "
-        f"{stats['down']} down, {stats['up']} up"
-    )
+    log_text = f"checked {stats['checked']} servers: {stats['down']} down, {stats['up']} up"
+    if stats["undelivered"]:
+        log_text += f", {stats['undelivered']} undelivered"
     if stats["failed"]:
         log_text += f", {stats['failed']} not checked"
+    if errors:
+        log_text += f" (first error: {errors[0]})"
+    degraded = stats["failed"] or stats["undelivered"]
     return TaskLog(
         entity_type="system",
         entity_id=None,
         task_type="server_monitor",
-        status=TaskLogStatus.SUCCESS if not stats["failed"] else TaskLogStatus.PARTIAL,
+        status=TaskLogStatus.PARTIAL if degraded else TaskLogStatus.SUCCESS,
         log_text=log_text,
         user_id=None,
     )
+
+
+async def _write_task_log(stats: dict[str, int], errors: Sequence[str]) -> None:
+    """Записать итог прогона — своей сессией, отдельно от фазы записи.
+
+    Сессия та же означала бы, что журнал теряется ровно тогда, когда он нужнее
+    всего: сессию мог убить обрыв соединения на середине фазы записи, и тогда
+    прогон, не сумевший проверить ни одного сервера, не оставил бы о себе и
+    следа.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(_build_task_log(stats, errors))
+            await session.commit()
+    except Exception:
+        logger.exception("server_monitor: итог прогона не записан в журнал")
 
 
 async def _monitor_servers(
@@ -236,9 +365,9 @@ async def _monitor_servers(
     results = await _probe_all(targets, probe=probe, concurrency=PROBE_CONCURRENCY)
 
     async with AsyncSessionLocal() as session:
-        stats = await _apply_results(session, results)
-        session.add(_task_log(stats))
-        await session.commit()
+        stats, errors = await _apply_results(session, results, targets)
+
+    await _write_task_log(stats, errors)
     return stats
 
 
