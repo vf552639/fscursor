@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -198,6 +199,35 @@ def _input_is_unsafe_to_echo(err: Mapping[str, Any]) -> bool:
     )
 
 
+def _without_unrenderable_input(err: Mapping[str, Any]) -> dict[str, Any]:
+    """Убрать `input`, который невозможно отдать в теле ответа вообще.
+
+    Отдельно от `_input_is_unsafe_to_echo` намеренно: тот про «нельзя
+    показывать» (секрет), этот — про «физически не отдаётся». Свести их в одну
+    функцию значило бы сделать её название враньём для половины случаев.
+
+    Случай ровно один и он не теоретический. Одиночный суррогат — законный
+    JSON (`"A\\ud800B"` — обычный `\\uXXXX`-эскейп), декодер Python его
+    пропускает, и он доезжает до `input` ошибки валидации. А `JSONResponse`
+    рендерит тело как `json.dumps(..., ensure_ascii=False).encode("utf-8")` —
+    и падает `UnicodeEncodeError: surrogates not allowed`. Уже внутри
+    обработчика ошибок, то есть 500 вместо только что собранного 422.
+
+    Без этого проверка кодируемости в `is_valid_column_text` закрывала бы
+    только половину пути: запись в БД не состоялась бы, а клиент всё равно
+    получил бы 500 — просто из другого места.
+
+    Ошибается в сторону лишнего срабатывания: `input`, который не сериализуется
+    по любой причине, выбрасывается. Цена — пропавшее из ответа значение у
+    экзотического типа; альтернатива — 500 на ровном месте.
+    """
+    try:
+        json.dumps(err.get("input"), ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, TypeError, ValueError):
+        return {k: v for k, v in err.items() if k != "input"}
+    return dict(err)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_without_secret_input(
     _request: Request, exc: RequestValidationError
@@ -221,7 +251,9 @@ async def validation_error_without_secret_input(
     именно считается небезопасным — в `_input_is_unsafe_to_echo`.
     """
     errors = [
-        {k: v for k, v in err.items() if k != "input"} if _input_is_unsafe_to_echo(err) else err
+        _without_unrenderable_input(
+            {k: v for k, v in err.items() if k != "input"} if _input_is_unsafe_to_echo(err) else err
+        )
         for err in exc.errors()
     ]
     return JSONResponse(

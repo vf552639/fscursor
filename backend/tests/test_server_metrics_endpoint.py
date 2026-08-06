@@ -35,6 +35,8 @@ from app.core.validators import (
     FASTPANEL_VERSION_MAX_LEN,
     KERNEL_MAX_LEN,
     OS_PRETTY_MAX_LEN,
+    PG_BIGINT_MAX,
+    PG_INT_MAX,
 )
 from app.main import app
 from app.models.server import Server
@@ -289,8 +291,8 @@ async def test_unknown_field_in_the_body_is_a_refusal_not_silence(extra_field: s
         # Верхняя граница — ширина колонки, а не вкус: `Integer` в Postgres
         # 32-битный, и 2**31 вернулся бы `NumericValueOutOfRange`, то есть 500
         # «внутренняя ошибка» вместо внятного 422 с именем поля.
-        pytest.param("ram_total_mb", 2**31, id="память-не-влезает-в-int32"),
-        pytest.param("uptime_seconds", 2**63, id="аптайм-не-влезает-в-int64"),
+        pytest.param("ram_total_mb", PG_INT_MAX + 1, id="память-не-влезает-в-int32"),
+        pytest.param("uptime_seconds", PG_BIGINT_MAX + 1, id="аптайм-не-влезает-в-int64"),
     ],
 )
 @pytest.mark.asyncio
@@ -312,6 +314,33 @@ async def test_out_of_range_metric_never_reaches_the_column(field: str, value: i
         assert _error_locs(r, field) == [["body", field]], r.text
 
         assert await _stored(server_id) == good, "отвергнутый снимок переписал колонки"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # Ровно то, что колонка ещё вмещает. Аптайм в секундах у машины,
+        # не перезагружавшейся годами, — уже сотни миллионов, так что верхняя
+        # граница обязана пропускать настоящие показания, а не только мелкие.
+        pytest.param("cpu_usage_pct", 100, id="cpu-ровно-100"),
+        pytest.param("ram_total_mb", PG_INT_MAX, id="int32-максимум"),
+        pytest.param("uptime_seconds", PG_BIGINT_MAX, id="int64-максимум"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_largest_value_the_column_can_hold_is_accepted(field: str, value: int):
+    """Верхняя граница чисел проверена и со стороны приёма, не только отказа.
+
+    Соседний тест ловит выход за границу, но зелен и при границе, ужатой до
+    абсурда: все числа в `FULL_METRICS` мелкие, и `le=1000` вместо
+    `le=PG_INT_MAX` не уронил бы ни одного случая. У строк такая симметрия
+    есть с самого начала — здесь она была только с одной стороны.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        server_id = await _login_and_create(c, "met-max")
+        r = await c.post(f"/api/servers/{server_id}/metrics", json={field: value})
+        assert r.status_code == 200, r.text
+        assert (await _stored(server_id))[field] == value
 
 
 @pytest.mark.parametrize(
@@ -370,24 +399,70 @@ async def test_control_character_in_free_text_metric_never_reaches_the_column():
 
 
 @pytest.mark.asyncio
+async def test_lone_surrogate_in_free_text_metric_is_refused_not_crashed():
+    """`"A\\ud800B"` — 422, а не 500 из драйвера.
+
+    Одиночный суррогат — законный JSON (`\\uXXXX`-эскейп), декодер Python его
+    пропускает, длина и управляющие символы к нему не придираются. Падает он
+    уже внутри запроса: `asyncpg.DataError: surrogates not allowed` — то есть
+    после всех проверок, необработанным исключением, 500 с трейсом. Ровно тот
+    случай, ради которого границы и заводились.
+
+    Отправляется как `\\ud800` в сыром JSON-теле: `json=` в httpx сериализует
+    строку обратно в эскейп, но заголовок и кодирование тела надёжнее задать
+    явно — иначе тест зависел бы от того, как именно клиент кодирует
+    суррогат.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        server_id = await _login_and_create(c, "met-surr")
+
+        r = await c.post(
+            f"/api/servers/{server_id}/metrics",
+            content=b'{"os_pretty": "A\\ud800B"}',
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 422, r.text
+        assert _error_locs(r, "os_pretty") == [["body", "os_pretty"]], r.text
+        assert (await _stored(server_id))["os_pretty"] is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param("", id="пустая"), pytest.param("   ", id="одни-пробелы")],
+)
+@pytest.mark.asyncio
+async def test_blank_free_text_metric_is_refused(value: str):
+    """Строка без содержимого — 422, а не `''` в колонке.
+
+    Обоснование (почему отказ, а не тихий `NULL`, как у `provider`) — в
+    `ServerMetricsIn._validate_text_metric`. Проверка по колонке: `''` и `NULL`
+    в JSON различимы, но в UI «показания есть, и они пустые» и «показаний нет»
+    выглядят одинаково, а означают разное.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        server_id = await _login_and_create(c, "met-blank")
+
+        r = await c.post(f"/api/servers/{server_id}/metrics", json={"kernel": value})
+        assert r.status_code == 422, r.text
+        assert _error_locs(r, "kernel") == [["body", "kernel"]], r.text
+        assert (await _stored(server_id))["kernel"] is None
+
+        # Позитивный контроль: та же форма тела с содержательной строкой
+        # проходит — значит 422 выше про пустоту, а не про поле целиком.
+        r = await c.post(f"/api/servers/{server_id}/metrics", json={"kernel": "6.1.0-21-amd64"})
+        assert r.status_code == 200, r.text
+        assert (await _stored(server_id))["kernel"] == "6.1.0-21-amd64"
+
+
+@pytest.mark.asyncio
 async def test_explicit_null_clears_the_metric_but_an_omitted_field_survives():
     """Явный `null` гасит метрику, отсутствующее поле — не трогает.
 
-    Различение сознательное и повторяет уже принятое в проекте решение по
-    write-back'у provision (`test_provision_writeback.py`): сервис патчит
+    Обоснование обеих половин — в `server_service.apply_metrics`, там же
+    контракт сборщика; здесь проверяется, что код ему следует. Различение
+    повторяет уже принятое в проекте решение по write-back'у provision
+    (`test_provision_writeback.py`): сервис патчит
     `model_dump(exclude_unset=True)`.
-
-    Зачем `null` затирает: по контракту десктоп шлёт снимок целиком и ставит
-    `null` там, где парсер не справился. Оставь мы прошлое значение — карточка
-    показала бы «снято минуту назад: диск 190 ГБ», где число недельной
-    давности. Протухшее значение под свежей отметкой хуже прочерка.
-
-    Зачем отсутствие поля не трогает: это узкий законный случай — дозапись
-    одного показания, а не снимок. Клиент, знающий только версию панели, не
-    должен стирать память и диск, которых он не измерял. Цена такого тела
-    (отметка свежее части полей под ней) и граница, за которой оно теряет
-    смысл, — в `test_body_without_a_single_metric_is_refused` ниже и в
-    `server_service.apply_metrics`.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         server_id = await _login_and_create(c, "met-null")
@@ -414,18 +489,14 @@ async def test_explicit_null_clears_the_metric_but_an_omitted_field_survives():
 async def test_body_without_a_single_metric_is_refused():
     """Пустое тело — 422, отметка времени на месте. Частичное — законно.
 
-    Обе ветки в одном тесте, потому что они и есть граница принятого решения.
-    Пустой запрос ничего не сообщает о сервере и делает ровно одну вещь:
-    двигает `metrics_collected_at`, из-за чего протухшие числа начинают
-    выглядеть снятыми только что. Это не пустая операция, а ложь в UI, и 200 в
-    ответ был бы самым дешёвым способом её получить.
+    Почему пустое тело отвергается — в `ServerMetricsIn._at_least_one_metric`;
+    почему частичное остаётся законным и что при этом значит отметка — в
+    `server_service.apply_metrics`. Обе ветки здесь вместе, потому что они и
+    есть граница между этими двумя решениями.
 
-    Частичное тело (дозапись одного показания) при этом остаётся законным — и
-    служит здесь позитивным контролем: без него 422 могло бы приходить от
-    чего угодно, вплоть до незарегистрированного роута, и первая половина
-    теста была бы зелёной в мире, где эндпоинт не работает вовсе. Отметка при
-    дозаписи двигается сознательно: она означает «когда сервер в последний раз
-    принял показания» (см. `server_service.apply_metrics`).
+    Частичное тело служит заодно позитивным контролем: без него 422 могло бы
+    приходить от чего угодно, вплоть до незарегистрированного роута, и первая
+    половина теста была бы зелёной в мире, где эндпоинт не работает вовсе.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         server_id = await _login_and_create(c, "met-empty")
