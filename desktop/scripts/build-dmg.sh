@@ -5,10 +5,12 @@
 # для macOS-таргета и печатает пути к артефактам. С флагом --run ещё и
 # открывает собранный .app.
 #
-# ПОЧЕМУ ТОЛЬКО --bundles dmg. В tauri.conf.json bundle.targets содержит
+# ПОЧЕМУ ТОЛЬКО --bundles app,dmg. В tauri.conf.json bundle.targets содержит
 # ["dmg", "nsis", "appimage"] — Windows и Linux пока не наша задача (Stage 5,
-# отложено намеренно). Без явного --bundles dmg `tauri build` попробует
-# собрать все три и упадёт на отсутствующих Windows/Linux-тулчейнах.
+# отложено намеренно). Без явного --bundles `tauri build` попробует собрать
+# все три и упадёт на отсутствующих Windows/Linux-тулчейнах. А `app` в списке
+# нужен не «за компанию»: с одним лишь `dmg` tauri после упаковки образа
+# вычищает bundle/macos/, и SDMP.app не остаётся — открывать по --run нечего.
 #
 # ПОЧЕМУ ТОЛЬКО host-арка. Universal-бинарь (aarch64+x86_64) — отдельная
 # задача Stage 5; собирать его сейчас — YAGNI. Какая именно арка host —
@@ -238,14 +240,85 @@ read_version() {
   echo "$version"
 }
 
+# Временный RW-образ (bundle_dmg.sh: DMG_TEMP_NAME="$DMG_DIR/rw.$$.${DMG_NAME}")
+# при успехе убирается сам, а после падения остаётся навсегда — и весит столько
+# же, сколько .app (десятки мегабайт). Имя каждый раз новое (в нём pid), так что
+# мусор копится молча. Чистим строго по шаблону rw.*.dmg и строго в bundle/macos/.
+clean_stale_rw_images() {
+  local dir="$SRC_TAURI_DIR/target/release/bundle/macos" f
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/rw.*.dmg; do
+    # Без nullglob неразвёрнутый шаблон приходит сюда как есть — отсеиваем.
+    [ -f "$f" ] || continue
+    warn "Убираю недоделанный образ от прерванной сборки: $f"
+    rm -f "$f"
+  done
+}
+
+# Вывод сборки нужен сразу в двух видах: на экране (пользователь ждёт и хочет
+# видеть прогресс) и в файле (чтобы разобрать причину падения). Отсюда tee, а
+# код возврата берём из PIPESTATUS[0] — иначе получим код tee, который всегда 0.
+# Вызывать только в условии (if/||): внутри такого контекста errexit выключен,
+# и падение сборки не уронит скрипт до того, как мы решим, что с ним делать.
+run_tauri_bundle() {
+  local log="$1" use_ci="$2" status
+  (
+    cd "$DESKTOP_DIR" || exit 1
+    # CI=true заставляет tauri передать bundle_dmg.sh флаг --skip-jenkins, то
+    # есть пропустить косметический AppleScript. Именно "true": на CI=1 tauri
+    # CLI падает с «invalid value '1' for '--ci'».
+    [ "$use_ci" = "ci" ] && export CI=true
+    npm run tauri build -- --bundles app,dmg
+  ) 2>&1 | tee "$log"
+  status=${PIPESTATUS[0]}
+  return "$status"
+}
+
+# Признаки того, что упал не сам билд, а косметика: bundle_dmg.sh просит Finder
+# разложить иконки в окне DMG через osascript, а у хост-процесса шелла нет
+# разрешения Automation → Finder (агентские шеллы, ssh, CI, свежий терминал без
+# выданного TCC-доступа). Строку про Apple events tauri показывает не всегда
+# (вывод bundle_dmg.sh он глотает без --verbose), поэтому ловим и более общий
+# «error running bundle_dmg.sh»: если дело было не в этом, повтор всё равно
+# упадёт и мы честно сообщим об ошибке.
+looks_like_apple_events_denial() {
+  grep -qE 'Not authorised to send Apple events|Failed running AppleScript|-1743|error running bundle_dmg\.sh' "$1"
+}
+
+BUILD_LOG=""
+cleanup_build_log() {
+  [ -n "$BUILD_LOG" ] && rm -f "$BUILD_LOG"
+  return 0
+}
+trap cleanup_build_log EXIT
+
 run_build() {
   local version
   version="$(read_version)"
   step "Версия из tauri.conf.json: $version"
 
-  step "Собираю .dmg (npm run tauri build -- --bundles dmg)…"
-  ( cd "$DESKTOP_DIR" && npm run tauri build -- --bundles dmg ) \
-    || die "Сборка tauri упала — смотри вывод выше."
+  BUILD_LOG="$(mktemp -t sdmp-build-dmg)" \
+    || die "Не смог создать временный файл для лога сборки (mktemp упал)."
+
+  clean_stale_rw_images
+
+  step "Собираю .dmg и .app (npm run tauri build -- --bundles app,dmg)…"
+  if run_tauri_bundle "$BUILD_LOG" ""; then
+    :
+  elif looks_like_apple_events_denial "$BUILD_LOG"; then
+    echo
+    warn "Сборка упала на упаковке DMG: macOS не дала обратиться к Finder (Apple events)."
+    warn "Повторяю один раз с CI=true — оформление окна DMG (раскладка иконок) будет"
+    warn "пропущено. На работоспособность .dmg и .app это не влияет."
+    warn "Чтобы получить «красивый» DMG — выдай своему терминалу/IDE доступ в"
+    warn "System Settings → Privacy & Security → Automation → Finder и собери заново."
+    echo
+    clean_stale_rw_images
+    run_tauri_bundle "$BUILD_LOG" "ci" \
+      || die "Повторная сборка с CI=true тоже упала — смотри вывод выше (дело не в Apple events)."
+  else
+    die "Сборка tauri упала — смотри вывод выше."
+  fi
 
   echo
 

@@ -30,9 +30,10 @@ Equivalently, from `desktop/`: `npm run dmg`.
 
 This runs a preflight check (toolchain, rustup target, disk space), installs npm
 dependencies if missing, validates the `version` field in `tauri.conf.json`, then runs
-`tauri build --bundles dmg` for your host architecture only — no Windows/Linux
-bundles, no universal binary. By default it only builds and prints the artifact
-paths; it does not open the app.
+`tauri build --bundles app,dmg` for your host architecture only — no Windows/Linux
+bundles, no universal binary. (`app` is not optional: with `--bundles dmg` alone Tauri
+wipes `bundle/macos/` after packing the image and no `SDMP.app` is left behind.) By
+default it only builds and prints the artifact paths; it does not open the app.
 
 Other modes:
 
@@ -44,6 +45,21 @@ Other modes:
 
 If the build fails during the frontend step, check the `tsc` output — that means
 type errors in `frontend/`, not a problem with the build script.
+
+## Apple events / Finder permission
+
+The DMG packer (`bundle_dmg.sh`) drives Finder through `osascript` purely to lay out
+the icons inside the DMG window. If the process running the build has no Automation →
+Finder permission (agent shells, ssh, CI, a freshly installed terminal), that step
+fails with `Not authorised to send Apple events to Finder. (-1743)`, and Tauri reports
+only a terse `failed to bundle project`.
+
+The build script handles this itself: it detects the failure and retries the build once
+with `CI=true`, which makes Tauri skip the cosmetic AppleScript. You get a warning and a
+working `.dmg`/`.app` — only the window layout of the mounted DMG is plain. To get the
+pretty layout, grant your terminal/IDE access under System Settings → Privacy & Security
+→ Automation → Finder and build again. If the retry fails too, the cause was something
+else and the script reports an honest error.
 
 ## Artifacts
 
