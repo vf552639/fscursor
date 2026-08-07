@@ -7,6 +7,8 @@ import ServerDetail from "./ServerDetail";
 import type { Server } from "../api/servers";
 import { u8ToB64 } from "../lib/b64";
 import { setTauri, secretBlobLifecycle } from "../test/secretBlobKit";
+import { hexToRgb } from "../test/colors";
+import { STALE_TEXT } from "../components/ui/Primitives";
 
 /**
  * Деталь сервера: сбор метрик по кнопке и честность того, что на ней нарисовано.
@@ -370,7 +372,7 @@ describe("ServerDetail — свежесть проверки и метрик", (
     expect(screen.getByText("CPU Usage")).toBeTruthy();
     expect(screen.queryByText(/stale/)).toBeNull();
     // И сама цифра не выкрашена в «протухшее»: цвет — часть утверждения.
-    expect(screen.getByText("42%").style.color).not.toBe("rgb(161, 98, 7)");
+    expect(screen.getByText("42%").style.color).not.toBe(hexToRgb(STALE_TEXT));
     // «Normal» рядом с числом ядер утверждалось безусловно — и при 95% CPU, и
     // на трёхмесячном снимке. Оценки, не выведенной из данных, здесь нет.
     expect(screen.queryByText(/Normal/)).toBeNull();
@@ -419,7 +421,7 @@ describe("ServerDetail — свежесть проверки и метрик", (
     renderDetail({ ...SERVER, ...WITH_READINGS, metrics_collected_at: ago(95 * DAY) });
 
     // Тот же цвет протухшего показания, что в списке серверов и на дашборде.
-    expect((await screen.findByText("42%")).style.color).toBe("rgb(161, 98, 7)");
+    expect((await screen.findByText("42%")).style.color).toBe(hexToRgb(STALE_TEXT));
     // И НЕ `opacity` на весь блок: она была третьим механизмом для того же
     // сигнала и утаскивала заодно серые подписи («of 4 GB») до нечитаемого
     // контраста — приписка должна читаться как раз у старого снимка.

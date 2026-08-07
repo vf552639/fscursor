@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import Servers from "./Servers";
 import { secretBlobLifecycle } from "../test/secretBlobKit";
+import { hexToRgb } from "../test/colors";
+import { STALE_TEXT, DIM_TEXT } from "../components/ui/Primitives";
 
 /**
  * Честность карточки сервера: что мы знаем про «жив» и насколько свежо то, что
@@ -419,11 +421,11 @@ describe("Servers — свежесть метрик отделена от све
     // выглядит ровно так же, как сегодняшнее.
     const stale = within(card("web-03")).getByText("42%");
     const fresh = within(card("web-02")).getByText("42%");
-    expect(stale.style.color).toBe("rgb(161, 98, 7)");
+    expect(stale.style.color).toBe(hexToRgb(STALE_TEXT));
     expect(fresh.style.color).not.toBe(stale.style.color);
     // И не серым: серый в этом UI занят под «данных нет» (прочерки), а тут
     // данные есть — просто старые.
-    expect(stale.style.color).not.toBe("rgb(156, 163, 175)");
+    expect(stale.style.color).not.toBe(hexToRgb(DIM_TEXT));
   });
 
   it("протухание метрик не протекает в колонки статуса и проверки", async () => {
@@ -447,7 +449,7 @@ describe("Servers — свежесть метрик отделена от све
 
     const staleCpu = within(row(table, "web-03")).getByText("42%");
     const freshCpu = within(row(table, "web-02")).getByText("42%");
-    expect(staleCpu.style.color).toBe("rgb(161, 98, 7)");
+    expect(staleCpu.style.color).toBe(hexToRgb(STALE_TEXT));
     expect(freshCpu.style.color).not.toBe(staleCpu.style.color);
   });
 });

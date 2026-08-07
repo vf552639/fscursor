@@ -4,6 +4,8 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import Dashboard from "./Dashboard";
+import { hexToRgb } from "../test/colors";
+import { STALE_TEXT } from "../components/ui/Primitives";
 
 /**
  * Дашборд — первый экран приложения, и до этих правок он был самым громким
@@ -260,7 +262,7 @@ describe("Dashboard — возраст показаний виден на пер
     await screen.findByText("web-04");
     const stale = within(row("web-04", "10.0.0.4")).getByText("CPU 42%");
     const fresh = within(row("web-01", "10.0.0.1")).getByText("CPU 42%");
-    expect(stale.style.color).toBe("rgb(161, 98, 7)");
+    expect(stale.style.color).toBe(hexToRgb(STALE_TEXT));
     expect(fresh.style.color).not.toBe(stale.style.color);
   });
 
