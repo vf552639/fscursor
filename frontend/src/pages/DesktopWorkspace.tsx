@@ -13,6 +13,7 @@ import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { listenHostKeyPrompts } from "../lib/sshHostKey";
 import { isTauri } from "../lib/runtime";
+import { buildLabel, buildTooltip } from "../lib/buildInfo";
 import { apiPost } from "../api/client";
 import { handleSdmpDeepLinkInTauri, type InstallFastpanelResult } from "../lib/deepLink";
 import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
@@ -481,6 +482,23 @@ export default function DesktopWorkspace() {
               }}
             />
             System Status
+          </div>
+          {/* Какая сборка запущена. Место выбрано так, чтобы подпись была видна
+              на любом экране: версия нужна ровно тогда, когда что-то ведёт себя
+              странно, — идти за ней в настройки в этот момент неудобно.
+              Подробности (полная версия, коммит, дата) — в подсказке. */}
+          <div
+            title={buildTooltip()}
+            style={{
+              marginTop: 10,
+              textAlign: "center",
+              fontSize: 10.5,
+              color: "#9ca3af",
+              letterSpacing: "0.2px",
+              userSelect: "text",
+            }}
+          >
+            {buildLabel()}
           </div>
         </div>
       </aside>
