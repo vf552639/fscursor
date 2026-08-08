@@ -1,19 +1,60 @@
 import React, { useState } from "react";
 
 export const copyText = (v: string) => navigator.clipboard?.writeText(v).catch(()=>{});
-export const genBars  = (base: number) => Array.from({length:15},()=>Math.max(5,Math.min(100,base+(Math.random()-0.5)*28)));
-export const cpuColor = (v: number) => v>=80?"#dc2626":v>=60?"#d97706":"#2563eb";
 
-export function MiniChart({data, color="#2563eb"}: {data: number[], color?: string}){
-  const max=Math.max(...data,1);
-  return <div style={{display:"flex",alignItems:"flex-end",gap:2,height:36}}>
-    {data.map((v,i)=><div key={i} style={{width:4,borderRadius:"2px 2px 0 0",flexShrink:0,height:Math.max(4,(v/max)*36),background:color,opacity:0.55+(i/data.length)*0.45}}/>)}
-  </div>;
-}
+/**
+ * Цвет полосы по доле заполнения: 80% и выше — красный, с 60% — жёлтый.
+ * Про CPU функция не знает ничего, и называлась она так зря: под именем
+ * `cpuColor` ею красили полосу диска, то есть чужой величиной.
+ */
+export const pctColor = (v: number) => v>=80?"#dc2626":v>=60?"#d97706":"#2563eb";
 
+/*
+ * Здесь жили `genBars` и `MiniChart` — спарклайн из ПЯТНАДЦАТИ случайных
+ * столбиков вокруг одного текущего значения. Мы храним последний снимок, а не
+ * историю: наблюдение у нас ровно одно, и форма графика заявляла недавние
+ * колебания, которых никто не измерял, — у протухшего снимка ещё и
+ * «заканчивающиеся сейчас». Тот же дефект, что зелёный бейдж без проверки,
+ * только в самой наглядной форме, поэтому удалено, а не приглушено. Настоящий
+ * график потребует хранить историю метрик — это отдельная функция.
+ */
+
+/** Приглушённый текст: прочерки, подписи «данных нет». */
+export const DIM_TEXT = "#9ca3af";
+
+/**
+ * Протухшее показание — и сама цифра, и подпись её возраста. Отдельный цвет, а
+ * не `DIM_TEXT`: серым нарисованы прочерки, то есть «данных нет», а это «данные
+ * есть, но старые» — разные вещи, и различать их одной лишь подписью значит
+ * требовать её прочитать.
+ *
+ * Цвет — приглушённый тёплый серый, но темнее `DIM_TEXT` (`#8a8580` против
+ * `#9ca3af`, ~3.6:1 против ~2.5:1 на белом): между ними ~1.4:1 — заметная
+ * ступень по светлоте, так что «старое» и «данных нет» не сливаются в один
+ * оттенок. AA для мелкого текста этот цвет всё равно не держит, поэтому цвет
+ * здесь не единственный канал распознавания: подпись «· stale» рядом — не
+ * украшение, а второй, дублирующий.
+ */
+export const STALE_TEXT = "#8a8580";
+
+/**
+ * Точка состояния сервера. Значения приезжают только из `serverUiStatus`
+ * (`lib/serverStatus`), поэтому и ключей здесь ровно два.
+ *
+ * Их было восемь: `healthy`/`warning`/`critical`/`ok`/`pending`/`paused` не
+ * производил НИКТО — кроме одной непочиненной лестницы в списке доменов,
+ * которая переводила `status === "active"` в `healthy`, минуя результат
+ * проверки. Именно живучесть этих ключей и позволяла зелёной точке спокойно
+ * стоять у подтверждённо упавшей машины: удали их раньше — и код бы упал в
+ * серый цвет, то есть заявил бы «не знаю» вместо «здоров».
+ *
+ * Всё незнакомое — серое: это «не знаем», и гадать в сторону здоровья нельзя.
+ */
 export function StatusDot({status, size=9}: {status: string, size?: number}){
-  const c: Record<string, string>={healthy:"#16a34a",warning:"#d97706",critical:"#dc2626",ok:"#16a34a",error:"#dc2626",pending:"#d97706",active:"#16a34a",paused:"#9ca3af"};
-  const g: Record<string, string>={healthy:"#bbf7d0",warning:"#fde68a",critical:"#fecaca"};
+  const c: Record<string, string>={active:"#16a34a",error:"#dc2626"};
+  // Ореол достаётся тем же двум: он усиливает утверждение, а усиливать здесь
+  // можно только то, что проверено.
+  const g: Record<string, string>={active:"#bbf7d0",error:"#fecaca"};
   const bg = c[status] || "#9ca3af";
   const shadow = g[status] ? `0 0 0 3px ${g[status]}` : "none";
   return <span style={{display:"inline-block",width:size,height:size,borderRadius:"50%",background:bg,boxShadow:shadow,flexShrink:0}}/>;
@@ -168,13 +209,15 @@ export function Modal({title, onClose, children, width=480, closeOnBackdrop=true
   </div>;
 }
 
-export function StatCard({label, value, sub, pct, color="#2563eb", chartData}: any){
+// `chartData` у карточки больше нет: рисовать ряд наблюдений, которого не
+// существует, — см. комментарий на месте `MiniChart` выше. Полоса `pct`
+// осталась: это ЕДИНСТВЕННОЕ измеренное значение, показанное как есть.
+export function StatCard({label, value, sub, pct, color="#2563eb"}: any){
   return <Card>
     <div style={{padding:"18px 20px"}}>
       <div style={{fontSize:12,fontWeight:500,color:"#6b7280",marginBottom:6}}>{label}</div>
       <div style={{fontSize:22,fontWeight:700,color:"#111",lineHeight:1}}>{value}</div>
       {sub&&<div style={{fontSize:12,color:"#6b7280",marginTop:4}}>{sub}</div>}
-      {chartData&&<div style={{marginTop:10}}><MiniChart data={chartData} color={color}/></div>}
       {pct!==undefined&&<div style={{height:4,background:"#f3f4f6",borderRadius:2,marginTop:8,overflow:"hidden"}}><div style={{height:"100%",borderRadius:2,background:color,width:`${Math.min(100,pct)}%`,transition:"width 0.6s"}}/></div>}
     </div>
   </Card>;
@@ -230,6 +273,20 @@ export function CopyBtn({value}: any){
 
 export const fmtDate = (iso: string) => iso ? new Date(iso).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—";
 export const fmtDT   = (iso: string) => iso ? new Date(iso).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
+/**
+ * Аптайм словами: «3d 5h», «23h 59m», «30m». ЕДИНСТВЕННАЯ реализация на
+ * продукт — у дашборда была своя («3 days», «23h»), и один и тот же сервер
+ * назывался на двух экранах по-разному; читатель сверяет экраны глазами, и два
+ * написания одного числа он читает как два разных числа.
+ *
+ * Форма плотная (две единицы подряд), потому что продукт — пульт с десятками
+ * цифр в строке: «3 days» рядом с «42%» и «2/4 GB» выпадает из ряда, а вторая
+ * единица отвечает на следующий же вопрос («три дня и сколько?»).
+ *
+ * `null`/`undefined` — прочерк, а не ноль: «0h» у сервера, которого ни разу не
+ * опрашивали, это выдуманное показание. Ноль настоящий при этом показывается
+ * («<1m»), потому что он означает «только что поднялся» — тоже факт.
+ */
 export const formatUptime = (seconds: number | null | undefined) => {
   if (seconds === null || seconds === undefined) return "—";
   if (seconds < 60) return "<1m";
@@ -243,3 +300,85 @@ export const formatUptime = (seconds: number | null | undefined) => {
   const h = Math.floor((seconds % 86400) / 3600);
   return `${d}d ${h}h`;
 };
+
+/**
+ * МБ → ГБ для показа, один знак после запятой. Тоже одна на продукт: перевод
+ * был написан трижды, и две копии из трёх округляли до целого — из-за чего
+ * дашборд показывал «1.5/4 GB», а список тот же сервер как «2/4 GB». Округление
+ * до целого дорисовывает машине треть памяти, которой никто не измерял.
+ *
+ * Живёт рядом с `formatUptime` и `formatAgo`: это тот же предмет — как показать
+ * измеренное число, — и дом у него должен быть один, иначе копии заводятся
+ * снова.
+ */
+export const mbToGb = (mb: number) => Math.round((mb / 1024) * 10) / 10;
+
+/**
+ * Возраст отметки времени словами: «2h ago», «3mo ago». Не украшение: показание
+ * без возраста читается как текущее, каким бы старым оно ни было, — а метрики
+ * снимает десктоп по кнопке, и на карточке легко живёт цифра трёхмесячной
+ * давности (`metrics_collected_at`).
+ *
+ * Аргумент — `string`, а НЕ `string | null`. «Отметки нет» и «отметка старая» —
+ * разные состояния, и слова у них на экране разные («never» / «3mo ago»);
+ * развилку обязан сделать вызывающий, и, пропусти он её, тип не даст собраться.
+ *
+ * `now` параметром ради тестов: границы у чистой функции проверяются дешевле и
+ * надёжнее, чем через рендер страницы.
+ *
+ * Экраны зовут не её, а `formatAgoStale` ниже: рядом с показанием возраст почти
+ * всегда идёт вместе с пометкой протухания. Раздельно они живут потому, что
+ * отвечают за разное — эта не знает, что именно устаревает и по какому порогу.
+ */
+export function formatAgo(iso: string, now: number = Date.now()): string {
+  const ts = new Date(iso).getTime();
+  // Неразобранная дата — прочерк, а не «NaN ago»: строка приезжает с сервера, и
+  // «NaN ago» на карточке читалось бы как поломка страницы.
+  if (Number.isNaN(ts)) return "—";
+  const sec = (now - ts) / 1000;
+  // Первая же ветка забирает и отрицательную разность — часы клиента, отставшие
+  // от серверных. Это не будущее: показание уже снято, и «через час» было бы
+  // фантазией. Отдельного `Math.max(0, …)` нет намеренно — он был бы кодом,
+  // который ничего не меняет (мутационная проверка это и показала).
+  if (sec < 60) return "just now";
+  // Везде вниз (`floor`): 90 минут — это «1h ago». Округление вверх делало бы
+  // показание СТАРШЕ, чем оно есть, а ошибаться в эту сторону здесь безопаснее,
+  // чем в обратную, только если это не переворачивает картину — «2h ago» у
+  // часового показания сбивает с толку ровно так же.
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  const days = Math.floor(sec / 86400);
+  if (days < 30) return `${days}d ago`;
+  // Дальше месяцев не идём: «12mo ago» читается не хуже «1y ago», а лишняя
+  // ступень — лишняя граница, которую надо помнить и проверять.
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
+/**
+ * Пометка «показание протухло». Одна на продукт: пока хвост собирался по месту,
+ * он успел разъехаться на три редакции («· stale», «· stale, press «Refresh
+ * metrics»», «(stale)»), то есть один и тот же факт назывался на трёх экранах
+ * по-разному.
+ */
+export const STALE_SUFFIX = " · stale";
+
+/**
+ * Возраст показания с пометкой протухания — то, что показывается рядом с самим
+ * показанием. Семь копий этого выражения в трёх файлах и породили три редакции
+ * текста, см. `STALE_SUFFIX`.
+ *
+ * `stale` отдельным аргументом, а не вычисляется внутри: порогов протухания два
+ * (метрики и проверка доступности), они живут в `lib/serverStatus` и знать про
+ * них форматированию нечего — иначе оно выбирало бы за вызывающего, каким
+ * порогом мерить.
+ */
+export function formatAgoStale(iso: string, stale: boolean, now: number = Date.now()): string {
+  return `${formatAgo(iso, now)}${stale ? STALE_SUFFIX : ""}`;
+}
+
+/*
+ * `isMetricsStale` переехала в `lib/serverStatus`: порог протухания — правило
+ * продукта, а не форматирование, и рядом с ним живёт такой же порог для
+ * проверки доступности. Здесь остаётся `formatAgo` — она про то, КАК показать
+ * возраст, и не знает, что именно устаревает.
+ */

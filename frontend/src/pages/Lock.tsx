@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { isTauri } from "../lib/runtime";
 import { useAuthStore } from "../store/auth";
+import { buildLabel, buildTooltip } from "../lib/buildInfo";
 
 export default function Lock() {
   const navigate = useNavigate();
@@ -111,6 +112,21 @@ export default function Lock() {
             {busy ? "Unlocking…" : "Unlock"}
           </button>
         </form>
+        {/* Экран блокировки — первое, что видно после запуска, и до разблокировки
+            сайдбара с той же подписью ещё нет. Проверить, ту ли сборку открыл,
+            логичнее всего здесь. */}
+        <div
+          title={buildTooltip()}
+          style={{
+            marginTop: 16,
+            textAlign: "center",
+            fontSize: 10.5,
+            color: "#9ca3af",
+            userSelect: "text",
+          }}
+        >
+          {buildLabel()}
+        </div>
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 # старт приложения, если голова в БД разошлась с этой строкой. Забыть его —
 # значит получить упавший бэкенд сразу после `alembic upgrade head` (так и
 # случилось при добавлении `015_server_provider`).
-EXPECTED_ALEMBIC_HEAD = "015_server_provider"
+EXPECTED_ALEMBIC_HEAD = "016_server_consecutive_failures"
 
 
 @asynccontextmanager
@@ -198,6 +199,55 @@ def _input_is_unsafe_to_echo(err: Mapping[str, Any]) -> bool:
     )
 
 
+def _without_unrenderable_input(err: Mapping[str, Any]) -> dict[str, Any]:
+    """Убрать `input`, который невозможно отдать в теле ответа вообще.
+
+    Отдельно от `_input_is_unsafe_to_echo` намеренно, и не только потому, что
+    вопросы разные («нельзя показывать» против «физически не отдаётся»). Эти
+    две обязаны КОМПОЗИРОВАТЬСЯ, а не выбираться: редакция секретов уже могла
+    вырезать `input`, и проверка рендерируемости должна отработать поверх её
+    результата. Слитая функция такого просто не выразила бы. Порядок при этом
+    безразличен, а вырезанный `input` не воскресает: ключа нет — `get` вернёт
+    `None`, он сериализуется, и словарь возвращается как есть.
+
+    Вызов `json.dumps` здесь обязан повторять рендер ТОЧНО. `JSONResponse`
+    рендерит тело как
+    `json.dumps(..., ensure_ascii=False, allow_nan=False, ...).encode("utf-8")`,
+    и каждый флаг тут решает: разойдётся гард с рендером хоть одним — и мимо
+    гарда поедет ровно то, ради чего он написан. Ниже оба известных случая, и
+    оба живые:
+
+    * **одиночный суррогат** (`ensure_ascii=False`). `"A\\ud800B"` — законный
+      JSON-эскейп, декодер Python его пропускает, и он доезжает до `input`.
+      Рендер падает `UnicodeEncodeError: surrogates not allowed`;
+    * **`NaN`/`Infinity`** (`allow_nan=False`). `json.loads` в FastAPI
+      принимает их по умолчанию, до `input` они доезжают той же дорогой
+      (`{"cpu_usage_pct": NaN}` на `POST /servers/{id}/metrics` — ошибка
+      `finite_number` с `input: nan`), имя поля не секретное, и рендер падает
+      `ValueError: Out of range float values are not JSON compliant`.
+
+    Оба падают уже ВНУТРИ обработчика ошибок, то есть дают 500 вместо только
+    что собранного 422. Проверка кодируемости в `is_valid_column_text`
+    закрывает только запись в БД; без этой функции клиент всё равно получал бы
+    500, просто из другого места.
+
+    Смотрит функция на `input` и только на него. `msg` и `loc` рендерятся тем
+    же `json.dumps`, но присланного значения сегодня не несут: `loc` — имена
+    полей, а ни один валидатор в схемах не вставляет `input` в текст ошибки.
+    Держится это на дисциплине — **не вставляй присланное значение в текст
+    `ValueError`**, иначе дыра вернётся молча и мимо этого гарда.
+
+    Ошибается в сторону лишнего срабатывания: `input`, который не
+    сериализуется по любой причине, выбрасывается. Цена — пропавшее из ответа
+    значение у экзотического типа; альтернатива — 500 на ровном месте.
+    """
+    try:
+        json.dumps(err.get("input"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (UnicodeEncodeError, TypeError, ValueError):
+        return {k: v for k, v in err.items() if k != "input"}
+    return dict(err)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_without_secret_input(
     _request: Request, exc: RequestValidationError
@@ -221,7 +271,9 @@ async def validation_error_without_secret_input(
     именно считается небезопасным — в `_input_is_unsafe_to_echo`.
     """
     errors = [
-        {k: v for k, v in err.items() if k != "input"} if _input_is_unsafe_to_echo(err) else err
+        _without_unrenderable_input(
+            {k: v for k, v in err.items() if k != "input"} if _input_is_unsafe_to_echo(err) else err
+        )
         for err in exc.errors()
     ]
     return JSONResponse(

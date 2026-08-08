@@ -10,6 +10,7 @@ from app.schemas.server import (
     ServerBulkImportResponse,
     ServerCreate,
     ServerListResponse,
+    ServerMetricsIn,
     ServerResponse,
     ServerUpdate,
 )
@@ -84,6 +85,53 @@ async def update_server(
     return ServerResponse.model_validate(server)
 
 
+@router.post("/{server_id}/metrics", response_model=ServerResponse)
+async def submit_server_metrics(
+    server_id: int,
+    data: ServerMetricsIn,
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> ServerResponse:
+    """Принять метрики, снятые десктопом по SSH.
+
+    Сервер тут только получатель: сам он на машину не ходит и после переезда на
+    zero-knowledge не может — SSH-пароль зашифрован клиентским ключом. Что
+    именно принимается и почему с такими границами — в docstring
+    `ServerMetricsIn`; как присланное ложится в колонки — в
+    `server_service.apply_metrics`.
+
+    Запись в аудит — по общему правилу репозитория, а не для этого роута
+    отдельно: каждый мутирующий маршрут оставляет след (у серверов —
+    `create`/`update`/`delete`/`bulk_import`, все четыре), и приём метрик,
+    молча меняющий строку пользователя, был бы единственным исключением.
+    Значений в metadata нет намеренно: `os_pretty`/`kernel` — свободные строки
+    с чужой машины, читать их надо через API, а не из аудит-лога, и гард
+    `test_mutation_audit.py` смотрит на ИМЕНА ключей, то есть такой ключ
+    пропустил бы.
+
+    Оговорка для того, кто заведёт автосбор. Запись оправдана ровно до тех
+    пор, пока сбор инициирует человек: сегодня это кнопка «Refresh metrics» в
+    десктопе, одна запись на один клик — то, что аудит и должен фиксировать.
+    Периодический опрос сотни серверов даст сотню записей за проход, а
+    `GET /api/audit/log` отдаёт последние 100 штук без фильтра по действию и
+    без прунинга — лента пользователя целиком заполнится `server.metrics`, и
+    человеческие действия из неё вытеснятся. Появится расписание — аудит
+    здесь надо пересматривать вместе с ним, а не после.
+    """
+    server = await server_service.apply_metrics(db, server_id, data, user.id)
+    if not server:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="server.metrics",
+        target_type="server",
+        target_id=str(server_id),
+    )
+    await db.commit()
+    return ServerResponse.model_validate(server)
+
+
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_server(
     server_id: int,
@@ -111,9 +159,17 @@ async def bulk_import_servers(
     db: AsyncSession = Depends(get_db),
 ) -> ServerBulkImportResponse:
     raw = await file.read()
+    # `user.id` снимается ДО импорта и дальше используется только он. Импорт
+    # переживает сбойную строку откатом транзакции, а `rollback()` помечает
+    # протухшими все объекты сессии — включая вот этот `user`, загруженный
+    # зависимостью аутентификации. Обращение к его полю после отката поехало бы
+    # в БД за перезагрузкой прямо посреди синхронного вычисления аргументов и
+    # упало бы `MissingGreenlet` — то есть частично удавшийся импорт отдал бы
+    # 500 вместо отчёта. Обычный `UUID` в локальной переменной этому не подвержен.
+    owner_id = user.id
     created, skipped, errors, csv_url = await process_server_bulk_import(
         db,
-        user_id=user.id,
+        user_id=owner_id,
         filename=file.filename or "servers.csv",
         content=raw,
         has_header=has_header,
@@ -126,7 +182,7 @@ async def bulk_import_servers(
     # неаутентифицированной выдачи того же CSV.
     await audit_service.log(
         db,
-        user_id=user.id,
+        user_id=owner_id,
         action="server.bulk_import",
         target_type="server",
         metadata={

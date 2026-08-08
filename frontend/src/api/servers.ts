@@ -5,6 +5,7 @@ import { queryClient } from "./queryClient";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri, requireDesktop } from "../lib/runtime";
 import { forgetSecretBlobs, readSecretBlob } from "../lib/secretBlob";
+import { COLLECT_METRICS_COMMAND, parseServerMetrics } from "../lib/serverMetrics";
 import { sshExecWithHostKeyRetry } from "../lib/sshHostKey";
 import { useAuthStore } from "../store/auth";
 import type { InstallFastpanelResult } from "../lib/deepLink";
@@ -207,21 +208,29 @@ export const SSH_TEST_COMMAND = "echo sdmp-ssh-ok";
 const SSH_TEST_MARKER = "sdmp-ssh-ok";
 
 /**
- * Проверка SSH — ТОЛЬКО десктоп. Эндпоинта `POST /servers/{id}/test-ssh` на
- * бэкенде нет и быть не может: пароль хранится блобом под мастер-ключом,
- * которого у сервера нет. (До этой правки фронт его звал и получал 404 —
- * остаток переезда выполнения в десктоп.)
+ * Выполнить команду на сервере — единственный путь фронта к чужой машине.
+ * `action` — то, что не выйдет сделать в вебе, для `requireDesktop`
+ * («Testing SSH» → «Testing SSH runs in the SDMP desktop app.»).
  *
- * Путь целиком: блоб → плейнтекст → `ssh_exec` → результат. Плейнтекст
- * появляется прямо в аргументах вызова и нигде не именуется: попади он в
- * `variables`/`data` мутации, react-query держал бы его ещё gcTime и после
- * `reset()` (см. `readSecretBlob`). Поэтому наружу уходит только «удалось/нет»
- * и текст для человека.
+ * Общий, а не «почти одинаковый в каждом вызове», по тому же соображению, что
+ * записано в JSDoc `desktopOnly`: и запрет, и «пароль не задан» пользователь
+ * читает как ОДНО правило продукта, а не как сообщения разных подсистем.
+ * Раньше обе фразы были скопированы дословно, и разъехаться им мешала только
+ * внимательность.
+ *
+ * Плейнтекст пароля появляется прямо в аргументах вызова и нигде не именуется:
+ * попади он в `variables`/`data` мутации, react-query держал бы его ещё gcTime
+ * и после `reset()` (см. `readSecretBlob`). Наружу отсюда уходит только код
+ * возврата и вывод чужой машины.
  */
-export async function runSshTest(server: SshTarget): Promise<SshTestResult> {
-  requireDesktop("Testing SSH");
+async function execOnServer(
+  server: SshTarget,
+  command: string,
+  action: string,
+): Promise<[number, string]> {
+  requireDesktop(action);
   if (!server.ssh_password_blob_id) {
-    // Кнопка такого сервера не показывает (`has_ssh` на бэкенде и есть «блоб
+    // Кнопки такого сервера не показывают (`has_ssh` на бэкенде и есть «блоб
     // есть»), но поле nullable, и без этой ветки сюда приехал бы
     // `vault_decrypt_blob(blobId: undefined)` с «invalid args» на экране.
     // Кнопку формы по имени не зовём: её подпись зависит от состояния
@@ -229,25 +238,44 @@ export async function runSshTest(server: SshTarget): Promise<SshTestResult> {
     // где недостижима), и назвать её значило бы указать не на ту.
     throw new Error("This server has no SSH password saved — add SSH access first.");
   }
-  const [code, output] = await sshExecWithHostKeyRetry({
+  return sshExecWithHostKeyRetry({
     host: server.ip_address,
     port: server.ssh_port || 22,
     user: server.ssh_user || "root",
     password: await readSecretBlob(server.ssh_password_blob_id),
-    command: SSH_TEST_COMMAND,
+    command,
   });
+}
+
+/**
+ * Отказ словами чужой машины. Вывод показываем как есть: он объясняет причину
+ * лучше любой нашей формулировки (`ssh_exec` отдаёт и stdout, и stderr). Но с
+ * потолком: длину нам никто не обещал — при подмене команды или болтливом
+ * профиле шелла сюда приехали бы килобайты чужого текста прямо в баннер.
+ */
+function sshFailure(code: number, output: string): string {
+  const tail = output.trim().slice(0, 300);
+  return `exit ${code}${tail ? `: ${tail}` : " with no output"}`;
+}
+
+/**
+ * Проверка SSH — ТОЛЬКО десктоп. Эндпоинта `POST /servers/{id}/test-ssh` на
+ * бэкенде нет и быть не может: пароль хранится блобом под мастер-ключом,
+ * которого у сервера нет. (До этой правки фронт его звал и получал 404 —
+ * остаток переезда выполнения в десктоп.)
+ *
+ * Путь целиком: блоб → плейнтекст → `ssh_exec` → результат. Наружу уходит
+ * только «удалось/нет» и текст для человека; про плейнтекст — в `execOnServer`.
+ */
+export async function runSshTest(server: SshTarget): Promise<SshTestResult> {
+  const [code, output] = await execOnServer(server, SSH_TEST_COMMAND, "Testing SSH");
   if (code === 0 && output.includes(SSH_TEST_MARKER)) {
     return {
       success: true,
       message: `${server.ssh_user || "root"}@${server.ip_address}:${server.ssh_port || 22} responded.`,
     };
   }
-  // Вывод показываем как есть: он от чужой машины и объясняет отказ лучше любой
-  // нашей формулировки (`ssh_exec` отдаёт и stdout, и stderr). Но с потолком:
-  // длину нам никто не обещал — при подмене команды или болтливом профиле
-  // шелла сюда приехали бы килобайты чужого текста прямо в баннер.
-  const tail = output.trim().slice(0, 300);
-  return { success: false, message: `exit ${code}${tail ? `: ${tail}` : " with no output"}` };
+  return { success: false, message: sshFailure(code, output) };
 }
 
 /**
@@ -264,11 +292,48 @@ export function useTestSsh(server: SshTarget | undefined) {
   });
 }
 
-export function useRefreshMetrics(id: number) {
+/** Сервер, с которого снимаем метрики: адрес для SSH плюс id для отправки. */
+export type MetricsTarget = SshTarget & Pick<Server, "id">;
+
+/**
+ * Снять метрики с сервера и отдать их бэкенду. ТОЛЬКО десктоп — по той же
+ * причине, что и `runSshTest`: SSH-пароль лежит блобом под мастер-ключом,
+ * которого у сервера нет. До переезда на zero-knowledge снимал сам бэкенд
+ * (`server_metrics_service.py`), после — снимать стало некому, и карточки
+ * показывают прочерки при живых колонках.
+ *
+ * Наружу из этой функции уходит только сущность сервера, вернувшаяся с
+ * бэкенда; про пароль и запрет в вебе — в `execOnServer`.
+ *
+ * Полнота снимка проверяется финальным маркером внутри `parseServerMetrics`, а
+ * НЕ кодом возврата: код принадлежит последней команде конвейера и о том,
+ * доехали ли секции, не говорит ничего (`grep` без совпадения — это 1 на вполне
+ * успешном снимке). В сообщение об отказе код всё же идёт: человеку он
+ * объясняет, что случилось, лучше нашей формулировки.
+ */
+export async function runCollectMetrics(server: MetricsTarget): Promise<Server> {
+  const [code, output] = await execOnServer(server, COLLECT_METRICS_COMMAND, "Collecting metrics");
+  const metrics = parseServerMetrics(output);
+  if (!metrics) {
+    throw new Error(`Server returned no metrics — ${sshFailure(code, output)}`);
+  }
+  return apiPost<Server>(`/servers/${server.id}/metrics`, metrics);
+}
+
+/**
+ * Аргументов у мутации нет по той же причине, что у `useTestSsh`: всё нужное
+ * замыкается на сущности сервера, а `variables` react-query переживают
+ * `reset()`. Сущность, а не id: ссылку на блоб с паролем знает только она.
+ */
+export function useRefreshMetrics(server: MetricsTarget | undefined) {
   return useMutation({
-    mutationFn: () => apiPost<Server>(`/servers/${id}/refresh-metrics`),
+    mutationFn: async (): Promise<Server> => {
+      if (!server) throw new Error("Server is still loading — try again in a moment.");
+      return runCollectMetrics(server);
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
+      // `all` = ["servers"] совпадает по префиксу и с ["servers", id], то есть
+      // накрывает и карточку, и список (см. `useInstallFastPanel`).
       queryClient.invalidateQueries({ queryKey: serversKeys.all });
     },
   });

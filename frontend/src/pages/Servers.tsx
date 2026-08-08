@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, MiniChart, genBars, cpuColor, EmptyState, ErrorState, formatUptime } from "../components/ui/Primitives";
-import { useServers, useCreateServer } from "../api/servers";
+import { Card, CHd, CTi, CBo, Btn, Sel, Inp, Modal, Badge, StatusDot, pctColor, mbToGb, EmptyState, ErrorState, formatUptime, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { useServers, useCreateServer, type Server } from "../api/servers";
 import ServerBulkImportDialog from "../components/ServerBulkImportDialog";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -10,6 +10,7 @@ import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { UNCHECKED, isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "add-server-provider-options";
@@ -321,18 +322,16 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
 
   const { data, isPending, isError, error, refetch } = useServers();
   
-  const toUiStatus = (s: any) => {
-    if (s.last_check_ok === false || s.status === "error") return "error";
-    if (s.status === "active") return "active";
-    if (s.status === "provisioned") return "provisioned";
-    return "new";
-  };
-
   // Один источник и для подсказок формы, и для списка фильтра: второй умел бы
   // разойтись с первым — предложить в форме имя, которого нет в фильтре.
   const providers = providerOptions(data?.items || []);
 
-  const servers = (data?.items || []).map((s: any) => ({
+  // Одно чтение часов на рендер — см. тот же приём на дашборде: три отдельных
+  // `Date.now()` на сервер дают три разных «сейчас», и на границе порога бейдж
+  // «active» мог бы встать рядом с подписью «· stale» про ту же отметку.
+  const now = Date.now();
+
+  const servers = (data?.items || []).map((s: Server) => ({
     id: s.id,
     name: s.name,
     ip: s.ip_address,
@@ -341,12 +340,25 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     // «Hetzner», по которому не находится ни один сервер.
     provider: s.provider?.trim() || null,
     os: s.os_pretty || s.os || null,
-    status: toUiStatus(s),
+    status: serverUiStatus(s, now),
     fastpanel: s.fastpanel_status === "installed",
     location: "-",
     uptime: formatUptime(s.uptime_seconds),
-    last_check_error: s.last_check_error || null,
+    // Ошибка проверки — ТОЛЬКО при подтверждённом падении, и гейт стоит здесь,
+    // в одном месте на оба представления. При первом промахе бэкенд пишет
+    // `last_check_error`, а `last_check_ok` оставляет `true` (падение
+    // подтверждают два промаха подряд) — тултип без этой оглядки давал зелёную
+    // карточку с текстом ошибки в подсказке.
+    check_error: s.last_check_ok === false ? s.last_check_error || null : null,
     last_check_at: s.last_check_at || null,
+    // Свежесть метрик — отдельный сигнал от свежести проверки: метрики снимает
+    // десктоп по кнопке, доступность — бэкенд по расписанию. Общая подпись на
+    // двоих означала бы, что один из них показан чужим возрастом.
+    metrics_at: s.metrics_collected_at || null,
+    stale: isMetricsStale(s.metrics_collected_at, now),
+    // У проверки свой порог: она идёт по расписанию раз в 6 часов, и молчание
+    // дольше трёх прогонов означает не «сервер жив», а «монитор молчит».
+    check_stale: isCheckStale(s.last_check_at, now),
     cpu: s.cpu_usage_pct ?? null,
     ram_used: s.ram_used_mb ?? null,
     ram_total: s.ram_total_mb ?? null,
@@ -383,7 +395,10 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
         <div style={{display:"flex",border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
           {[["grid","⊞ Grid"],["table","☰ Table"]].map(([v,l])=><button key={v} onClick={()=>setView(v)} style={{padding:"7px 14px",border:"none",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",background:view===v?"#2563eb":"#fff",color:view===v?"#fff":"#6b7280",transition:"all 0.15s"}}>{l}</button>)}
         </div>
-        <Sel value={filter} onChange={(e: any)=>setFilter(e.target.value)}>{["All","active","provisioned","new","error"].map(s=><option key={s} value={s}>Status: {s}</option>)}</Sel>
+        {/* `unchecked` — полноправный пункт: без него ни разу не проверенные
+            серверы не находятся ни одним фильтром, кроме «All», и заодно молча
+            пропадают из выборки «active», где раньше были. */}
+        <Sel value={filter} onChange={(e: any)=>setFilter(e.target.value)}>{["All","active",UNCHECKED,"provisioned","new","error"].map(s=><option key={s} value={s}>Status: {s}</option>)}</Sel>
         {/* Список — только встречающиеся имена: фиксированного перечня
             провайдеров нет, и предлагать фильтр по тому, чего в списке нет,
             значит предлагать заведомо пустой экран. `aria-label` потому, что
@@ -412,16 +427,27 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
             </div>
           ) : null}
           {filtered.map(s=>{
-            const cpuValue = s.cpu ?? 0;
-            const hasCpu = s.cpu !== null;
-            const hasDisk = s.ssd_used !== null && s.ssd_total !== null && s.ssd_total > 0;
-            const cpuData = hasCpu ? genBars(cpuValue) : [];
-            const pct = hasDisk ? (s.ssd_used / s.ssd_total) * 100 : 0;
-            const cc = cpuColor(cpuValue);
-            const statusBadgeVariant = s.status === "error" ? "red" : s.status === "new" ? "gray" : "green";
+            // Показания — в локальные `const`, и развилки «измерено / нет»
+            // проверяют именно их: сужение по вспомогательному флагу
+            // (`hasRam` и соседи) TypeScript делает только для const-переменных
+            // и readonly-полей, а поля этого объекта ни то, ни другое.
+            const { cpu, ram_used: ramUsed, ram_total: ramTotal, ssd_used: ssdUsed, ssd_total: ssdTotal } = s;
+            const hasCpu = cpu !== null;
+            const hasRam = ramUsed !== null && ramTotal !== null;
+            const hasDisk = ssdUsed !== null && ssdTotal !== null && ssdTotal > 0;
+            // Доля занятого диска — только когда её есть из чего посчитать.
+            // Прежний фолбэк `: 0` не использовался никогда: полоса рисуется
+            // ровно в той же ветке, где он и не нужен.
+            const diskPct = hasDisk ? (ssdUsed / ssdTotal) * 100 : null;
+            // Протухшее показание не прячется и не превращается в прочерк: цифра
+            // настоящая, просто старая, и позавчерашний размер диска полезнее
+            // пустоты. Но и цветом «нет данных» (`DIM_TEXT`) она не рисуется —
+            // это разные вещи. Вредна была не старая цифра, а молчание рядом с
+            // ней, поэтому под ней всегда стоит её возраст.
+            const dim = s.stale ? { color: STALE_TEXT } : null;
             return <div key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,padding:"16px 18px",cursor:"pointer",transition:"box-shadow 0.15s"}} onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"} onMouseLeave={e=>e.currentTarget.style.boxShadow="none"}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-                <div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status}/><span style={{fontSize:14,fontWeight:700,color:"#111"}} title={s.last_check_error || undefined}>{s.name}</span></div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status}/><span style={{fontSize:14,fontWeight:700,color:"#111"}} title={s.check_error || undefined}>{s.name}</span></div>
                 <span style={{fontSize:13,color:"#9ca3af"}}>⋯</span>
               </div>
               {/* Провайдер рядом с IP, а не отдельной строкой: фильтр работает и
@@ -429,18 +455,56 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
                   на экране остался. */}
               <div style={{fontSize:12,color:"#6b7280",marginBottom:10}}>{s.provider ? `${s.ip} · ${s.provider}` : s.ip}</div>
               <div style={{display:"flex",gap:6,marginBottom:12}}>{s.os ? <Badge variant="gray">{s.os}</Badge> : null}{s.fastpanel&&<Badge variant="blue">FASTPANEL</Badge>}</div>
-              {hasCpu ? <MiniChart data={cpuData} color={cc}/> : <div style={{height:36,fontSize:12,color:"#9ca3af",display:"flex",alignItems:"center"}}>No metrics yet</div>}
+              {/* «Метрик нет» — это `metrics_collected_at === null`, и только
+                  оно. Снимок, где не разобрался процент CPU, метриками быть не
+                  перестал: остальные показания в нём настоящие.
+
+                  На месте этой строки раньше был спарклайн из пятнадцати
+                  случайных столбиков вокруг текущего CPU (см. Primitives).
+                  Освободившееся место занято RAM — показанием, которое у нас
+                  действительно есть и которого на карточке не было. */}
+              {!hasCpu ? <div style={{fontSize:12,color:DIM_TEXT,marginBottom:2}}>{s.metrics_at ? "No CPU reading" : "No metrics yet"}</div> : null}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"3px 0",marginTop:10,fontSize:12.5}}>
-                <span style={{color:"#6b7280"}}>Uptime:</span><span style={{fontWeight:600,textAlign:"right"}}>{s.uptime}</span>
-                <span style={{color:"#6b7280"}}>SSD Usage</span><span style={{fontWeight:600,textAlign:"right"}}>{hasDisk ? `${s.ssd_used} GB` : "—"}</span>
-                <span style={{color:"#6b7280"}}>CPU %</span><span style={{fontWeight:600,textAlign:"right"}}>{hasCpu ? `${s.cpu}%` : "—"}</span>
+                <span style={{color:"#6b7280"}}>Uptime:</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{s.uptime}</span>
+                <span style={{color:"#6b7280"}}>RAM</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{hasRam ? `${mbToGb(ramUsed)}/${mbToGb(ramTotal)} GB` : "—"}</span>
+                <span style={{color:"#6b7280"}}>SSD Usage</span><span style={{fontWeight:600,textAlign:"right",...dim}}>{hasDisk ? `${ssdUsed} GB` : "—"}</span>
+                {/* Цвет числа — от самого числа (`pctColor`), а у протухшего снимка от
+                    его возраста: спарклайн, который раньше нёс этот сигнал, был
+                    выдумкой, а порог загрузки — нет. Считается внутри ветки: без
+                    показания цвета у него и не бывает, а `?? 0` снаружи давал
+                    синий «здоровый» оттенок величине, которой нет. */}
+                <span style={{color:"#6b7280"}}>CPU %</span><span style={{fontWeight:600,textAlign:"right",...(hasCpu ? {color:s.stale?STALE_TEXT:pctColor(cpu)} : dim)}}>{hasCpu ? `${cpu}%` : "—"}</span>
               </div>
-              {hasDisk ? <div style={{marginTop:10,height:4,background:"#f3f4f6",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:cc,borderRadius:2}}/></div> : null}
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10}}>
+              {/* Полоса заполнения диска — единственное измерение, показанное
+                  как есть. Цвет считается от НЕЁ САМОЙ: раньше он брался от
+                  загрузки CPU, то есть диск краснел от чужой величины. */}
+              {diskPct !== null ? <div style={{marginTop:10,height:4,background:"#f3f4f6",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${diskPct}%`,background:s.stale?STALE_TEXT:pctColor(diskPct),borderRadius:2}}/></div> : null}
+              {/* Возраст снимка стоит вплотную к самим показаниям, а блок
+                  доступности ниже отделён чертой: это два независимых сигнала
+                  (десктоп по кнопке против бэкенда раз в 6 часов), и подпись
+                  обязана читаться как относящаяся к своим цифрам. */}
+              {s.metrics_at ? (
+                <div title={new Date(s.metrics_at).toLocaleString()} style={{fontSize:11.5,color:s.stale?STALE_TEXT:DIM_TEXT,marginTop:8}}>Metrics: {formatAgoStale(s.metrics_at, s.stale, now)}</div>
+              ) : null}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10,paddingTop:10,borderTop:"1px solid #f3f4f6"}}>
                 <span style={{fontSize:12,color:"#6b7280"}}>Status</span>
-                <Badge variant={statusBadgeVariant}>{s.status}</Badge>
+                <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
               </div>
-              <div style={{fontSize:11.5,color:"#9ca3af",marginTop:8}}>Last check: {s.last_check_at ? new Date(s.last_check_at).toLocaleString() : "—"}</div>
+              {/* Относительное время, а не дата: «06.08.2026, 12:00» требует от
+                  читателя вычесть одно из другого, чтобы понять, свежая ли это
+                  проверка, — а вопрос ровно в этом. Точная дата осталась в
+                  подсказке. «never» словом: прочерк здесь читался бы как
+                  «данные не доехали». */}
+              <div title={s.last_check_at ? new Date(s.last_check_at).toLocaleString() : undefined} style={{fontSize:11.5,color:s.check_stale?STALE_TEXT:DIM_TEXT,marginTop:8}}>Last check: {s.last_check_at ? formatAgoStale(s.last_check_at, s.check_stale, now) : "never"}</div>
+              {/* Причина падения — строкой, а не только тултипом у имени: тултип
+                  невидим, пока в него не попали мышью, а искать упавший сервер
+                  глазами по сетке карточек надо без наведения. Тот же довод и то
+                  же решение, что у ошибки провижининга в списке доменов; полный
+                  текст остаётся в подсказке. Гейт по подтверждённому падению
+                  стоит выше, в `check_error`. */}
+              {s.check_error ? (
+                <div data-testid="check-error" title={s.check_error} style={{marginTop:4,fontSize:11.5,color:"#b91c1c",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.check_error}</div>
+              ) : null}
             </div>;
           })}
           {servers.length > 0 && filtered.length === 0 ? (
@@ -455,29 +519,45 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
               </EmptyState>
             ) : (
             <table style={{width:"100%",borderCollapse:"collapse"}}>
-              <thead><tr>{["Name","IP","Provider","OS","CPU","RAM","SSD","Uptime","FastPanel","Status"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
+              {/* «Metrics» стоит сразу за столбцами показаний, «Checked» — рядом
+                  со «Status»: колонка возраста должна читаться как относящаяся к
+                  своему сигналу, а сигналов здесь два. */}
+              <thead><tr>{["Name","IP","Provider","OS","CPU","RAM","SSD","Uptime","Metrics","FastPanel","Status","Checked"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                    <td colSpan={12} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
                       No servers match the current filters.
                     </td>
                   </tr>
                 ) : null}
-                {filtered.map(s=><tr key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
-                  <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}} title={s.last_check_error || undefined}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
+                {filtered.map(s=>{
+                  // Тот же приём, что и в карточках: протухшее показание видно,
+                  // но приглушено, и рядом стоит его возраст.
+                  const dim = s.stale ? { color: STALE_TEXT } : null;
+                  return <tr key={s.id} onClick={()=>onNav("server-detail",s.original)} style={{cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#fafbfc"} onMouseLeave={e=>e.currentTarget.style.background=""}>
+                  <td style={{padding:"12px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><StatusDot status={s.status} size={8}/><span style={{fontWeight:600,fontSize:13.5,color:"#111"}} title={s.check_error || undefined}>{s.name}</span></div><div style={{fontSize:11.5,color:"#9ca3af",paddingLeft:16}}>{s.location}</div></td>
                   <td style={{padding:"12px 16px",fontFamily:"monospace",fontSize:13}}>{s.ip}</td>
                   {/* Прочерк, а не пустая ячейка: пустая читается как «данные не
                       доехали», прочерк — как «не заполнено». Так же, как у OS. */}
                   <td style={{padding:"12px 16px",fontSize:13}}>{s.provider || <span style={{color:"#9ca3af"}}>—</span>}</td>
                   <td style={{padding:"12px 16px"}}>{s.os ? <Badge variant="gray">{s.os}</Badge> : <span style={{color:"#9ca3af"}}>—</span>}</td>
-                  <td style={{padding:"12px 16px"}}>{s.cpu !== null ? <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:55,height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.cpu}%`,background:cpuColor(s.cpu)}}/></div><span style={{fontSize:12,color:"#6b7280"}}>{s.cpu}%</span></div> : <span style={{color:"#9ca3af"}}>—</span>}</td>
-                  <td style={{padding:"12px 16px",fontSize:13}}>{s.ram_used !== null && s.ram_total !== null ? `${Math.round(s.ram_used / 1024)}/${Math.round(s.ram_total / 1024)} GB` : "—"}</td>
-                  <td style={{padding:"12px 16px",fontSize:13}}>{s.ssd_used !== null && s.ssd_total !== null ? `${s.ssd_used}/${s.ssd_total} GB` : "—"}</td>
-                  <td style={{padding:"12px 16px",fontSize:13}}>{s.uptime}</td>
+                  <td style={{padding:"12px 16px"}}>{s.cpu !== null ? <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:55,height:5,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.cpu}%`,background:s.stale?STALE_TEXT:pctColor(s.cpu)}}/></div><span style={{fontSize:12,color:"#6b7280",...dim}}>{s.cpu}%</span></div> : <span style={{color:"#9ca3af"}}>—</span>}</td>
+                  <td style={{padding:"12px 16px",fontSize:13,...dim}}>{s.ram_used !== null && s.ram_total !== null ? `${mbToGb(s.ram_used)}/${mbToGb(s.ram_total)} GB` : "—"}</td>
+                  <td style={{padding:"12px 16px",fontSize:13,...dim}}>{s.ssd_used !== null && s.ssd_total !== null ? `${s.ssd_used}/${s.ssd_total} GB` : "—"}</td>
+                  <td style={{padding:"12px 16px",fontSize:13,...dim}}>{s.uptime}</td>
+                  <td title={s.metrics_at ? new Date(s.metrics_at).toLocaleString() : undefined} style={{padding:"12px 16px",fontSize:12.5,color:s.stale?STALE_TEXT:DIM_TEXT}}>{s.metrics_at ? formatAgoStale(s.metrics_at, s.stale, now) : "—"}</td>
                   <td style={{padding:"12px 16px"}}>{s.fastpanel?<Badge variant="blue">FASTPANEL</Badge>:<Badge variant="gray">—</Badge>}</td>
-                  <td style={{padding:"12px 16px"}}><Badge variant={s.status==="error"?"red":s.status==="new"?"gray":"green"}>{s.status}</Badge></td>
-                </tr>)}
+                  <td style={{padding:"12px 16px"}}><Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge></td>
+                  {/* Причина падения — строкой, как и на карточке: подсказка у
+                      имени невидима, пока в неё не попали мышью. Стоит в колонке
+                      проверки, из которой ошибка и приехала. */}
+                  <td title={s.last_check_at ? new Date(s.last_check_at).toLocaleString() : undefined} style={{padding:"12px 16px",fontSize:12.5,color:s.check_stale?STALE_TEXT:DIM_TEXT}}>
+                    {s.last_check_at ? formatAgoStale(s.last_check_at, s.check_stale, now) : "never"}
+                    {s.check_error ? <div data-testid="check-error" title={s.check_error} style={{marginTop:2,color:"#b91c1c",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.check_error}</div> : null}
+                  </td>
+                </tr>;
+                })}
               </tbody>
             </table>
             )}

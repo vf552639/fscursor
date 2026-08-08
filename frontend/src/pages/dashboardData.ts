@@ -1,12 +1,13 @@
+import { formatUptime, mbToGb } from "../components/ui/Primitives";
 import type { Server } from "../api/servers";
 import type { AuditLogRow } from "../api/audit";
 
 /**
- * Метрики сервера. `null` — «данных нет», и это НЕ то же самое, что 0: ничего
- * в продукте эти поля пока не пишет (сборщика нет, роут refresh-metrics на
- * бэкенде отсутствует), поэтому подстановка нулей рисовала бы «здоровый
- * простаивающий сервер» там, где мы просто ничего не знаем. Рендерить `null`
- * как «—», по образцу ServerDetail.tsx.
+ * Метрики сервера. `null` — «данных нет», и это НЕ то же самое, что 0: снимает
+ * их десктоп по SSH (`runCollectMetrics`), то есть у сервера, к которому давно
+ * не подключались или у которого не разобрался вывод, полей просто нет.
+ * Подстановка нулей рисовала бы «здоровый простаивающий сервер» там, где мы
+ * ничего не знаем. Рендерить `null` как «—», по образцу ServerDetail.tsx.
  */
 export interface ServerMetrics {
   cpu: number | null;
@@ -17,14 +18,12 @@ export interface ServerMetrics {
   uptime: string | null;
 }
 
-export function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  if (days > 0) return `${days} day${days === 1 ? "" : "s"}`;
-  const hours = Math.floor(seconds / 3600);
-  return `${hours}h`;
-}
-
-const round1 = (n: number) => Math.round(n * 10) / 10;
+/*
+ * Здесь жила вторая реализация `formatUptime` — «3 days» / «23h» против плотной
+ * «3d 0h» из `Primitives`. Две записи одного числа на двух экранах читаются как
+ * два разных числа, поэтому обе функции показа (аптайм и МБ→ГБ) переехали в
+ * `Primitives` — туда, где живут остальные форматтеры продукта.
+ */
 
 const mapNum = <T>(v: number | null | undefined, f: (n: number) => T): T | null =>
   v === null || v === undefined ? null : f(v);
@@ -32,8 +31,8 @@ const mapNum = <T>(v: number | null | undefined, f: (n: number) => T): T | null 
 export function serverMetrics(s: Server): ServerMetrics {
   return {
     cpu: mapNum(s.cpu_usage_pct, Math.round),
-    ramUsed: mapNum(s.ram_used_mb, (n) => round1(n / 1024)),
-    ramTotal: mapNum(s.ram_total_mb, (n) => round1(n / 1024)),
+    ramUsed: mapNum(s.ram_used_mb, mbToGb),
+    ramTotal: mapNum(s.ram_total_mb, mbToGb),
     ssdUsed: mapNum(s.disk_used_gb, Math.round),
     ssdTotal: mapNum(s.disk_total_gb, Math.round),
     uptime: mapNum(s.uptime_seconds, formatUptime),

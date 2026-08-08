@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { serverMetrics, formatUptime, auditRowToActivity, ACTION_LABELS, isSslExpiringSoon } from "./dashboardData";
+import { serverMetrics, auditRowToActivity, ACTION_LABELS, isSslExpiringSoon } from "./dashboardData";
 
 describe("serverMetrics", () => {
   it("maps real server fields instead of zeros", () => {
@@ -15,11 +15,11 @@ describe("serverMetrics", () => {
     expect(m.ramUsed).toBe(2);
     expect(m.ramTotal).toBe(4);
     expect(m.ssdUsed).toBe(10);
-    expect(m.uptime).toBe("2 days");
+    expect(m.uptime).toBe("2d 0h");
   });
 
-  // Ноль здесь врал бы: метрики никто не собирает, и "CPU 0% · 0h" читается
-  // как здоровый простаивающий сервер вместо "данных нет".
+  // Ноль здесь врал бы: метрики никто не собирает, и "CPU 0%" рядом с нулевым
+  // аптаймом читается как здоровый простаивающий сервер вместо "данных нет".
   it("keeps missing metrics absent instead of inventing zeros", () => {
     const m = serverMetrics({} as any);
     expect(m.cpu).toBeNull();
@@ -34,7 +34,9 @@ describe("serverMetrics", () => {
     const m = serverMetrics({ cpu_usage_pct: 0, disk_used_gb: 0, uptime_seconds: 0 } as any);
     expect(m.cpu).toBe(0);
     expect(m.ssdUsed).toBe(0);
-    expect(m.uptime).toBe("0h");
+    // Настоящий ноль остаётся показанием («только что поднялся»), а не
+    // становится прочерком: прочерк здесь означает «не знаем».
+    expect(m.uptime).toBe("<1m");
   });
 
   it("maps ssdTotal from disk_total_gb", () => {
@@ -66,25 +68,9 @@ describe("serverMetrics", () => {
   });
 });
 
-describe("formatUptime", () => {
-  it("uses days when >= 1 day, hours otherwise", () => {
-    expect(formatUptime(86400)).toBe("1 day");
-    expect(formatUptime(3600)).toBe("1h");
-  });
-
-  it("is singular for exactly one day and plural for two", () => {
-    expect(formatUptime(86400)).toBe("1 day");
-    expect(formatUptime(172800)).toBe("2 days");
-  });
-
-  it("falls back to hours just below the one-day boundary", () => {
-    expect(formatUptime(86399)).toBe("23h");
-  });
-
-  it("returns 0h for zero seconds", () => {
-    expect(formatUptime(0)).toBe("0h");
-  });
-});
+// Своей реализации `formatUptime` у дашборда больше нет — она была второй
+// записью того же числа («2 days» против «2d 0h»). Границы и «данных нет»
+// проверяются там, где функция теперь живёт: `Primitives.uptime.test.ts`.
 
 describe("auditRowToActivity", () => {
   it("labels a known action and picks the type icon", () => {

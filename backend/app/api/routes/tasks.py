@@ -9,11 +9,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user_or_401
 from app.auth.models import User
+from app.core.constants import TaskLogStatus
 from app.core.database import AsyncSessionLocal, get_db
 from app.models.task_log import TaskLog
 from app.schemas.task import TaskLogResponse
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
+
+# Статусы, на которых SSE-поток закрывается: всё, что не «ещё выполняется».
+#
+# Множество выводится ВЫЧИТАНИЕМ из перечисления, а не перечисляется руками, и
+# это ровно тот случай, ради которого: `partial` завели в `TaskLogStatus`,
+# показали на странице Activity — и сюда не донесли. Задача в этом статусе не
+# завершала поток никогда: цикл ниже крутил `sleep(0.5)` до отключения клиента,
+# открывая на каждом тике сессию к БД. Новый терминальный статус теперь
+# попадает сюда сам, а вот новый статус «в работе» придётся дописать в
+# исключения — и это заметно, потому что поток по нему сразу оборвётся.
+#
+# Значения, а не члены enum: `status` в БД — обычная строка, а `hash` у члена
+# `Enum` считается по имени (`"SUCCESS"`), и проверка `"success" in {...}` на
+# множестве членов молча давала бы False.
+TERMINAL_TASK_STATUSES = frozenset(
+    s.value for s in TaskLogStatus if s not in (TaskLogStatus.PENDING, TaskLogStatus.RUNNING)
+)
 
 
 @router.get("", response_model=List[TaskLogResponse])
@@ -63,7 +81,7 @@ async def stream_task(task_id: int, user: User = Depends(get_current_user_or_401
             if current_log != last_log:
                 last_log = current_log
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            if task.status in {"success", "failed"}:
+            if task.status in TERMINAL_TASK_STATUSES:
                 break
             await asyncio.sleep(0.5)
 

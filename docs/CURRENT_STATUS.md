@@ -18,7 +18,7 @@
   - **FastPanel client (SSH/CLI):** added `create_database`, `revoke_ssl_certificate`, `read_ssl_info_via_ssh`, `read_nginx_override`, `apply_nginx_override`.
   - **Domain APIs:** added endpoints for create-site (`site_only` mode), create-db, db-credentials, ssl-request/cancel/refresh, nginx override get/set, and `bulk-full-setup`. (`mark-ns-set` и `check-ns` были в этом списке ошибочно — роутов под них нет; звавшие их кнопки удалены в спринте 3, фаза 5.)
   - **Celery tasks:** added `create_db`, `request_ssl`, `revoke_ssl`, `nginx_override`, `check_ns` (registrar API with DNS fallback), `refresh_ssl`/`refresh_ssl_all`, and `bulk_full_setup`.
-  - **Schedulers:** beat now includes daily SSL metadata refresh task (`03:00 UTC`) via `app.tasks.domain.refresh_ssl_all`.
+  - **Schedulers:** beat now includes daily SSL metadata refresh task (`03:00 UTC`) via `app.tasks.domain.refresh_ssl_all`. (**Gone:** neither the task module nor the Beat entry exists; `beat_schedule` holds only the renewal check and the 6-hourly server reachability probe.)
   - **Registrars:** `BaseRegistrarService` now includes `get_nameservers`; implemented for Namecheap (`domains.getInfo`) and Hostiq (`GET /domains/{domain}`).
   - **Domains UI:** new `DomainDetailModal` tabs (Overview/DB/SSL/Nginx/NS), expanded bulk toolbar actions (Refresh SSL, Check NS, Mark NS Set), and `BulkSetupWizard` + multi-task progress modal for full setup runs.
   - **Tests:** expanded `test_fastpanel_client.py` with new function coverage and added `test_bulk_full_setup_task.py`; sync regression tests remain green.
@@ -32,9 +32,9 @@
 - 2026-04-29 (**task26 + task27**): Servers telemetry refresh and FastPanel domains sync delivered.
   - New migration: `008_server_metrics` (CPU/RAM/disk/network, OS/kernel, FastPanel version/port, metrics timestamp fields on `servers`).
   - Backend:
-    - `server_metrics_service.collect_metrics()` reads system telemetry over SSH in one pass and persists health/error state.
-    - `POST /api/servers/{id}/refresh-metrics` added; `refresh-uptime` kept as compatibility alias to the same metrics path.
-    - Celery tasks switched to `check_server_metrics` / `check_all_servers_metrics`; Beat schedule now runs every 5 minutes.
+    - `server_metrics_service.collect_metrics()` reads system telemetry over SSH in one pass and persists health/error state. (**Removed** with the zero-knowledge migration: the SSH password is an opaque blob and the backend has no key. Metrics are now collected by the desktop and posted to the backend — see `docs/ARCHITECTURE.md` § Server metrics flow.)
+    - `POST /api/servers/{id}/refresh-metrics` added; `refresh-uptime` kept as compatibility alias to the same metrics path. (**Neither route exists any more.** The only metrics route today is `POST /api/servers/{id}/metrics`, which *receives* a snapshot from the desktop.)
+    - Celery tasks switched to `check_server_metrics` / `check_all_servers_metrics`; Beat schedule now runs every 5 minutes. (**Superseded 2026-08-06:** the backend metrics sweep is gone; Beat now runs `app.tasks.server_monitor.check_server_reachability` — a credential-free TCP probe of port 22 — every 6 hours.)
     - FastPanel domain sync path added: `list_sites()` (JSON/table/filesystem fallback), `fetch_and_persist_domains()`, and `POST /api/servers/{id}/sync-domains`.
     - Auto-sync hooks:
       - after successful FastPanel install task;
@@ -93,9 +93,10 @@
   - Initial uptime flow:
     - `server_service.fetch_and_persist_uptime()` reads `/proc/uptime` over SSH and persists success/error state.
     - auto-trigger on `POST /api/servers` when SSH password is provided.
-    - on-demand endpoint `POST /api/servers/{id}/refresh-uptime` (now routed to full metrics collector).
-    - Celery tasks `app.tasks.server_health.check_server_uptime` and `check_all_servers_uptime` (now superseded by `check_server_metrics` and `check_all_servers_metrics`).
-    - Beat schedule `check-servers-uptime` every 15 minutes (now `check-servers-metrics` every 5 minutes).
+    - on-demand endpoint `POST /api/servers/{id}/refresh-uptime` (later routed to the full metrics collector; **no longer exists**).
+    - Celery tasks `app.tasks.server_health.check_server_uptime` and `check_all_servers_uptime` (superseded by `check_server_metrics` / `check_all_servers_metrics`, and those in turn by `app.tasks.server_monitor.check_server_reachability`).
+    - Beat schedule `check-servers-uptime` every 15 minutes → `check-servers-metrics` every 5 minutes → **today `check-server-reachability-6h`, every 6 hours** (`app/core/celery_app.py`).
+  - Note (2026-08-06): the `last_check_*` fields survived all of this, but their writer and meaning changed. They are now filled by a TCP probe of `ip_address:ssh_port`, and `last_check_ok = false` means a **confirmed** outage — two misses in a row (`consecutive_failures`, migration `016_server_consecutive_failures`). They are one of **two independent signals** about a server; the other is the desktop-collected metrics snapshot. See `docs/ARCHITECTURE.md` § Server signals.
   - Frontend:
     - `Servers` page uses real `uptime_seconds` formatting (no more hardcoded `0 days`).
     - `ServerDetail` shows uptime in header/info, adds `Refresh Uptime`, and renders a failure banner when `last_check_ok=false`.

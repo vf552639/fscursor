@@ -14,7 +14,7 @@ SDMP is an internal panel for centralized management of servers and domains with
    - CRUD for servers
    - FastPanel connection/install lifecycle
    - SSH-related setup flow and status tracking
-   - Persisted server telemetry checks over SSH (CPU/RAM/disk/network/uptime/OS/kernel/FastPanel version) with manual refresh and periodic scheduling
+   - Persisted server telemetry checks over SSH (CPU/RAM/disk/network/uptime/OS/kernel/FastPanel version) with manual refresh and periodic scheduling. **Superseded 2026-08-06:** the backend no longer runs SSH at all. Metrics are collected by the desktop and posted to `POST /api/servers/{id}/metrics`, while availability is a separate credential-free TCP probe run by Beat every 6 hours — two independent signals, see `docs/ARCHITECTURE.md` § Server signals
    - Server status lifecycle (`new` / `provisioned` / `active` / `error`) driven by health checks
    - File-based bulk import (`csv`/`xlsx`): `POST /api/servers/bulk-import`, row-level errors via `GET /api/servers/bulk-import-errors/{token}`; UI entry on the Servers page (`⇪ Import`)
 2. **Domains**
@@ -52,7 +52,7 @@ SDMP is an internal panel for centralized management of servers and domains with
    - Edit/delete flows connected in UI tables
 5. **Task Processing**
    - Celery worker for async jobs
-   - Celery Beat for periodic jobs (daily renewal check + 5-minute server metrics checks + daily SSL metadata refresh at `03:00 UTC`)
+   - Celery Beat for periodic jobs. **Today (`app/core/celery_app.py`) exactly two:** daily renewal check at `09:00 UTC` and `check-server-reachability-6h` every 6 hours. The 5-minute server metrics sweep and the `03:00 UTC` SSL metadata refresh no longer exist
    - Task audit logs in database
    - Task live log streaming endpoint (SSE) for progress UI
 6. **Navigation & Settings**
@@ -70,7 +70,7 @@ SDMP is an internal panel for centralized management of servers and domains with
 - Local postgres compose service was intentionally removed; backend DB connection is driven by `SUPABASE_DB_URL`.
 - Backend DSN is expected in async form (`postgresql+asyncpg://...`) to match SQLAlchemy async engine setup.
 - Backend container startup applies migrations automatically via `backend/entrypoint.sh`: optional `alembic_version` column widen, **wait-for-db** (asyncpg ping, ~60 s max), then `alembic upgrade head` before app start.
-- API startup validates `alembic_version` against `EXPECTED_ALEMBIC_HEAD` in `main.py` (must match the latest Alembic head, currently `010_domain_extras`); **transient** DB read failures are retried in lifespan before failing (revision mismatch still fails immediately).
+- API startup validates `alembic_version` against `EXPECTED_ALEMBIC_HEAD` in `main.py` (must match the latest Alembic head, currently `016_server_consecutive_failures`); **transient** DB read failures are retried in lifespan before failing (revision mismatch still fails immediately).
 - `worker` and `beat` containers run with overridden empty entrypoint so migrations are executed only by `backend`.
 - Runtime requires env contract parity with backend settings (`SUPABASE_*`, Redis/Celery URLs, encryption/secret keys, CORS/API prefix). Optional keys used by newer features: `RAPIDAPI_KEY` (temp-mail API), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, plus tunables such as `LOG_LEVEL`, `SSH_CONNECT_TIMEOUT`, `DNS_PRECHECK_*`, `DEFAULT_PHP_VERSION` (all optional with defaults in `Settings`).
 - Operational details for Supabase URLs, pooler ports, Docker checks, and MCP vs app connectivity: [`SUPABASE_DOCKER.md`](SUPABASE_DOCKER.md).
