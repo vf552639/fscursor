@@ -28,17 +28,21 @@
 """
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from celery import Celery
 from celery.schedules import crontab
+from kombu.exceptions import OperationalError
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy import func, select, text
 
 from app.api.routes.tasks import TERMINAL_TASK_STATUSES
 from app.auth.models import SyncState, User
+from app.core import celery_app as celery_app_module
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
 from app.models.notification import Notification
@@ -142,7 +146,7 @@ class _World:
                 self.ownerless_server_ids.append(server.id)
             return server.id
 
-    async def run(self, probe) -> dict[str, int]:
+    async def run(self, probe, owners: list[uuid.UUID] = None) -> dict[str, int]:
         """Прогон, суженный до серверов этого теста.
 
         Единственная точка запуска в файле — намеренно. Задача по построению
@@ -151,15 +155,23 @@ class _World:
         машинам и рассылает их владельцам уведомления. Такое уже случилось,
         и лечится оно тем, что забыть фильтр негде.
 
+        `owners` позволяет сузить прогон ЕЩЁ, до части своих же пользователей —
+        это нужно тесту про само сужение. Расширить им область нельзя: список
+        сверяется с теми, кого тест завёл, и посторонний владелец в нём —
+        падение. Так вторая дверь остаётся дверью, а не дырой.
+
         Заглушка проверяется типом, а не на слово: сырая функция вида «просто
         верни True» отчиталась бы «жив» о любом сервере, до которого прогон
         дотянулся, — то есть сняла бы второй рубеж (см. шапку файла) заодно с
         первым.
         """
         assert isinstance(probe, _Probe), "в прогон уехала заглушка мимо _Probe"
-        return await server_monitor_task._monitor_servers(
-            probe=probe, user_ids=[self.user_id, *self.extra_user_ids]
+        mine = [self.user_id, *self.extra_user_ids]
+        scope = mine if owners is None else owners
+        assert scope and set(scope) <= set(mine), (
+            "прогон сужен до владельцев, которых этот тест не заводил"
         )
+        return await server_monitor_task._monitor_servers(probe=probe, user_ids=scope)
 
     async def reload(self, server_id: int) -> Server:
         async with AsyncSessionLocal() as session:
@@ -669,6 +681,40 @@ async def test_the_selection_takes_owned_servers_and_only_the_asked_owners(
     assert [t[0] for t in mine] == [owned_id], "фильтр по владельцу пропустил чужие строки"
 
 
+async def test_a_scoped_run_leaves_the_other_owners_servers_alone(world):
+    """Сужение по владельцу доходит до конца: чужой сервер не опрошен и не тронут.
+
+    Так задачу зовёт заведение сервера — с одним владельцем в аргументе. Если
+    сужение теряется где-нибудь по дороге (задача разобрала аргумент, но не
+    донесла его до выборки), в продакшене каждое добавление сервера
+    превращалось бы в опрос всего парка всех пользователей, а в общей с dev
+    базе — ещё и в «упал» живым чужим машинам.
+
+    Чужому хосту здесь намеренно задан нормальный исход `(True, None)`, а не
+    оставлен без ответа: заглушка на незнакомом хосте бросает (второй рубеж из
+    шапки файла), и тест зеленел бы от неё, а не от фильтра. Предметом должен
+    быть фильтр, поэтому второй рубеж на этот один хост снят, и всё держится на
+    первом.
+    """
+    outsider = await world.another_user()
+    mine, his = _host(), _host()
+    mine_id = await world.server(mine, last_check_ok=True)
+    his_id = await world.server(his, owner_id=outsider, last_check_ok=True)
+    probe = _Probe({mine: (True, None), his: (True, None)})
+
+    stats = await world.run(probe=probe, owners=[world.user_id])
+
+    assert probe.asked_hosts == [mine], f"опрошены лишние хосты: {probe.asked_hosts}"
+    assert stats["checked"] == 1
+    assert (await world.reload(mine_id)).last_check_at is not None
+    untouched = await world.reload(his_id)
+    assert untouched.last_check_at is None, "чужому серверу записали чужую проверку"
+    assert untouched.sync_version == 0
+    assert [log.user_id for log in await world.logs()] == [world.user_id], (
+        "постороннему владельцу написали строку журнала о прогоне, которого он не просил"
+    )
+
+
 async def test_the_real_run_probes_in_parallel_too(world):
     """Веер включён в самом прогоне, а не только в `_probe_all`.
 
@@ -966,3 +1012,77 @@ def test_task_is_registered_and_scheduled_every_six_hours():
     assert entry["task"] in celery_app.tasks, f"в расписании имя-призрак: {entry['task']}"
     assert entry["task"] == server_monitor_task.check_server_reachability.name
     assert entry["schedule"] == crontab(minute=0, hour="*/6")
+
+
+def test_the_task_takes_owners_as_json_strings_and_parses_them(monkeypatch):
+    """Владельцы приезжают в задачу строками, а в выборку — уже как `UUID`.
+
+    Брокер настроен на `task_serializer="json"`, и `uuid.UUID` в аргументах
+    задачу до очереди попросту не довёз бы. Обратная сторона — строка, дошедшая
+    до `WHERE user_id IN (…)` без разбора: тип аргумента здесь и есть предмет,
+    и проверяется он на границе задачи, потому что дальше по коду его уже никто
+    не проверяет.
+
+    Заодно фиксируется, что вызов без аргумента остаётся прогоном по всему
+    парку: так задачу зовут расписание и сигнал старта воркера, и подмена
+    `None` на пустой список тихо превратила бы их в прогон ни по кому.
+    """
+    seen: list = []
+
+    async def _fake_run(*, probe=None, user_ids=None):
+        seen.append(user_ids)
+        return {"checked": 0}
+
+    monkeypatch.setattr(server_monitor_task, "_monitor_servers", _fake_run)
+    owner = uuid.uuid4()
+
+    server_monitor_task.check_server_reachability([str(owner)])
+    server_monitor_task.check_server_reachability()
+
+    assert seen == [[owner], None], f"аргумент доехал до выборки как {seen}"
+
+
+def test_worker_start_rechecks_the_whole_fleet(published_tasks):
+    """Старт воркера ставит прогон — по всему парку и по существующему имени.
+
+    Дыра, ради которой сигнал заведён, реальная: расписание бьёт по слотам
+    00/06/12/18 UTC, воркер поднялся в 06:09 и промахнулся мимо слота на девять
+    минут — в БД у всех серверов остался `last_check_at = NULL` до полудня.
+
+    Проверять «сигнал подключён, потому что мы его подключили» смысла нет,
+    поэтому предмет тут другой и падает он по-настоящему: имя задачи (константа
+    могла бы разъехаться с реестром Celery, и тогда сигнал стал бы беззвучным
+    no-op) и отсутствие сужения (сузить прогон по владельцу означало бы после
+    деплоя переопросить чей-то один парк вместо всех).
+    """
+    celery_app_module.recheck_the_fleet_on_worker_start(sender="worker@test")
+
+    assert len(published_tasks) == 1, f"опубликовано не одно: {published_tasks}"
+    published = published_tasks[0]
+    assert published.name in celery_app.tasks, f"сигнал зовёт имя-призрак: {published.name}"
+    assert published.name == server_monitor_task.check_server_reachability.name
+    assert published.args == () and published.kwargs == {}, (
+        "прогон после деплоя сужен — часть парка останется непроверенной"
+    )
+
+
+def test_a_dead_broker_at_worker_start_does_not_stop_the_worker(monkeypatch, app_log):
+    """Брокер не принял прогон на старте — воркер всё равно поднимается.
+
+    Сигнал выполняется внутри загрузки воркера, и исключение отсюда уронило бы
+    сам воркер. Размен очевиден: без прогона на старте парк дождётся ближайшего
+    слота, без воркера не работает вообще ничего — включая расписание.
+    """
+
+    def _broker_is_down(self, name, *args, **kwargs):
+        raise OperationalError("Redis не отвечает")
+
+    monkeypatch.setattr(Celery, "send_task", _broker_is_down)
+
+    # Не должно бросить: исключение отсюда — это упавший воркер.
+    celery_app_module.recheck_the_fleet_on_worker_start(sender="worker@test")
+
+    assert any(
+        rec.levelno == logging.WARNING and rec.name == celery_app_module.__name__
+        for rec in app_log.records
+    ), "провал публикации прошёл бесследно — «мониторинг молчит» не отличить от «брокер лёг»"

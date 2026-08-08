@@ -243,7 +243,10 @@ async def process_server_bulk_import(
                 ssh_port=item.ssh_port,
                 provider=item.provider,
             )
-            await server_service.create(db, payload, user_id)
+            # `check_now=False` — проверка ставится одна на всю пачку, после
+            # цикла: на каждую строку это был бы отдельный прогон по всему
+            # парку этого пользователя, то есть N прогонов по N серверов.
+            await server_service.create(db, payload, user_id, check_now=False)
             existing_ips.add(item.ip)
             created += 1
         except ValidationError as exc:
@@ -260,6 +263,11 @@ async def process_server_bulk_import(
         except Exception as exc:
             skipped += 1
             errors.append(ServerBulkImportError(row=item.row, server=item.name, reason=f"{type(exc).__name__}: {exc}"))
+
+    if created:
+        # Одна проверка на всю пачку: импортированные серверы получают статус
+        # за секунды, а не к следующему слоту расписания.
+        await server_service.enqueue_reachability_check(user_id)
 
     csv_url = None
     if errors:

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
@@ -9,6 +11,9 @@ from app.core.constants import FastPanelStatus, ServerStatus
 from app.models.server import Server
 from app.schemas.server import ServerCreate, ServerMetricsIn, ServerUpdate
 from app.sync.service import touch_entity_sync
+from app.tasks.server_monitor_task import check_server_reachability
+
+logger = logging.getLogger(__name__)
 
 
 async def get_all(db: AsyncSession, user_id: UUID) -> tuple[list[Server], int]:
@@ -29,7 +34,65 @@ async def get_by_id(db: AsyncSession, server_id: int, user_id: UUID) -> Optional
     return server
 
 
-async def create(db: AsyncSession, data: ServerCreate, user_id: UUID) -> Server:
+def _publish_reachability_check(user_id: UUID) -> None:
+    """Опубликовать задачу мониторинга — так, чтобы её провал никого не задел.
+
+    `retry=False` отключает штатный `task_publish_retry` (по умолчанию три
+    попытки): здесь публикация — удобство, и растягивать её отказ на несколько
+    таймаутов подключения к брокеру не за что. Верхняя граница ожидания
+    остаётся за `broker_connection_timeout` — одна попытка, а не три.
+
+    Исключение наружу не выпускается вовсе. Постановка проверки не входит в
+    контракт создания сервера: с мёртвым Redis сервер обязан создаться и
+    вернуть 201, а статуса человек дождётся на ближайшем прогоне по расписанию.
+    Но и молчать нельзя — иначе «мониторинг не сработал» никак не отличить от
+    «брокер лежит вторые сутки», поэтому провал уходит в лог предупреждением с
+    трейсом.
+    """
+    try:
+        check_server_reachability.apply_async(
+            kwargs={"user_ids": [str(user_id)]},
+            retry=False,
+        )
+    except Exception:
+        logger.warning(
+            "server_service: немедленная проверка серверов владельца %s не поставлена "
+            "в очередь — статус появится на ближайшем прогоне по расписанию",
+            user_id,
+            exc_info=True,
+        )
+
+
+async def enqueue_reachability_check(user_id: UUID) -> None:
+    """Поставить немедленную проверку доступности серверов этого владельца.
+
+    Зачем вообще: расписание бьёт по слотам 00/06/12/18 UTC, и сервер, заведённый
+    в 06:05, до полудня стоял бы с `unchecked` и «Last check: never». Проверка
+    занимает секунды — держать в незнании шесть часов незачем.
+
+    Прогон сужен до владельца новой строки. Задача по умолчанию берёт ВСЕ
+    серверы всех пользователей, и чужой парк к чужому событию отношения не
+    имеет (разбор — в `_load_targets`); заодно это единственное, что делает
+    вызов безопасным в общей с dev-окружением базе.
+
+    Публикация уезжает в поток, потому что kombu пишет в брокер синхронно.
+    Прямой вызов из корутины на мёртвом Redis подвесил бы весь event loop на
+    таймаут подключения — то есть один недоступный брокер тормозил бы не запрос
+    создания сервера, а вообще все запросы процесса.
+    """
+    await asyncio.to_thread(_publish_reachability_check, user_id)
+
+
+async def create(
+    db: AsyncSession, data: ServerCreate, user_id: UUID, *, check_now: bool = True
+) -> Server:
+    """Завести сервер и (по умолчанию) сразу поставить ему проверку доступности.
+
+    `check_now=False` нужен пакетному импорту: он зовёт `create` в цикле, и
+    задача на каждую строку означала бы сотню прогонов по одному и тому же
+    парку — сотню лишних вееров сокетов и сотню претендентов на `FOR UPDATE`
+    по одной строке `sync_state`. Импорт ставит одну проверку на всю пачку сам.
+    """
     payload = data.model_dump(
         exclude={"ssh_password_blob_id", "fastpanel_password_blob_id"},
     )
@@ -42,6 +105,11 @@ async def create(db: AsyncSession, data: ServerCreate, user_id: UUID) -> Server:
     db.add(server)
     await db.commit()
     await db.refresh(server)
+    # Строго после коммита: задача читает сервер из своей сессии и не увидела
+    # бы его, встань она в очередь раньше, — быстрый воркер успел бы отработать
+    # по ещё не существующей строке.
+    if check_now:
+        await enqueue_reachability_check(user_id)
     return server
 
 

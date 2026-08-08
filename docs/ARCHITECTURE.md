@@ -36,6 +36,7 @@ Notes:
   - Scheduled tasks via Beat — `app/core/celery_app.py` holds exactly two entries:
     - `check-domain-renewals-daily` → `app.tasks.renewal.check_domain_renewals`, daily at `09:00 UTC`;
     - `check-server-reachability-6h` → `app.tasks.server_monitor.check_server_reachability`, `crontab(minute=0, hour="*/6")`.
+  - The reachability task is also fired **outside the schedule**, by the same two-parameter task (no second task exists): on worker start (`celeryd_after_setup` in `celery_app.py`, whole fleet) and on server creation / bulk import (`server_service`, scoped to that owner via `user_ids`). Both are conveniences — a failed publish is logged as a warning and never propagates to the HTTP response or the worker boot.
   - There is **no** server metrics sweep on the backend — see § Server signals below.
   - `TaskLogStatus` (`app/core/constants.py`) is `pending / running / success / failed / partial`. **`partial`** is for batch runs that finished but did not process every entity — the normal degraded outcome of server monitoring, which neither `success` nor `failed` describes.
 - **Provisioning flow:**
@@ -84,7 +85,7 @@ Notes:
   Both thresholds live in `frontend/src/lib/serverStatus.ts` (`CHECK_STALE_MS`, `METRICS_STALE_MS`).
 
 - **Server reachability monitoring flow** (`app/services/server_monitor.py` + `app/tasks/server_monitor_task.py`):
-  1. Beat fires `app.tasks.server_monitor.check_server_reachability`; targets are `(id, ip_address, ssh_port)` of servers that have an owner. A row with `user_id = NULL` is skipped before the probe — there is nobody to notify and no `sync_state` to bump.
+  1. Beat fires `app.tasks.server_monitor.check_server_reachability`; targets are `(id, ip_address, ssh_port)` of servers that have an owner. A row with `user_id = NULL` is skipped before the probe — there is nobody to notify and no `sync_state` to bump. The optional `user_ids` argument narrows the selection to the listed owners (JSON strings, parsed to `UUID` inside the task, because the broker is `task_serializer="json"`); creating a server passes its owner so one new row does not trigger a sweep of everyone's fleet.
   2. **Probe fan-out.** `probe()` is pure network and never touches the DB; it is run under `asyncio.Semaphore(20)`. One probe is a TCP connect with a 5 s timeout plus a single retry after 2 s, so a silent host costs up to 12 s — a sequential pass over hundreds of servers would not fit `task_soft_time_limit`. The DB session is deliberately closed for the whole probe phase: keeping it open would mean an `idle in transaction` connection held through minutes of network waits, which through the Supabase pooler is an occupied upstream connection.
   3. **Write-back is sequential** — one commit per server, in a single session — and deliberately not fanned out: `touch_entity_sync` takes `SELECT … FOR UPDATE` on the owner's `sync_state` row (parallel sessions of one owner would contend on it), and `apply_check_result` commits inside itself and then makes outbound HTTP calls (webhook / Telegram), so such a commit in a shared session would drag half-written neighbours into the DB.
   4. Each row is re-read before writing, and the probed address is compared with the stored one: an address edited during the probe makes the result stale and it is discarded.
