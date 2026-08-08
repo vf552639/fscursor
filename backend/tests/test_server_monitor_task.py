@@ -833,6 +833,68 @@ async def test_a_result_for_a_changed_address_is_thrown_away(world):
     assert await world.notifications() == []
 
 
+async def test_a_run_that_checked_nothing_at_all_fails_loudly(world):
+    """Не выжила ни одна цель — задача обязана покраснеть, а не отчитаться успехом.
+
+    Это тест не про мониторинг, а про его наблюдаемость, и написан он по следам
+    настоящей поломки. Реестр моделей в воркере был неполон, запись падала
+    `NoReferencedTableError` на КАЖДОМ сервере, итог прогона был
+    «checked 0, failed 6» — и задача при этом рапортовала `succeeded`, потому
+    что изоляция сбоев по построению не даёт одному серверу уронить остальных.
+    Когда падают все, эта же изоляция превращается в зелёный отчёт ни о чём.
+    Ошибки лежали в логах воркера месяцами, и никто не смотрел: смотреть
+    начинают, когда что-нибудь краснеет.
+
+    Проверяется весь путь наружу, а не только исключение: строка журнала
+    человеку обязана быть записана ДО того, как задача упадёт, иначе он
+    останется вообще без объяснений — и на его экране, и в Activity.
+    """
+    first, second = _host(), _host()
+    await world.server(first, last_check_ok=True)
+    await world.server(second, last_check_ok=True)
+    probe = _Probe({first: RuntimeError("реестр неполон"), second: RuntimeError("реестр неполон")})
+
+    with pytest.raises(server_monitor_task.ServerMonitorRunFailed) as failure:
+        await world.run(probe=probe)
+
+    assert "2" in str(failure.value), f"по тексту не понять масштаб: {failure.value}"
+    assert "RuntimeError" in str(failure.value), "в тексте нет причины, ради которой всё затевалось"
+
+    log = (await world.logs())[0]
+    assert log.status == "partial", "журнал не записан до падения — человек остался без объяснений"
+    assert "0 down, 0 up" in log.log_text and "2 not checked" in log.log_text
+
+
+async def test_a_run_where_nothing_was_checked_but_nothing_broke_stays_quiet(world):
+    """Проверять было нечего — это не провал задачи, и краснеть не о чем.
+
+    Обратная сторона теста выше, и без неё он опасен: `failed` растёт и от
+    безобидных гонок. Здесь единственному серверу меняют адрес прямо во время
+    опроса — результат протухает и не применяется, `checked` остаётся нулём.
+    Система отработала ровно правильно, записывать было нечего, и красная задача
+    здесь была бы ложной тревогой — той самой, из-за которой через месяц
+    перестают читать любые.
+
+    Отличает случаи не счётчик, а наличие настоящей ошибки: гонки в `errors`
+    ничего не кладут, исключения кладут.
+    """
+    typo_host, fixed_host = _host(), _host()
+    server_id = await world.server(typo_host, last_check_ok=True)
+
+    async def _fix_the_address_mid_probe():
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                sa_update(Server).where(Server.id == server_id).values(ip_address=fixed_host)
+            )
+            await session.commit()
+        return False, "nodename nor servname provided"
+
+    # Не должно бросить: провал без единой ошибки — это не провал.
+    stats = await world.run(probe=_Probe({typo_host: _fix_the_address_mid_probe}))
+
+    assert stats["checked"] == 0 and stats["failed"] == 1
+
+
 async def test_a_server_deleted_between_the_phases_is_counted_as_not_checked(world):
     """Сервер, удалённый во время опроса, не пропадает из статистики молча.
 
