@@ -40,7 +40,7 @@ from celery.app.task import Task
 from httpx import ASGITransport, AsyncClient
 from kombu.exceptions import OperationalError
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from app.auth.models import User
 from app.core.database import AsyncSessionLocal
@@ -269,6 +269,60 @@ async def test_a_bulk_import_queues_one_check_for_the_whole_batch(published_task
         f"импорт трёх строк поставил {len(published_tasks)} прогонов вместо одного"
     )
     assert published_tasks[0].kwargs == {"user_ids": [str(user_id)]}
+
+
+async def test_a_db_error_mid_batch_still_yields_a_partial_report(published_tasks, monkeypatch):
+    """Ошибка БД на одной строке не превращает частичный успех в 500.
+
+    Импорт по построению переживает плохую строку: считает её в `skipped`,
+    пишет причину в отчёт и идёт дальше. Но у ошибки **уровня БД** есть
+    последствие, которого нет у ошибки валидации: сессия остаётся в состоянии
+    «нужен откат», и следующий же `commit()` бросит `PendingRollbackError`.
+    Пока после цикла ничего не коммитилось, это никого не задевало; с
+    появлением коммита перед постановкой проверки пачка, создавшая часть
+    серверов, стала отвечать 500 вместо отчёта — то есть человек терял и
+    результат, и список причин.
+
+    Ошибка здесь настоящая, а не подделанное исключение: строка-ловушка ходит в
+    БД за несуществующей таблицей, и сессия помечается ровно так, как пометил бы
+    её любой отказ драйвера. Подделка `raise Exception(...)` прошла бы мимо
+    предмета — она сессию не портит.
+    """
+    real_create = server_service.create
+    poison = f"srv-poison-{uuid.uuid4().hex[:6]}"
+
+    async def _create_or_poison(db, data, owner_id, **kwargs):
+        if data.name == poison:
+            await db.execute(text("SELECT 1 FROM a_table_that_does_not_exist"))
+        return await real_create(db, data, owner_id, **kwargs)
+
+    monkeypatch.setattr(server_service, "create", _create_or_poison)
+
+    good_a, good_b = f"srv-a-{uuid.uuid4().hex[:6]}", f"srv-b-{uuid.uuid4().hex[:6]}"
+    rows = "\n".join(
+        [
+            f"{good_a},203.0.113.91,root,secret,22",
+            f"{poison},203.0.113.92,root,secret,22",
+            f"{good_b},203.0.113.93,root,secret,22",
+        ]
+    )
+    csv = f"name,ip,ssh_user,ssh_password,ssh_port\n{rows}\n".encode()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        user_id = await _register_and_login(c, "firstcheck-dberr")
+        published_tasks.clear()
+
+        r = await c.post(
+            "/api/servers/bulk-import",
+            files={"file": ("servers.csv", io.BytesIO(csv), "text/csv")},
+            data={"has_header": "true"},
+        )
+
+    assert r.status_code == 200, f"частичный импорт ответил ошибкой: {r.status_code} {r.text}"
+    body = r.json()
+    assert body["created"] == 2, f"уцелевшие строки потеряны: {body}"
+    assert body["skipped"] == 1, body
+    assert len(await _stored_server_ids(user_id)) == 2, "созданные серверы не доехали до БД"
 
 
 async def test_an_import_that_created_nothing_queues_nothing(published_tasks):

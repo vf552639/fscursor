@@ -13,9 +13,9 @@ SQLAlchemy разрешает `ForeignKey("blob_storage.id")` не в момен
 класса, а лениво — когда кому-то понадобится связать таблицы. У ORM это
 происходит на flush: unit of work сортирует таблицы по зависимостям
 (`metadata.sorted_tables`) и падает `NoReferencedTableError`, если целевой
-таблицы в метаданных нет. Пять моделей (`server`, `domain`,
-`cloudflare_account`, `registrar_account`) ссылаются на `blob_storage`, а сам
-`BlobStorage` объявлен в `app/blobs/models.py` и в этот пакет не входил.
+таблицы в метаданных нет. На `blob_storage` ссылаются шесть колонок в четырёх
+моделях (`server` ×2, `domain` ×2, `cloudflare_account`, `registrar_account`), а
+сам `BlobStorage` объявлен в `app/blobs/models.py` и в этот пакет не входил.
 
 Веб-процесс беды не знал: он грузит роуты, а те импортируют `blobs`, `auth` и
 `audit` попутно. Воркер роуты не грузит **никогда** — его цепочка

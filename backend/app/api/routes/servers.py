@@ -159,9 +159,17 @@ async def bulk_import_servers(
     db: AsyncSession = Depends(get_db),
 ) -> ServerBulkImportResponse:
     raw = await file.read()
+    # `user.id` снимается ДО импорта и дальше используется только он. Импорт
+    # переживает сбойную строку откатом транзакции, а `rollback()` помечает
+    # протухшими все объекты сессии — включая вот этот `user`, загруженный
+    # зависимостью аутентификации. Обращение к его полю после отката поехало бы
+    # в БД за перезагрузкой прямо посреди синхронного вычисления аргументов и
+    # упало бы `MissingGreenlet` — то есть частично удавшийся импорт отдал бы
+    # 500 вместо отчёта. Обычный `UUID` в локальной переменной этому не подвержен.
+    owner_id = user.id
     created, skipped, errors, csv_url = await process_server_bulk_import(
         db,
-        user_id=user.id,
+        user_id=owner_id,
         filename=file.filename or "servers.csv",
         content=raw,
         has_header=has_header,
@@ -174,7 +182,7 @@ async def bulk_import_servers(
     # неаутентифицированной выдачи того же CSV.
     await audit_service.log(
         db,
-        user_id=user.id,
+        user_id=owner_id,
         action="server.bulk_import",
         target_type="server",
         metadata={

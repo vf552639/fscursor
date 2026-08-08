@@ -1,5 +1,6 @@
 import csv
 import io
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Optional
@@ -15,6 +16,23 @@ from app.schemas.server import ServerBulkImportError
 from app.services import domain_service
 from app.services import server_service
 from app.schemas.server import ServerCreate
+
+logger = logging.getLogger(__name__)
+
+
+async def _safe_rollback(db: AsyncSession) -> None:
+    """Откатить, не позволив самому откату уронить импорт.
+
+    `rollback()` ходит в БД и вполне может бросить — если сбой был обрывом
+    соединения, то бросит именно он. Голый вызов в обработчике отдал бы это
+    исключение наружу мимо всех перехватов и превратил бы частично удавшийся
+    импорт в 500 без отчёта, то есть ровно в то, от чего обработчик и защищает.
+    """
+    try:
+        await db.rollback()
+    except Exception:
+        logger.exception("bulk_import: откат транзакции не удался")
+
 
 _ERROR_EXPORTS: dict[str, str] = {}
 
@@ -263,6 +281,17 @@ async def process_server_bulk_import(
         except Exception as exc:
             skipped += 1
             errors.append(ServerBulkImportError(row=item.row, server=item.name, reason=f"{type(exc).__name__}: {exc}"))
+            # Откат обязателен, и это не гигиена, а спасение остатка пачки.
+            # Ошибка уровня БД (в отличие от `ValidationError` выше, до БД не
+            # доходящей) оставляет транзакцию аборченной: Postgres после неё
+            # отвергает в ней всё подряд — «current transaction is aborted».
+            # Без отката одна кривая строка уносила молча ВСЕ следующие за ней
+            # валидные, и человек получал отчёт, где половина пачки «не
+            # создана» без внятной причины. Заодно это то, что позволяет
+            # посцикловому коммиту (ниже) вообще состояться: на неоткаченной
+            # сессии он бросил бы `PendingRollbackError`, и частичный успех
+            # превратился бы в 500 вместо отчёта.
+            await _safe_rollback(db)
 
     if created:
         # Одна проверка на всю пачку: импортированные серверы получают статус
