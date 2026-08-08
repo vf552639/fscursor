@@ -267,6 +267,12 @@ async def process_server_bulk_import(
     if created:
         # Одна проверка на всю пачку: импортированные серверы получают статус
         # за секунды, а не к следующему слоту расписания.
+        #
+        # Коммит перед походом в сеть — по той же причине, что и в
+        # `server_service.create`: последний `refresh` в цикле оставил
+        # транзакцию открытой, и без этого соединение простояло бы `idle in
+        # transaction` всё время публикации.
+        await db.commit()
         await server_service.enqueue_reachability_check(user_id)
 
     csv_url = None

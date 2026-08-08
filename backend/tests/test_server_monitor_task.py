@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import celeryd_after_setup
 from kombu.exceptions import OperationalError
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
@@ -1054,9 +1055,22 @@ def test_worker_start_rechecks_the_whole_fleet(published_tasks):
     могла бы разъехаться с реестром Celery, и тогда сигнал стал бы беззвучным
     no-op) и отсутствие сужения (сузить прогон по владельцу означало бы после
     деплоя переопросить чей-то один парк вместо всех).
-    """
-    celery_app_module.recheck_the_fleet_on_worker_start(sender="worker@test")
 
+    Сигнал **отправляется**, а не вызывается обработчик напрямую, и это третий
+    предмет — проводка. Прямой вызов зеленел бы и после того, как с функции
+    снят `@celeryd_after_setup.connect` или сигнал подменён на другой
+    (`worker_ready`): обработчик на месте, просто воркер его больше не зовёт, и
+    дыра с `last_check_at = NULL` возвращается молча. Аргументы — те же, что
+    celery шлёт по-настоящему (`apps/worker.py`: `sender`, `instance`, `conf`).
+    """
+    receivers = celeryd_after_setup.send(
+        sender="worker@test", instance=None, conf=celery_app.conf
+    )
+
+    assert len(receivers) == 1, (
+        f"на celeryd_after_setup подписан не один обработчик, а {len(receivers)} — "
+        "прогон на старте либо отключён, либо задваивается"
+    )
     assert len(published_tasks) == 1, f"опубликовано не одно: {published_tasks}"
     published = published_tasks[0]
     assert published.name in celery_app.tasks, f"сигнал зовёт имя-призрак: {published.name}"
