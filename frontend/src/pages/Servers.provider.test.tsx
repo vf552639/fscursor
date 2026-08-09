@@ -198,7 +198,7 @@ describe("AddServerModal — поле провайдера", () => {
     await screen.findByPlaceholderText("e.g., production-web-01");
   }
 
-  function fillInstallTab() {
+  function fillForm() {
     fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
       target: { value: "srv-new" },
     });
@@ -208,28 +208,25 @@ describe("AddServerModal — поле провайдера", () => {
     fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
   }
 
-  it("подсказывает уже введённых провайдеров — и на второй вкладке тоже", async () => {
+  it("подсказывает уже введённых провайдеров", async () => {
     await openModal();
 
-    for (const tab of ["Install New Fastpanel", "Connect Existing Fastpanel"]) {
-      fireEvent.click(screen.getByRole("button", { name: new RegExp(tab) }));
-      const input = screen.getByPlaceholderText("e.g., Hetzner") as HTMLInputElement;
-      // Именно привязка `list` → `<datalist>`: нарисованный, но не привязанный
-      // список подсказок не показывает вовсе.
-      const listId = input.getAttribute("list");
-      expect(listId).toBeTruthy();
-      const list = document.getElementById(listId as string) as HTMLDataListElement;
-      expect(Array.from(list.querySelectorAll("option")).map((o) => o.value)).toEqual([
-        "AWS",
-        "Hetzner",
-      ]);
-    }
+    const input = screen.getByPlaceholderText("e.g., Hetzner") as HTMLInputElement;
+    // Именно привязка `list` → `<datalist>`: нарисованный, но не привязанный
+    // список подсказок не показывает вовсе.
+    const listId = input.getAttribute("list");
+    expect(listId).toBeTruthy();
+    const list = document.getElementById(listId as string) as HTMLDataListElement;
+    expect(Array.from(list.querySelectorAll("option")).map((o) => o.value)).toEqual([
+      "AWS",
+      "Hetzner",
+    ]);
   });
 
-  it("сохраняет провайдера на вкладке установки", async () => {
+  it("сохраняет провайдера", async () => {
     mocks.apiPost.mockResolvedValue({ id: 9 });
     await openModal();
-    fillInstallTab();
+    fillForm();
     fillProvider("  Hetzner  ");
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
@@ -238,30 +235,10 @@ describe("AddServerModal — поле провайдера", () => {
     expect(mocks.apiPost.mock.calls[0][1].provider).toBe("Hetzner");
   });
 
-  it("сохраняет провайдера и на вкладке подключения существующей панели", async () => {
-    // Сервер заводится обеими вкладками — поле, забытое на одной из них, теряет
-    // провайдера у половины серверов.
-    mocks.apiPost.mockResolvedValue({ id: 9 });
-    await openModal();
-    fireEvent.click(screen.getByRole("button", { name: /Connect Existing Fastpanel/ }));
-    fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
-      target: { value: "srv-new" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("https://192.168.1.100:8888"), {
-      target: { value: "https://10.0.0.9:8888" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("Enter password"), { target: { value: "pw" } });
-    fillProvider("AWS");
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
-    expect(mocks.apiPost.mock.calls[0][1].provider).toBe("AWS");
-  });
-
   it("пустое поле уезжает как null, а не пустой строкой", async () => {
     mocks.apiPost.mockResolvedValue({ id: 9 });
     await openModal();
-    fillInstallTab();
+    fillForm();
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
@@ -271,7 +248,7 @@ describe("AddServerModal — поле провайдера", () => {
 
   it("слишком длинное имя ловится ДО записи блоба", async () => {
     await openModal();
-    fillInstallTab();
+    fillForm();
     // 65 символов — на один больше ширины колонки. Литералом, а не через
     // константу: сверка константы с самой собой зеленела бы при любой границе.
     fillProvider("x".repeat(65));

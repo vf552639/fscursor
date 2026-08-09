@@ -50,7 +50,6 @@ vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
 vi.mock("../components/ServerBulkImportDialog", () => ({ default: () => null }));
 
 const SSH_PW = "s3cret-ssh-pw";
-const FP_PW = "fastpanel-pw";
 
 function renderModal(onClose = vi.fn()) {
   // Подсказки провайдеров тут ни при чём — пустым списком; за их содержимое
@@ -58,7 +57,7 @@ function renderModal(onClose = vi.fn()) {
   return { onClose, ...renderWithClient(<AddServerModal onClose={onClose} providers={[]} />) };
 }
 
-function fillInstallTab(password?: string) {
+function fillForm(password?: string) {
   fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
     target: { value: "srv-1" },
   });
@@ -78,7 +77,7 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     mocks.apiPost.mockResolvedValue({ id: 1 });
 
     const { onClose } = renderModal();
-    fillInstallTab(SSH_PW);
+    fillForm(SSH_PW);
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
@@ -108,7 +107,7 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     mocks.invokeIfTauri.mockRejectedValue(new Error("keychain locked"));
 
     const { onClose } = renderModal();
-    fillInstallTab(SSH_PW);
+    fillForm(SSH_PW);
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
     // Ошибка — в форме, куда пользователь сейчас смотрит, и той же фразой, что
@@ -130,7 +129,7 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     mocks.apiPost.mockResolvedValue({ id: 1 });
 
     renderModal();
-    fillInstallTab(SSH_PW);
+    fillForm(SSH_PW);
     const btn = screen.getByRole("button", { name: "Add Server" }) as HTMLButtonElement;
     fireEvent.click(btn);
 
@@ -143,37 +142,6 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     releaseBlob();
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
-  });
-
-  it("пароль не переезжает с вкладки connect на install", async () => {
-    setTauri(true);
-    mocks.apiPost.mockResolvedValue({ id: 1 });
-
-    renderModal();
-    // На connect в поле «Password» набирают пароль ПАНЕЛИ. Уехав на install,
-    // он был бы записан в блоб как SSH-пароль сервера — секрет не того вида под
-    // не тем `blobKind`.
-    fireEvent.click(screen.getByText(/Connect Existing Fastpanel/));
-    fireEvent.change(screen.getByPlaceholderText("Enter password"), { target: { value: FP_PW } });
-    fireEvent.click(screen.getByText(/Install New Fastpanel/));
-
-    expect((screen.getByPlaceholderText("••••••••") as HTMLInputElement).value).toBe("");
-
-    // И обратно — эта половина пришпиливает `fastpanelPassword.reset()`: чужой
-    // секрет в блоб не уедет и без него (у вкладок разные инстансы хука), но
-    // поле панели вернуло бы набранное до ухода на install, и сохранение взяло
-    // бы пароль, который пользователь считает забытым.
-    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: SSH_PW } });
-    fireEvent.click(screen.getByRole("button", { name: /Connect Existing Fastpanel/ }));
-    expect((screen.getByPlaceholderText("Enter password") as HTMLInputElement).value).toBe("");
-    fireEvent.click(screen.getByRole("button", { name: /Install New Fastpanel/ }));
-
-    fillInstallTab(SSH_PW);
-    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
-
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
-    const blob = putBlobArgs(mocks.invokeIfTauri);
-    expect(new TextDecoder().decode(b64ToU8(blob.plaintextB64))).toBe(SSH_PW);
   });
 
   it("в вебе поля пароля нет вовсе, а есть общая фраза про десктоп", async () => {
@@ -189,10 +157,57 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     // десктоп тем же deep link'ом, что и остальные исполняющие действия.
     const link = container.querySelector('a[href^="sdmp://add-server"]');
     expect(link).toBeTruthy();
+    // Подпись говорит про добавление сервера и только: пока форма умела ещё и
+    // подключать панель, она ветвилась на «Connect server in desktop app», и
+    // веб-пользователь читал бы обещание сценария, которого в форме нет.
+    expect(link!.textContent).toContain("Add server in desktop app");
     expect(screen.queryByRole("button", { name: "Add Server" })).toBeNull();
 
-    fillInstallTab();
+    fillForm();
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Панель на этапе добавления сервера НЕ выбирается: раньше здесь стояли две
+ * вкладки («Install New Fastpanel» / «Connect Existing Fastpanel»), и решение
+ * приходилось принимать до того, как сервер вообще завёлся. Теперь и установка,
+ * и подключение живут на странице сервера, а форма заводит «голый» сервер по
+ * SSH.
+ */
+describe("AddServerModal — панель здесь не выбирается", () => {
+  secretBlobLifecycle();
+
+  it("не шлёт ни одного поля fastpanel_*", async () => {
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ id: 1 });
+
+    renderModal();
+    fillForm(SSH_PW);
+    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    const body = mocks.apiPost.mock.calls[0][1];
+    // Именно «ключа нет», а не «ключ с пустым значением»: `fastpanel_status`
+    // отсюда — это ложь про сервер, у которого панели ещё нет. «installed»
+    // накрыл бы блок установки видом подключённой панели, к которой нечем
+    // подключиться, а «not_installed» дублировал бы дефолт бэкенда — и разошёлся
+    // бы с ним, стоит тому измениться.
+    expect(Object.keys(body).filter((k) => k.startsWith("fastpanel"))).toEqual([]);
+  });
+
+  it("переключателя вкладок в форме нет вовсе", async () => {
+    setTauri(true);
+    renderModal();
+
+    // Сценарий один, и выбирать между ними нечего. Кнопки-вкладки поверх формы
+    // обещали бы обратное.
+    expect(screen.queryByText(/Install New Fastpanel/)).toBeNull();
+    expect(screen.queryByText(/Connect Existing Fastpanel/)).toBeNull();
+    // Полей панели тоже нет: пароль панели, набранный здесь, уехал бы в блоб
+    // под видом SSH-пароля — поля-то называются одинаково.
+    expect(screen.queryByPlaceholderText("https://192.168.1.100:8888")).toBeNull();
+    expect(screen.queryByPlaceholderText("Enter password")).toBeNull();
   });
 });

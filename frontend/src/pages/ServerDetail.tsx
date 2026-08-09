@@ -181,10 +181,9 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   };
 
   const openConnectModal = () => {
-    // Адрес панели собирается из `ip_address` самого сервера: здесь он уже
-    // известен, тогда как в «Add Server» сервера ещё нет и IP приходится
-    // выковыривать обратно из набранного URL. Пустое поле заставляло бы
-    // набирать руками то, что программа и так знает.
+    // Адрес панели собирается из `ip_address` самого сервера: сюда попадают
+    // только с уже заведённого сервера, и IP известен. Пустое поле заставляло
+    // бы набирать руками то, что программа и так знает.
     setFpUrl(fastpanelUrlOf(s));
     setFpLogin(s?.fastpanel_user || "fastuser");
     fpPassword.reset();
@@ -216,8 +215,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     if (urlErr) errs.url = urlErr;
     const loginErr = fastpanelUserError(fpLogin);
     if (loginErr) errs.login = loginErr;
-    // Формулировка — та же, что во вкладке connect «Add Server»: поле одно и то
-    // же, и два разных текста читались бы как два разных требования.
+    // Просто «Password», без имени панели: форма называется «Connect Existing
+    // Fastpanel», и уточнение в тексте ошибки отвечало бы на вопрос, которого
+    // никто не задавал. Шаблон «… is required» — общий для обязательных полей
+    // здесь и в «Add Server»: одно требование не должно объясняться двумя
+    // разными фразами.
     if (!fpPassword.value) errs.password = "Password is required";
     setFpConnectErr(errs);
     if (Object.keys(errs).length > 0) return;
@@ -229,8 +231,8 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
       // оставил бы сущность указывать на прежний секрет.
       existingBlobId: s?.fastpanel_password_blob_id ?? null,
       persist: async (blobId) => {
-        // Те же поля, что у connect-ветки «Add Server», но через PUT: сервер уже
-        // заведён. `fastpanel_status` обязателен — без него блок установки так и
+        // PUT, а не POST: сервер уже заведён — «Add Server» про панель не знает
+        // вовсе. `fastpanel_status` обязателен — без него блок установки так и
         // остался бы поверх работающей панели.
         await updateServer.mutateAsync({
           fastpanel_user: fpLogin,
@@ -737,9 +739,10 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
       <Modal title="Connect Existing Fastpanel" onClose={closeConnectModal} width={420}>
         <div style={{display:"flex", flexDirection:"column", gap:14}}>
           <div>
-            {/* Подписи и плейсхолдеры — те же, что в «Add Server»: поля те же
-                самые, и разные примеры в двух формах читались бы как разные
-                требования к значению. */}
+            {/* Поле открывается уже заполненным (`openConnectModal`), так что
+                плейсхолдер видит только тот, кто стёр значение. Схема и порт в
+                нём те же, что требует `fastpanelUrlError`: очищенное поле не
+                должно подсказывать формат слабее, чем подставленное. */}
             <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel URL</label>
             <Inp value={fpUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setFpUrl(e.target.value); if(fpConnectErr.url) setFpConnectErr(prev=>({...prev, url:""}));}} placeholder="https://192.168.1.100:8888" style={{borderColor: fpConnectErr.url ? "#dc2626" : undefined}}/>
             {fpConnectErr.url && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.url}</div>}

@@ -220,9 +220,8 @@ describe("ServerDetail — подключение существующей па�
     setTauri(true);
     renderDetail();
     const form = await openConnectForm();
-    // Адрес сервера здесь уже известен — в отличие от «Add Server», где IP
-    // выковыривали обратно из набранного URL. Пустое поле заставило бы набрать
-    // руками то, что программа и так знает.
+    // Адрес сервера здесь уже известен. Пустое поле заставило бы набрать руками
+    // то, что программа и так знает.
     expect(form.url.value).toBe("https://10.0.0.7:8888");
     expect(form.login.value).toBe("fastuser");
   });
