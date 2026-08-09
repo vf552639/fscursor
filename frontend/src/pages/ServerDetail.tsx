@@ -46,6 +46,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const sshPassword = useSecretSave("SSH password");
   const [editingDomain, setEditingDomain] = useState<any | null>(null);
 
+  // Переименование. Как и провайдер ниже — обычное поле сущности, не секрет.
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [nameValue, setNameValue] = useState("");
+  const [nameErr, setNameErr] = useState<string | null>(null);
+
   // Правка провайдера. Обычным `useState`, а не `useSecretSave`: провайдер —
   // не секрет, он едет полем сущности и хранится плейнтекстом в колонке.
   const [showProviderModal, setShowProviderModal] = useState(false);
@@ -156,6 +161,41 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     if (ok) setShowSshModal(false);
   };
 
+  // Поле заполняется ТЕКУЩИМ именем — по той же причине, что и в SSH-форме:
+  // пустая форма правки читается как «стереть» тем, кто открыл её посмотреть.
+  const openNameModal = () => {
+    setNameValue(s?.name || "");
+    setNameErr(null);
+    setShowNameModal(true);
+  };
+
+  const handleSaveName = () => {
+    // Проверка до отправки, как и в «Add Server»: пустое имя бэкенд отвергает
+    // 422-й строкой про схему, а не фразой про поле. Формулировка та же, что
+    // там, — одно требование не должно объясняться двумя разными фразами.
+    if (!nameValue.trim()) {
+      setNameErr("Server name is required");
+      return;
+    }
+    // Ровно одно поле в теле — тот же довод, что у провайдера ниже: PUT,
+    // собранный из всего состояния страницы, переписал бы заодно ssh_user и
+    // ssh_port дефолтами SSH-формы.
+    //
+    // Отказ — в СВОЁ состояние, а не через `updateServer.isError`: тем же хуком
+    // сохраняются и SSH-доступ, и провайдер, и чужая провалившаяся мутация
+    // висела бы в `isError` до следующей — открытая потом форма имени встречала
+    // бы пользователя красным баннером про чужую ошибку.
+    updateServer.mutate(
+      // Обрезанным: «web-01 » и «web-01» стояли бы в списке серверов двумя
+      // строками, различить которые глазом нечем.
+      { name: nameValue.trim() },
+      {
+        onSuccess: () => setShowNameModal(false),
+        onError: (e: any) => setNameErr(e?.message || "Не удалось сохранить"),
+      },
+    );
+  };
+
   // Как и у SSH-формы: поле заполняется ТЕКУЩИМ значением сервера. Пустая форма
   // правки читается как «стереть» тем, кто открыл её просто посмотреть.
   const openProviderModal = () => {
@@ -255,11 +295,32 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     </div>
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:24}}>
       <div>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={uiStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1>{osLabel ? <Badge variant="gray">{osLabel}</Badge> : null}{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
+        {/* Карандаш у самого имени: до него имя задавалось один раз в «Add
+            Server» и опечатка оставалась с сервером навсегда. Правка — мутация,
+            а значит только десктоп (заметка для веба — ниже, отдельной строкой).
+            Не OpenInDesktop: хоста `server-rename` в parseDeepLinkAction нет,
+            ссылка вела бы в {handled:false} и только тостила бы сама себя.
+
+            `RowActions`, а не `Btn`: это иконочная кнопка, а `RowActions` —
+            единственный примитив, который сам ставит глифу `title`/`aria-label`.
+            Голый «✎» без имени не читается ни скринридером, ни курсором — и
+            выпадал бы из ряда: все прочие карандаши в проекте несут слово. */}
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={uiStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1>{isTauri() && (
+          <RowActions actions={[{ icon: "✎", title: "Rename server", onClick: openNameModal }]}/>
+        )}{osLabel ? <Badge variant="gray">{osLabel}</Badge> : null}{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
         {/* Пометка стоит вплотную к самой цифре: аптайм здесь — часть того же
             снимка, и «3d 0h» трёхмесячной давности без неё читается как «сервер
             работает три дня» прямо сейчас. */}
         <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:STALE_TEXT}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?STALE_SUFFIX:""}</span> · Added {fmtDate(s.created_at)}</div>
+        {/* Объяснение вместо карандаша — своей строкой, а не на месте кнопки в
+            строке заголовка: заметка это блок с рамкой и padding'ом, и внутри
+            flex-строки «точка — имя — бейджи» она распирала бы её на ширину
+            целого предложения, утаскивая бейджи ОС и FASTPANEL вправо. `what`
+            тот же, что у правки провайдера: запрет один, и объяснение у него
+            должно быть одно. */}
+        {!isTauri() && (
+          <div style={{marginTop:8}}><DesktopOnlyNote what="Editing servers" /></div>
+        )}
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -559,6 +620,31 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         )}
         <div style={{marginTop:22}}>
           <Btn variant="primary" onClick={handleSaveSsh} disabled={sshPassword.saving} style={{width:"100%",justifyContent:"center"}}>{sshPassword.saving ? "Saving..." : "Save"}</Btn>
+        </div>
+      </Modal>
+    )}
+    {showNameModal && (
+      <Modal title="Rename server" onClose={()=>setShowNameModal(false)} width={420}>
+        <div>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Server Name</label>
+          {/* Плейсхолдер и подпись — те же, что в «Add Server»: поле одно и то
+              же, и разные примеры в двух формах читались бы как разные правила
+              именования. */}
+          <Inp
+            value={nameValue}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setNameValue(e.target.value); setNameErr(null);}}
+            placeholder="e.g., production-web-01"
+            style={{borderColor: nameErr ? "#dc2626" : undefined}}
+          />
+        </div>
+        {nameErr && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {nameErr}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          <Btn variant="primary" onClick={handleSaveName} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={()=>setShowNameModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
         </div>
       </Modal>
     )}
