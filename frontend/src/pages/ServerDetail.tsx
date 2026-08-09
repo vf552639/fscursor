@@ -3,6 +3,7 @@ import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, mbToGb, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
@@ -16,6 +17,15 @@ import type { InstallFastpanelResult } from "../lib/deepLink";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "server-detail-provider-options";
+
+/**
+ * Адрес панели: свой, если известен, иначе собранный из адреса сервера. Одним
+ * выражением на карточку доступа и на форму подключения — разъехавшись, они
+ * показывали бы человеку один URL, а сохраняли другой.
+ */
+function fastpanelUrlOf(server: any): string {
+  return server?.fastpanel_url || `https://${server?.ip_address}:8888`;
+}
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
   server?: any,
@@ -50,6 +60,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const [showNameModal, setShowNameModal] = useState(false);
   const [nameValue, setNameValue] = useState("");
   const [nameErr, setNameErr] = useState<string | null>(null);
+
+  // Подключение уже стоящей панели. Плейнтекст пароля держит хук — по той же
+  // причине, что и у SSH-формы выше: страница смонтирована целиком, модалку она
+  // только прячет.
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [fpUrl, setFpUrl] = useState("");
+  const [fpLogin, setFpLogin] = useState("fastuser");
+  const [fpConnectErr, setFpConnectErr] = useState<Record<string, string>>({});
+  const fpPassword = useSecretSave("FastPanel password");
 
   // Правка провайдера. Обычным `useState`, а не `useSecretSave`: провайдер —
   // не секрет, он едет полем сущности и хранится плейнтекстом в колонке.
@@ -161,6 +180,70 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     if (ok) setShowSshModal(false);
   };
 
+  const openConnectModal = () => {
+    // Адрес панели собирается из `ip_address` самого сервера: здесь он уже
+    // известен, тогда как в «Add Server» сервера ещё нет и IP приходится
+    // выковыривать обратно из набранного URL. Пустое поле заставляло бы
+    // набирать руками то, что программа и так знает.
+    setFpUrl(fastpanelUrlOf(s));
+    setFpLogin(s?.fastpanel_user || "fastuser");
+    fpPassword.reset();
+    setFpConnectErr({});
+    setShowConnectModal(true);
+  };
+
+  // Как и у SSH-формы: ✕, клик по оверлею и Cancel зовут именно это, чтобы
+  // плейнтекст не пережил закрытие формы — страница-то смонтирована, и своё
+  // состояние лежало бы в памяти до ухода с неё.
+  //
+  // Тестом этот сброс НЕ стережётся, и это надо знать: `openConnectModal` зовёт
+  // `reset()` тоже, поэтому пустое поле в переоткрытой форме обеспечивает
+  // открытие, а не закрытие, — снимите `reset()` отсюда, и все тесты останутся
+  // зелёными. Инвариант тут свой (плейнтекст в памяти закрытой формы), и через
+  // DOM он не наблюдаем; двойной сброс — осознанная страховка, а не дубль.
+  const closeConnectModal = () => {
+    fpPassword.reset();
+    setShowConnectModal(false);
+  };
+
+  const handleSaveConnect = async () => {
+    // Проверка ДО `save()`, как и в «Add Server»: порядок «блоб → сущность», и
+    // отказ после записи оставил бы в хранилище пароль от панели, которую так и
+    // не подключили. Собираются ВСЕ промахи разом — иначе человек чинил бы URL,
+    // чтобы следующим кликом узнать про пустой пароль.
+    const errs: Record<string, string> = {};
+    const urlErr = fastpanelUrlError(fpUrl);
+    if (urlErr) errs.url = urlErr;
+    const loginErr = fastpanelUserError(fpLogin);
+    if (loginErr) errs.login = loginErr;
+    // Формулировка — та же, что во вкладке connect «Add Server»: поле одно и то
+    // же, и два разных текста читались бы как два разных требования.
+    if (!fpPassword.value) errs.password = "Password is required";
+    setFpConnectErr(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    const ok = await fpPassword.save({
+      blobKind: BLOB_KIND.serverFastpanelPassword,
+      // Как и у SSH: сервер мог уже носить пароль панели (например, после
+      // оборвавшейся попытки), и переписать надо именно его блоб — новый id
+      // оставил бы сущность указывать на прежний секрет.
+      existingBlobId: s?.fastpanel_password_blob_id ?? null,
+      persist: async (blobId) => {
+        // Те же поля, что у connect-ветки «Add Server», но через PUT: сервер уже
+        // заведён. `fastpanel_status` обязателен — без него блок установки так и
+        // остался бы поверх работающей панели.
+        await updateServer.mutateAsync({
+          fastpanel_user: fpLogin,
+          fastpanel_password_blob_id: blobId,
+          // Обрезанное — ровно то, что проверил `fastpanelUrlError`.
+          fastpanel_url: fpUrl.trim(),
+          fastpanel_status: "installed",
+        });
+      },
+    });
+    if (ok) setShowConnectModal(false);
+  };
+
   // Поле заполняется ТЕКУЩИМ именем — по той же причине, что и в SSH-форме:
   // пустая форма правки читается как «стереть» тем, кто открыл её посмотреть.
   const openNameModal = () => {
@@ -257,7 +340,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const metricsStale = isMetricsStale(metricsAt, now);
 
   const fp = {
-    url: s.fastpanel_url || `https://${s.ip_address}:8888`,
+    url: fastpanelUrlOf(s),
     login: s.fastpanel_user || "fastuser",
     password: "encrypted (hidden)", // Actual password not sent via API 
     version: s.fastpanel_version ?? "—",
@@ -524,13 +607,38 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             {/* Прогресс идёт отдельным каналом: Rust шлёт `fastpanel:progress`,
                 а тостит его один глобальный слушатель в DesktopWorkspace —
                 установка переживает уход с этой страницы. */}
-            <OpenInDesktop
-              variant="primary"
-              action={`install-fastpanel?serverId=${s.id}`}
-              label={fpRunning ? "Installing…" : "Install FastPanel"}
-              desktopOnClick={() => installFp.mutate(undefined)}
-              disabled={fpRunning}
-            />
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <OpenInDesktop
+                variant="primary"
+                action={`install-fastpanel?serverId=${s.id}`}
+                label={fpRunning ? "Installing…" : "Install FastPanel"}
+                desktopOnClick={() => installFp.mutate(undefined)}
+                disabled={fpRunning}
+              />
+              {/* Второй путь рядом с установкой: панель на сервере может уже
+                  стоять, и до этой кнопки единственным способом рассказать о ней
+                  SDMP была установка заново — получасовая и поверх работающих
+                  сайтов. В вебе — заметка, а НЕ
+                  OpenInDesktop: хоста `server-connect-fastpanel` в
+                  parseDeepLinkAction нет, ссылка вела бы в {handled:false} и
+                  только тостила бы сама себя. `what` тот же, что у SSH-формы:
+                  запрет один и тот же — пароль шифрует Rust мастер-ключом из
+                  keychain, из браузера его не сохранить.
+
+                  `disabled` тот же, что у установки, и по своей причине:
+                  подключение ставит `fastpanel_status: "installed"`, карточка
+                  установки исчезает вместе с индикатором «Installing…» — идущая
+                  установка становится невидимой, а её write-back через полчаса
+                  молча перезапишет только что подключённые креды на выданные
+                  инсталлятором. `size` тоже общий: сосед — `OpenInDesktop` со
+                  своим дефолтным "sm", и без него вторичная кнопка была бы
+                  крупнее первичной. */}
+              {isTauri() ? (
+                <Btn size="sm" variant="secondary" onClick={openConnectModal} disabled={fpRunning}>Connect Existing</Btn>
+              ) : (
+                <DesktopOnlyNote what="Saving secrets" />
+              )}
+            </div>
             {fpError && (
               <div role="alert" style={{marginTop:12, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
                 Install failed: {fpError.message || String(fpError)}
@@ -620,6 +728,44 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         )}
         <div style={{marginTop:22}}>
           <Btn variant="primary" onClick={handleSaveSsh} disabled={sshPassword.saving} style={{width:"100%",justifyContent:"center"}}>{sshPassword.saving ? "Saving..." : "Save"}</Btn>
+        </div>
+      </Modal>
+    )}
+    {showConnectModal && (
+      // Поле пароля без гейта `isTauri()`, в отличие от «Add Server»: сюда
+      // попадают только кнопкой, которой в вебе нет вовсе.
+      <Modal title="Connect Existing Fastpanel" onClose={closeConnectModal} width={420}>
+        <div style={{display:"flex", flexDirection:"column", gap:14}}>
+          <div>
+            {/* Подписи и плейсхолдеры — те же, что в «Add Server»: поля те же
+                самые, и разные примеры в двух формах читались бы как разные
+                требования к значению. */}
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel URL</label>
+            <Inp value={fpUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setFpUrl(e.target.value); if(fpConnectErr.url) setFpConnectErr(prev=>({...prev, url:""}));}} placeholder="https://192.168.1.100:8888" style={{borderColor: fpConnectErr.url ? "#dc2626" : undefined}}/>
+            {fpConnectErr.url && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.url}</div>}
+          </div>
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Login</label>
+            <Inp value={fpLogin} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setFpLogin(e.target.value); if(fpConnectErr.login) setFpConnectErr(prev=>({...prev, login:""}));}} placeholder="Enter login" style={{borderColor: fpConnectErr.login ? "#dc2626" : undefined}}/>
+            {fpConnectErr.login && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.login}</div>}
+          </div>
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Password</label>
+            <Inp type="password" value={fpPassword.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{fpPassword.setValue(e.target.value); if(fpConnectErr.password) setFpConnectErr(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: fpConnectErr.password ? "#dc2626" : undefined}}/>
+            {fpConnectErr.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.password}</div>}
+          </div>
+        </div>
+        {fpPassword.error && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {fpPassword.error}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          {/* Кнопка мёртвая всё время записи блоба И сохранения сервера: между
+              ними нет кадра, где `saving` ложен, — второй клик писал бы второй
+              блоб на тот же секрет. */}
+          <Btn variant="primary" onClick={handleSaveConnect} disabled={fpPassword.saving} style={{width:"100%",justifyContent:"center"}}>{fpPassword.saving ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={closeConnectModal} disabled={fpPassword.saving} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
         </div>
       </Modal>
     )}
