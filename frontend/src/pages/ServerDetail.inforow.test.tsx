@@ -113,12 +113,22 @@ function cardHeader(): HTMLElement {
 
 async function openIpForm() {
   fireEvent.click(await screen.findByRole("button", { name: "Edit IP address" }));
-  return (await screen.findByPlaceholderText("e.g., 192.168.1.100")) as HTMLInputElement;
+  // По подписи поля — она же стережёт пару `htmlFor`/`id`: без неё поле для
+  // скринридера безымянное, и запрос упадёт.
+  return (await screen.findByLabelText("IP Address")) as HTMLInputElement;
 }
 
 async function openOsForm() {
   fireEvent.click(await screen.findByRole("button", { name: "Edit operating system" }));
-  return (await screen.findByRole("combobox")) as HTMLSelectElement;
+  // По подписи поля, а не по единственному `combobox` на странице: подпись —
+  // это то, чем поле названо для человека и для скринридера, и запрос через неё
+  // заодно стережёт пару `htmlFor`/`id`.
+  return (await screen.findByLabelText("OS")) as HTMLSelectElement;
+}
+
+/** Кнопка сохранения открытой формы — мёртвая или живая. */
+function saveButton(): HTMLButtonElement {
+  return screen.getByText("Save").closest("button") as HTMLButtonElement;
 }
 
 describe("ServerDetail — правка полей из строк карточки", () => {
@@ -227,6 +237,20 @@ describe("ServerDetail — правка полей из строк карточ�
 
     // Формулировка — та же, что в «Add Server»: требование одно, и объяснять
     // его двумя фразами нельзя.
+    expect(await screen.findByText("Invalid IP address format")).toBeTruthy();
+    expect(mocks.apiPut).not.toHaveBeenCalled();
+  });
+
+  it("адрес с портом не уходит на сервер", async () => {
+    setTauri(true);
+    renderDetail();
+    const input = await openIpForm();
+    // Самая частая форма, в которой адрес лежит в записях про SSH, — и первое,
+    // что человек вставит в это поле. Бэкенд формат не проверяет вовсе, так что
+    // принятое здесь уедет в `host` SSH-коннекта и в «https://1.2.3.4:22:8888».
+    fireEvent.change(input, { target: { value: "1.2.3.4:22" } });
+    fireEvent.click(screen.getByText("Save"));
+
     expect(await screen.findByText("Invalid IP address format")).toBeTruthy();
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });
@@ -354,16 +378,50 @@ describe("ServerDetail — правка полей из строк карточ�
     expect(select.value).toBe("CentOS");
   });
 
-  it("семейство вне списка — первый пункт как отправная точка, а не молчаливая правка", async () => {
+  it("семейство вне списка селект не подменяет чужой ОС и сохранить не даёт", async () => {
     setTauri(true);
     // Fedora опознаётся (`osShortName`), но пункта под неё в форме нет и не
     // будет — это не серверный дистрибутив.
     renderDetail({ ...SERVER, os: null, os_pretty: "Fedora Linux 39 (Server Edition)" });
+    // Строку читаем ДО открытия формы: у формы своя подпись «OS», и после
+    // открытия таких элементов на экране два.
+    await screen.findByText("Provider");
+    expect(within(infoRow("OS")).getByText("Fedora")).toBeTruthy();
+
+    // Селект, открытый из этой самой строки, обязан называть ОС так же.
+    const select = await openOsForm();
+    expect(select.value).toBe("");
+    expect(screen.getByText("Fedora — не в списке")).toBeTruthy();
+    // Сохранять нечего: колонку `os` читает `update_command` в десктопе и
+    // выбирает по ней apt или yum, так что один случайный «Save» с
+    // подставленным Debian ломал бы получасовую установку FastPanel на Fedora —
+    // и откатить это нечем, `os` навсегда перекрывает `os_pretty`.
+    expect(saveButton().disabled).toBe(true);
+    expect(mocks.apiPut).not.toHaveBeenCalled();
+  });
+
+  it("для такого сервера уходит ровно то, что выбрали руками", async () => {
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...SERVER, os: "CentOS" });
+    renderDetail({ ...SERVER, os: null, os_pretty: "Fedora Linux 39 (Server Edition)" });
     const select = await openOsForm();
 
-    // Показать нечего честнее, но подменить сущность может только явное
-    // «Save» — при открытии формы на сервер не уходит ничего.
-    expect(select.value).toBe("Debian");
-    expect(mocks.apiPut).not.toHaveBeenCalled();
+    fireEvent.change(select, { target: { value: "CentOS" } });
+    // Осознанный выбор — и кнопка оживает.
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPut.mock.calls[0][1]).toEqual({ os: "CentOS" });
+  });
+
+  it("у сервера без ОС вовсе селект тоже пуст, а не «Debian»", async () => {
+    setTauri(true);
+    renderDetail({ ...SERVER, os: null, os_pretty: null });
+    const select = await openOsForm();
+
+    expect(select.value).toBe("");
+    expect(screen.getByText("ОС не определена")).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
   });
 });

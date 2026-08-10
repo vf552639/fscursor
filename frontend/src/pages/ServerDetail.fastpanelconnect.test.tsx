@@ -226,6 +226,19 @@ describe("ServerDetail — подключение существующей па�
     expect(form.login.value).toBe("fastuser");
   });
 
+  it("IPv6-адрес попадает в URL панели в скобках", async () => {
+    setTauri(true);
+    // Адрес с двоеточиями через UI появиться не мог, пока адрес сервера не стал
+    // правиться (`ipError(…, {ipv6:true})`), — теперь может.
+    renderDetail({ ...SERVER, ip_address: "2a01:4f8:c17:b8f::1" });
+    const form = await openConnectForm();
+
+    // Без скобок «https://2a01:4f8:c17:b8f::1:8888» разбирается как хост «2a01»
+    // с портом «4f8» (RFC 3986): и подставленный в форму, и открытый кнопкой
+    // «Open FastPanel» адрес вёл бы не туда.
+    expect(form.url.value).toBe("https://[2a01:4f8:c17:b8f::1]:8888");
+  });
+
   it("упавшая запись блоба не трогает сервер и не молчит", async () => {
     setTauri(true);
     mocks.invokeIfTauri.mockRejectedValue(new Error("keychain locked"));

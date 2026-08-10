@@ -9,6 +9,7 @@ import { BLOB_KIND } from "../lib/secretBlob";
 import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { ipError } from "../lib/ipInput";
 import { UNCHECKED, isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, serverOsName } from "../lib/osName";
 
@@ -52,9 +53,11 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
     const provError = providerError(provider);
     if (provError) newErrors.provider = provError;
 
-    if (!ip.trim()) newErrors.ip = "IP address is required";
-    // Basic IP regex
-    else if (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip.trim())) newErrors.ip = "Invalid IP address format";
+    // Без IPv6: сервер заводят по IPv4, и правило формы живёт в `lib/ipInput`
+    // вместе с текстом отказа — вторая копия регулярки на странице сервера уже
+    // успела разойтись с этой по смыслу.
+    const ipErr = ipError(ip);
+    if (ipErr) newErrors.ip = ipErr;
     if (!sshPassword.value) newErrors.password = "SSH Password is required";
 
     setErrors(newErrors);

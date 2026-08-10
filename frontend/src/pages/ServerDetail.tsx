@@ -3,6 +3,7 @@ import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, mbToGb, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { ipError } from "../lib/ipInput";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, serverOsName } from "../lib/osName";
@@ -19,20 +20,10 @@ import type { InstallFastpanelResult } from "../lib/deepLink";
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "server-detail-provider-options";
 
-/**
- * «Похоже на IP» — точечная запись IPv4 ИЛИ двоеточие где угодно (грубый
- * признак IPv6). Проверка тут ШИРЕ, чем в форме «Add Server» (там только
- * IPv4-регулярка): сервер с IPv6-адресом завести нельзя, но у уже заведённого
- * адрес мог смениться на IPv6 — форма правки, отвергающая настоящий адрес
- * сервера, оставила бы человека без способа его записать.
- *
- * Текст отказа при этом взят у «Add Server» слово в слово («Invalid IP address
- * format» / «IP address is required»): множество принимаемых значений разное,
- * но требование, которое читает человек, одно и то же — «в поле должен стоять
- * IP-адрес», — а одно требование не должно объясняться двумя разными фразами.
- * Разойтись формулировкам стоит тогда, когда разойдётся сам смысл запрета.
- */
-const IP_LIKE = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$|:/;
+// Пары `htmlFor`/`id` для полей новых форм: без них скринридер читает поле
+// безымянным, а `<label>` по соседству сам по себе его не именует.
+const IP_INPUT_ID = "server-detail-ip";
+const OS_SELECT_ID = "server-detail-os";
 
 /**
  * Адрес панели: свой, если известен, иначе собранный из адреса сервера. Одним
@@ -40,7 +31,17 @@ const IP_LIKE = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$|:/;
  * показывали бы человеку один URL, а сохраняли другой.
  */
 function fastpanelUrlOf(server: any): string {
-  return server?.fastpanel_url || `https://${server?.ip_address}:8888`;
+  if (server?.fastpanel_url) return server.fastpanel_url;
+  const ip = server?.ip_address ?? "";
+  // IPv6 в URL — только в скобках (RFC 3986): без них «https://2a01:4f8::1:8888»
+  // разбирается как хост «2a01» с портом «4f8», и открытая панель уедет не туда.
+  // До появления правки адреса на этой странице IPv6 через UI сюда попасть не
+  // мог — теперь может (`ipError(…, {ipv6:true})`).
+  //
+  // Признак — двоеточие, а не «не IPv4»: в колонке у старых серверов могло
+  // осесть имя хоста, и его скобки как раз сломали бы.
+  const host = ip.includes(":") ? `[${ip}]` : ip;
+  return `https://${host}:8888`;
 }
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
@@ -99,8 +100,13 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
 
   // Правка ОС. Значение — из закрытого списка `OS_OPTIONS`, поэтому своего
   // состояния под ошибку ВВОДА не нужно; `osErr` держит только отказ сервера.
+  //
+  // `null` — законное состояние: у сервера может стоять семейство, которого в
+  // списке нет (см. `openOsModal`). Именно поэтому не `OS_OPTIONS[0]`: значение
+  // по умолчанию тут означало бы «человек выбрал Debian», а он ничего не
+  // выбирал.
   const [showOsModal, setShowOsModal] = useState(false);
-  const [osValue, setOsValue] = useState<(typeof OS_OPTIONS)[number]>(OS_OPTIONS[0]);
+  const [osValue, setOsValue] = useState<(typeof OS_OPTIONS)[number] | null>(null);
   const [osErr, setOsErr] = useState<string | null>(null);
 
   // Queries
@@ -350,16 +356,16 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   };
 
   const handleSaveIp = () => {
-    // Проверка до отправки, как и в «Add Server»: 422 от схемы приезжает сюда
-    // строкой про поле схемы, а не фразой про адрес. Формулировки — те же, что
-    // там (см. `IP_LIKE`).
+    // Проверка до отправки тем же модулем, что и в «Add Server»: формат адреса
+    // бэкенд не проверяет вовсе (см. JSDoc `lib/ipInput`), так что принятый
+    // здесь мусор дальше некому остановить — он уедет в SSH-коннект и в адрес
+    // панели. `ipv6: true` — разница именно этой формы: у уже заведённого
+    // сервера адрес мог смениться на IPv6, и отвергать настоящий адрес машины
+    // форма правки не вправе.
     const trimmed = ipValue.trim();
-    if (!trimmed) {
-      setIpErr("IP address is required");
-      return;
-    }
-    if (!IP_LIKE.test(trimmed)) {
-      setIpErr("Invalid IP address format");
+    const err = ipError(trimmed, { ipv6: true });
+    if (err) {
+      setIpErr(err);
       return;
     }
     // Ровно одно поле в теле и своё состояние под ошибку — тот же довод, что у
@@ -387,15 +393,23 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     const known = OS_OPTIONS.find((o) => o === short);
     // Остаётся случай, которого закрытый список выразить не умеет вовсе:
     // семейства вне пяти пунктов (Red Hat, Fedora, openSUSE — их приносит
-    // автоопределение по SSH, см. `FAMILY_NEEDLES`). Показываем первый пункт как
-    // отправную точку: подменить им сущность может только явное «Save», а
-    // молчаливой правки при открытии формы не происходит.
-    setOsValue(known ?? OS_OPTIONS[0]);
+    // автоопределение по SSH, см. `FAMILY_NEEDLES`). Тогда `null`, и селект
+    // показывает НАСТОЯЩЕЕ имя отдельным нерабочим пунктом — подставленный
+    // «Debian» противоречил бы строке карточки, из которой форму и открыли, а
+    // цена случайного «Save» тут не косметическая: колонку `os` читает
+    // `update_command` в десктопе (`provision.rs`) и по ней выбирает apt или
+    // yum, то есть один клик ломал бы получасовую установку FastPanel. Вернуть
+    // прежнее значение после этого нечем: `os` перекрывает `os_pretty` в
+    // `serverOsName`, так что и бейдж остался бы врать.
+    setOsValue(known ?? null);
     setOsErr(null);
     setShowOsModal(true);
   };
 
   const handleSaveOs = () => {
+    // Не выбрано ничего — сохранять нечего: кнопка в этом состоянии мертва, и
+    // guard тут для полноты (клавиатура, повторный клик до перерисовки).
+    if (!osValue) return;
     // Проверки ввода нет намеренно: значение приходит из `<select>` по закрытому
     // списку `OS_OPTIONS`, свободного ввода в поле не бывает.
     //
@@ -938,10 +952,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     {showIpModal && (
       <Modal title="IP Address" onClose={()=>setShowIpModal(false)} width={420}>
         <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>IP Address</label>
+          {/* `htmlFor`/`id`, в отличие от соседних форм этого файла: без пары
+              скринридер объявляет поле безымянным, а `<label>` рядом сам по себе
+              его не именует. Соседи это правило нарушают исторически — новый код
+              его не тиражирует. */}
+          <label htmlFor={IP_INPUT_ID} style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>IP Address</label>
           {/* Плейсхолдер тот же, что в «Add Server»: поле одно и то же, и разные
               примеры в двух формах читались бы как разные правила записи. */}
           <Inp
+            id={IP_INPUT_ID}
             value={ipValue}
             onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setIpValue(e.target.value); setIpErr(null);}}
             placeholder="e.g., 192.168.1.100"
@@ -962,12 +981,20 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     {showOsModal && (
       <Modal title="Operating System" onClose={()=>setShowOsModal(false)} width={420}>
         <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label>
+          <label htmlFor={OS_SELECT_ID} style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label>
           {/* Закрытый список, а не свободный текст, — тот же `OS_OPTIONS`, что и
               в «Add Server»: по этому имени десктоп выбирает пакетный менеджер
               для установки FastPanel, и «убунту» руками сломало бы установку
               молча (см. JSDoc `OS_OPTIONS`). */}
-          <Sel value={osValue} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>{setOsValue(e.target.value as (typeof OS_OPTIONS)[number]); setOsErr(null);}} style={{width:"100%"}}>
+          <Sel id={OS_SELECT_ID} value={osValue ?? ""} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>{setOsValue(e.target.value as (typeof OS_OPTIONS)[number]); setOsErr(null);}} style={{width:"100%"}}>
+            {/* Семейство, которого в списке нет, — нерабочим пунктом с его
+                НАСТОЯЩИМ именем (тем же `osLabel`, что в строке карточки):
+                селект не вправе называть ОС иначе, чем строка, из которой его
+                открыли. Выбрать этот пункт нельзя, сохранить — тоже (кнопка
+                мертва, пока не выбрано настоящее значение). */}
+            {!osValue && (
+              <option value="" disabled>{osLabel ? `${osLabel} — не в списке` : "ОС не определена"}</option>
+            )}
             {OS_OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}
           </Sel>
         </div>
@@ -977,7 +1004,9 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
           </div>
         )}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
-          <Btn variant="primary" onClick={handleSaveOs} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          {/* Мертва и пока ничего не выбрано: сохранять «то, что показал
+              селект» тут нечего — показать он мог и «Fedora — не в списке». */}
+          <Btn variant="primary" onClick={handleSaveOs} disabled={updateServer.isPending || !osValue} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
           <Btn variant="secondary" onClick={()=>setShowOsModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
         </div>
       </Modal>
