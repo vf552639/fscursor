@@ -18,11 +18,11 @@ def build_account_response(account: CloudflareAccount) -> CloudflareAccountRespo
     if account.api_token_blob_id:
         s = str(account.api_token_blob_id)
         masked = "••••" + s[-4:]
-    payload = CloudflareAccountResponse.model_validate(account).model_dump()
-    payload["api_token_masked"] = masked
-    payload["sync_result"] = None
-    payload["sync_warning"] = None
-    return CloudflareAccountResponse(**payload)
+    response = CloudflareAccountResponse.model_validate(account)
+    # Маска не лежит в модели: она вычисляется от ссылки на блоб, самого токена
+    # сервер не видит.
+    response.api_token_masked = masked
+    return response
 
 
 async def _get_account(

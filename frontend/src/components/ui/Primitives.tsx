@@ -151,8 +151,11 @@ export function EmptyState({
 export function Card({children, style}: {children: React.ReactNode, style?: React.CSSProperties}){
   return <div style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,...style}}>{children}</div>;
 }
-export function CHd({children, style}: {children: React.ReactNode, style?: React.CSSProperties}){
-  return <div style={{padding:"15px 20px",borderBottom:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between",...style}}>{children}</div>;
+// `onClick` — не украшение: шапка раскладывает содержимое `space-between`, и
+// пустое место между левым блоком и кнопками принадлежит ЕЙ. Мишенью «клик по
+// пустому месту шапки» может быть только сам этот div.
+export function CHd({children, style, onClick}: {children: React.ReactNode, style?: React.CSSProperties, onClick?: React.MouseEventHandler<HTMLDivElement>}){
+  return <div style={{padding:"15px 20px",borderBottom:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between",...style}} onClick={onClick}>{children}</div>;
 }
 export function CTi({children}: {children: React.ReactNode}){
   return <div style={{fontSize:14,fontWeight:600,color:"#111",display:"flex",alignItems:"center",gap:8}}>{children}</div>;
@@ -307,9 +310,15 @@ export function RowActions({ actions = [] }: { actions: RowAction[] }) {
   </div>;
 }
 
-export function CopyBtn({value}: any){
+/**
+ * `label` — доступное имя кнопки. Глиф «⎘» скринридер не произносит никак, а
+ * там, где копируемых значений в одном ряду несколько (id зоны, её NS),
+ * безымянные кнопки неразличимы и глазами. Необязателен: у кнопки, стоящей
+ * вплотную к единственному значению, нейтрального «Copy» хватает.
+ */
+export function CopyBtn({value, label = "Copy"}: { value: string; label?: string }){
   const [c,setC] = useState(false);
-  return <button onClick={()=>{copyText(value);setC(true);setTimeout(()=>setC(false),1400);}} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280",flexShrink:0,transition:"all 0.15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#eff4ff";e.currentTarget.style.color="#2563eb";}} onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color="#6b7280";}}>{c?"✓":"⎘"}</button>;
+  return <button onClick={()=>{copyText(value);setC(true);setTimeout(()=>setC(false),1400);}} title={label} aria-label={label} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280",flexShrink:0,transition:"all 0.15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#eff4ff";e.currentTarget.style.color="#2563eb";}} onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color="#6b7280";}}>{c?"✓":"⎘"}</button>;
 }
 
 export const fmtDate = (iso: string) => iso ? new Date(iso).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—";

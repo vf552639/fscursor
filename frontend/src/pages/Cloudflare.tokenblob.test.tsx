@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { screen, fireEvent, waitFor } from "@testing-library/react";
+import { screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import Cloudflare, { AddCfAccountModal } from "./Cloudflare";
 import { useDeleteCloudflareAccount } from "../api/cloudflare";
@@ -70,9 +70,14 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   syncLocalCache: vi.fn(async () => {}),
 }));
 
-// Тянет argon2/libsodium и к записи токена отношения не имеет.
+// Тянет argon2/libsodium, и сама расшифровка к записи токена отношения не
+// имеет. Но пропсы заглушка выводит на экран, а не глотает: проводка «блоб
+// аккаунта → кнопка» — это и есть то, что осталось от строки токена, и с
+// немой заглушкой `blobId={acc.account_id}` в компоненте прошёл бы тест.
 vi.mock("../components/RevealSecret", () => ({
-  RevealSecret: () => <span>reveal</span>,
+  RevealSecret: ({ blobId, label }: { blobId: string | null; label: string }) => (
+    <span>reveal:{blobId}:{label}</span>
+  ),
 }));
 
 const EXISTING_BLOB = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -120,12 +125,17 @@ async function openEditModal() {
   fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
 }
 
+/** Тело карточки (там, где жил блок токена) свёрнуто по умолчанию. */
+async function expandCard() {
+  fireEvent.click(await screen.findByLabelText(`Свернуть/развернуть аккаунт ${ACC.name}`));
+}
+
 describe("Cloudflare — api_token через блоб", () => {
   secretBlobLifecycle();
 
   it("в десктопе шлёт api_token_blob_id и НЕ шлёт api_token", async () => {
     setTauri(true);
-    mocks.apiPost.mockResolvedValue({ ...ACC, id: 6, sync_result: { updated: 2, skipped: 0, total_zones: 2 } });
+    mocks.apiPost.mockResolvedValue({ ...ACC, id: 6 });
 
     renderPage([]);
     await openAddModal();
@@ -155,9 +165,10 @@ describe("Cloudflare — api_token через блоб", () => {
     expect(JSON.stringify(body)).not.toContain(TOKEN);
     expect(body.name).toBe("cf-new");
 
-    // Итог синхронизации зон показывается по-прежнему: перевод формы на
-    // `mutateAsync` не должен был съесть ответ создания.
-    expect(await screen.findByText(/Linked Cloudflare to 2 existing domains/)).toBeTruthy();
+    // Итог создания показывается по-прежнему: перевод формы на `mutateAsync`
+    // не должен был съесть ответ. Что именно в нём написано — в
+    // `Cloudflare.createstatus.test.tsx`.
+    expect(await screen.findByText("Cloudflare account created.")).toBeTruthy();
   });
 
   it("упавшая запись блоба не создаёт аккаунт и не молчит", async () => {
@@ -292,6 +303,56 @@ describe("Cloudflare — api_token через блоб", () => {
     // сигнатуру `Pick<CloudflareAccount, "id" | "api_token_blob_id">`.
     await expectDeleteIgnoresBlobFailure(useDeleteCloudflareAccount, ACC);
     expect(mocks.apiDelete).toHaveBeenCalledWith("/cloudflare/accounts/5");
+  });
+
+  it("в вебе карточка даёт расшифровать токен по блобу, а не показывает хвост blob_id", async () => {
+    // Под подписью «Token: ••••xxxx» стоял хвост `api_token_blob_id`: с
+    // переездом на блобы плейнтекстовой колонки не стало, и маскировать было
+    // нечего. Сверять этот хвост с панелью Cloudflare бесполезно, а выглядел он
+    // как «вот твой токен». Настоящий токен вебу отдаёт только RevealSecret —
+    // расшифровкой блоба на клиенте.
+    setTauri(false);
+    renderPage();
+    await expandCard();
+
+    // Именно блоб аккаунта и именно эта подпись: `blobId` — единственное, что
+    // связывает кнопку с токеном ЭТОГО аккаунта, а подпись — единственное, что
+    // объясняет вебу, зачем на неё жать.
+    expect(
+      within(screen.getByTestId("account-token")).getByText(
+        `reveal:${EXISTING_BLOB}:Reveal API token`
+      )
+    ).toBeTruthy();
+    expect(screen.queryByText(/Token:/)).toBeNull();
+    expect(screen.queryByText(ACC.api_token_masked)).toBeNull();
+  });
+
+  it("в вебе без блоба блока токена тоже нет — прочерк не полоса", async () => {
+    // Вторая половина условия. `RevealSecret` без `blobId` рисует «—», то есть
+    // блок сжимался бы до полосы с прочерком: ничего не объясняющей и никуда не
+    // ведущей. Заодно этот тест не даёт «упростить» условие обратно до
+    // `!isTauri()`.
+    setTauri(false);
+    renderPage([{ ...ACC, api_token_blob_id: null }]);
+    await expandCard();
+
+    expect(screen.queryByTestId("account-token")).toBeNull();
+    expect(screen.queryByText(/^reveal:/)).toBeNull();
+  });
+
+  it("в десктопе блока токена нет вовсе — ни строки, ни пустой полосы", async () => {
+    // В десктопе `RevealSecret` не нужен (токен проверяют кнопкой Test), и
+    // после удаления строки внутри блока не остаётся ничего: отрисованный, он
+    // был бы полосой с рамкой ни о чём.
+    setTauri(true);
+    renderPage();
+    await expandCard();
+
+    // Карточка действительно раскрыта — иначе утверждения ниже вакуумны.
+    expect(await screen.findByText(/^Zones \(/)).toBeTruthy();
+    expect(screen.queryByTestId("account-token")).toBeNull();
+    expect(screen.queryByText(/Token:/)).toBeNull();
+    expect(screen.queryByText(ACC.api_token_masked)).toBeNull();
   });
 
   it("пробел в поле токена не перезаписывает живой блоб", async () => {

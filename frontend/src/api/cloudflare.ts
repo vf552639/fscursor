@@ -17,16 +17,8 @@ export interface CloudflareAccount {
   is_active: boolean;
   api_token_blob_id?: string | null;
   api_token_masked?: string | null;
-  sync_result?: CloudflareSyncResult | null;
-  sync_warning?: string | null;
   created_at: string;
   updated_at: string;
-}
-
-export interface CloudflareSyncResult {
-  updated: number;
-  skipped: number;
-  total_zones: number;
 }
 
 export interface CloudflareTestResponse {
@@ -76,8 +68,8 @@ export interface DnsRecord {
   ttl: number | null;
   proxied: boolean;
   zone_id: string | null;
-  // priority здесь намеренно нет: `client::DnsRecord` его не десериализует,
-  // так что в ответе на create/update приоритет не возвращается.
+  /** `Option<u16>` в Rust: приоритет есть только у MX/SRV/URI, у прочих — null. */
+  priority: number | null;
 }
 
 export interface DnsRecordCreate {
@@ -129,6 +121,13 @@ function zonesQuery(accountId: number | null | undefined) {
       const userId = requireUserId();
       return invokeSynced<Zone[]>("cf_list_zones", { userId, accountId: String(accountId) });
     },
+    // Заметно дольше глобальных 10с (`queryClient.ts`): это отдельный поход в
+    // Cloudflare с пагинацией на КАЖДЫЙ аккаунт, а список аккаунтов монтирует
+    // их все разом: с глобальным дефолтом возврат из DNS-редактора на страницу
+    // перезапрашивает зоны всех аккаунтов сразу. Свежесть от этого не страдает:
+    // зоны меняются руками и редко, а созданную нами зону список получает
+    // инвалидацией из `useCreateZone`, а не по истечении staleTime.
+    staleTime: 60_000,
   };
 }
 

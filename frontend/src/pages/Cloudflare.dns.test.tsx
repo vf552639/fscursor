@@ -112,6 +112,8 @@ const RECORD = {
   ttl: 1,
   proxied: true,
   zone_id: "zone-a",
+  // Ключ есть всегда: у типов без приоритета (A в том числе) он приезжает null.
+  priority: null,
 };
 
 function setTauri(on: boolean) {
@@ -169,8 +171,22 @@ function renderPage() {
   );
 }
 
+/**
+ * Карточка аккаунта приезжает СВЁРНУТОЙ (аккаунтов у пользователя десятки —
+ * см. `Cloudflare.collapse.test`), так что до зон, строки токена и «+ Add Zone»
+ * надо сперва её раскрыть. Раскрываем только свёрнутые: хелпер зовётся и сам по
+ * себе, и из `openZone`, а второй клик по раскрытой карточке закрыл бы её.
+ */
+async function expandAccounts() {
+  const chevrons = await screen.findAllByLabelText(/^Свернуть\/развернуть аккаунт/);
+  chevrons
+    .filter((c) => c.getAttribute("aria-expanded") === "false")
+    .forEach((c) => fireEvent.click(c));
+}
+
 /** Дойти со страницы аккаунтов до DNS-редактора зоны. */
 async function openZone(zoneName = "example.com") {
+  await expandAccounts();
   await screen.findByText(zoneName);
   const row = screen
     .getAllByTestId("zone-row")
@@ -230,6 +246,7 @@ describe("Cloudflare — достижимость и чтения", () => {
   it("даёт дойти от списка аккаунтов до DNS-редактора зоны", async () => {
     setTauri(true);
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText("example.com")).toBeTruthy();
     expect(screen.queryByText("no-cf.com")).toBeNull();
@@ -245,6 +262,7 @@ describe("Cloudflare — достижимость и чтения", () => {
     mockInvoke({ zones: [ZONE, UNLINKED_ZONE] });
 
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText("brand-new.com")).toBeTruthy();
     expect(invokeArgs("cf_list_zones")).toEqual({ userId: "user-1", accountId: "5" });
@@ -311,6 +329,7 @@ describe("Cloudflare — достижимость и чтения", () => {
     mockInvoke({ zonesError: new Error("cloudflare: 9109 invalid token") });
 
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText(/9109 invalid token/)).toBeTruthy();
     // Резервный список из доменов остаётся: пользователь не заперт.
@@ -326,6 +345,7 @@ describe("Cloudflare — достижимость и чтения", () => {
     ]);
 
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText("example.com")).toBeTruthy();
     expect(screen.queryByText("blog.example.com")).toBeNull();
@@ -420,6 +440,53 @@ describe("Cloudflare — мутации в десктопе", () => {
     // set)» и без своей опции — единственная, на которую не было проверки.
     expect(args.patch.ttl).toBe(1);
     expect(mocks.apiPut).not.toHaveBeenCalled();
+  });
+
+  it("показывает текущий priority MX и не теряет его при сохранении", async () => {
+    setTauri(true);
+    const mx = { ...RECORD, type: "MX", name: "example.com", content: "mx.example.com", priority: 20 };
+    mockInvoke({ records: [mx] });
+    mocks.mutate.mockResolvedValue(mx);
+
+    renderPage();
+    await openZone();
+    await screen.findByText("mx.example.com");
+
+    fireEvent.click(screen.getByTitle("Edit DNS record"));
+    // Пока `client::DnsRecord` не читал priority, поле открывалось пустым — и
+    // сохранение без единой правки уносило приоритет с собой.
+    const prio = screen.getByPlaceholderText("10") as HTMLInputElement;
+    expect(prio.value).toBe("20");
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
+    const [, args] = lastMutation();
+    expect(args.patch.priority).toBe(20);
+  });
+
+  it("не путает приоритет 0 с отсутствующим", async () => {
+    setTauri(true);
+    // 0 — валидный приоритет MX, причём самый «выигрышный»: почта пойдёт именно
+    // сюда. Наивное `record.priority ? String(record.priority) : ""` открыло бы
+    // поле пустым, и Save без правок молча стёр бы нуль до прежнего значения.
+    const mx = { ...RECORD, type: "MX", name: "example.com", content: "mx.example.com", priority: 0 };
+    mockInvoke({ records: [mx] });
+    mocks.mutate.mockResolvedValue(mx);
+
+    renderPage();
+    await openZone();
+    await screen.findByText("mx.example.com");
+
+    fireEvent.click(screen.getByTitle("Edit DNS record"));
+    expect((screen.getByPlaceholderText("10") as HTMLInputElement).value).toBe("0");
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
+    // Вторая половина того же пути: проверка «поле тронуто» в onSave тоже не
+    // должна принимать "0" за пустую строку.
+    expect(lastMutation()[1].patch.priority).toBe(0);
   });
 
   it("не переписывает отсутствующий TTL в Auto при простом сохранении", async () => {
@@ -528,6 +595,7 @@ describe("Cloudflare — мутации в десктопе", () => {
     });
 
     renderPage();
+    await expandAccounts();
     fireEvent.click(await screen.findByText("+ Add Zone"));
     fireEvent.change(screen.getByPlaceholderText("example.com"), {
       target: { value: "fresh.com" },
