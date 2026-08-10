@@ -173,6 +173,36 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
 });
 
 /**
+ * Список опций поля OS — контракт с десктопом (`OS_OPTIONS` в Servers.tsx,
+ * `update_command` в fastpanel_install.rs): каждый пункт обязан быть чистым
+ * именем семейства ОС, которое десктоп умеет разобрать. Список литералом, а
+ * не через импорт `OS_OPTIONS`: тест — это снимок контракта, а не сверка
+ * константы с самой собой.
+ */
+describe("AddServerModal — поле OS", () => {
+  secretBlobLifecycle();
+
+  it("ровно пять пунктов, по умолчанию выбран Ubuntu", async () => {
+    setTauri(true);
+    const { container } = renderModal();
+
+    // Поле провайдера — `<input list=...>` — тоже получает роль combobox
+    // (ARIA-маппинг для инпута с `list`), поэтому целимся в единственный
+    // настоящий `<select>` в модалке напрямую.
+    const select = container.querySelector("select") as HTMLSelectElement;
+    expect(select).toBeTruthy();
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      "Debian",
+      "Ubuntu",
+      "CentOS",
+      "AlmaLinux",
+      "Rocky Linux",
+    ]);
+    expect(select.value).toBe("Ubuntu");
+  });
+});
+
+/**
  * Панель на этапе добавления сервера НЕ выбирается: раньше здесь стояли две
  * вкладки («Install New Fastpanel» / «Connect Existing Fastpanel»), и решение
  * приходилось принимать до того, как сервер вообще завёлся. Теперь и установка,

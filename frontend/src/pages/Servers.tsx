@@ -28,9 +28,12 @@ const ALL_PROVIDERS = "";
  * выбирает пакетный менеджер для установки FastPanel (`apt` или `yum`),
  * версия ему не нужна.
  *
- * Новое имя обязано попадать под подстроки `cent|rhel|rocky|alma|fedora` из
+ * Новое имя из RHEL-семейства обязано попадать под подстроки
+ * `cent|rhel|rocky|alma|fedora` из
  * `desktop/src-tauri/src/provision/fastpanel_install.rs::update_command` —
- * иначе оно молча уедет в apt-ветку (там `else`, а не whitelist).
+ * иначе оно молча получит apt (там `else`, а не whitelist). Debian-подобные
+ * (Debian, Ubuntu) под эти подстроки не попадают нарочно — apt для них и
+ * есть правильный ответ.
  */
 const OS_OPTIONS = ["Debian", "Ubuntu", "CentOS", "AlmaLinux", "Rocky Linux"] as const;
 
@@ -123,7 +126,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Login</label><Inp value={login} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setLogin((e.target as any).value)} placeholder="e.g., root"/></div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setOs((e.target as any).value)} style={{width:"100%"}}>{OS_OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}</Sel></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setOs(e.target.value as (typeof OS_OPTIONS)[number])} style={{width:"100%"}}>{OS_OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}</Sel></div>
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label>
           {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Сервер
