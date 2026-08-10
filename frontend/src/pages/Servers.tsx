@@ -24,6 +24,13 @@ const PROVIDER_LIST_ID = "add-server-provider-options";
 const ALL_PROVIDERS = "";
 
 /**
+ * Только имя семейства ОС, без версии и архитектуры: десктоп по этому имени
+ * выбирает пакетный менеджер для установки FastPanel (`apt` или `yum`),
+ * версия ему не нужна.
+ */
+const OS_OPTIONS = ["Debian", "Ubuntu", "CentOS", "AlmaLinux", "Rocky Linux"] as const;
+
+/**
  * `providers` — обязательный проп, а не `useServers()` внутри: список серверов
  * страница УЖЕ загрузила, и второй его источник умел бы с ним разойтись. И не
  * опциональный с дефолтом `[]`: забытая передача — это молча пустые подсказки,
@@ -34,7 +41,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
   const [name, setName] = useState("");
   const [ip, setIp] = useState("");
   const [login, setLogin] = useState("root");
-  const [os, setOs] = useState("Ubuntu 22.04 LTS (x86_64)");
+  const [os, setOs] = useState("Ubuntu");
   const [provider, setProvider] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const sshPassword = useSecretSave("SSH password");
@@ -112,7 +119,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
         <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Login</label><Inp value={login} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setLogin((e.target as any).value)} placeholder="e.g., root"/></div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setOs((e.target as any).value)} style={{width:"100%"}}><option>Ubuntu 22.04 LTS (x86_64)</option><option>Ubuntu 20.04 LTS (x86_64)</option><option>Debian 12 (x86_64)</option></Sel></div>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label><Sel value={os} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setOs((e.target as any).value)} style={{width:"100%"}}>{OS_OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}</Sel></div>
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>SSH Password</label>
           {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Сервер
