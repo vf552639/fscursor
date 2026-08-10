@@ -97,15 +97,29 @@ function renderDetail(server: typeof SERVER = SERVER) {
   );
 }
 
-/** Значение строки «Provider» в карточке Server Information. */
+/**
+ * Значение строки «Provider» в карточке Server Information.
+ *
+ * Кнопки из ячейки значения выбрасываются: у правимых строк `InfoRow` рисует
+ * там же карандаш, и его глиф «✎» приклеился бы к значению без разделителя
+ * («Hetzner✎»). Убираем сам элемент, а не подчищаем строку от глифа: подгонка
+ * ожидания под мусор скрыла бы и настоящий мусор в значении.
+ */
 function infoRowValue(label: string): string {
   const key = screen.getByText(label);
   const row = key.parentElement as HTMLElement;
-  return ((row.children[1] as HTMLElement).textContent || "").trim();
+  const cell = (row.children[1] as HTMLElement).cloneNode(true) as HTMLElement;
+  cell.querySelectorAll("button").forEach((b) => b.remove());
+  return (cell.textContent || "").trim();
 }
 
+/**
+ * Правку открывает карандаш в самой строке «Provider» — по имени действия, а не
+ * по глифу: «✎» на этой странице носят ещё три строки карточки и кнопки правки
+ * доменов.
+ */
 async function openProviderForm() {
-  fireEvent.click(await screen.findByText("✎ Provider"));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit Provider" }));
   return (await screen.findByPlaceholderText("e.g., Hetzner")) as HTMLInputElement;
 }
 
@@ -213,7 +227,7 @@ describe("ServerDetail — хостинг-провайдер", () => {
     // Значение видно (веб read-only), а кнопки правки нет: PUT из браузера —
     // мутация, а мутации живут в десктопе.
     expect(await screen.findByText("Provider")).toBeTruthy();
-    expect(screen.queryByText("✎ Provider")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit Provider" })).toBeNull();
     expect(screen.getAllByText(DESKTOP_NOTE).length).toBeGreaterThan(0);
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });

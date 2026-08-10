@@ -200,7 +200,7 @@ describe("ServerDetail — переименование сервера", () => {
 
     renderDetail();
     // Провайдер сохраняется тем же `useUpdateServer`, что и имя. Роняем его.
-    fireEvent.click(await screen.findByText("✎ Provider"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Provider" }));
     fireEvent.change(await screen.findByPlaceholderText("e.g., Hetzner"), {
       target: { value: "AWS" },
     });
