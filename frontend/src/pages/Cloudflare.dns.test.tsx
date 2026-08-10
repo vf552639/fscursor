@@ -169,8 +169,22 @@ function renderPage() {
   );
 }
 
+/**
+ * Карточка аккаунта приезжает СВЁРНУТОЙ (аккаунтов у пользователя десятки —
+ * см. `Cloudflare.collapse.test`), так что до зон, строки токена и «+ Add Zone»
+ * надо сперва её раскрыть. Раскрываем только свёрнутые: хелпер зовётся и сам по
+ * себе, и из `openZone`, а второй клик по раскрытой карточке закрыл бы её.
+ */
+async function expandAccounts() {
+  const chevrons = await screen.findAllByLabelText(/^Свернуть\/развернуть аккаунт/);
+  chevrons
+    .filter((c) => c.getAttribute("aria-expanded") === "false")
+    .forEach((c) => fireEvent.click(c));
+}
+
 /** Дойти со страницы аккаунтов до DNS-редактора зоны. */
 async function openZone(zoneName = "example.com") {
+  await expandAccounts();
   await screen.findByText(zoneName);
   const row = screen
     .getAllByTestId("zone-row")
@@ -230,6 +244,7 @@ describe("Cloudflare — достижимость и чтения", () => {
   it("даёт дойти от списка аккаунтов до DNS-редактора зоны", async () => {
     setTauri(true);
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText("example.com")).toBeTruthy();
     expect(screen.queryByText("no-cf.com")).toBeNull();
@@ -245,6 +260,7 @@ describe("Cloudflare — достижимость и чтения", () => {
     mockInvoke({ zones: [ZONE, UNLINKED_ZONE] });
 
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText("brand-new.com")).toBeTruthy();
     expect(invokeArgs("cf_list_zones")).toEqual({ userId: "user-1", accountId: "5" });
@@ -311,6 +327,7 @@ describe("Cloudflare — достижимость и чтения", () => {
     mockInvoke({ zonesError: new Error("cloudflare: 9109 invalid token") });
 
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText(/9109 invalid token/)).toBeTruthy();
     // Резервный список из доменов остаётся: пользователь не заперт.
@@ -326,6 +343,7 @@ describe("Cloudflare — достижимость и чтения", () => {
     ]);
 
     renderPage();
+    await expandAccounts();
 
     expect(await screen.findByText("example.com")).toBeTruthy();
     expect(screen.queryByText("blog.example.com")).toBeNull();
@@ -528,6 +546,7 @@ describe("Cloudflare — мутации в десктопе", () => {
     });
 
     renderPage();
+    await expandAccounts();
     fireEvent.click(await screen.findByText("+ Add Zone"));
     fireEvent.change(screen.getByPlaceholderText("example.com"), {
       target: { value: "fresh.com" },

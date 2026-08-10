@@ -112,7 +112,6 @@ function AccountCard({
   onDelete,
   onTest,
   testStatus,
-  domainCount,
   domainZones,
   onOpenZone,
   onAddZone,
@@ -122,17 +121,23 @@ function AccountCard({
   onDelete: () => void;
   onTest: () => void;
   testStatus?: { state: "idle" | "loading" | "success" | "error"; message?: string };
-  /** Домены из НАШЕЙ базы. Это не «Zones (N)» ниже: те отдаёт сам Cloudflare. */
-  domainCount: number;
   domainZones: CfZoneRef[];
   onOpenZone: (zone: CfZoneRef) => void;
   onAddZone: () => void;
 }) {
   const canExecute = isTauri();
-  // Локальный boolean, а не общий Set в родителе: карточки не размонтируются на
-  // ре-рендере, а «свёрнут» — свойство одной карточки и больше ничьё.
-  const [collapsed, setCollapsed] = useState(false);
-  const toggle = () => setCollapsed((v) => !v);
+  // Свёрнуто по умолчанию: аккаунтов десятки, а раскрытый список зон нужен
+  // точечно. Локальный boolean, а не общий Set в родителе: карточки не
+  // размонтируются на ре-рендере, а «свёрнут» — свойство одной карточки.
+  const [collapsed, setCollapsed] = useState(true);
+  const toggle = () => {
+    // Клик по пустому месту шапки разворачивает карточку — но `account_id`
+    // выделяют мышью, чтобы скопировать, а mouseup после выделения тоже даёт
+    // click. Выделение важнее: без этой проверки id нельзя было бы скопировать,
+    // не схлопнув карточку.
+    if (window.getSelection()?.toString()) return;
+    setCollapsed((v) => !v);
+  };
   // Источник правды — сам Cloudflare: только он знает про зону, созданную
   // минуту назад, и только он отдаёт её name_servers. Домены остаются
   // резервом для веба, у которого токена нет и быть не должно.
@@ -150,14 +155,23 @@ function AccountCard({
       {/* Гасим границу шапки, только когда шапка — последнее, что есть в
           карточке: там она встаёт вплотную к границе `Card` и читается двойным
           кантом. С показанным итогом Test connection она обычный разделитель. */}
-      <CHd style={collapsed && !testResultShown ? { borderBottom: "none" } : undefined}>
+      <CHd
+        onClick={toggle}
+        style={{
+          cursor: "pointer",
+          ...(collapsed && !testResultShown ? { borderBottom: "none" } : null),
+        }}
+      >
         <div data-testid="account-header" style={{display:"flex",alignItems:"center",gap:10}}>
           <span
             role="button"
             aria-expanded={!collapsed}
             aria-label={`Свернуть/развернуть аккаунт ${acc.name}`}
             tabIndex={0}
-            onClick={toggle}
+            // Клик по шеврону обязан всплыть НЕ дальше него: обработчик шапки
+            // отработал бы вторым и вернул состояние назад — мишень выглядела бы
+            // сломанной.
+            onClick={(e) => { e.stopPropagation(); toggle(); }}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
             }}
@@ -168,17 +182,18 @@ function AccountCard({
             {collapsed ? "▸" : "▾"}
           </span>
           <div style={{width:36,height:36,background:"#fff7ed",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>☁</div>
-          {/* Имя — вторая мишень того же переключателя: попасть мышью в глиф
-              11px трудно, а строка аккаунта — привычное место для клика.
-              Именно имя, а не блок целиком: под ним лежит `account_id`, который
-              захочется выделить и скопировать, а mouseup после выделения дал бы
-              click и схлопнул карточку. */}
-          <div><div onClick={toggle} style={{fontSize:14,fontWeight:700,color:"#111",cursor:"pointer"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
+          {/* Отдельной мишени у имени больше нет: переключатель висит на всей
+              шапке, а имя — её часть. */}
+          <div><div style={{fontSize:14,fontWeight:700,color:"#111"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
           <Badge variant={acc.is_active?"green":"gray"}>{acc.is_active?"Active":"Inactive"}</Badge>
-          {/* «1 domain» без -s: счётчик стоит на самом видном месте карточки. */}
-          <Badge variant="gray">{domainCount} {domainCount === 1 ? "domain" : "domains"}</Badge>
+          {/* То же число, что в заголовке «Zones (N)» ниже, — и ради свёрнутой
+              карточки: там блока зон не видно, а знать, сколько их, надо.
+              «1 domain» без -s: счётчик стоит на самом видном месте карточки. */}
+          <Badge variant="gray">{zones.length} {zones.length === 1 ? "domain" : "domains"}</Badge>
         </div>
-        <div style={{display:"flex",gap:8}}>
+        {/* Кнопки — не часть переключателя: без остановки всплытия любой клик по
+            ним доехал бы до шапки и свернул карточку. */}
+        <div onClick={(e) => e.stopPropagation()} style={{display:"flex",gap:8}}>
           {/* Был OpenInDesktop с action `test-cloudflare` — хостом, которого
               parseDeepLinkAction не знает: ссылка вела в {handled:false} и
               только тостила. Проверка токена идёт в cf_verify_token, а веб,
@@ -392,7 +407,6 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onDelete={async () => { if (!(await confirmAction(`Delete account ${acc.name}?`))) return; deleteAcc.mutate(acc); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
-        domainCount={domains.filter((d) => d.cloudflare_account_id === acc.id).length}
         domainZones={zonesOfAccount(domains, acc.id)}
         onOpenZone={(zone) => setSel({ acc: { id: acc.id, name: acc.name }, zone })}
         onAddZone={() => setAddZoneFor({ id: acc.id, name: acc.name })}

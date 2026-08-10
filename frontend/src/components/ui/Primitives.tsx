@@ -151,8 +151,11 @@ export function EmptyState({
 export function Card({children, style}: {children: React.ReactNode, style?: React.CSSProperties}){
   return <div style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,...style}}>{children}</div>;
 }
-export function CHd({children, style}: {children: React.ReactNode, style?: React.CSSProperties}){
-  return <div style={{padding:"15px 20px",borderBottom:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between",...style}}>{children}</div>;
+// `onClick` — не украшение: шапка раскладывает содержимое `space-between`, и
+// пустое место между левым блоком и кнопками принадлежит ЕЙ. Мишенью «клик по
+// пустому месту шапки» может быть только сам этот div.
+export function CHd({children, style, onClick}: {children: React.ReactNode, style?: React.CSSProperties, onClick?: React.MouseEventHandler<HTMLDivElement>}){
+  return <div style={{padding:"15px 20px",borderBottom:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between",...style}} onClick={onClick}>{children}</div>;
 }
 export function CTi({children}: {children: React.ReactNode}){
   return <div style={{fontSize:14,fontWeight:600,color:"#111",display:"flex",alignItems:"center",gap:8}}>{children}</div>;

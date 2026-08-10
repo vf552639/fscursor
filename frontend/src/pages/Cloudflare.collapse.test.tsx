@@ -7,12 +7,12 @@ import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 
 /**
- * Шапка карточки аккаунта: счётчик доменов и сворачивание. Оба про одно —
- * страница с десятками аккаунтов, у каждого из которых всегда раскрыт полный
- * список зон, читается только скроллом.
+ * Шапка карточки аккаунта: счётчик зон и сворачивание. Оба про одно — страница
+ * с десятками аккаунтов, у каждого из которых раскрыт полный список зон,
+ * читается только скроллом.
  *
- * Счётчик доменов и «Zones (N)» — РАЗНЫЕ показатели: домены живут в нашей БД,
- * зоны отдаёт сам Cloudflare. Тесты держат их порознь.
+ * Число в шапке — то же самое, что в заголовке «Zones (N)». Смысл дубля в том,
+ * что у свёрнутой карточки блока зон не видно, а знать, сколько их, надо.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -69,25 +69,7 @@ const ZONE = {
   status: "active",
 };
 
-function domain(over: Record<string, unknown>) {
-  return {
-    id: 1,
-    domain_name: "example.com",
-    status: "active",
-    registrar_id: null,
-    server_id: null,
-    cloudflare_account_id: 5,
-    cloudflare_zone_id: "zone-a",
-    cloudflare_enabled: true,
-    expiry_date: null,
-    purchase_date: null,
-    ns_status: null,
-    ns_updated_at: null,
-    created_at: "2026-01-01T00:00:00Z",
-    updated_at: "2026-01-01T00:00:00Z",
-    ...over,
-  };
-}
+const ZONE_B = { ...ZONE, id: "zone-b", name: "second.com" };
 
 function setTauri(on: boolean) {
   const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
@@ -95,7 +77,12 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-function mockHttp(accounts: any[], domains: any[]) {
+/**
+ * Доменов у аккаунтов в этих тестах нет вовсе — и это осмысленно: счётчик в
+ * шапке считает зоны из Cloudflare, а не строки нашей базы. Пустой `/domains`
+ * держит эту границу: будь счётчик снова доменным, все числа стали бы нулями.
+ */
+function mockHttp(accounts: any[], domains: any[] = []) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/cloudflare/accounts") return accounts;
     if (url === "/domains") return domains;
@@ -103,10 +90,13 @@ function mockHttp(accounts: any[], domains: any[]) {
   });
 }
 
-/** Чтения отвечают фикстурой, всё прочее уходит в `mocks.mutate`. */
-function mockInvoke(zones: any[] = [ZONE]) {
+/**
+ * Чтения отвечают фикстурой, всё прочее уходит в `mocks.mutate`. `zones` можно
+ * задать функцией от `accountId` — тогда у соседних карточек разное число зон.
+ */
+function mockInvoke(zones: any[] | ((accountId: string) => any[]) = [ZONE]) {
   mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
-    if (cmd === "cf_list_zones") return zones;
+    if (cmd === "cf_list_zones") return typeof zones === "function" ? zones(args.accountId) : zones;
     if (cmd === "cf_list_dns_records") return [];
     return mocks.mutate(cmd, args);
   });
@@ -125,10 +115,10 @@ function renderPage() {
 }
 
 /**
- * Левый блок шапки карточки: шеврон, имя и бейджи лежат в одном flex-ряду.
- * Скоуп нужен, чтобы при двух аккаунтах счётчик привязывался к своей карточке,
- * а не просто «где-то на странице есть такой текст». Поднимаемся `closest`, а
- * не счётом `parentElement`: счёт ступеней ломается от любой новой обёртки.
+ * Левый блок шапки: шеврон, имя и бейджи лежат в одном flex-ряду. Скоуп нужен,
+ * чтобы при двух аккаунтах счётчик привязывался к своей карточке, а не просто
+ * «где-то на странице есть такой текст». Поднимаемся `closest`, а не счётом
+ * `parentElement`: счёт ступеней ломается от любой новой обёртки.
  */
 function headerOf(accName: string): HTMLElement {
   const header = screen.getByText(accName).closest('[data-testid="account-header"]');
@@ -136,8 +126,22 @@ function headerOf(accName: string): HTMLElement {
   return header as HTMLElement;
 }
 
+/**
+ * Сама шапка (`CHd`) — мишень «клик по пустому месту»: она раскладывает
+ * содержимое `space-between`, и промежуток между бейджами и кнопками
+ * принадлежит именно ей, а не вложенным блокам.
+ */
+function cardHeaderOf(accName: string): HTMLElement {
+  return headerOf(accName).parentElement as HTMLElement;
+}
+
 function chevronOf(accName: string) {
   return screen.getByLabelText(`Свернуть/развернуть аккаунт ${accName}`);
+}
+
+/** Число зон в бейдже шапки: ждём живой список, до него там фолбэк. */
+async function expectBadge(accName: string, text: string) {
+  await waitFor(() => expect(within(headerOf(accName)).getByText(text)).toBeTruthy());
 }
 
 beforeEach(() => {
@@ -152,7 +156,7 @@ beforeEach(() => {
     mutations: { ...base.mutations, retry: false },
   });
   useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
-  mockHttp([ACCOUNT], [domain({})]);
+  mockHttp([ACCOUNT]);
   mockInvoke();
 });
 
@@ -165,93 +169,98 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("Cloudflare — счётчик доменов в шапке аккаунта", () => {
-  it("считает домены своего аккаунта и не считает чужие", async () => {
+describe("Cloudflare — счётчик в шапке аккаунта", () => {
+  it("показывает число зон, а не строк из нашей базы", async () => {
     setTauri(true);
-    mockHttp(
-      [ACCOUNT, SECOND_ACCOUNT, EMPTY_ACCOUNT],
-      [
-        domain({ id: 1, domain_name: "example.com" }),
-        domain({ id: 2, domain_name: "second.example.com" }),
-        // Чужой аккаунт и домен вообще без Cloudflare — в счёт первого не идут.
-        domain({ id: 3, domain_name: "other.com", cloudflare_account_id: 7, cloudflare_zone_id: "zone-b" }),
-        domain({ id: 4, domain_name: "no-cf.com", cloudflare_account_id: null, cloudflare_zone_id: null }),
-      ]
-    );
+    // Ровно расхождение, которое увидел пользователь: доменов в базе нет, а зон
+    // в Cloudflare две — в шапке должна стоять двойка, а не ноль.
+    mockInvoke([ZONE, ZONE_B]);
 
     renderPage();
 
     await screen.findByText("Main CF");
-    expect(within(headerOf("Main CF")).getByText("2 domains")).toBeTruthy();
-    // Единственное число — без «-s»: счётчик стоит на самом видном месте
-    // карточки, и «1 domains» там читается как опечатка продукта.
-    expect(within(headerOf("Second CF")).getByText("1 domain")).toBeTruthy();
-    // Ноль — снова множественное.
-    expect(within(headerOf("Empty CF")).getByText("0 domains")).toBeTruthy();
+    await expectBadge("Main CF", "2 domains");
+
+    // И это ТО ЖЕ число, что в заголовке блока зон: два показателя разъезжаться
+    // не должны, иначе непонятно, какому верить.
+    fireEvent.click(chevronOf("Main CF"));
+    expect(await screen.findByText("Zones (2)")).toBeTruthy();
   });
 
-  it("не смешивает счётчик доменов с числом живых зон", async () => {
+  it("единственная зона — без «-s», ни одной — «0 domains»", async () => {
     setTauri(true);
-    // Домен один, а зон у аккаунта в Cloudflare три: показатели независимы.
-    mockInvoke([ZONE, { ...ZONE, id: "zone-b", name: "b.com" }, { ...ZONE, id: "zone-c", name: "c.com" }]);
+    mockHttp([ACCOUNT, EMPTY_ACCOUNT]);
+    mockInvoke((accountId) => (accountId === "9" ? [] : [ZONE]));
 
     renderPage();
 
     await screen.findByText("Main CF");
-    expect(within(headerOf("Main CF")).getByText("1 domain")).toBeTruthy();
-    expect(await screen.findByText("Zones (3)")).toBeTruthy();
+    // «1 domains» на самом видном месте карточки читается опечаткой продукта.
+    await expectBadge("Main CF", "1 domain");
+    await expectBadge("Empty CF", "0 domains");
   });
 });
 
 describe("Cloudflare — сворачивание карточки аккаунта", () => {
-  it("по умолчанию карточка развёрнута", async () => {
+  it("по умолчанию карточка свёрнута: видна только шапка", async () => {
     setTauri(true);
     renderPage();
 
     await screen.findByText("Main CF");
-    await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(1));
-    expect(screen.getByText(/^Token:/)).toBeTruthy();
-    expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
-  });
-
-  it("шеврон прячет зоны и строку токена, повторный клик возвращает", async () => {
-    setTauri(true);
-    renderPage();
-
-    await screen.findByText("Main CF");
-    await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(1));
-
-    fireEvent.click(chevronOf("Main CF"));
+    await expectBadge("Main CF", "1 domain");
 
     expect(screen.queryAllByTestId("zone-row").length).toBe(0);
     expect(screen.queryByText(/^Token:/)).toBeNull();
     expect(screen.queryByText(/^Zones \(/)).toBeNull();
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("false");
-    // Шапка остаётся видимой всегда — иначе свёрнутую карточку нечем опознать.
-    expect(screen.getByText("Main CF")).toBeTruthy();
-    expect(within(headerOf("Main CF")).getByText("1 domain")).toBeTruthy();
-
-    fireEvent.click(chevronOf("Main CF"));
-
-    expect(screen.getAllByTestId("zone-row").length).toBe(1);
-    expect(screen.getByText(/^Token:/)).toBeTruthy();
-    expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("клик по имени аккаунта переключает, а по account_id — нет", async () => {
+  it("шеврон разворачивает ровно одним кликом и сворачивает обратно", async () => {
     setTauri(true);
     renderPage();
 
     await screen.findByText("Main CF");
-    await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(1));
 
-    // `account_id` — то, что как раз выделяют мышью, чтобы скопировать: mouseup
-    // после выделения даёт click, и переключатель на обёртке схлопывал бы
-    // карточку ровно в этот момент. Мишень — только строка имени.
-    fireEvent.click(screen.getByText("cf-acc-1"));
-    expect(screen.getAllByTestId("zone-row").length).toBe(1);
+    // «Ровно одним»: клик по шеврону всплывает в шапку, у которой тот же
+    // обработчик. Без stopPropagation переключений было бы два, и карточка
+    // осталась бы свёрнутой — мишень выглядела бы сломанной.
+    fireEvent.click(chevronOf("Main CF"));
 
-    fireEvent.click(screen.getByText("Main CF"));
+    expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
+    expect(screen.getByText(/^Token:/)).toBeTruthy();
+    expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(chevronOf("Main CF"));
+
+    expect(screen.queryAllByTestId("zone-row").length).toBe(0);
+    expect(screen.queryByText(/^Token:/)).toBeNull();
+    expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("false");
+    // Шапка видна всегда — иначе свёрнутую карточку нечем опознать.
+    expect(screen.getByText("Main CF")).toBeTruthy();
+  });
+
+  it("клик по пустому месту шапки разворачивает карточку", async () => {
+    setTauri(true);
+    renderPage();
+
+    await screen.findByText("Main CF");
+    fireEvent.click(cardHeaderOf("Main CF"));
+
+    expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
+    expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("выделение текста в шапке не переключает карточку", async () => {
+    setTauri(true);
+    // `account_id` выделяют мышью, чтобы скопировать, а mouseup после выделения
+    // тоже даёт click: без проверки выделения id нельзя было бы скопировать, не
+    // развернув карточку.
+    vi.stubGlobal("getSelection", () => ({ toString: () => "cf-acc-1" }));
+
+    renderPage();
+
+    await screen.findByText("Main CF");
+    fireEvent.click(cardHeaderOf("Main CF"));
 
     expect(screen.queryAllByTestId("zone-row").length).toBe(0);
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("false");
@@ -262,10 +271,9 @@ describe("Cloudflare — сворачивание карточки аккаун�
     renderPage();
 
     await screen.findByText("Main CF");
-    await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(1));
 
     fireEvent.keyDown(chevronOf("Main CF"), { key: "Enter" });
-    expect(screen.queryAllByTestId("zone-row").length).toBe(0);
+    expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
 
     // Событие создаём вручную, чтобы проверить `preventDefault`: без него пробел
     // на шевроне ещё и прокручивает страницу, а обычный `fireEvent.keyDown`
@@ -273,25 +281,23 @@ describe("Cloudflare — сворачивание карточки аккаун�
     const space = createEvent.keyDown(chevronOf("Main CF"), { key: " " });
     fireEvent(chevronOf("Main CF"), space);
     expect(space.defaultPrevented).toBe(true);
-    expect(screen.getAllByTestId("zone-row").length).toBe(1);
+    expect(screen.queryAllByTestId("zone-row").length).toBe(0);
   });
 
-  it("сворачивает только свою карточку, соседнюю не трогает", async () => {
+  it("разворачивает только свою карточку, соседнюю не трогает", async () => {
     setTauri(true);
-    mockHttp([ACCOUNT, SECOND_ACCOUNT], [domain({})]);
+    mockHttp([ACCOUNT, SECOND_ACCOUNT]);
 
     renderPage();
 
     await screen.findByText("Second CF");
-    await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(2));
-
     fireEvent.click(chevronOf("Main CF"));
 
-    expect(screen.getAllByTestId("zone-row").length).toBe(1);
-    expect(chevronOf("Second CF").getAttribute("aria-expanded")).toBe("true");
+    expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
+    expect(chevronOf("Second CF").getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("кнопки Test/Edit/✕ не сворачивают карточку", async () => {
+  it("кнопки Test/Edit/✕ не сворачивают развёрнутую карточку", async () => {
     setTauri(true);
     mocks.mutate.mockResolvedValue(true);
     // Удаление отклоняем: тест про сворачивание, а не про исчезновение карточки.
@@ -299,8 +305,11 @@ describe("Cloudflare — сворачивание карточки аккаун�
 
     renderPage();
     await screen.findByText("Main CF");
-    await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(1));
+    fireEvent.click(chevronOf("Main CF"));
+    expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
 
+    // Кнопки лежат ВНУТРИ шапки, у которой теперь свой onClick: без остановки
+    // всплытия каждый клик по ним сворачивал бы карточку.
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
     expect(screen.getAllByTestId("zone-row").length).toBe(1);
