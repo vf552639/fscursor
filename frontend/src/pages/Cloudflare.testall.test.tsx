@@ -103,6 +103,23 @@ function renderPage() {
   );
 }
 
+/**
+ * Так страница живёт в приложении: `main.tsx` оборачивает всё в `StrictMode`.
+ * Разница не косметическая — React 18 в dev делает монтирование → эффект →
+ * уборку → эффект НА ТОМ ЖЕ экземпляре, а рефы при этом не пересоздаются, так
+ * что сторож, который только гасят в уборке, остаётся погашенным навсегда и
+ * убивает прогон целиком. Тесты, рендерящие голый компонент, этого не видят.
+ */
+function renderPageStrict() {
+  return render(
+    <React.StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <Cloudflare />
+      </QueryClientProvider>
+    </React.StrictMode>
+  );
+}
+
 /** Кнопка прогона — по подписи-шаблону: число в ней и есть предмет проверки. */
 const testAllBtn = () => screen.getByRole("button", { name: /^Test \d+ tokens?$/ });
 const queryTestAllBtn = () => screen.queryByRole("button", { name: /^Test \d+ tokens?$/ });
@@ -256,6 +273,21 @@ describe("Cloudflare — «проверить все токены»", () => {
     // Второй прогон удвоил бы список проверок — и итог по каждому аккаунту
     // приехал бы дважды.
     expect(verifiedIds()).toEqual(["5", "7", "9"]);
+  });
+
+  it("под StrictMode — то есть в приложении — прогон доходит до всех аккаунтов", async () => {
+    setTauri(true);
+    renderPageStrict();
+    await screen.findByText("Backup CF");
+
+    fireEvent.click(testAllBtn());
+
+    // Сторож размонтирования обязан подниматься в теле эффекта, а не только
+    // гаснуть в его уборке: в dev-сборке (а её и щупают руками) StrictMode
+    // прогоняет уборку на живом экземпляре, и односторонний сторож оставлял бы
+    // кнопку, которая моргает и не делает ничего — молча.
+    await waitFor(() => expect(verifiedIds()).toEqual(["5", "7", "9"]));
+    expect(await screen.findByText("3 tokens verified.")).toBeTruthy();
   });
 
   it("уход со страницы посреди прогона его останавливает", async () => {

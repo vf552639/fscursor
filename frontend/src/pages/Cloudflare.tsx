@@ -508,7 +508,19 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   // кнопку. С одиночными кликами это было экзотикой, с прогоном на десятки
   // аккаунтов — штатное окно.
   const resetTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
-  useEffect(() => () => { alive.current = false; }, []);
+  // Флаг поднимается В ТЕЛЕ эффекта, а не только гасится в его уборке. Иначе под
+  // `React.StrictMode` (он обёрнут вокруг всего приложения в `main.tsx`) фича
+  // мертва в dev целиком: React 18 там делает монтирование → эффект → уборку →
+  // эффект НА ТОМ ЖЕ экземпляре, а рефы при этом не пересоздаются, — `alive`
+  // уходил в `false` на симулированном размонтировании и не возвращался никогда.
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      // Таймеры сброса успеха уносим с собой: своей карточки они уже не найдут.
+      Object.values(resetTimers.current).forEach(clearTimeout);
+    };
+  }, []);
   const visibleAccounts = filterAccounts(cfAccounts, accQuery);
   // Идущий прогон держит кнопку на экране даже тогда, когда порог соблюдён, а
   // проверять сейчас нечего: запрос, сузивший список до пустого, унёс бы с
