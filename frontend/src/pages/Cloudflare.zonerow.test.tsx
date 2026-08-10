@@ -66,6 +66,9 @@ const ZONE = {
 /** Зона, чьи NS ещё не делегированы на Cloudflare, — жёлтая ступень. */
 const PENDING_ZONE = { ...ZONE, id: "zone-b", name: "fresh.com", status: "pending" };
 
+/** Зона, которую Cloudflare только заводит, — вторая жёлтая ступень. */
+const INITIALIZING_ZONE = { ...ZONE, id: "zone-d", name: "new.com", status: "initializing" };
+
 /** Зона, уехавшая из этого аккаунта: статус вне известных нам ступеней. */
 const MOVED_ZONE = { ...ZONE, id: "zone-c", name: "moved.com", status: "moved" };
 
@@ -190,7 +193,7 @@ afterEach(() => {
 describe("Cloudflare — бейдж статуса зоны", () => {
   it("показывает статус из cf_list_zones, красит каждую ступень своим цветом", async () => {
     setTauri(true);
-    mockInvoke([ZONE, PENDING_ZONE, MOVED_ZONE]);
+    mockInvoke([ZONE, PENDING_ZONE, INITIALIZING_ZONE, MOVED_ZONE]);
 
     renderPage();
     await expandAccounts();
@@ -200,11 +203,14 @@ describe("Cloudflare — бейдж статуса зоны", () => {
 
     // Три РАЗНЫХ утверждения, поэтому и три точных цвета, а не «не зелёный»:
     // зелёный говорит «делегирование доехало» и заслужен только `active`;
-    // жёлтый у `pending` — NS ещё не делегированы, и позеленить эту ступень
-    // значит нарисовать здоровье там, где его никто не подтверждал; серый —
-    // «состояние знает Cloudflare, а мы нет», и туда же уходит незнакомое.
+    // жёлтый у `pending` и `initializing` — зона ещё не работает, и позеленить
+    // эту ступень значит нарисовать здоровье там, где его никто не подтверждал;
+    // серый — «состояние знает Cloudflare, а мы нет», туда же уходит незнакомое.
+    // Оба жёлтых значения судятся поимённо: у каждого своя строка в
+    // `ZONE_STATUS_VARIANT`, и одна проверка стерегла бы только одну из них.
     expect((await badge("example.com", "active")).style.color).toBe(GREEN);
     expect((await badge("fresh.com", "pending")).style.color).toBe(YELLOW);
+    expect((await badge("new.com", "initializing")).style.color).toBe(YELLOW);
     expect((await badge("moved.com", "moved")).style.color).toBe(GRAY);
   });
 

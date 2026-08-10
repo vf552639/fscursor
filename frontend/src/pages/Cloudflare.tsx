@@ -288,8 +288,9 @@ function AccountCard({
                   неполон, уже сказано подписью над ним. */}
               {/* Слова — сырые, из словаря Cloudflare; заглавная буква их не
                   выдумывает и держит бейдж в одном регистре с соседними
-                  («Active» в шапке). `capitalize` поднимает первую букву, так
-                  что многословный `read only` остаётся читаемым. */}
+                  («Active» в шапке). `capitalize` поднимает первую букву
+                  каждого слова, так что многословный `read only` станет
+                  «Read Only» — непривычно, но читаемо. */}
               {z.status ? (
                 <Badge variant={ZONE_STATUS_VARIANT[z.status] || "gray"} style={{textTransform:"capitalize"}}>{z.status}</Badge>
               ) : null}
