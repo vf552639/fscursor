@@ -96,7 +96,11 @@ CLAUDE.md («одна функция = один план») и ведётся п
 только объявление типа (`frontend/src/api/cloudflare.ts:19`) и фикстуры четырёх
 тестов. Вычистить поле из `CloudflareAccountResponse` и `build_account_response`
 (`backend/app/services/cloudflare_service.py:16-24`) и из TS-типа. Сцеплено с 4.1
-(чистка схем) — делать одним заходом.
+(чистка схем) — делать одним заходом. Адрес поля в схеме —
+`backend/app/schemas/cloudflare.py:50`. Правка уронит
+`backend/tests/test_cloudflare_account_response.py` (точный набор ключей ответа
+и `assert response.api_token_masked == "••••eeee"`) — это не «я что-то сломал», а
+часть работы Д1: гард держит «ответ не обещает того, чего сервер не делает».
 
 **Д2. Протухшая строка allowlist**
 `backend/tests/test_no_plaintext_secret_schemas.py:94` разрешает
