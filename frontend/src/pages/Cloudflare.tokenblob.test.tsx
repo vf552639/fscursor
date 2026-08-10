@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { screen, fireEvent, waitFor } from "@testing-library/react";
+import { screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import Cloudflare, { AddCfAccountModal } from "./Cloudflare";
 import { useDeleteCloudflareAccount } from "../api/cloudflare";
@@ -118,6 +118,11 @@ function fillAddModal(token?: string) {
 
 async function openEditModal() {
   fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+}
+
+/** Тело карточки (там, где жил блок токена) свёрнуто по умолчанию. */
+async function expandCard() {
+  fireEvent.click(await screen.findByLabelText(`Свернуть/развернуть аккаунт ${ACC.name}`));
 }
 
 describe("Cloudflare — api_token через блоб", () => {
@@ -293,6 +298,36 @@ describe("Cloudflare — api_token через блоб", () => {
     // сигнатуру `Pick<CloudflareAccount, "id" | "api_token_blob_id">`.
     await expectDeleteIgnoresBlobFailure(useDeleteCloudflareAccount, ACC);
     expect(mocks.apiDelete).toHaveBeenCalledWith("/cloudflare/accounts/5");
+  });
+
+  it("в вебе карточка даёт расшифровать токен по блобу, а не показывает хвост blob_id", async () => {
+    // Под подписью «Token: ••••xxxx» стоял хвост `api_token_blob_id`: с
+    // переездом на блобы плейнтекстовой колонки не стало, и маскировать было
+    // нечего. Сверять этот хвост с панелью Cloudflare бесполезно, а выглядел он
+    // как «вот твой токен». Настоящий токен вебу отдаёт только RevealSecret —
+    // расшифровкой блоба на клиенте.
+    setTauri(false);
+    renderPage();
+    await expandCard();
+
+    expect(within(screen.getByTestId("account-token")).getByText("reveal")).toBeTruthy();
+    expect(screen.queryByText(/Token:/)).toBeNull();
+    expect(screen.queryByText(ACC.api_token_masked)).toBeNull();
+  });
+
+  it("в десктопе блока токена нет вовсе — ни строки, ни пустой полосы", async () => {
+    // В десктопе `RevealSecret` не нужен (токен проверяют кнопкой Test), и
+    // после удаления строки внутри блока не остаётся ничего: отрисованный, он
+    // был бы полосой с рамкой ни о чём.
+    setTauri(true);
+    renderPage();
+    await expandCard();
+
+    // Карточка действительно раскрыта — иначе утверждения ниже вакуумны.
+    expect(await screen.findByText(/^Zones \(/)).toBeTruthy();
+    expect(screen.queryByTestId("account-token")).toBeNull();
+    expect(screen.queryByText(/Token:/)).toBeNull();
+    expect(screen.queryByText(ACC.api_token_masked)).toBeNull();
   });
 
   it("пробел в поле токена не перезаписывает живой блоб", async () => {

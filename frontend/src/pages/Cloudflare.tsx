@@ -223,29 +223,15 @@ function AccountCard({
       {/* Свёрнутой остаётся только шапка и итог Test connection: аккаунтов
           десятки, а раскрытый список зон нужен точечно. */}
       {!collapsed && (<>
-      <div
-        style={{
-          padding: "12px 20px",
-          borderTop: "1px solid #e5e7eb",
-          fontSize: 12,
-          color: "#374151",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          flexWrap: "wrap",
-        }}
-      >
-        {/* ВНИМАНИЕ: это НЕ хвост токена. С переездом на блобы плейнтекстовой
-            колонки не стало, и `build_account_response` собирает
-            `api_token_masked` из хвоста `api_token_blob_id` — то есть под
-            подписью «Token» показан хвост непрозрачной ссылки. Сверять его с
-            токеном в панели Cloudflare бесполезно. Поле подлежит вычистке
-            отдельной задачей (записано в долг), здесь его не трогаем. */}
-        <span>Token: {acc.api_token_masked || "—"}</span>
-        {!isTauri() && acc.api_token_blob_id ? (
+      {/* Расшифровка по блобу — единственный способ увидеть НАСТОЯЩИЙ токен, и
+          нужен он только вебу: в десктопе токен проверяют кнопкой Test
+          connection. Без блока целиком, а не с пустым его телом: одна рамка
+          `borderTop` без содержимого — видимая полоса ни о чём. */}
+      {!isTauri() && acc.api_token_blob_id ? (
+        <div data-testid="account-token" style={{ padding: "12px 20px", borderTop: "1px solid #e5e7eb" }}>
           <RevealSecret blobId={acc.api_token_blob_id} label="Reveal API token" />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       <div style={{ borderTop: "1px solid #e5e7eb", padding: "12px 20px" }}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:zones.length?10:0}}>
           <div style={{fontSize:12,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px"}}>
@@ -825,8 +811,9 @@ function EditCfAccountModal({ account, onClose }: { account: any; onClose: () =>
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Token (optional)</label>
         {/* Почему в вебе поля нет вовсе — JSDoc `DesktopOnlyNote`. Переименовать
             аккаунт в вебе при этом можно: для этого секрет не нужен.
-            Плейсхолдер — только про «оставь пустым»: `api_token_masked` теперь
-            маскирует хвост blob_id, а не токена (см. карточку аккаунта). */}
+            Плейсхолдер — только про «оставь пустым»: показать хвост текущего
+            токена нечем, плейнтекста на клиенте нет, а `api_token_masked`
+            маскирует хвост blob_id, а не токена. */}
         {isTauri() ? (
           <Inp type="password" value={secrets.values.apiToken} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiToken", e.target.value.trim())} placeholder="Leave empty to keep current" />
         ) : (

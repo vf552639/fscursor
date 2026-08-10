@@ -210,7 +210,6 @@ describe("Cloudflare — сворачивание карточки аккаун�
     await expectBadge("Main CF", "1 domain");
 
     expect(screen.queryAllByTestId("zone-row").length).toBe(0);
-    expect(screen.queryByText(/^Token:/)).toBeNull();
     expect(screen.queryByText(/^Zones \(/)).toBeNull();
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("false");
   });
@@ -227,13 +226,13 @@ describe("Cloudflare — сворачивание карточки аккаун�
     fireEvent.click(chevronOf("Main CF"));
 
     expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
-    expect(screen.getByText(/^Token:/)).toBeTruthy();
+    expect(screen.getByText(/^Zones \(/)).toBeTruthy();
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
 
     fireEvent.click(chevronOf("Main CF"));
 
     expect(screen.queryAllByTestId("zone-row").length).toBe(0);
-    expect(screen.queryByText(/^Token:/)).toBeNull();
+    expect(screen.queryByText(/^Zones \(/)).toBeNull();
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("false");
     // Шапка видна всегда — иначе свёрнутую карточку нечем опознать.
     expect(screen.getByText("Main CF")).toBeTruthy();

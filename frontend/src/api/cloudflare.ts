@@ -121,6 +121,13 @@ function zonesQuery(accountId: number | null | undefined) {
       const userId = requireUserId();
       return invokeSynced<Zone[]>("cf_list_zones", { userId, accountId: String(accountId) });
     },
+    // Заметно дольше глобальных 10с (`queryClient.ts`): это отдельный поход в
+    // Cloudflare с пагинацией на КАЖДЫЙ аккаунт, а список аккаунтов монтирует
+    // их все разом. С дефолтом любой возврат из DNS-редактора на страницу
+    // перезапрашивал зоны у всех аккаунтов сразу. Свежесть от этого не страдает:
+    // зоны меняются руками и редко, а созданную нами зону список получает
+    // инвалидацией из `useCreateZone`, а не по истечении staleTime.
+    staleTime: 60_000,
   };
 }
 
