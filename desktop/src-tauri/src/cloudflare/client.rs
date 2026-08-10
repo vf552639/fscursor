@@ -162,6 +162,12 @@ pub struct DnsRecord {
     pub proxied: bool,
     #[serde(default)]
     pub zone_id: Option<String>,
+    /// Приоритет MX/SRV/URI: у остальных типов Cloudflare поля не отдаёт вовсе.
+    /// Во фронт едет как есть (`null` там, где приоритета нет) — так же, как
+    /// соседние `ttl` и `zone_id`: форма правки различает «нет значения» и
+    /// «значение 0» по самому значению, а не по наличию ключа.
+    #[serde(default)]
+    pub priority: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -715,5 +721,38 @@ mod tests {
         let rec: DnsRecord = serde_json::from_value(raw).unwrap();
         assert!(rec.proxied);
         assert_eq!(rec.zone_id.as_deref(), Some("zone123"));
+    }
+
+    // Приоритет Cloudflare отдаёт только у MX/SRV/URI. Пока структура его не
+    // читала, форма правки открывала MX с пустым полем — и приоритет терялся
+    // при первом же сохранении. Запись без поля обязана разбираться по-прежнему.
+    #[test]
+    fn dns_record_deserializes_priority_only_when_present() {
+        let mx: DnsRecord = serde_json::from_value(serde_json::json!({
+            "id": "rec1",
+            "type": "MX",
+            "name": "x",
+            "content": "mail.example.com",
+            "ttl": 1,
+            "proxied": false,
+            "zone_id": "zone123",
+            "priority": 20
+        }))
+        .unwrap();
+        assert_eq!(mx.priority, Some(20));
+
+        let a: DnsRecord = serde_json::from_value(serde_json::json!({
+            "id": "rec2",
+            "type": "A",
+            "name": "x",
+            "content": "1.1.1.1"
+        }))
+        .unwrap();
+        assert_eq!(a.priority, None);
+        // Во фронт ключ едет всегда: TS-тип объявляет `priority: number | null`,
+        // и пропажа ключа сделала бы это объявление ложным.
+        let json = serde_json::to_value(&a).unwrap();
+        assert!(json.as_object().unwrap().contains_key("priority"));
+        assert!(json["priority"].is_null());
     }
 }

@@ -845,9 +845,10 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
   const [ttl, setTtl] = useState(record.ttl == null ? "" : String(record.ttl));
   const ttlOptions = ttlOptionsFor(record.ttl);
   const [proxied, setProxied] = useState(Boolean(record.proxied));
-  // Cloudflare не возвращает priority в DnsRecord, поэтому подставить текущее
-  // значение нечем: пустое поле = «не трогать» (serde видит undefined как None).
-  const [priority, setPriority] = useState("");
+  // Приоритет есть только у MX/SRV/URI — у прочих типов он null, и поля не
+  // видно. Стёртое поле по-прежнему значит «не трогать» (serde видит undefined
+  // как None): у MX приоритет обязателен, убирать его нечем и незачем.
+  const [priority, setPriority] = useState(record.priority == null ? "" : String(record.priority));
   const needsPriority = TYPES_WITH_PRIORITY.has(type);
   return <Modal title={`Edit record ${record.name}`} onClose={onClose} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -859,7 +860,7 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
       {needsPriority && (
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Priority</label>
-          <Inp value={priority} onChange={(e: any)=>setPriority(e.target.value)} placeholder="leave empty to keep current" />
+          <Inp value={priority} onChange={(e: any)=>setPriority(e.target.value)} placeholder="10" />
         </div>
       )}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>

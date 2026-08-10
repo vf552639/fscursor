@@ -68,8 +68,8 @@ export interface DnsRecord {
   ttl: number | null;
   proxied: boolean;
   zone_id: string | null;
-  // priority здесь намеренно нет: `client::DnsRecord` его не десериализует,
-  // так что в ответе на create/update приоритет не возвращается.
+  /** `Option<u16>` в Rust: приоритет есть только у MX/SRV/URI, у прочих — null. */
+  priority: number | null;
 }
 
 export interface DnsRecordCreate {

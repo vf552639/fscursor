@@ -440,6 +440,29 @@ describe("Cloudflare — мутации в десктопе", () => {
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });
 
+  it("показывает текущий priority MX и не теряет его при сохранении", async () => {
+    setTauri(true);
+    const mx = { ...RECORD, type: "MX", name: "example.com", content: "mx.example.com", priority: 20 };
+    mockInvoke({ records: [mx] });
+    mocks.mutate.mockResolvedValue(mx);
+
+    renderPage();
+    await openZone();
+    await screen.findByText("mx.example.com");
+
+    fireEvent.click(screen.getByTitle("Edit DNS record"));
+    // Пока `client::DnsRecord` не читал priority, поле открывалось пустым — и
+    // сохранение без единой правки уносило приоритет с собой.
+    const prio = screen.getByPlaceholderText("10") as HTMLInputElement;
+    expect(prio.value).toBe("20");
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
+    const [, args] = lastMutation();
+    expect(args.patch.priority).toBe(20);
+  });
+
   it("не переписывает отсутствующий TTL в Auto при простом сохранении", async () => {
     setTauri(true);
     mockInvoke({ records: [{ ...RECORD, ttl: null }] });

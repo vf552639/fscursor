@@ -37,11 +37,18 @@ CLAUDE.md («одна функция = один план») и ведётся п
   вебе и только при наличии блоба (иначе оставалась бы пустая полоса с кантом).
   Серверное поле `api_token_masked` не тронуто (вычистка — вне объёма).
 
-**1.3 Потеря priority у MX/SRV при редактировании.**
+**1.3 Потеря priority у MX/SRV при редактировании.**  `[x]`
 `client::DnsRecord` (`client.rs:152`) не десериализует `priority`.
 - Rust: `pub priority: Option<u16>` в `struct DnsRecord` (serde default).
 - TS: `priority?: number` в интерфейсе `DnsRecord` (`cloudflare.ts:70`).
 - Фронт: в `EditDnsRecordModal` префиллить `priority` из записи.
+- Сделано: поле добавлено в `DnsRecord` без `skip_serializing_if` — во фронт
+  оно едет всегда (`null` у типов без приоритета), как соседние `ttl`/`zone_id`,
+  поэтому TS-тип объявлен `priority: number | null`, а не опциональным.
+  `EditDnsRecordModal` подставляет текущее значение; плейсхолдер «leave empty to
+  keep current» заменён на пример «10» (как в форме создания): поле больше не
+  пустое, а стёртое по-прежнему значит «не трогать». Тесты: разбор priority
+  (есть/нет) в `client.rs`, префилл и доезд значения — в `Cloudflare.dns.test.tsx`.
 
 ## Фаза 2 — Быстрые UX-победы  `[ ]`
 
