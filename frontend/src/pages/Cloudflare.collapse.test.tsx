@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
+import { render, screen, fireEvent, createEvent, waitFor, cleanup, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import Cloudflare from "./Cloudflare";
 import { queryClient } from "../api/queryClient";
@@ -60,6 +60,7 @@ const ACCOUNT = {
 };
 
 const SECOND_ACCOUNT = { ...ACCOUNT, id: 7, name: "Second CF", account_id: "cf-acc-2" };
+const EMPTY_ACCOUNT = { ...ACCOUNT, id: 9, name: "Empty CF", account_id: "cf-acc-3" };
 
 const ZONE = {
   id: "zone-a",
@@ -126,10 +127,13 @@ function renderPage() {
 /**
  * Левый блок шапки карточки: шеврон, имя и бейджи лежат в одном flex-ряду.
  * Скоуп нужен, чтобы при двух аккаунтах счётчик привязывался к своей карточке,
- * а не просто «где-то на странице есть такой текст».
+ * а не просто «где-то на странице есть такой текст». Поднимаемся `closest`, а
+ * не счётом `parentElement`: счёт ступеней ломается от любой новой обёртки.
  */
 function headerOf(accName: string): HTMLElement {
-  return screen.getByText(accName).parentElement!.parentElement as HTMLElement;
+  const header = screen.getByText(accName).closest('[data-testid="account-header"]');
+  if (!header) throw new Error(`шапки аккаунта «${accName}» на экране нет`);
+  return header as HTMLElement;
 }
 
 function chevronOf(accName: string) {
@@ -165,7 +169,7 @@ describe("Cloudflare — счётчик доменов в шапке аккау�
   it("считает домены своего аккаунта и не считает чужие", async () => {
     setTauri(true);
     mockHttp(
-      [ACCOUNT, SECOND_ACCOUNT],
+      [ACCOUNT, SECOND_ACCOUNT, EMPTY_ACCOUNT],
       [
         domain({ id: 1, domain_name: "example.com" }),
         domain({ id: 2, domain_name: "second.example.com" }),
@@ -179,7 +183,11 @@ describe("Cloudflare — счётчик доменов в шапке аккау�
 
     await screen.findByText("Main CF");
     expect(within(headerOf("Main CF")).getByText("2 domains")).toBeTruthy();
-    expect(within(headerOf("Second CF")).getByText("1 domains")).toBeTruthy();
+    // Единственное число — без «-s»: счётчик стоит на самом видном месте
+    // карточки, и «1 domains» там читается как опечатка продукта.
+    expect(within(headerOf("Second CF")).getByText("1 domain")).toBeTruthy();
+    // Ноль — снова множественное.
+    expect(within(headerOf("Empty CF")).getByText("0 domains")).toBeTruthy();
   });
 
   it("не смешивает счётчик доменов с числом живых зон", async () => {
@@ -190,7 +198,7 @@ describe("Cloudflare — счётчик доменов в шапке аккау�
     renderPage();
 
     await screen.findByText("Main CF");
-    expect(within(headerOf("Main CF")).getByText("1 domains")).toBeTruthy();
+    expect(within(headerOf("Main CF")).getByText("1 domain")).toBeTruthy();
     expect(await screen.findByText("Zones (3)")).toBeTruthy();
   });
 });
@@ -221,7 +229,7 @@ describe("Cloudflare — сворачивание карточки аккаун�
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("false");
     // Шапка остаётся видимой всегда — иначе свёрнутую карточку нечем опознать.
     expect(screen.getByText("Main CF")).toBeTruthy();
-    expect(within(headerOf("Main CF")).getByText("1 domains")).toBeTruthy();
+    expect(within(headerOf("Main CF")).getByText("1 domain")).toBeTruthy();
 
     fireEvent.click(chevronOf("Main CF"));
 
@@ -253,7 +261,12 @@ describe("Cloudflare — сворачивание карточки аккаун�
     fireEvent.keyDown(chevronOf("Main CF"), { key: "Enter" });
     expect(screen.queryAllByTestId("zone-row").length).toBe(0);
 
-    fireEvent.keyDown(chevronOf("Main CF"), { key: " " });
+    // Событие создаём вручную, чтобы проверить `preventDefault`: без него пробел
+    // на шевроне ещё и прокручивает страницу, а обычный `fireEvent.keyDown`
+    // остался бы зелёным и без него — то есть ничего бы не стерёг.
+    const space = createEvent.keyDown(chevronOf("Main CF"), { key: " " });
+    fireEvent(chevronOf("Main CF"), space);
+    expect(space.defaultPrevented).toBe(true);
     expect(screen.getAllByTestId("zone-row").length).toBe(1);
   });
 

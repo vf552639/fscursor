@@ -144,8 +144,10 @@ function AccountCard({
 
   return (
     <Card style={{marginBottom:16}}>
-      <CHd>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
+      {/* У свёрнутой карточки нижняя граница шапки встаёт вплотную к границе
+          `Card` и читается двойным кантом — гасим её. */}
+      <CHd style={collapsed ? { borderBottom: "none" } : undefined}>
+        <div data-testid="account-header" style={{display:"flex",alignItems:"center",gap:10}}>
           <span
             role="button"
             aria-expanded={!collapsed}
@@ -155,16 +157,22 @@ function AccountCard({
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
             }}
-            style={{fontSize:11,color:"#9ca3af",cursor:"pointer",userSelect:"none"}}
+            // Глиф — 8×14px, а это единственная мишень для клавиатуры и switch:
+            // коробка 20×20 держит область клика (WCAG 2.2 SC 2.5.8).
+            style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:20,height:20,fontSize:11,color:"#9ca3af",cursor:"pointer",userSelect:"none"}}
           >
             {collapsed ? "▸" : "▾"}
           </span>
           <div style={{width:36,height:36,background:"#fff7ed",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>☁</div>
           {/* Имя — вторая мишень того же переключателя: попасть мышью в глиф
-              11px трудно, а строка аккаунта — привычное место для клика. */}
-          <div onClick={toggle} style={{cursor:"pointer"}}><div style={{fontSize:14,fontWeight:700,color:"#111"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
+              11px трудно, а строка аккаунта — привычное место для клика.
+              Именно имя, а не блок целиком: под ним лежит `account_id`, который
+              захочется выделить и скопировать, а mouseup после выделения дал бы
+              click и схлопнул карточку. */}
+          <div><div onClick={toggle} style={{fontSize:14,fontWeight:700,color:"#111",cursor:"pointer"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
           <Badge variant={acc.is_active?"green":"gray"}>{acc.is_active?"Active":"Inactive"}</Badge>
-          <Badge variant="gray">{domainCount} domains</Badge>
+          {/* «1 domain» без -s: счётчик стоит на самом видном месте карточки. */}
+          <Badge variant="gray">{domainCount} {domainCount === 1 ? "domain" : "domains"}</Badge>
         </div>
         <div style={{display:"flex",gap:8}}>
           {/* Был OpenInDesktop с action `test-cloudflare` — хостом, которого
@@ -257,7 +265,7 @@ function AccountCard({
           ))
         )}
       </div>
-      </>)}
+      </>)}{/* ← конец `{!collapsed &&`: тело карточки (токен + зоны) */}
     </Card>
   );
 }
