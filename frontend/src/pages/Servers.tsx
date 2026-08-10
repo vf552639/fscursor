@@ -10,7 +10,7 @@ import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { UNCHECKED, isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
-import { OS_OPTIONS, osShortName } from "../lib/osName";
+import { OS_OPTIONS, serverOsName } from "../lib/osName";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "add-server-provider-options";
@@ -203,10 +203,9 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     // (`providerOptions` тоже обрезает). Иначе строка «Hetzner » дала бы пункт
     // «Hetzner», по которому не находится ни один сервер.
     provider: s.provider?.trim() || null,
-    // Ручной выбор перекрывает автоопределение: `os` — решение пользователя из
-    // «Add Server», `os_pretty` — только догадка десктопа по SSH (см. JSDoc
-    // `osShortName` в `lib/osName`).
-    os: osShortName(s.os) || osShortName(s.os_pretty),
+    // Приоритет ручного выбора над автоопределением — общее правило, см.
+    // JSDoc `serverOsName` в `lib/osName`.
+    os: serverOsName(s),
     status: serverUiStatus(s, now),
     fastpanel: s.fastpanel_status === "installed",
     location: "-",

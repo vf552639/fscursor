@@ -5,7 +5,7 @@ import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
-import { osShortName } from "../lib/osName";
+import { serverOsName } from "../lib/osName";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -332,10 +332,9 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // разъезжалась.
   const uiStatus = serverUiStatus(s, now);
   const checkStale = isCheckStale(s.last_check_at, now);
-  // Ручной выбор перекрывает автоопределение: `os` — решение пользователя из
-  // «Add Server», `os_pretty` — только догадка десктопа по SSH (см. JSDoc
-  // `osShortName` в `lib/osName`).
-  const osLabel = osShortName(s.os) || osShortName(s.os_pretty);
+  // Приоритет ручного выбора над автоопределением — общее правило, см.
+  // JSDoc `serverOsName` в `lib/osName`.
+  const osLabel = serverOsName(s);
   const providers = providerOptions(serversList?.items || []);
   // Снимок есть ровно тогда, когда есть его отметка времени: и десктопный
   // сборщик (`apply_metrics`), и удалённый серверный до него ставили её всегда,
