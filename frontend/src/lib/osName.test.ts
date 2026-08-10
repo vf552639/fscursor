@@ -54,8 +54,8 @@ describe("osShortName — каждое значение OS_OPTIONS возвра�
  * Иголки шире `OS_OPTIONS`: Red Hat и Fedora выбрать в форме нельзя, но
  * `os_pretty` десктоп вычитывает из настоящего `/etc/os-release`, и там они
  * встречаются. Без этих иголок фраза вида «Red Hat Enterprise Linux» дала бы
- * обрубок «Red», а «Linux Mint» — «Linux»: обе матчатся дефолтным fallback
- * раньше, чем добрались бы до настоящего семейства.
+ * обрубок «Red»: fallback режет по первой цифре раньше, чем добрался бы до
+ * настоящего имени семейства.
  */
 describe("osShortName — иголки шире OS_OPTIONS (Red Hat, Fedora)", () => {
   it.each([
@@ -64,6 +64,35 @@ describe("osShortName — иголки шире OS_OPTIONS (Red Hat, Fedora)", (
     ["Fedora Linux 39", "Fedora"],
   ])("%s → %s", (input, expected) => {
     expect(osShortName(input)).toBe(expected);
+  });
+});
+
+/**
+ * Иголки CentOS/AlmaLinux укорочены до "cent"/"alma" — парно с Rust
+ * `update_command`, который матчит теми же короткими подстроками. Написание
+ * с пробелом ("Cent OS", "Alma Linux") встречается на живых машинах, и полное
+ * "centos"/"almalinux" его бы не поймало вовсе — строка уехала бы в fallback
+ * и дала «Cent»/«Alma» вместо канонического имени.
+ */
+describe("osShortName — CentOS/AlmaLinux с пробелом в написании", () => {
+  it.each([
+    ["Cent OS 7", "CentOS"],
+    ["Alma Linux 9", "AlmaLinux"],
+  ])("%s → %s", (input, expected) => {
+    expect(osShortName(input)).toBe(expected);
+  });
+});
+
+/**
+ * Порядок иголок значим: производный дистрибутив обязан победить апстрим,
+ * с которым он совместим. `PRETTY_NAME` некоторых сборок Rocky прямо
+ * упоминает совместимость с RHEL в скобках — строка содержит обе подстроки
+ * одновременно, и результат обязан остаться «Rocky Linux», а не переехать в
+ * «Red Hat» только из-за перестановки строк в `FAMILY_NEEDLES`.
+ */
+describe("osShortName — производный дистрибутив побеждает апстрим в имени", () => {
+  it("Rocky Linux 9.3 (RHEL 9 compatible) → Rocky Linux, а не Red Hat", () => {
+    expect(osShortName("Rocky Linux 9.3 (RHEL 9 compatible)")).toBe("Rocky Linux");
   });
 });
 

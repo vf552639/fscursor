@@ -27,17 +27,30 @@ export const OS_OPTIONS = ["Debian", "Ubuntu", "CentOS", "AlmaLinux", "Rocky Lin
  * встречается Red Hat и Fedora, которых в форме нет и не будет (RHEL требует
  * платной подписки для доступа к репозиториям, ставить на неё FastPanel
  * незачем; Fedora — не серверный дистрибутив). Опознать их всё равно нужно,
- * иначе вместо имени в бейдже — обрубок вида «Red» или «Linux» (Linux Mint).
+ * иначе вместо имени в бейдже — обрубок вида «Red».
+ *
+ * Иголки для CentOS и AlmaLinux — не полное имя ("centos", "almalinux"), а
+ * подстрока покороче ("cent", "alma"), парно с Rust `update_command`: там
+ * матчер тоже смотрит на "cent"/"alma", и написание вроде "Cent OS 7" (с
+ * пробелом — так генерируют некоторые сборки) обязано опознаваться одинаково
+ * по обе стороны SSH-границы, а не только в Rust.
  *
  * Поиск подстроки для "Rocky Linux" — короче, "rocky", а не нижний регистр
  * имени целиком ("rocky linux"), потому что PRETTY_NAME по разным сборкам
  * пишет то "Rocky Linux release 9.3", то "Rocky Linux 9.3 (Blue Onyx)".
+ *
+ * Порядок значим: производные дистрибутивы (Rocky, AlmaLinux, CentOS) стоят
+ * ПЕРЕД "rhel"/"red hat" нарочно. Строка вроде "Rocky Linux 9.3 (RHEL 9
+ * compatible)" содержит обе подстроки одновременно, а бейдж на карточке
+ * обязан назвать дистрибутив, который реально стоит, а не апстрим, с которым
+ * он совместим. Переставь массив в алфавитном порядке — и это молча сломается
+ * без единого красного теста, кроме того самого на совместимость ниже.
  */
 const FAMILY_NEEDLES: ReadonlyArray<readonly [string, string]> = [
   ["ubuntu", "Ubuntu"],
   ["debian", "Debian"],
-  ["centos", "CentOS"],
-  ["almalinux", "AlmaLinux"],
+  ["cent", "CentOS"],
+  ["alma", "AlmaLinux"],
   ["rocky", "Rocky Linux"],
   ["red hat", "Red Hat"],
   ["rhel", "Red Hat"],
