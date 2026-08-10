@@ -316,7 +316,7 @@ export function RowActions({ actions = [] }: { actions: RowAction[] }) {
  * безымянные кнопки неразличимы и глазами. Необязателен: у кнопки, стоящей
  * вплотную к единственному значению, нейтрального «Copy» хватает.
  */
-export function CopyBtn({value, label = "Copy"}: any){
+export function CopyBtn({value, label = "Copy"}: { value: string; label?: string }){
   const [c,setC] = useState(false);
   return <button onClick={()=>{copyText(value);setC(true);setTimeout(()=>setC(false),1400);}} title={label} aria-label={label} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280",flexShrink:0,transition:"all 0.15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#eff4ff";e.currentTarget.style.color="#2563eb";}} onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color="#6b7280";}}>{c?"✓":"⎘"}</button>;
 }

@@ -27,9 +27,9 @@ import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave, useSecretSave } from "../hooks/useSecretSave";
 
 /**
- * Зона в UI. `nameServers` и `status` приходят вместе со списком зон из
- * `cf_list_zones`, то есть только в десктопе: у резервного списка из доменов
- * (`zonesOfAccount`) их нет и взяться им неоткуда.
+ * Зона в UI. `nameServers` и `status` приходят из `cf_list_zones`, то есть
+ * только в десктопе; у резервного списка из доменов (`zonesOfAccount`) их нет.
+ * Что из этого следует для бейджа — у `ZONE_STATUS_VARIANT`.
  */
 export interface CfZoneRef {
   id: string;
@@ -286,8 +286,12 @@ function AccountCard({
                   доменов, и о делегировании он не знает НИЧЕГО. Серый «pending»
                   на этом месте был бы выдуманным измерением; почему список
                   неполон, уже сказано подписью над ним. */}
+              {/* Слова — сырые, из словаря Cloudflare; заглавная буква их не
+                  выдумывает и держит бейдж в одном регистре с соседними
+                  («Active» в шапке). `capitalize` поднимает первую букву, так
+                  что многословный `read only` остаётся читаемым. */}
               {z.status ? (
-                <Badge variant={ZONE_STATUS_VARIANT[z.status] || "gray"}>{z.status}</Badge>
+                <Badge variant={ZONE_STATUS_VARIANT[z.status] || "gray"} style={{textTransform:"capitalize"}}>{z.status}</Badge>
               ) : null}
               <span style={{ fontFamily: "monospace", fontSize: 11.5, color: "#9ca3af" }}>{z.id}</span>
               {/* Имя зоны в подписи — потому что кнопок на экране столько же,

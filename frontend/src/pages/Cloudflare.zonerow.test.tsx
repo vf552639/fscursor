@@ -9,11 +9,9 @@ import { useAuthStore } from "../store/auth";
 /**
  * Строка зоны: бейдж статуса и копирование id/NS.
  *
- * Главное здесь — не «бейдж рисуется», а откуда он берётся. `status` и
- * `name_servers` знает только Cloudflare, то есть только десктоп; веб собирает
- * список зон из наших доменов, где о делегировании нет ни слова. Поэтому у
- * зоны без статуса бейджа нет вовсе: серый «pending» на этом месте был бы
- * выдуманным измерением («не рисуй незнание здоровьем», CLAUDE.md).
+ * Главное здесь — не «бейдж рисуется», а какое утверждение он делает: цвет
+ * ступени и отсутствие бейджа у зоны без статуса. Почему так — у
+ * `ZONE_STATUS_VARIANT` в `Cloudflare.tsx`.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -65,8 +63,21 @@ const ZONE = {
   status: "active",
 };
 
-/** Зона, уехавшая из этого аккаунта: статус не из тройки «зелёный/жёлтый». */
+/** Зона, чьи NS ещё не делегированы на Cloudflare, — жёлтая ступень. */
+const PENDING_ZONE = { ...ZONE, id: "zone-b", name: "fresh.com", status: "pending" };
+
+/** Зона, уехавшая из этого аккаунта: статус вне известных нам ступеней. */
 const MOVED_ZONE = { ...ZONE, id: "zone-c", name: "moved.com", status: "moved" };
+
+/**
+ * Цвета текста бейджей из палитры `Badge` (`components/ui/Primitives.tsx`),
+ * как их отдаёт jsdom. Именами, а не литералами по месту: три ступени
+ * различаются ТОЛЬКО цветом, и «rgb(217, 119, 6)» в ассерте ничего не говорит
+ * о том, жёлтый это или ещё какой.
+ */
+const GREEN = "rgb(22, 163, 74)"; // Badge variant="green", #16a34a
+const YELLOW = "rgb(217, 119, 6)"; // Badge variant="yellow", #d97706
+const GRAY = "rgb(55, 65, 81)"; // Badge variant="gray", #374151
 
 const DOMAIN = {
   id: 1,
@@ -177,19 +188,24 @@ afterEach(() => {
 });
 
 describe("Cloudflare — бейдж статуса зоны", () => {
-  it("показывает статус из cf_list_zones и зеленит только active", async () => {
+  it("показывает статус из cf_list_zones, красит каждую ступень своим цветом", async () => {
     setTauri(true);
-    mockInvoke([ZONE, MOVED_ZONE]);
+    mockInvoke([ZONE, PENDING_ZONE, MOVED_ZONE]);
 
     renderPage();
     await expandAccounts();
 
-    const active = within(await zoneRow("example.com")).getByText("active");
-    const moved = within(await zoneRow("moved.com")).getByText("moved");
-    // Зелёный — утверждение «делегирование доехало», и заслуживает его ровно
-    // `active`. Незнакомый статус красится нейтрально, а не гадает в его пользу.
-    expect(active.style.color).toBe("rgb(22, 163, 74)");
-    expect(moved.style.color).not.toBe(active.style.color);
+    const badge = async (zoneName: string, status: string) =>
+      within(await zoneRow(zoneName)).getByText(status);
+
+    // Три РАЗНЫХ утверждения, поэтому и три точных цвета, а не «не зелёный»:
+    // зелёный говорит «делегирование доехало» и заслужен только `active`;
+    // жёлтый у `pending` — NS ещё не делегированы, и позеленить эту ступень
+    // значит нарисовать здоровье там, где его никто не подтверждал; серый —
+    // «состояние знает Cloudflare, а мы нет», и туда же уходит незнакомое.
+    expect((await badge("example.com", "active")).style.color).toBe(GREEN);
+    expect((await badge("fresh.com", "pending")).style.color).toBe(YELLOW);
+    expect((await badge("moved.com", "moved")).style.color).toBe(GRAY);
   });
 
   it("у зоны без статуса бейджа нет вовсе — веб не знает о делегировании", async () => {
@@ -219,7 +235,7 @@ describe("Cloudflare — копирование id и NS", () => {
     // Подпись адресная: кнопок на экране столько же, сколько зон, и без имени
     // зоны они неотличимы — ни скринридеру, ни тесту.
     const row = await zoneRow("moved.com");
-    fireEvent.click(within(row).getByTitle("Copy zone ID for moved.com"));
+    fireEvent.click(within(row).getByRole("button", { name: "Copy zone ID for moved.com" }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("zone-c"));
   });
@@ -233,7 +249,9 @@ describe("Cloudflare — копирование id и NS", () => {
     fireEvent.click(screen.getByText("🔗 Nameservers"));
     await screen.findByText("ada.ns.cloudflare.com");
 
-    fireEvent.click(screen.getByTitle("Copy nameservers"));
+    // По роли и доступному имени, а не по `title`: имя — это то, ради чего
+    // проп и заводился, а тултип его лишь один из источников.
+    fireEvent.click(screen.getByRole("button", { name: "Copy nameservers" }));
 
     // Через `\n`: NS вбивают у регистратора списком, и склейка через запятую
     // потребовала бы чистить вставленное руками.
@@ -253,6 +271,6 @@ describe("Cloudflare — копирование id и NS", () => {
     // В вебе NS не приезжают вовсе — кнопка копировала бы пустую строку и
     // молча «успевала».
     expect(await screen.findByText(/Nameservers come from Cloudflare/)).toBeTruthy();
-    expect(screen.queryByTitle("Copy nameservers")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy nameservers" })).toBeNull();
   });
 });
