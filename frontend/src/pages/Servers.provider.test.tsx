@@ -130,6 +130,27 @@ function fillProvider(value: string) {
   fireEvent.change(screen.getByPlaceholderText("e.g., Hetzner"), { target: { value } });
 }
 
+function fillIp(value: string) {
+  fireEvent.change(screen.getByPlaceholderText("e.g., 192.168.1.100"), { target: { value } });
+}
+
+/** Форма «Add Server» на экране. Общая для обоих `describe` ниже. */
+async function openModal() {
+  setTauri(true);
+  renderServers();
+  fireEvent.click(await screen.findByText("+ Add Server"));
+  await screen.findByPlaceholderText("e.g., production-web-01");
+}
+
+/** Обязательный минимум полей — всё, кроме того, что проверяет конкретный тест. */
+function fillForm() {
+  fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
+    target: { value: "srv-new" },
+  });
+  fillIp("10.0.0.9");
+  fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
+}
+
 describe("Servers — колонка и фильтр по провайдеру", () => {
   secretBlobLifecycle();
   // После `vi.resetAllMocks` из `secretBlobLifecycle` — иначе `apiGet` остался
@@ -191,23 +212,6 @@ describe("Servers — колонка и фильтр по провайдеру",
 describe("AddServerModal — поле провайдера", () => {
   secretBlobLifecycle();
 
-  async function openModal() {
-    setTauri(true);
-    renderServers();
-    fireEvent.click(await screen.findByText("+ Add Server"));
-    await screen.findByPlaceholderText("e.g., production-web-01");
-  }
-
-  function fillForm() {
-    fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
-      target: { value: "srv-new" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("e.g., 192.168.1.100"), {
-      target: { value: "10.0.0.9" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
-  }
-
   it("подсказывает уже введённых провайдеров", async () => {
     await openModal();
 
@@ -259,5 +263,44 @@ describe("AddServerModal — поле провайдера", () => {
     // секрет, на который никто не ссылается.
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
     expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Поле адреса в форме создания. Правило у него общее со страницей сервера
+ * (`lib/ipInput`), а форма записи — НЕТ: сервер заводят по IPv4, и `ipError`
+ * зовётся отсюда без флага `ipv6`.
+ *
+ * Асимметрия двух форм — единственный смысл существования этого параметра, и
+ * стеречь её надо с обоих концов: сам модуль проверен своими тестами, а вот то,
+ * КАК его зовёт эта форма, до этих тестов не проверял никто — подмена вызова на
+ * `ipError(ip, { ipv6: true })` не красила ни одного теста.
+ */
+describe("AddServerModal — поле адреса", () => {
+  secretBlobLifecycle();
+
+  it("IPv6 в форме создания не принимается", async () => {
+    await openModal();
+    fillForm();
+    fillIp("2a01:4f8::1");
+    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
+
+    expect(await screen.findByText("Invalid IP address format")).toBeTruthy();
+    // Как и у провайдера выше: отказ до записи блоба, иначе в хранилище остался
+    // бы секрет, на который никто не ссылается.
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+
+  it("IPv4 принимается и уезжает на сервер", async () => {
+    // Парный к предыдущему: без него «форма отвергает всё подряд» выглядело бы
+    // так же зелено, как правильное поведение.
+    mocks.apiPost.mockResolvedValue({ id: 9 });
+    await openModal();
+    fillForm();
+    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPost.mock.calls[0][1].ip_address).toBe("10.0.0.9");
   });
 });
