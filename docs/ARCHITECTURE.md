@@ -1,6 +1,6 @@
 > ⚠️ **Устарело.** Описывает server-side архитектуру до разворота на zero-knowledge.
-> Целевая архитектура (desktop выполняет, web read-only, сервер «слепой») — в `plan.md`
-> и `docs/AUDIT_2026-08-02.md`.
+> Целевая архитектура (desktop выполняет, web read-only, сервер «слепой») — в `CLAUDE.md`
+> и `docs/AUDIT_2026-08-02.md` (спека `plan.md` удалена как исполненная — история git).
 >
 > **Исключение:** § *Server signals*, § *Server reachability monitoring flow*, § *Server metrics
 > flow* и «Server status ladder» в разделе Frontend переписаны по коду **2026-08-06** и актуальны.

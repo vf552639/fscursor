@@ -12,8 +12,10 @@
 `frontend/src/api/cloudflare.ts`, `backend/app/services/cloudflare_service.py`,
 `backend/app/schemas/cloudflare.py`, `desktop/src-tauri/src/cloudflare/client.rs`.
 
-Исходная постановка — `task6.md` в корне. Здесь она оформлена по правилу
-CLAUDE.md («одна функция = один план») и ведётся по фазам.
+Исходная постановка приехала файлом `task6.md` в корне; здесь она оформлена по
+правилу CLAUDE.md («одна функция = один план») и ведётся по фазам. Сам `task6.md`
+удалён после исполнения — этот план его полностью заменяет, а текст постановки
+остался в истории git.
 
 ## Фаза 1 — Исправление багов  `[x]`
 

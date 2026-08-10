@@ -125,7 +125,8 @@ problem.
 ## Not yet in scope
 
 Apple signing/notarization, a universal (`aarch64`+`x86_64`) binary, Windows/Linux
-bundles, and a CI workflow producing checksums are all deferred — see `plan.md` /
-`stage5.md`. Making the CSP `connect-src` allowlist itself configurable (it's
+bundles, and a CI workflow producing checksums are all deferred — see `stage5.md`
+(`plan.md` was deleted once executed; it survives in git history only). Making the
+CSP `connect-src` allowlist itself configurable (it's
 currently fixed to `localhost:8100` and `*.sdmp.app`) is tracked separately in
 `plans/2026-08-04-local-dmg-build.md`.
