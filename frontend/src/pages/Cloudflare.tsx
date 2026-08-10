@@ -141,12 +141,16 @@ function AccountCard({
     ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers }))
     : domainZones;
   const zonesLoading = canExecute && liveZones.isPending;
+  // Именно «отрисован», а не «есть testStatus»: `idle` — это состояние без
+  // единого пикселя на экране, и `!testStatus` считал бы его блоком.
+  const testResultShown = testStatus?.state === "success" || testStatus?.state === "error";
 
   return (
     <Card style={{marginBottom:16}}>
-      {/* У свёрнутой карточки нижняя граница шапки встаёт вплотную к границе
-          `Card` и читается двойным кантом — гасим её. */}
-      <CHd style={collapsed ? { borderBottom: "none" } : undefined}>
+      {/* Гасим границу шапки, только когда шапка — последнее, что есть в
+          карточке: там она встаёт вплотную к границе `Card` и читается двойным
+          кантом. С показанным итогом Test connection она обычный разделитель. */}
+      <CHd style={collapsed && !testResultShown ? { borderBottom: "none" } : undefined}>
         <div data-testid="account-header" style={{display:"flex",alignItems:"center",gap:10}}>
           <span
             role="button"

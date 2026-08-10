@@ -238,12 +238,18 @@ describe("Cloudflare — сворачивание карточки аккаун�
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("клик по имени аккаунта переключает так же, как по шеврону", async () => {
+  it("клик по имени аккаунта переключает, а по account_id — нет", async () => {
     setTauri(true);
     renderPage();
 
     await screen.findByText("Main CF");
     await waitFor(() => expect(screen.getAllByTestId("zone-row").length).toBe(1));
+
+    // `account_id` — то, что как раз выделяют мышью, чтобы скопировать: mouseup
+    // после выделения даёт click, и переключатель на обёртке схлопывал бы
+    // карточку ровно в этот момент. Мишень — только строка имени.
+    fireEvent.click(screen.getByText("cf-acc-1"));
+    expect(screen.getAllByTestId("zone-row").length).toBe(1);
 
     fireEvent.click(screen.getByText("Main CF"));
 
