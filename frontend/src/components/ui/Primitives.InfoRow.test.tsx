@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 
 import { InfoRow } from "./Primitives";
 
@@ -32,7 +32,7 @@ describe("InfoRow", () => {
     const btn = screen.getByRole("button", { name: "Edit Name" });
     expect(screen.getAllByRole("button")).toHaveLength(1);
 
-    btn.click();
+    fireEvent.click(btn);
     expect(onEdit).toHaveBeenCalledTimes(1);
 
     // Значение строки нарисовано как прежде, карандаш ничего в нём не заменил.
@@ -50,5 +50,14 @@ describe("InfoRow", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "Edit operating system" })).toBeTruthy();
+  });
+
+  it("k не строка и editLabel нет — кнопка всё равно с именем, не голый глиф", () => {
+    // Тип `k` в файле остаётся `any`, и без этого случая ветка фолбэка
+    // (`label ? ... : "Edit"`) ничем не покрыта: подмени `"Edit"` на `""` —
+    // и все остальные тесты файла останутся зелёными, а кнопка при этом
+    // лишится имени вовсе — ровно дефект, ради которого затевался `RowActions`.
+    render(<InfoRow k={<span>OS</span>} v="Ubuntu 22.04" onEdit={() => {}} />);
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
   });
 });

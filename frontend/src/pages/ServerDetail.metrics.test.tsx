@@ -174,7 +174,17 @@ function hasBar(label: string): boolean {
   return statCard(label).querySelectorAll('div[style*="transition"]').length > 0;
 }
 
-/** Значение строки «Server Information» по её подписи (`InfoRow`). */
+/**
+ * Значение строки «Server Information» по её подписи (`InfoRow`).
+ *
+ * ЛОВУШКА: `InfoRow` умеет рисовать карандаш правки (`onEdit`) внутри той же
+ * строки — глиф «✎» тоже попадёт в `textContent` и приклеится к значению без
+ * разделителя (`rowValue("Name")` вернёт `"server-1✎"`, а не `"server-1"`).
+ * Сегодня это не задевает ни один вызов — карандаши есть только у read-only
+ * строк (или их вовсе нет), — но для будущей редактируемой строки (Name/IP/
+ * Provider/OS) хелпер нужно будет поправить: например, убрать из `row`
+ * дочерние `<button>` перед чтением `textContent`.
+ */
 function rowValue(label: string): string {
   const row = screen.getByText(label).parentElement;
   if (!row) throw new Error(`строки «${label}» на экране нет`);
