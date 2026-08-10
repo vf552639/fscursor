@@ -1,32 +1,35 @@
-"""Ответ аккаунта Cloudflare не обещает того, чего сервер не делает.
+"""Ответ аккаунта Cloudflare — ровно про аккаунт, и состав модуля схем.
 
-`CloudflareAccountResponse` возил `sync_result`/`sync_warning` — итог
-синхронизации зон, которой на сервере нет: токен расшифровывается на клиенте, и
-зоны читает десктоп (`cf_list_zones`). `build_account_response` зашивал туда
-`None`, из-за чего форма создания во фронте всегда уходила в ветку «зоны не
-синхронизировались» и рисовала жёлтое предупреждение поверх удачного создания.
+Почему у сервера нет и не может быть схем под зоны/DNS — в докстринге
+`app/schemas/cloudflare.py`.
 
-Тест уровня схемы и сервиса, а не HTTP: роут поверх них — три строки
-`response_model=`, а полный прогон через `AsyncClient` требует живой БД
-(см. `test_user_scoping.py`), которой в этом сценарии не нужно ничего.
+Тесты уровня схемы и сервиса, а не HTTP: роут поверх них — три строки
+`response_model=`, а прогон через `AsyncClient` требует живой БД
+(см. `test_user_scoping.py`), которой здесь не нужно ничего.
 """
 
 import datetime
-import importlib
 import uuid
 
-from pydantic import BaseModel
+from test_no_plaintext_secret_schemas import models_declared_in_schema_modules
 
 from app.models.cloudflare_account import CloudflareAccount
-from app.schemas.cloudflare import (
-    CloudflareAccountBase,
-    CloudflareAccountCreate,
-    CloudflareAccountResponse,
-    CloudflareAccountUpdate,
-)
 from app.services.cloudflare_service import build_account_response
 
 BLOB_ID = uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+
+SCHEMA_MODULE = "app.schemas.cloudflare"
+
+# Имена строками, а не через `Класс.__name__`: с импортом обе стороны равенства
+# приезжают из одного модуля, и переименование `CloudflareAccountUpdate` в
+# `CloudflareZoneUpdate` гард бы не заметил — то есть не заметил бы ровно то,
+# что обещает ловить.
+ACCOUNT_CRUD_SCHEMAS = {
+    "CloudflareAccountBase",
+    "CloudflareAccountCreate",
+    "CloudflareAccountUpdate",
+    "CloudflareAccountResponse",
+}
 
 
 def _account() -> CloudflareAccount:
@@ -44,19 +47,13 @@ def _account() -> CloudflareAccount:
     )
 
 
-def test_response_carries_no_sync_fields():
-    """Полей нет в схеме — а не «есть, но всегда пустые».
-
-    Пустое поле фронт обязан как-то истолковать, и толковать его нечем: `None`
-    там означал одновременно «не синхронизировали» и «синхронизировать нечего».
-    """
-    fields = CloudflareAccountResponse.model_fields
-    assert "sync_result" not in fields
-    assert "sync_warning" not in fields
-
-
 def test_build_account_response_returns_exactly_the_account():
-    """Ответ = сам аккаунт плюс маска токена, и ничего сверх."""
+    """Ответ = сам аккаунт плюс маска токена, и ничего сверх.
+
+    Точный набор ключей, а не «нет вот такого поля»: ответ, обещающий то, чего
+    сервер не делает (итог синхронизации зон, состояние делегирования), фронт
+    обязан как-то истолковать, а истолковать вечный `None` нечем.
+    """
     response = build_account_response(_account())
 
     assert response.model_dump().keys() == {
@@ -76,26 +73,28 @@ def test_build_account_response_returns_exactly_the_account():
 
 
 def test_schema_module_declares_only_account_crud():
-    """В модуле нет схем под то, чего сервер не делает.
+    """В `app/schemas/cloudflare.py` нет схем под то, чего сервер не делает.
 
-    Здесь лежали `ZoneResponse`, `DnsRecord*`, `NameserversResponse`,
-    `PurgeResponse`, `CloudflareTestResponse`, `CloudflareRaw` — ни одна никуда
-    не импортировалась. Это не просто мусор: готовая схема — это форма под
-    роут, а роут на зоны означал бы токен Cloudflare на сервере, то есть отказ
-    от zero-knowledge. Гард именно на равенство множеств: «нет вот этих шести»
-    молчал бы про седьмую.
+    Гард однофайловый и большего не обещает: схему под зоны, заведённую в
+    соседнем `app/schemas/cloudflare_zones.py`, он не увидит. Сторожится то,
+    куда её положат вероятнее всего, — модуль, где такие схемы уже лежали.
+
+    Равенство множеств, а не «нет вот этих имён»: перечень отсутствующих
+    молчал бы про следующее добавленное.
+
+    Перебор взят у `test_no_plaintext_secret_schemas` (там же он и объяснён), а
+    не написан заново: две копии одного сканера разъезжаются молча.
     """
-    module = importlib.import_module("app.schemas.cloudflare")
     declared = {
-        obj.__name__
-        for obj in vars(module).values()
-        if isinstance(obj, type)
-        and issubclass(obj, BaseModel)
-        and obj.__module__ == module.__name__
+        model.__name__
+        for model in models_declared_in_schema_modules()
+        if model.__module__ == SCHEMA_MODULE
     }
-    assert declared == {
-        CloudflareAccountBase.__name__,
-        CloudflareAccountCreate.__name__,
-        CloudflareAccountResponse.__name__,
-        CloudflareAccountUpdate.__name__,
-    }
+
+    assert declared == ACCOUNT_CRUD_SCHEMAS, (
+        f"состав {SCHEMA_MODULE} изменился: {declared ^ ACCOUNT_CRUD_SCHEMAS}. "
+        f"Если это схема под серверный роут на зоны/DNS/проверку токена — её быть "
+        f"не должно: токен расшифровывается на клиенте, у сервера его нет "
+        f"(zero-knowledge). Если это ещё одна схема самого аккаунта — допиши имя "
+        f"в ACCOUNT_CRUD_SCHEMAS."
+    )

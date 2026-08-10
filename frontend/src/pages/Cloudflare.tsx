@@ -375,9 +375,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       )}
     </div>
     {/* Только успех: единственный источник этого баннера — создание аккаунта, а
-        его провал уходит в ошибку внутри формы и до страницы не доезжает.
-        Жёлтая ветка здесь была под «зоны не синхронизировались» — синхронизации
-        зон на сервере нет вовсе (см. `schemas/cloudflare.py`). */}
+        его провал уходит в ошибку внутри формы и до страницы не доезжает. */}
     {statusMessage && (
       <Card style={{marginBottom:14}}>
         <div style={{padding:"12px 16px",fontSize:13,color:"#166534",background:"#f0fdf4",borderRadius:10}}>
@@ -474,8 +472,8 @@ export function AddCfAccountModal({ onClose, onStatus }: {
           account_id: accId,
           api_token_blob_id: blobId,
         });
-        // Ответ создания ничего сверх самого аккаунта не несёт: зон сервер не
-        // видит, и обещать «связали с N доменами» ему нечем.
+        // Ответ — про сам аккаунт и только: зон сервер не видит
+        // (`backend/app/schemas/cloudflare.py`), обещать по ним нечего.
         onStatus("Cloudflare account created.");
       },
     });
