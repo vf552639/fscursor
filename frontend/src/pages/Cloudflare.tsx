@@ -861,7 +861,10 @@ function EditDnsRecordModal({ record, onClose, onSave, isSaving }: {
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Priority</label>
           <Inp value={priority} onChange={(e: any)=>setPriority(e.target.value)} placeholder="10" />
-          <div style={{fontSize:11.5,color:"#9ca3af",marginTop:4}}>Leave empty to keep the current priority.</div>
+          {/* Не «keep the current»: у записи, которой меняют тип с A на MX,
+              текущего приоритета нет вовсе, и пустое поле даст патч без него
+              (это долг Д3 в плане). «Не меняется» честно в обоих случаях. */}
+          <div style={{fontSize:11.5,color:"#9ca3af",marginTop:4}}>Empty = priority unchanged.</div>
         </div>
       )}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
