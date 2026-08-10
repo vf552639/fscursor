@@ -27,6 +27,10 @@ const ALL_PROVIDERS = "";
  * Только имя семейства ОС, без версии и архитектуры: десктоп по этому имени
  * выбирает пакетный менеджер для установки FastPanel (`apt` или `yum`),
  * версия ему не нужна.
+ *
+ * Новое имя обязано попадать под подстроки `cent|rhel|rocky|alma|fedora` из
+ * `desktop/src-tauri/src/provision/fastpanel_install.rs::update_command` —
+ * иначе оно молча уедет в apt-ветку (там `else`, а не whitelist).
  */
 const OS_OPTIONS = ["Debian", "Ubuntu", "CentOS", "AlmaLinux", "Rocky Linux"] as const;
 
@@ -41,7 +45,7 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
   const [name, setName] = useState("");
   const [ip, setIp] = useState("");
   const [login, setLogin] = useState("root");
-  const [os, setOs] = useState("Ubuntu");
+  const [os, setOs] = useState<(typeof OS_OPTIONS)[number]>("Ubuntu");
   const [provider, setProvider] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const sshPassword = useSecretSave("SSH password");

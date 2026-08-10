@@ -94,6 +94,9 @@ describe("AddServerModal — SSH-пароль через блоб", () => {
     const [url, body] = mocks.apiPost.mock.calls[0];
     expect(url).toBe("/servers");
     expect(body.ssh_password_blob_id).toBe(blob.blobId);
+    // Дефолт формы — чистое имя семейства ОС, а не строка с версией/архитектурой:
+    // десктоп разбирает `os` подстрокой, версия в ней лишняя.
+    expect(body.os).toBe("Ubuntu");
     // Ради этой строки и затевался спринт: поля нет, а не «есть, но сервер его
     // игнорирует».
     expect(body).not.toHaveProperty("ssh_password");
