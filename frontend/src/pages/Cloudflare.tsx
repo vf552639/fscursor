@@ -74,6 +74,72 @@ const ZONE_STATUS_VARIANT: Record<string, string> = {
   initializing: "yellow",
 };
 
+/**
+ * Порядок ступеней при сортировке зон по статусу. Сверху то, что ждёт действия
+ * человека: `pending` — «пойди пропиши NS у регистратора», `initializing` —
+ * Cloudflare ещё заводит зону. Дальше идёт всё незнакомое (`moved`,
+ * `deactivated`): что с ним делать, мы не знаем, но и «в порядке» оно не
+ * значит. `active` — ниже всех статусов: с ним делать нечего. Зона БЕЗ статуса
+ * уходит в самый низ, а не наверх: её статуса мы не знаем (веб собирает список
+ * из доменов), и поднять незнание в начало списка «важного» значило бы выдать
+ * его за проблему — ровно тот же подлог, что и покрасить его зелёным.
+ */
+const ZONE_STATUS_RANK: Record<string, number> = {
+  pending: 0,
+  initializing: 1,
+  active: 3,
+};
+const ZONE_RANK_UNKNOWN = 2;
+const ZONE_RANK_NO_STATUS = 4;
+
+/**
+ * С какого числа зон у карточки появляются поиск и сортировка. Список короче
+ * читается одним взглядом, и поле над ним — лишний элемент в каждой из десятков
+ * карточек. Порог считается по ПОЛНОМУ числу зон, а не по отфильтрованному:
+ * иначе поле исчезало бы под пальцами, стоит запросу сузить список.
+ */
+const ZONE_CONTROLS_MIN = 8;
+
+export type ZoneSort = "name" | "status";
+
+/**
+ * Фильтр аккаунтов: имя и `account_id`. Именно `account_id`, а не только имя, —
+ * его копируют из панели Cloudflare и им же опознают аккаунт, когда имена у
+ * всех вида «Main CF». Пустой запрос — весь список, а не пустой экран.
+ */
+export function filterAccounts<T extends { name: string; account_id?: string | null }>(
+  accounts: T[],
+  query: string
+): T[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return accounts;
+  return accounts.filter(
+    (a) => a.name.toLowerCase().includes(q) || (a.account_id || "").toLowerCase().includes(q)
+  );
+}
+
+/** Фильтр зон по имени. Регистр не важен: домены пишут и как «Example.com». */
+export function filterZones(zones: CfZoneRef[], query: string): CfZoneRef[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return zones;
+  return zones.filter((z) => z.name.toLowerCase().includes(q));
+}
+
+/**
+ * Сортировка зон. Ключ статуса — `ZONE_STATUS_RANK`; при равных статусах (а в
+ * вебе статуса нет вообще ни у одной зоны) порядок доопределяется именем.
+ * Без этого добора список зависел бы от того, откуда он приехал: живой
+ * `cf_list_zones` отдаёт свой порядок, резерв из доменов — уже отсортированный.
+ */
+export function sortZones(zones: CfZoneRef[], mode: ZoneSort): CfZoneRef[] {
+  const rank = (z: CfZoneRef) =>
+    !z.status ? ZONE_RANK_NO_STATUS : ZONE_STATUS_RANK[z.status] ?? ZONE_RANK_UNKNOWN;
+  return [...zones].sort((a, b) => {
+    if (mode === "status" && rank(a) !== rank(b)) return rank(a) - rank(b);
+    return a.name.localeCompare(b.name);
+  });
+}
+
 /** Типы, у которых Cloudflare принимает priority. Для прочих поле слать нельзя. */
 const TYPES_WITH_PRIORITY = new Set(["MX", "SRV", "URI"]);
 
@@ -164,6 +230,17 @@ function AccountCard({
     ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers, status: z.status }))
     : domainZones;
   const zonesLoading = canExecute && liveZones.isPending;
+  const [zoneQuery, setZoneQuery] = useState("");
+  const [zoneSort, setZoneSort] = useState<ZoneSort>("name");
+  const showZoneControls = zones.length >= ZONE_CONTROLS_MIN;
+  // Фильтр действует ровно тогда, когда поле видно. Иначе список, ужавшийся
+  // ниже порога (зону удалили), остался бы отфильтрован невидимым запросом.
+  const zoneFilter = showZoneControls ? zoneQuery : "";
+  // Сортировка применяется и к коротким спискам, у которых селектора не видно:
+  // иначе один и тот же аккаунт с восемью зонами и с семью раскладывал бы их
+  // по-разному. Порядок по умолчанию — по имени; живой `cf_list_zones` отдавал
+  // свой, и «Sort: name» обязан что-то значить с первого кадра.
+  const visibleZones = sortZones(filterZones(zones, zoneFilter), zoneSort);
   // Именно «отрисован», а не «есть testStatus»: `idle` — это состояние без
   // единого пикселя на экране, и `!testStatus` считал бы его блоком.
   const testResultShown = testStatus?.state === "success" || testStatus?.state === "error";
@@ -251,11 +328,48 @@ function AccountCard({
         </div>
       ) : null}
       <div style={{ borderTop: "1px solid #e5e7eb", padding: "12px 20px" }}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:zones.length?10:0}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",marginBottom:zones.length?10:0}}>
+          {/* Число здесь — ПОЛНОЕ, то же, что в бейдже шапки: они объявлены
+              одним показателем, и разъехавшись, заставили бы гадать, какому
+              верить. Сколько строк осталось от запроса, говорит счётчик у
+              самого поля — там это утверждение про фильтр, а не про аккаунт. */}
           <div style={{fontSize:12,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px"}}>
             Zones ({zones.length})
           </div>
-          <Btn size="sm" variant="secondary" onClick={onAddZone} disabled={!canExecute}>+ Add Zone</Btn>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {showZoneControls && (
+              <>
+                {zoneFilter.trim() ? (
+                  <span style={{fontSize:12,color:"#6b7280",whiteSpace:"nowrap"}}>
+                    {visibleZones.length} of {zones.length}
+                  </span>
+                ) : null}
+                {/* Подпись адресная: развёрнутых карточек на экране может быть
+                    несколько, и «Search zones» у всех читалось бы одинаково —
+                    ни скринридеру, ни глазами не различить, чьё это поле.
+                    `aria-label`, а не `<label>`: подписи у полей этой страницы
+                    с ними не связаны вовсе (долг Д5), и опираться на этот
+                    образец нельзя. */}
+                <Inp
+                  value={zoneQuery}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setZoneQuery(e.target.value)}
+                  placeholder="Filter zones"
+                  aria-label={`Search zones in ${acc.name}`}
+                  style={{width:170,padding:"6px 10px",fontSize:12.5}}
+                />
+                <Sel
+                  value={zoneSort}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setZoneSort(e.target.value as ZoneSort)}
+                  aria-label={`Sort zones in ${acc.name}`}
+                  style={{padding:"6px 10px",fontSize:12.5}}
+                >
+                  <option value="name">Sort: name</option>
+                  <option value="status">Sort: status</option>
+                </Sel>
+              </>
+            )}
+            <Btn size="sm" variant="secondary" onClick={onAddZone} disabled={!canExecute}>+ Add Zone</Btn>
+          </div>
         </div>
         {canExecute && liveZones.error ? (
           <div role="alert" style={{ fontSize: 12.5, color: "#dc2626", marginBottom: 8 }}>
@@ -274,8 +388,14 @@ function AccountCard({
           <div style={{ fontSize: 12.5, color: "#9ca3af" }}>
             No zones linked to this account yet.
           </div>
+        ) : visibleZones.length === 0 ? (
+          // «Зон нет» и «ни одна не подошла» — разные факты, и первый на месте
+          // второго заставил бы решить, что зоны пропали.
+          <div style={{ fontSize: 12.5, color: "#9ca3af" }}>
+            No zones match “{zoneFilter.trim()}”.
+          </div>
         ) : (
-          zones.map((z) => (
+          visibleZones.map((z) => (
             <div
               key={z.id}
               data-testid="zone-row"
@@ -321,9 +441,11 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [sel, setSel] = useState<CfZoneSelection | null>(null);
   const [addZoneFor, setAddZoneFor] = useState<CfAccountRef | null>(null);
 
+  const [accQuery, setAccQuery] = useState("");
   const [editingAcc, setEditingAcc] = useState<any | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [testState, setTestState] = useState<Record<number, { state: "idle" | "loading" | "success" | "error"; message?: string }>>({});
+  const visibleAccounts = filterAccounts(cfAccounts, accQuery);
 
   const handleTest = (accountId: number) => {
     setTestState((prev) => ({ ...prev, [accountId]: { state: "loading" } }));
@@ -408,6 +530,31 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         ["Active",cfAccounts.filter((c)=>c.is_active).length,"#16a34a"],
       ].map(([l,v,c])=><StatCard key={l as string} label={l} value={v} color={c}/>)}
     </div>
+    {/* Искать не в чем, пока аккаунтов нет вовсе: пустое поле над пустым
+        экраном — обещание списка, которого не существует. */}
+    {cfAccounts.length > 0 && (
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+        {/* `aria-label`, а не `<label>`: подписи полей на этой странице с самими
+            полями не связаны (долг Д5 в плане), и повторять этот образец у
+            нового поля незачем. */}
+        <Inp
+          value={accQuery}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAccQuery(e.target.value)}
+          placeholder="Search accounts by name or account ID"
+          aria-label="Search Cloudflare accounts"
+          style={{maxWidth:340}}
+        />
+        {/* Единственное место, где показано отфильтрованное число. Счётчики
+            выше («N accounts connected», StatCard) остаются ОБЩИМИ: они
+            описывают, сколько аккаунтов подключено, а не сколько строк сейчас
+            видно, и, поехав за фильтром, молча сменили бы смысл. */}
+        {accQuery.trim() ? (
+          <span style={{fontSize:12.5,color:"#6b7280",whiteSpace:"nowrap"}}>
+            {visibleAccounts.length} of {cfAccounts.length}
+          </span>
+        ) : null}
+      </div>
+    )}
     {cfAccounts.length === 0 ? (
       <Card>
         <EmptyState
@@ -419,8 +566,20 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
           {isTauri() ? <Btn variant="primary" onClick={() => setShowAcc(true)}>+ Add Account</Btn> : null}
         </EmptyState>
       </Card>
+    ) : visibleAccounts.length === 0 ? (
+      // Отдельное состояние, а не «No Cloudflare accounts yet»: аккаунты есть,
+      // и предлагать завести ещё один в ответ на неудачный поиск — совет мимо
+      // задачи. Действие здесь ровно одно — снять запрос.
+      <Card>
+        <EmptyState
+          title="No accounts match your search"
+          description={`Nothing is named or identified as “${accQuery.trim()}”.`}
+        >
+          <Btn variant="secondary" onClick={() => setAccQuery("")}>Clear search</Btn>
+        </EmptyState>
+      </Card>
     ) : (
-      cfAccounts.map((acc)=>(
+      visibleAccounts.map((acc)=>(
       <AccountCard
         key={acc.id}
         acc={acc}
