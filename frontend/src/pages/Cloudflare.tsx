@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
 import {
   useCloudflareAccounts,
@@ -84,7 +84,7 @@ const ZONE_STATUS_VARIANT: Record<string, string> = {
  * из доменов), и поднять незнание в начало списка «важного» значило бы выдать
  * его за проблему — ровно тот же подлог, что и покрасить его зелёным.
  */
-const ZONE_STATUS_RANK: Record<string, number> = {
+const ZONE_STATUS_RANK: Record<string, number | undefined> = {
   pending: 0,
   initializing: 1,
   active: 3,
@@ -93,12 +93,21 @@ const ZONE_RANK_UNKNOWN = 2;
 const ZONE_RANK_NO_STATUS = 4;
 
 /**
- * С какого числа зон у карточки появляются поиск и сортировка. Список короче
- * читается одним взглядом, и поле над ним — лишний элемент в каждой из десятков
- * карточек. Порог считается по ПОЛНОМУ числу зон, а не по отфильтрованному:
- * иначе поле исчезало бы под пальцами, стоит запросу сузить список.
+ * С какого числа зон появляется ПОИСК. Пока список читается одним взглядом,
+ * поле над ним — лишняя мишень и лишняя строка в теле карточки; глазами по
+ * семи именам попадают быстрее, чем набирают запрос. Порог считается по
+ * ПОЛНОМУ числу зон, а не по отфильтрованному: иначе поле исчезало бы под
+ * пальцами, стоит запросу сузить список.
  */
-const ZONE_CONTROLS_MIN = 8;
+const ZONE_SEARCH_MIN = 8;
+
+/**
+ * С какого числа зон появляется СОРТИРОВКА. Порог у неё свой и низкий: селектор
+ * стоит один тег в уже существующем ряду и полезен с двух строк («где тут
+ * pending?»), тогда как поле поиска требует набрать запрос, чтобы окупиться.
+ * Одна зона — единственный случай, когда сортировать нечего в принципе.
+ */
+const ZONE_SORT_MIN = 2;
 
 export type ZoneSort = "name" | "status";
 
@@ -211,8 +220,12 @@ function AccountCard({
 }) {
   const canExecute = isTauri();
   // Свёрнуто по умолчанию: аккаунтов десятки, а раскрытый список зон нужен
-  // точечно. Локальный boolean, а не общий Set в родителе: карточки не
-  // размонтируются на ре-рендере, а «свёрнут» — свойство одной карточки.
+  // точечно. Состояние локальное, а не общий Set в родителе, потому что
+  // «свёрнут» — свойство одной карточки. Цена известна и принята: поиск по
+  // аккаунтам ВЫКИДЫВАЕТ несовпавшие карточки из дерева, и снятие запроса
+  // возвращает их свёрнутыми, с пустым поиском зон и сортировкой по умолчанию.
+  // Для запроса зон сброс даже уместен, для `collapsed` — нет; лечится подъёмом
+  // в родителя (долг Д8 в плане), а не здесь.
   const [collapsed, setCollapsed] = useState(true);
   const toggle = () => {
     // Клик по пустому месту шапки разворачивает карточку — но `account_id`
@@ -226,21 +239,39 @@ function AccountCard({
   // минуту назад, и только он отдаёт её name_servers. Домены остаются
   // резервом для веба, у которого токена нет и быть не должно.
   const liveZones = useCloudflareZones(acc.id);
-  const zones: CfZoneRef[] = liveZones.data
-    ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers, status: z.status }))
-    : domainZones;
+  // Оба списка мемоизированы, и это не микрооптимизация: ввод в поиск по
+  // аккаунтам перерисовывает страницу, а с ней ВСЕ карточки — включая свёрнутые,
+  // которых на экране десятки. Без мемо каждая из них на каждый символ заново
+  // копировала и сортировала свои сотни зон, то есть работа шла на списки,
+  // которых никто не видит.
+  const zones: CfZoneRef[] = useMemo(
+    () =>
+      liveZones.data
+        ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers, status: z.status }))
+        : domainZones,
+    [liveZones.data, domainZones]
+  );
   const zonesLoading = canExecute && liveZones.isPending;
   const [zoneQuery, setZoneQuery] = useState("");
   const [zoneSort, setZoneSort] = useState<ZoneSort>("name");
-  const showZoneControls = zones.length >= ZONE_CONTROLS_MIN;
+  const showZoneSearch = zones.length >= ZONE_SEARCH_MIN;
+  const showZoneSort = zones.length >= ZONE_SORT_MIN;
+  // Сортировать по статусу можно, только если он есть хоть у одной зоны: в вебе
+  // список собран из наших доменов и статуса не знает ни одна строка, так что
+  // пункт давал бы ровно тот же порядок, что и «по имени», — мёртвый выбор,
+  // размноженный на все карточки веба.
+  const canSortByStatus = zones.some((z) => z.status);
   // Фильтр действует ровно тогда, когда поле видно. Иначе список, ужавшийся
   // ниже порога (зону удалили), остался бы отфильтрован невидимым запросом.
-  const zoneFilter = showZoneControls ? zoneQuery : "";
+  const zoneFilter = showZoneSearch ? zoneQuery : "";
   // Сортировка применяется и к коротким спискам, у которых селектора не видно:
-  // иначе один и тот же аккаунт с восемью зонами и с семью раскладывал бы их
+  // иначе один и тот же аккаунт с двумя зонами и с одной раскладывал бы их
   // по-разному. Порядок по умолчанию — по имени; живой `cf_list_zones` отдавал
   // свой, и «Sort: name» обязан что-то значить с первого кадра.
-  const visibleZones = sortZones(filterZones(zones, zoneFilter), zoneSort);
+  const visibleZones = useMemo(
+    () => sortZones(filterZones(zones, zoneFilter), zoneSort),
+    [zones, zoneFilter, zoneSort]
+  );
   // Именно «отрисован», а не «есть testStatus»: `idle` — это состояние без
   // единого пикселя на экране, и `!testStatus` считал бы его блоком.
   const testResultShown = testStatus?.state === "success" || testStatus?.state === "error";
@@ -337,36 +368,42 @@ function AccountCard({
             Zones ({zones.length})
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
-            {showZoneControls && (
+            {showZoneSearch && (
               <>
-                {zoneFilter.trim() ? (
-                  <span style={{fontSize:12,color:"#6b7280",whiteSpace:"nowrap"}}>
-                    {visibleZones.length} of {zones.length}
-                  </span>
-                ) : null}
-                {/* Подпись адресная: развёрнутых карточек на экране может быть
-                    несколько, и «Search zones» у всех читалось бы одинаково —
-                    ни скринридеру, ни глазами не различить, чьё это поле.
-                    `aria-label`, а не `<label>`: подписи у полей этой страницы
-                    с ними не связаны вовсе (долг Д5), и опираться на этот
-                    образец нельзя. */}
+                {/* Подпись адресная — и с `account_id`: развёрнутых карточек
+                    может быть несколько, а имена у аккаунтов сплошь «Main CF»
+                    (ровно поэтому фильтр выше и ищет по id). Одним именем
+                    подписи тёзок были бы неразличимы — ни скринридеру, ни
+                    тесту. `aria-label`, а не `<label>`: подписи у полей этой
+                    страницы с ними не связаны вовсе (долг Д5), и опираться на
+                    этот образец нельзя. */}
                 <Inp
                   value={zoneQuery}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setZoneQuery(e.target.value)}
                   placeholder="Filter zones"
-                  aria-label={`Search zones in ${acc.name}`}
+                  aria-label={`Search zones in ${acc.name}${acc.account_id ? ` (${acc.account_id})` : ""}`}
                   style={{width:170,padding:"6px 10px",fontSize:12.5}}
                 />
-                <Sel
-                  value={zoneSort}
-                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setZoneSort(e.target.value as ZoneSort)}
-                  aria-label={`Sort zones in ${acc.name}`}
-                  style={{padding:"6px 10px",fontSize:12.5}}
-                >
-                  <option value="name">Sort: name</option>
-                  <option value="status">Sort: status</option>
-                </Sel>
+                {/* Справа от поля, как и у поиска по аккаунтам: число про фильтр
+                    принадлежит полю, а не заголовку «Zones (N)» — встав рядом с
+                    ним, оно читалось бы вторым мнением о том же. */}
+                {zoneFilter.trim() ? (
+                  <span role="status" style={{fontSize:12,color:"#6b7280",whiteSpace:"nowrap"}}>
+                    {visibleZones.length} of {zones.length}
+                  </span>
+                ) : null}
               </>
+            )}
+            {showZoneSort && (
+              <Sel
+                value={zoneSort}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setZoneSort(e.target.value as ZoneSort)}
+                aria-label={`Sort zones in ${acc.name}${acc.account_id ? ` (${acc.account_id})` : ""}`}
+                style={{padding:"6px 10px",fontSize:12.5}}
+              >
+                <option value="name">Sort: name</option>
+                {canSortByStatus ? <option value="status">Sort: status</option> : null}
+              </Sel>
             )}
             <Btn size="sm" variant="secondary" onClick={onAddZone} disabled={!canExecute}>+ Add Zone</Btn>
           </div>
@@ -446,6 +483,14 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [testState, setTestState] = useState<Record<number, { state: "idle" | "loading" | "success" | "error"; message?: string }>>({});
   const visibleAccounts = filterAccounts(cfAccounts, accQuery);
+  // Резервные списки зон считаются один раз на набор доменов, а не на символ,
+  // набранный в поиске: каждый вызов — проход по ВСЕМ доменам, и без мемо их
+  // было бы столько же, сколько аккаунтов, на каждое нажатие клавиши. Заодно
+  // ссылка на массив остаётся прежней, и мемо внутри карточки не сбрасывается.
+  const domainZonesByAccount = useMemo(
+    () => new Map(cfAccounts.map((a) => [a.id, zonesOfAccount(domains, a.id)])),
+    [cfAccounts, domains]
+  );
 
   const handleTest = (accountId: number) => {
     setTestState((prev) => ({ ...prev, [accountId]: { state: "loading" } }));
@@ -534,9 +579,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         экраном — обещание списка, которого не существует. */}
     {cfAccounts.length > 0 && (
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
-        {/* `aria-label`, а не `<label>`: подписи полей на этой странице с самими
-            полями не связаны (долг Д5 в плане), и повторять этот образец у
-            нового поля незачем. */}
+        {/* Про `aria-label` вместо `<label>` — у поля поиска зон выше. */}
         <Inp
           value={accQuery}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAccQuery(e.target.value)}
@@ -548,8 +591,11 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
             выше («N accounts connected», StatCard) остаются ОБЩИМИ: они
             описывают, сколько аккаунтов подключено, а не сколько строк сейчас
             видно, и, поехав за фильтром, молча сменили бы смысл. */}
+        {/* `role="status"` — и здесь, и у счётчика зон: список меняется молча,
+            и без объявления скринридер узнаёт об этом, только уйдя проверять
+            его руками. */}
         {accQuery.trim() ? (
-          <span style={{fontSize:12.5,color:"#6b7280",whiteSpace:"nowrap"}}>
+          <span role="status" style={{fontSize:12.5,color:"#6b7280",whiteSpace:"nowrap"}}>
             {visibleAccounts.length} of {cfAccounts.length}
           </span>
         ) : null}
@@ -587,7 +633,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onDelete={async () => { if (!(await confirmAction(`Delete account ${acc.name}?`))) return; deleteAcc.mutate(acc); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
-        domainZones={zonesOfAccount(domains, acc.id)}
+        domainZones={domainZonesByAccount.get(acc.id) || []}
         onOpenZone={(zone) => setSel({ acc: { id: acc.id, name: acc.name }, zone })}
         onAddZone={() => setAddZoneFor({ id: acc.id, name: acc.name })}
       />

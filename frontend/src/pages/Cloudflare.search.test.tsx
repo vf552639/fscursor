@@ -67,17 +67,45 @@ const zone = (name: string, status: string | null = "active") => ({
   status,
 });
 
-/** Ровно порог показа поиска зон (`ZONE_CONTROLS_MIN`). */
+/**
+ * Ровно порог показа поиска зон (`ZONE_SEARCH_MIN`). Порядок фикстуры НАРОЧНО
+ * перемешан: заданная по алфавиту, она делала бы любое утверждение о порядке
+ * тавтологией — список приезжал бы на экран уже правильным, и сортировку можно
+ * было бы удалить целиком, не покраснев ни одним тестом.
+ */
 const EIGHT_ZONES = [
-  zone("a-pending.com", "pending"),
-  zone("b-init.com", "initializing"),
-  zone("c-moved.com", "moved"),
-  zone("d-active.com"),
-  zone("e-none.com", null),
   zone("f-active.com"),
-  zone("g-active.com"),
+  zone("c-moved.com", "moved"),
   zone("h-active.com"),
+  zone("a-pending.com", "pending"),
+  zone("e-none.com", null),
+  zone("g-active.com"),
+  zone("b-init.com", "initializing"),
+  zone("d-active.com"),
 ];
+
+/** Имена `EIGHT_ZONES` по алфавиту — то, что даёт сортировка по умолчанию. */
+const BY_NAME = [
+  "a-pending.com", "b-init.com", "c-moved.com", "d-active.com",
+  "e-none.com", "f-active.com", "g-active.com", "h-active.com",
+];
+
+const domain = (id: number, name: string, zoneId: string) => ({
+  id,
+  domain_name: name,
+  status: "active",
+  registrar_id: null,
+  server_id: null,
+  cloudflare_account_id: ACCOUNT.id,
+  cloudflare_zone_id: zoneId,
+  cloudflare_enabled: true,
+  expiry_date: null,
+  purchase_date: null,
+  ns_status: null,
+  ns_updated_at: null,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+});
 
 function setTauri(on: boolean) {
   const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
@@ -85,11 +113,11 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-/** Доменов нет: зоны в этих тестах приезжают из Cloudflare, а не из базы. */
-function mockHttp(accounts: any[]) {
+/** Домены нужны только вебу: там зоны собираются из них, а не из Cloudflare. */
+function mockHttp(accounts: any[], domains: any[] = []) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/cloudflare/accounts") return accounts;
-    if (url === "/domains") return [];
+    if (url === "/domains") return domains;
     throw new Error(`unexpected GET ${url}`);
   });
 }
@@ -111,6 +139,14 @@ function renderPage() {
 }
 
 const accountSearch = () => screen.getByLabelText("Search Cloudflare accounts");
+
+/**
+ * Подписи контролов зон — точными строками, вместе с `account_id`: он в них не
+ * украшение, а единственное, чем различаются подписи у аккаунтов-тёзок (имена
+ * вида «Main CF» — та самая причина, по которой фильтр ищет и по id).
+ */
+const ZONE_SEARCH_LABEL = "Search zones in Main CF (cf-acc-1)";
+const ZONE_SORT_LABEL = "Sort zones in Main CF (cf-acc-1)";
 
 /** Карточка аккаунта приезжает свёрнутой — см. `Cloudflare.collapse.test`. */
 async function expandAccounts() {
@@ -237,8 +273,10 @@ describe("Cloudflare — поиск по аккаунтам", () => {
     expect(screen.getByText("3 accounts connected")).toBeTruthy();
     const total = screen.getByText("Total Accounts").parentElement as HTMLElement;
     expect(within(total).getByText("3")).toBeTruthy();
-    // А вот у поля число именно про фильтр — и оно там появляется.
-    expect(screen.getByText("1 of 3")).toBeTruthy();
+    // А вот у поля число именно про фильтр — и оно там появляется. Роль
+    // `status` не украшение: список меняется молча, и без объявления скринридер
+    // узнаёт об этом, только уйдя проверять его руками.
+    expect(screen.getByRole("status").textContent).toBe("1 of 3");
   });
 });
 
@@ -251,14 +289,14 @@ describe("Cloudflare — поиск и сортировка зон в карто
     await expandAccounts();
     await screen.findByText("a-pending.com");
 
-    const field = screen.getByLabelText("Search zones in Main CF");
+    const field = screen.getByLabelText(ZONE_SEARCH_LABEL);
     fireEvent.change(field, { target: { value: "ACTIVE" } });
 
     expect(zoneNames()).toEqual(["d-active.com", "f-active.com", "g-active.com", "h-active.com"]);
     // Заголовок остаётся общим — это то же число, что в бейдже шапки; сколько
     // осталось от запроса, говорит счётчик у поля.
     expect(screen.getByText("Zones (8)")).toBeTruthy();
-    expect(screen.getByText("4 of 8")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("4 of 8");
 
     fireEvent.change(field, { target: { value: "нетакой" } });
 
@@ -276,13 +314,11 @@ describe("Cloudflare — поиск и сортировка зон в карто
     await expandAccounts();
     await screen.findByText("a-pending.com");
 
-    // По умолчанию — по имени.
-    expect(zoneNames()).toEqual([
-      "a-pending.com", "b-init.com", "c-moved.com", "d-active.com",
-      "e-none.com", "f-active.com", "g-active.com", "h-active.com",
-    ]);
+    // По умолчанию — по имени, и это не даровое совпадение с порядком ответа
+    // Cloudflare: фикстура приезжает перемешанной.
+    expect(zoneNames()).toEqual(BY_NAME);
 
-    fireEvent.change(screen.getByLabelText("Sort zones in Main CF"), { target: { value: "status" } });
+    fireEvent.change(screen.getByLabelText(ZONE_SORT_LABEL), { target: { value: "status" } });
 
     // Сверху — то, что ждёт человека (`pending` → пропиши NS, `initializing` →
     // Cloudflare ещё заводит зону), затем незнакомое (`moved`: не «в порядке»,
@@ -296,7 +332,7 @@ describe("Cloudflare — поиск и сортировка зон в карто
     ]);
   });
 
-  it("у короткого списка зон поля поиска нет, у списка от порога — есть", async () => {
+  it("ниже порога поля поиска нет, но порядок по имени всё равно наведён", async () => {
     setTauri(true);
     mockInvoke(EIGHT_ZONES.slice(0, 7));
 
@@ -304,20 +340,73 @@ describe("Cloudflare — поиск и сортировка зон в карто
     await expandAccounts();
     await screen.findByText("a-pending.com");
 
-    // Семь строк читаются одним взглядом; поле над ними — лишний элемент в
-    // каждой из десятков карточек.
-    expect(screen.queryByLabelText("Search zones in Main CF")).toBeNull();
-    expect(screen.queryByLabelText("Sort zones in Main CF")).toBeNull();
-    expect(screen.getAllByTestId("zone-row").length).toBe(7);
+    // Семь имён проглядывают глазами быстрее, чем набирают запрос.
+    expect(screen.queryByLabelText(ZONE_SEARCH_LABEL)).toBeNull();
+    // А порядок наводится и здесь: иначе один и тот же аккаунт раскладывал бы
+    // зоны по-разному по разные стороны порога.
+    expect(zoneNames()).toEqual(BY_NAME.filter((n) => n !== "d-active.com"));
+  });
 
-    cleanup();
-    queryClient.clear();
+  it("от восьми зон появляется поле поиска", async () => {
+    setTauri(true);
     mockInvoke(EIGHT_ZONES);
 
     renderPage();
     await expandAccounts();
     await screen.findByText("a-pending.com");
 
-    expect(screen.getByLabelText("Search zones in Main CF")).toBeTruthy();
+    expect(screen.getByLabelText(ZONE_SEARCH_LABEL)).toBeTruthy();
+  });
+
+  it("селектор сортировки появляется уже у двух зон — поиска там ещё нет", async () => {
+    setTauri(true);
+    mockInvoke(EIGHT_ZONES.slice(0, 2));
+
+    renderPage();
+    await expandAccounts();
+    await screen.findByText("c-moved.com");
+
+    // Порог у сортировки свой и низкий: селектор стоит один тег в уже
+    // существующем ряду, а поиск требует набрать запрос, чтобы окупиться.
+    expect(screen.getByLabelText(ZONE_SORT_LABEL)).toBeTruthy();
+    expect(screen.queryByLabelText(ZONE_SEARCH_LABEL)).toBeNull();
+  });
+
+  it("у единственной зоны сортировать нечего — селектора нет", async () => {
+    setTauri(true);
+    mockInvoke(EIGHT_ZONES.slice(0, 1));
+
+    renderPage();
+    await expandAccounts();
+    await screen.findByText("f-active.com");
+
+    expect(screen.queryByLabelText(ZONE_SORT_LABEL)).toBeNull();
+  });
+
+  it("в вебе пункта «Sort: status» нет — статуса не знает ни одна зона", async () => {
+    setTauri(false);
+    mockHttp([ACCOUNT], [domain(1, "ccc.com", "z-3"), domain(2, "aaa.com", "z-1"), domain(3, "bbb.com", "z-2")]);
+
+    renderPage();
+    await expandAccounts();
+    await screen.findByText("aaa.com");
+
+    // Список собран из наших доменов: сортировка по статусу дала бы ровно тот
+    // же порядок, что и по имени, — мёртвый пункт на каждой карточке веба.
+    expect(screen.getByLabelText(ZONE_SORT_LABEL)).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Sort: name" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Sort: status" })).toBeNull();
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  it("со статусами пункт «Sort: status» на месте", async () => {
+    setTauri(true);
+    mockInvoke(EIGHT_ZONES);
+
+    renderPage();
+    await expandAccounts();
+    await screen.findByText("a-pending.com");
+
+    expect(screen.getByRole("option", { name: "Sort: status" })).toBeTruthy();
   });
 });
