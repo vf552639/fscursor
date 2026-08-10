@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { OS_OPTIONS, osShortName } from "./osName";
+import { OS_OPTIONS, osShortName, serverOsName } from "./osName";
 
 /**
  * `osShortName` — чистая функция, поэтому весь разбор проверяется на строках,
@@ -132,5 +132,49 @@ describe("osShortName — пустые значения", () => {
     ["строка из одной версии без имени", "39"],
   ])("%s → null", (_name, input) => {
     expect(osShortName(input)).toBeNull();
+  });
+});
+
+/**
+ * `serverOsName` — то самое «единственное место, где решается приоритет между
+ * ручным выбором и автоопределением», обещанное её JSDoc. Своих тестов у неё до
+ * сих пор не было: покрыт был только `osShortName` под ней, а перевёрнутый
+ * приоритет — правило, которое отличает «человек выбрал CentOS» от «машина
+ * ответила Ubuntu», — не ловился ничем.
+ */
+describe("serverOsName — приоритет ручного выбора над автоопределением", () => {
+  it("ручной выбор перекрывает автоопределение", () => {
+    // Не «последнее по времени» и не «более подробное»: выбор человека — это
+    // решение, `os_pretty` — догадка десктопа по SSH, которая могла собраться с
+    // другой машины (или не собраться вовсе).
+    expect(serverOsName({ os: "CentOS", os_pretty: "Ubuntu 22.04.6 LTS" })).toBe("CentOS");
+  });
+
+  it("оба значения укорачиваются до имени семейства", () => {
+    expect(serverOsName({ os: "Ubuntu 22.04 LTS (x86_64)", os_pretty: null })).toBe("Ubuntu");
+    expect(serverOsName({ os: null, os_pretty: "Debian GNU/Linux 12 (bookworm)" })).toBe("Debian");
+  });
+
+  it("автоопределение подхватывается, когда выбора нет", () => {
+    expect(serverOsName({ os: null, os_pretty: "AlmaLinux 9.3 (Shamrock Pampas Cat)" })).toBe(
+      "AlmaLinux",
+    );
+    expect(serverOsName({ os: "", os_pretty: "Rocky Linux release 9.3" })).toBe("Rocky Linux");
+  });
+
+  it("мусор в ручном поле проваливается в автоопределение, а не побеждает", () => {
+    // «39» — версия без имени: `osShortName` даёт из неё null, и значение обязано
+    // взяться из `os_pretty`. Проверка на пустоту вместо `osShortName` («os есть
+    // — берём os») показала бы здесь пустой бейдж при живом автоопределении.
+    expect(serverOsName({ os: "39", os_pretty: "Fedora Linux 39 (Server Edition)" })).toBe(
+      "Fedora",
+    );
+  });
+
+  it("нет ни того, ни другого — null, а не пустая строка", () => {
+    // Пустая строка нарисовалась бы в JSX пустым местом, а вызывающий код
+    // проверяет именно null, чтобы показать «—».
+    expect(serverOsName({ os: null, os_pretty: null })).toBeNull();
+    expect(serverOsName({})).toBeNull();
   });
 });

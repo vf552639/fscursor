@@ -292,12 +292,17 @@ describe("AddServerModal — поле адреса", () => {
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
-  it("IPv4 принимается и уезжает на сервер", async () => {
+  it("IPv4 принимается и уезжает на сервер обрезанным", async () => {
     // Парный к предыдущему: без него «форма отвергает всё подряд» выглядело бы
     // так же зелено, как правильное поведение.
     mocks.apiPost.mockResolvedValue({ id: 9 });
     await openModal();
     fillForm();
+    // С пробелами по краям: проверка их обрезает (`ipError`), и ровно то же
+    // значение обязано уехать в тело. Бэкенд пробелы не срезает, а дальше адрес
+    // идёт в `host` SSH-коннекта и в URL панели — «10.0.0.9 » не откроет ни то,
+    // ни другое.
+    fillIp("  10.0.0.9  ");
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));

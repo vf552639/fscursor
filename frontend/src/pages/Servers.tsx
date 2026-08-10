@@ -82,7 +82,11 @@ export function AddServerModal({onClose, providers}: {onClose: ()=>void, provide
       persist: async (blobId) => {
         await create.mutateAsync({
           name: name,
-          ip_address: ip,
+          // Обрезанным — ровно тем значением, которое проверил `ipError`
+          // (он тоже обрезает). Бэкенд пробелы не срезает (`_checked_server_text`
+          // проверяет пригодность для колонки, а не формат), и «10.0.0.9 » уехал
+          // бы дальше в `host` SSH-коннекта и в адрес панели.
+          ip_address: ip.trim(),
           ssh_user: login,
           ssh_password_blob_id: blobId,
           os: os,

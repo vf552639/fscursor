@@ -85,7 +85,11 @@ function isIpv6(value: string): boolean {
   const head = split(halves[0]);
   const tail = compressed ? split(halves[1]) : [];
 
-  const headCount = groupCount(head, !compressed || tail.length === 0);
+  // Встроенный IPv4 — это последние 32 бита ВСЕГО адреса, поэтому стоять он
+  // может только в конце хвоста (при сжатии) или в конце головы (когда сжатия
+  // нет). «1:2:3.4.5.6::» с правом на v4 в голове — не адрес: за v4-хвостом идёт
+  // сжатие, то есть последние биты не его.
+  const headCount = groupCount(head, !compressed);
   const tailCount = groupCount(tail, compressed);
   if (headCount === null || tailCount === null) return false;
 
@@ -104,6 +108,11 @@ export interface IpErrorOptions {
    * странице сервера — да: у уже заведённого сервера адрес мог смениться на
    * IPv6, и форма, отвергающая настоящий адрес машины, оставила бы человека без
    * способа его записать.
+   *
+   * ⚠️ Принятый IPv6 работает не везде: FastPanel по нему подключить нельзя —
+   * проверка URL панели знает только «хост:порт» без скобок, и одинаково с обеих
+   * сторон границы (см. ограничение в JSDoc `lib/fastpanelInput`). SSH и
+   * метрики по IPv6 при этом работают.
    */
   ipv6?: boolean;
 }

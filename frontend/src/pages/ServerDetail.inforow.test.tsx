@@ -378,6 +378,37 @@ describe("ServerDetail — правка полей из строк карточ�
     expect(select.value).toBe("CentOS");
   });
 
+  it("расхождение с тем, что ответила машина, названо прямо в форме", async () => {
+    setTauri(true);
+    renderDetail({ ...SERVER, os: "CentOS", os_pretty: "Debian GNU/Linux 12 (bookworm)" });
+    await openOsForm();
+
+    // С тех пор как ручной `os` перекрывает `os_pretty` на всех экранах,
+    // автоопределённое значение не видно больше нигде — а расхождение означает,
+    // что установка FastPanel пойдёт не тем пакетным менеджером (apt против
+    // yum). Единственное место, где об этом можно узнать, — эта подсказка.
+    expect(screen.getByText("По SSH определено: Debian")).toBeTruthy();
+  });
+
+  it("совпадение с машиной подсказку не показывает", async () => {
+    setTauri(true);
+    // Шум ради шума: «выбрано Ubuntu, определено Ubuntu» — не новость.
+    renderDetail({ ...SERVER, os: "Ubuntu", os_pretty: "Ubuntu 22.04.6 LTS" });
+    await openOsForm();
+
+    expect(screen.queryByText(/По SSH определено/)).toBeNull();
+  });
+
+  it("у семейства вне списка подсказка не повторяет соседний пункт", async () => {
+    setTauri(true);
+    // Селект уже показывает «Fedora — не в списке»; второе «По SSH определено:
+    // Fedora» под ним — то же самое слово в слово.
+    renderDetail({ ...SERVER, os: null, os_pretty: "Fedora Linux 39 (Server Edition)" });
+    await openOsForm();
+
+    expect(screen.queryByText(/По SSH определено/)).toBeNull();
+  });
+
   it("семейство вне списка селект не подменяет чужой ОС и сохранить не даёт", async () => {
     setTauri(true);
     // Fedora опознаётся (`osShortName`), но пункта под неё в форме нет и не

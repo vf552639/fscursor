@@ -129,6 +129,10 @@ describe("ipError — IPv6 только там, где он разрешён", (
     expect(ipError("fe80::1%eth0", v6)).toBe("Invalid IP address format");
     // Встроенный IPv4 — только последней группой.
     expect(ipError("::192.168.1.1:ffff", v6)).toBe("Invalid IP address format");
+    // …и «последней» — во всём адресе, а не в своей половине: за v4-хвостом тут
+    // идёт сжатие, то есть последние 32 бита принадлежат не ему.
+    expect(ipError("1:2:3.4.5.6::", v6)).toBe("Invalid IP address format");
+    expect(ipError("1.2.3.4::", v6)).toBe("Invalid IP address format");
     // …и только настоящий IPv4.
     expect(ipError("::ffff:999.1.1.1", v6)).toBe("Invalid IP address format");
   });

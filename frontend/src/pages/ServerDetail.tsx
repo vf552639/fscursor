@@ -6,7 +6,7 @@ import { providerError, providerOptions, providerPayload } from "../lib/provider
 import { ipError } from "../lib/ipInput";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
-import { OS_OPTIONS, serverOsName } from "../lib/osName";
+import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -217,7 +217,16 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     // Адрес панели собирается из `ip_address` самого сервера: сюда попадают
     // только с уже заведённого сервера, и IP известен. Пустое поле заставляло
     // бы набирать руками то, что программа и так знает.
-    setFpUrl(fastpanelUrlOf(s));
+    //
+    // Исключение — IPv6: `fastpanelUrlError` (и парные ему проверки на бэкенде и
+    // в десктопе) принимают только «хост:порт» без скобок, так что собранный
+    // адрес форма забраковала бы сама — предзаполнять поле заведомо невалидным
+    // значением хуже, чем оставить его пустым с плейсхолдером. Подключить панель
+    // по IPv6 сегодня нельзя вовсе; чинится это расширением трёх парных
+    // регулярок (`lib/fastpanelInput`, `backend/app/core/validators.py`,
+    // `host_port_regex()` в десктопе) на bracketed-IPv6 — работа за границами
+    // этой задачи, записана в долг.
+    setFpUrl(s?.ip_address?.includes(":") ? "" : fastpanelUrlOf(s));
     setFpLogin(s?.fastpanel_user || "fastuser");
     fpPassword.reset();
     setFpConnectErr({});
@@ -443,6 +452,19 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // Приоритет ручного выбора над автоопределением — общее правило, см.
   // JSDoc `serverOsName` в `lib/osName`.
   const osLabel = serverOsName(s);
+  // Что ответила по SSH сама машина. Показывается только в форме правки ОС и
+  // только при расхождении с тем, что в этой форме выбрано: с тех пор как ручной
+  // `os` перекрывает `os_pretty` везде, автоопределённое значение не видно ни на
+  // одном экране — а состояние «человек выбрал CentOS, машина отвечает Ubuntu»
+  // это ровно то, в котором `update_command` берёт yum вместо apt и получасовая
+  // установка FastPanel ломается на первом шаге.
+  //
+  // Сравнивается с ПОКАЗАННЫМ в форме (`osValue ?? osLabel`), а не с `osValue`:
+  // у семейства вне списка `osValue` пуст, и селект показывает `osLabel` — там,
+  // где это то же самое имя, подсказка повторяла бы соседнюю строку слово в
+  // слово.
+  const osDetected = osShortName(s.os_pretty);
+  const osMismatch = osDetected && osDetected !== (osValue ?? osLabel) ? osDetected : null;
   const providers = providerOptions(serversList?.items || []);
   // Снимок есть ровно тогда, когда есть его отметка времени: и десктопный
   // сборщик (`apply_metrics`), и удалённый серверный до него ставили её всегда,
@@ -997,6 +1019,13 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             )}
             {OS_OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}
           </Sel>
+          {/* Правда от машины — рядом с выбором, но НЕ вместо него: ручной выбор
+              перекрывает автоопределение осознанно (см. `serverOsName`), и
+              подсказка ничего не меняет сама. Она лишь показывает расхождение,
+              которое иначе не видно нигде. */}
+          {osMismatch && (
+            <div style={{fontSize:11.5,color:"#9ca3af",marginTop:6}}>По SSH определено: {osMismatch}</div>
+          )}
         </div>
         {osErr && (
           <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>

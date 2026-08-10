@@ -239,10 +239,10 @@ type InfoRowProps = {
    * — например, аббревиатура «OS» скринридер произнесёт по буквам, а не как
    * «operating system». Необязателен: по умолчанию имя строится из `k`.
    *
-   * Пока не вызывается ни одним потребителем — им станет задача, которая
-   * сделает Name/IP/Provider/OS редактируемыми: для «OS» и «IP» она обязана
-   * передать `editLabel` («operating system», «IP address») по этой же
-   * причине.
+   * Так им и пользуется единственный сегодняшний потребитель — карточка Server
+   * Information (`pages/ServerDetail.tsx`): строки «OS» и «IP» передают
+   * «operating system» и «IP address», а «Name» и «Provider» обходятся своей
+   * подписью.
    */
   editLabel?: string;
 };
