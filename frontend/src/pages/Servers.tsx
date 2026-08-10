@@ -10,6 +10,7 @@ import { useSecretSave } from "../hooks/useSecretSave";
 import { describeQueryError } from "../lib/queryError";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { UNCHECKED, isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
+import { OS_OPTIONS, osShortName } from "../lib/osName";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "add-server-provider-options";
@@ -22,20 +23,6 @@ const PROVIDER_LIST_ID = "add-server-provider-options";
  * строкой имя провайдера быть не может: схема на бэкенде приводит её к `NULL`.
  */
 const ALL_PROVIDERS = "";
-
-/**
- * Только имя семейства ОС, без версии и архитектуры: десктоп по этому имени
- * выбирает пакетный менеджер для установки FastPanel (`apt` или `yum`),
- * версия ему не нужна.
- *
- * Новое имя из RHEL-семейства обязано попадать под подстроки
- * `cent|rhel|rocky|alma|fedora` из
- * `desktop/src-tauri/src/provision/fastpanel_install.rs::update_command` —
- * иначе оно молча получит apt (там `else`, а не whitelist). Debian-подобные
- * (Debian, Ubuntu) под эти подстроки не попадают нарочно — apt для них и
- * есть правильный ответ.
- */
-const OS_OPTIONS = ["Debian", "Ubuntu", "CentOS", "AlmaLinux", "Rocky Linux"] as const;
 
 /**
  * `providers` — обязательный проп, а не `useServers()` внутри: список серверов
@@ -216,7 +203,10 @@ export default function Servers({onNav}: {onNav: (page: string, ctx?: any)=>void
     // (`providerOptions` тоже обрезает). Иначе строка «Hetzner » дала бы пункт
     // «Hetzner», по которому не находится ни один сервер.
     provider: s.provider?.trim() || null,
-    os: s.os_pretty || s.os || null,
+    // Ручной выбор перекрывает автоопределение: `os` — решение пользователя из
+    // «Add Server», `os_pretty` — только догадка десктопа по SSH (см. JSDoc
+    // `osShortName` в `lib/osName`).
+    os: osShortName(s.os) || osShortName(s.os_pretty),
     status: serverUiStatus(s, now),
     fastpanel: s.fastpanel_status === "installed",
     location: "-",
