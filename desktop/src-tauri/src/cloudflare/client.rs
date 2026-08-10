@@ -727,7 +727,7 @@ mod tests {
     // читала, форма правки открывала MX с пустым полем — и приоритет терялся
     // при первом же сохранении. Запись без поля обязана разбираться по-прежнему.
     #[test]
-    fn dns_record_deserializes_priority_only_when_present() {
+    fn dns_record_priority_roundtrip() {
         let mx: DnsRecord = serde_json::from_value(serde_json::json!({
             "id": "rec1",
             "type": "MX",

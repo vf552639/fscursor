@@ -112,6 +112,8 @@ const RECORD = {
   ttl: 1,
   proxied: true,
   zone_id: "zone-a",
+  // Ключ есть всегда: у типов без приоритета (A в том числе) он приезжает null.
+  priority: null,
 };
 
 function setTauri(on: boolean) {
@@ -461,6 +463,30 @@ describe("Cloudflare — мутации в десктопе", () => {
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
     const [, args] = lastMutation();
     expect(args.patch.priority).toBe(20);
+  });
+
+  it("не путает приоритет 0 с отсутствующим", async () => {
+    setTauri(true);
+    // 0 — валидный приоритет MX, причём самый «выигрышный»: почта пойдёт именно
+    // сюда. Наивное `record.priority ? String(record.priority) : ""` открыло бы
+    // поле пустым, и Save без правок молча стёр бы нуль до прежнего значения.
+    const mx = { ...RECORD, type: "MX", name: "example.com", content: "mx.example.com", priority: 0 };
+    mockInvoke({ records: [mx] });
+    mocks.mutate.mockResolvedValue(mx);
+
+    renderPage();
+    await openZone();
+    await screen.findByText("mx.example.com");
+
+    fireEvent.click(screen.getByTitle("Edit DNS record"));
+    expect((screen.getByPlaceholderText("10") as HTMLInputElement).value).toBe("0");
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledTimes(1));
+    // Вторая половина того же пути: проверка «поле тронуто» в onSave тоже не
+    // должна принимать "0" за пустую строку.
+    expect(lastMutation()[1].patch.priority).toBe(0);
   });
 
   it("не переписывает отсутствующий TTL в Auto при простом сохранении", async () => {
