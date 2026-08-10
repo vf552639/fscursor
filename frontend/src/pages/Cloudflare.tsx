@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
 import {
   useCloudflareAccounts,
@@ -465,6 +465,16 @@ function AccountCard({
   );
 }
 
+/**
+ * С какого числа аккаунтов появляется «проверить все токены». На одном аккаунте
+ * кнопка была бы второй мишенью того же действия, что и Test connection в его
+ * единственной карточке, только со сводкой поверх собственной полосы итога.
+ * Порог считается по ПОЛНОМУ числу аккаунтов, а не по видимым: иначе кнопка
+ * пропадала бы под пальцами, стоит запросу сузить список до одного, — та же
+ * причина, что у порогов зон выше.
+ */
+const TEST_ALL_MIN = 2;
+
 export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) => void }){
   const { data: cfAccountsData, isPending, isError, error } = useCloudflareAccounts();
   const { data: domainsData } = useDomains();
@@ -482,7 +492,19 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [editingAcc, setEditingAcc] = useState<any | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [testState, setTestState] = useState<Record<number, { state: "idle" | "loading" | "success" | "error"; message?: string }>>({});
+  /** Идущий прогон «проверить все токены»: сколько закончено из скольких. */
+  const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
+  /** Итог последнего ЗАВЕРШЁННОГО прогона; `failed` — имена аккаунтов. */
+  const [bulkSummary, setBulkSummary] = useState<{ total: number; failed: string[] } | null>(null);
+  // Сторож от второго запуска — ref, а не `bulkTest`: два клика в одном тике
+  // прочитали бы одно и то же (ещё пустое) состояние, и прогонов уехало бы два.
+  // `disabled` у кнопки решает ту же задачу только для глаза.
+  const bulkRunning = useRef(false);
   const visibleAccounts = filterAccounts(cfAccounts, accQuery);
+  // Идущий прогон держит кнопку на экране даже тогда, когда порог соблюдён, а
+  // проверять сейчас нечего: запрос, сузивший список до пустого, унёс бы с
+  // экрана единственный признак того, что прогон ещё идёт.
+  const showTestAll = cfAccounts.length >= TEST_ALL_MIN && (bulkTest !== null || visibleAccounts.length > 0);
   // Резервные списки зон считаются один раз на набор доменов, а не на символ,
   // набранный в поиске: каждый вызов — проход по ВСЕМ доменам, и без мемо их
   // было бы столько же, сколько аккаунтов, на каждое нажатие клавиши. Заодно
@@ -492,25 +514,76 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
     [cfAccounts, domains]
   );
 
-  const handleTest = (accountId: number) => {
+  /**
+   * Одна проверка токена; `true` — токен живой. `mutateAsync`, а не `mutate` с
+   * колбэками: мутация на странице ОДНА на все аккаунты, а её наблюдатель
+   * держит колбэки только последнего вызова и отписывается от предыдущей
+   * мутации. В прогоне по списку это значило бы, что итог доедет ровно до
+   * последней карточки, а остальные останутся «Testing...» навсегда. Промис же
+   * принадлежит своему вызову и приходит туда, откуда его ждали, — поэтому и
+   * одиночная кнопка, и прогон ходят одним путём.
+   */
+  const runTest = async (accountId: number): Promise<boolean> => {
     setTestState((prev) => ({ ...prev, [accountId]: { state: "loading" } }));
-    testAcc.mutate(accountId, {
-      onSuccess: (res) => {
-        const nextState = res.success ? "success" : "error";
-        setTestState((prev) => ({ ...prev, [accountId]: { state: nextState, message: res.message } }));
-        if (res.success) {
-          setTimeout(() => {
-            setTestState((prev) => ({ ...prev, [accountId]: { state: "idle" } }));
-          }, 3000);
-        }
-      },
-      onError: (err: any) => {
-        setTestState((prev) => ({
-          ...prev,
-          [accountId]: { state: "error", message: String(err?.message || "Connection test failed") },
-        }));
-      },
-    });
+    try {
+      const res = await testAcc.mutateAsync(accountId);
+      const nextState = res.success ? "success" : "error";
+      setTestState((prev) => ({ ...prev, [accountId]: { state: nextState, message: res.message } }));
+      if (res.success) {
+        setTimeout(() => {
+          setTestState((prev) => ({ ...prev, [accountId]: { state: "idle" } }));
+        }, 3000);
+      }
+      return res.success;
+    } catch (err: any) {
+      setTestState((prev) => ({
+        ...prev,
+        [accountId]: { state: "error", message: String(err?.message || "Connection test failed") },
+      }));
+      return false;
+    }
+  };
+
+  const handleTest = (accountId: number) => { void runTest(accountId); };
+
+  /**
+   * Прогон по ВИДИМЫМ аккаунтам, а не по всем: поле поиска стоит на том же
+   * экране, и кнопка, тихо ушедшая проверять скрытые фильтром аккаунты, делала
+   * бы не то, что показывает. Ровно поэтому в подписи стоит число — она честна
+   * и с запросом, и без него. Список снимается один раз, на клике: фильтр можно
+   * поменять во время прогона, и тогда «12» в прогрессе перестало бы сходиться с
+   * тем, что считается.
+   *
+   * Проверки идут ПО ОДНОЙ. Дело не только в вежливости к Cloudflare: каждая
+   * `cf_verify_token` — это ещё и `sync_now` перед ней (`invokeSynced`), а
+   * мутация на странице одна (см. `runTest`), и десяток одновременных вызовов
+   * оставил бы её `variables`/`isPending` описывающими случайный из них.
+   *
+   * Отмены нет намеренно. Уход в зону эту страницу не размонтирует (`if (sel)` —
+   * ранний возврат ВНУТРИ компонента), так что вернувшись, пользователь увидит
+   * доехавшие итоги; уход на другую вкладку в React 18 делает `setState` после
+   * размонтирования безобидным no-op, а никаких подписок цикл не держит.
+   */
+  const handleTestAll = async () => {
+    if (bulkRunning.current) return;
+    const batch = visibleAccounts.map((a) => ({ id: a.id, name: a.name }));
+    if (!batch.length) return;
+    bulkRunning.current = true;
+    setBulkSummary(null);
+    setBulkTest({ done: 0, total: batch.length });
+    const failed: string[] = [];
+    try {
+      for (const acc of batch) {
+        if (!(await runTest(acc.id))) failed.push(acc.name);
+        setBulkTest((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+      }
+      // Сводка ставится только после ПОЛНОГО прохода: оборвись он на середине,
+      // «2 из 12 не прошли» умолчало бы о том, что восемь вообще не проверяли.
+      setBulkSummary({ total: batch.length, failed });
+    } finally {
+      bulkRunning.current = false;
+      setBulkTest(null);
+    }
   };
 
   if (isError) {
@@ -555,11 +628,55 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
           {handled:false} и только тостила бы — ровно то, что уже делает
           предсуществующий `add-server` в `Servers.tsx` и что записано в долг. */}
       {isTauri() ? (
-        <Btn variant="primary" onClick={()=>setShowAcc(true)}>+ Add Account</Btn>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {/* Кнопки «проверить все» в вебе нет вовсе, а не выключенной: токен
+              расшифровывается на клиенте, и проверить его браузер не может в
+              принципе — ровно то же, почему рядом нет «+ Add Account». Дохлый
+              контрол в шапке пришлось бы объяснять второй заметкой поверх уже
+              стоящей. Одиночный Test connection в карточке остаётся видимым и
+              выключенным по своей причине: он привязан к аккаунту, и его
+              отсутствие читалось бы как «у этого аккаунта проверять нечего». */}
+          {showTestAll && (
+            <Btn variant="secondary" onClick={handleTestAll} disabled={bulkTest !== null}>
+              {bulkTest
+                // Пока прогон идёт, показываем ТЕКУЩИЙ номер, а не число
+                // законченных: «Testing 0 of 12» выглядело бы зависшим.
+                ? `Testing ${Math.min(bulkTest.done + 1, bulkTest.total)} of ${bulkTest.total}…`
+                : `Test ${visibleAccounts.length} ${visibleAccounts.length === 1 ? "token" : "tokens"}`}
+            </Btn>
+          )}
+          <Btn variant="primary" onClick={()=>setShowAcc(true)}>+ Add Account</Btn>
+        </div>
       ) : (
         <DesktopOnlyNote what="Saving secrets" />
       )}
     </div>
+    {/* Сводка прогона. Полосы итога в карточках её не заменяют: при десятках
+        аккаунтов их не видно разом, а успех и вовсе гаснет через 3 секунды.
+        Отдельной ступени «не проверено» здесь нет и не нужно — сводка ставится
+        только после полного прохода по снимку списка, поэтому «ok = total −
+        failed» тут утверждение, а не допущение. Гаснет она не по таймеру, а от
+        следующего прогона: провалившийся токен — это задача, а не уведомление. */}
+    {bulkSummary && (
+      <Card style={{marginBottom:14}}>
+        <div
+          role="status"
+          style={{
+            padding:"12px 16px",
+            fontSize:13,
+            borderRadius:10,
+            color: bulkSummary.failed.length ? "#991b1b" : "#166534",
+            background: bulkSummary.failed.length ? "#fef2f2" : "#f0fdf4",
+          }}
+        >
+          {/* Имена, а не голое число: карточку с провалившимся токеном иначе
+              пришлось бы искать скроллом по всему списку. */}
+          {bulkSummary.failed.length
+            ? `${bulkSummary.failed.length} of ${bulkSummary.total} ${bulkSummary.total === 1 ? "token" : "tokens"} failed: ${bulkSummary.failed.join(", ")}.`
+            : `${bulkSummary.total} ${bulkSummary.total === 1 ? "token" : "tokens"} verified.`}
+        </div>
+      </Card>
+    )}
     {/* Только успех: единственный источник этого баннера — создание аккаунта, а
         его провал уходит в ошибку внутри формы и до страницы не доезжает. */}
     {statusMessage && (
