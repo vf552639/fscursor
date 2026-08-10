@@ -112,6 +112,7 @@ function AccountCard({
   onDelete,
   onTest,
   testStatus,
+  domainCount,
   domainZones,
   onOpenZone,
   onAddZone,
@@ -121,11 +122,17 @@ function AccountCard({
   onDelete: () => void;
   onTest: () => void;
   testStatus?: { state: "idle" | "loading" | "success" | "error"; message?: string };
+  /** Домены из НАШЕЙ базы. Это не «Zones (N)» ниже: те отдаёт сам Cloudflare. */
+  domainCount: number;
   domainZones: CfZoneRef[];
   onOpenZone: (zone: CfZoneRef) => void;
   onAddZone: () => void;
 }) {
   const canExecute = isTauri();
+  // Локальный boolean, а не общий Set в родителе: карточки не размонтируются на
+  // ре-рендере, а «свёрнут» — свойство одной карточки и больше ничьё.
+  const [collapsed, setCollapsed] = useState(false);
+  const toggle = () => setCollapsed((v) => !v);
   // Источник правды — сам Cloudflare: только он знает про зону, созданную
   // минуту назад, и только он отдаёт её name_servers. Домены остаются
   // резервом для веба, у которого токена нет и быть не должно.
@@ -139,9 +146,25 @@ function AccountCard({
     <Card style={{marginBottom:16}}>
       <CHd>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span
+            role="button"
+            aria-expanded={!collapsed}
+            aria-label={`Свернуть/развернуть аккаунт ${acc.name}`}
+            tabIndex={0}
+            onClick={toggle}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+            }}
+            style={{fontSize:11,color:"#9ca3af",cursor:"pointer",userSelect:"none"}}
+          >
+            {collapsed ? "▸" : "▾"}
+          </span>
           <div style={{width:36,height:36,background:"#fff7ed",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>☁</div>
-          <div><div style={{fontSize:14,fontWeight:700,color:"#111"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
+          {/* Имя — вторая мишень того же переключателя: попасть мышью в глиф
+              11px трудно, а строка аккаунта — привычное место для клика. */}
+          <div onClick={toggle} style={{cursor:"pointer"}}><div style={{fontSize:14,fontWeight:700,color:"#111"}}>{acc.name}</div><div style={{fontSize:12,color:"#6b7280"}}>{acc.account_id || "-"}</div></div>
           <Badge variant={acc.is_active?"green":"gray"}>{acc.is_active?"Active":"Inactive"}</Badge>
+          <Badge variant="gray">{domainCount} domains</Badge>
         </div>
         <div style={{display:"flex",gap:8}}>
           {/* Был OpenInDesktop с action `test-cloudflare` — хостом, которого
@@ -170,6 +193,9 @@ function AccountCard({
           {testStatus.message || "Connection test failed"}
         </div>
       )}
+      {/* Свёрнутой остаётся только шапка и итог Test connection: аккаунтов
+          десятки, а раскрытый список зон нужен точечно. */}
+      {!collapsed && (<>
       <div
         style={{
           padding: "12px 20px",
@@ -231,6 +257,7 @@ function AccountCard({
           ))
         )}
       </div>
+      </>)}
     </Card>
   );
 }
@@ -353,6 +380,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onDelete={async () => { if (!(await confirmAction(`Delete account ${acc.name}?`))) return; deleteAcc.mutate(acc); }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
+        domainCount={domains.filter((d) => d.cloudflare_account_id === acc.id).length}
         domainZones={zonesOfAccount(domains, acc.id)}
         onOpenZone={(zone) => setSel({ acc: { id: acc.id, name: acc.name }, zone })}
         onAddZone={() => setAddZoneFor({ id: acc.id, name: acc.name })}
