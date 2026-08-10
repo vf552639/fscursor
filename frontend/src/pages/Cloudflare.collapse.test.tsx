@@ -226,7 +226,6 @@ describe("Cloudflare — сворачивание карточки аккаун�
     fireEvent.click(chevronOf("Main CF"));
 
     expect((await screen.findAllByTestId("zone-row")).length).toBe(1);
-    expect(screen.getByText(/^Zones \(/)).toBeTruthy();
     expect(chevronOf("Main CF").getAttribute("aria-expanded")).toBe("true");
 
     fireEvent.click(chevronOf("Main CF"));

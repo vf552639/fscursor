@@ -90,6 +90,22 @@ CLAUDE.md («одна функция = один план») и ведётся п
 - `cd desktop/src-tauri && cargo test`
 - `cd backend && pytest`
 
+## Долг, выявленный по ходу
+
+**Д1. `api_token_masked` больше не читает никто на фронте.** После 1.2 остались
+только объявление типа (`frontend/src/api/cloudflare.ts:19`) и фикстуры четырёх
+тестов. Вычистить поле из `CloudflareAccountResponse` и `build_account_response`
+(`backend/app/services/cloudflare_service.py:16-24`) и из TS-типа. Сцеплено с 4.1
+(чистка схем) — делать одним заходом.
+
+**Д2. Протухшая строка allowlist**
+`backend/tests/test_no_plaintext_secret_schemas.py:94` разрешает
+`CloudflareAccountResponse.api_token_masked` с обоснованием «Токен, уже
+замаскированный сервером (`****abcd`) для списка в UI». Оба утверждения ложны:
+это хвост blob_id, а никакого списка в UI после 1.2 нет. Файл сам настаивает, что
+каждая строка списка — «видимый в диффе акт», так что снять её надо вместе с Д1,
+а не «когда-нибудь».
+
 ## Итог
 
 Реализован: нет (в работе). Осталось: Фазы 1–4.

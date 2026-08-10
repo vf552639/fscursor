@@ -70,9 +70,14 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   syncLocalCache: vi.fn(async () => {}),
 }));
 
-// Тянет argon2/libsodium и к записи токена отношения не имеет.
+// Тянет argon2/libsodium, и сама расшифровка к записи токена отношения не
+// имеет. Но пропсы заглушка выводит на экран, а не глотает: проводка «блоб
+// аккаунта → кнопка» — это и есть то, что осталось от строки токена, и с
+// немой заглушкой `blobId={acc.account_id}` в компоненте прошёл бы тест.
 vi.mock("../components/RevealSecret", () => ({
-  RevealSecret: () => <span>reveal</span>,
+  RevealSecret: ({ blobId, label }: { blobId: string | null; label: string }) => (
+    <span>reveal:{blobId}:{label}</span>
+  ),
 }));
 
 const EXISTING_BLOB = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -310,9 +315,29 @@ describe("Cloudflare — api_token через блоб", () => {
     renderPage();
     await expandCard();
 
-    expect(within(screen.getByTestId("account-token")).getByText("reveal")).toBeTruthy();
+    // Именно блоб аккаунта и именно эта подпись: `blobId` — единственное, что
+    // связывает кнопку с токеном ЭТОГО аккаунта, а подпись — единственное, что
+    // объясняет вебу, зачем на неё жать.
+    expect(
+      within(screen.getByTestId("account-token")).getByText(
+        `reveal:${EXISTING_BLOB}:Reveal API token`
+      )
+    ).toBeTruthy();
     expect(screen.queryByText(/Token:/)).toBeNull();
     expect(screen.queryByText(ACC.api_token_masked)).toBeNull();
+  });
+
+  it("в вебе без блоба блока токена тоже нет — прочерк не полоса", async () => {
+    // Вторая половина условия. `RevealSecret` без `blobId` рисует «—», то есть
+    // блок сжимался бы до полосы с прочерком: ничего не объясняющей и никуда не
+    // ведущей. Заодно этот тест не даёт «упростить» условие обратно до
+    // `!isTauri()`.
+    setTauri(false);
+    renderPage([{ ...ACC, api_token_blob_id: null }]);
+    await expandCard();
+
+    expect(screen.queryByTestId("account-token")).toBeNull();
+    expect(screen.queryByText(/^reveal:/)).toBeNull();
   });
 
   it("в десктопе блока токена нет вовсе — ни строки, ни пустой полосы", async () => {
