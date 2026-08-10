@@ -1,8 +1,9 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, within, act, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import Cloudflare from "./Cloudflare";
+import { cloudflareKeys } from "../api/cloudflare";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -167,6 +168,18 @@ function zoneNames(): string[] {
     .map((b) => (b.getAttribute("aria-label") || "").replace("Copy zone ID for ", ""));
 }
 
+/**
+ * Левый блок шапки карточки: там стоит бейдж со счётчиком зон. Скоуп нужен,
+ * чтобы утверждение было про СВОЮ карточку, а не «где-то на странице есть такой
+ * текст». Поднимаемся `closest`, а не счётом `parentElement`: счёт ступеней
+ * ломается от любой новой обёртки.
+ */
+function headerOf(accName: string): HTMLElement {
+  const header = screen.getByText(accName).closest('[data-testid="account-header"]');
+  if (!header) throw new Error(`шапки аккаунта «${accName}» на экране нет`);
+  return header as HTMLElement;
+}
+
 /** Имена аккаунтов на экране — из подписи шеврона, по той же причине. */
 function accountNames(): string[] {
   return screen
@@ -304,6 +317,54 @@ describe("Cloudflare — поиск и сортировка зон в карто
     expect(screen.getByText(/No zones match/)).toBeTruthy();
     // «Зон нет» на месте «ни одна не подошла» читалось бы как «зоны пропали».
     expect(screen.queryByText(/No zones linked to this account yet/)).toBeNull();
+  });
+
+  it("бейдж шапки от фильтра зон не едет — это тот же показатель, что «Zones (N)»", async () => {
+    setTauri(true);
+    mockInvoke(EIGHT_ZONES);
+
+    renderPage();
+    await expandAccounts();
+    await screen.findByText("a-pending.com");
+
+    fireEvent.change(screen.getByLabelText(ZONE_SEARCH_LABEL), { target: { value: "active" } });
+    expect(zoneNames().length).toBe(4);
+
+    // Бейдж и заголовок объявлены ОДНИМ показателем: разъехавшись («Zones (8)»
+    // против «4 domains»), они заставили бы гадать, какому верить. Тем более что
+    // бейдж виден и у свёрнутой карточки, где заголовка рядом нет вовсе.
+    expect(within(headerOf("Main CF")).getByText("8 domains")).toBeTruthy();
+    expect(screen.getByText("Zones (8)")).toBeTruthy();
+  });
+
+  it("список, ужавшийся ниже порога, не остаётся отфильтрован невидимым запросом", async () => {
+    setTauri(true);
+    let zones = EIGHT_ZONES;
+    mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "cf_list_zones") return zones;
+      if (cmd === "cf_list_dns_records") return [];
+      return mocks.mutate(cmd, args);
+    });
+
+    renderPage();
+    await expandAccounts();
+    await screen.findByText("a-pending.com");
+
+    fireEvent.change(screen.getByLabelText(ZONE_SEARCH_LABEL), { target: { value: "active" } });
+    expect(zoneNames()).toEqual(["d-active.com", "f-active.com", "g-active.com", "h-active.com"]);
+
+    // Зону удалили (здесь — Cloudflare отдаёт список без неё), и число зон ушло
+    // ниже порога: поле поиска пропало вместе с ним. Запрос при этом остался в
+    // стейте карточки — снять его пользователю уже нечем.
+    zones = EIGHT_ZONES.filter((z) => z.name !== "d-active.com");
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: cloudflareKeys.zones(ACCOUNT.id) });
+    });
+    await waitFor(() => expect(screen.queryByLabelText(ZONE_SEARCH_LABEL)).toBeNull());
+
+    // Поэтому фильтр действует ровно тогда, когда поле видно: иначе на экране
+    // осталось бы три зоны из семи, и почему — не сказано ничем.
+    expect(zoneNames()).toEqual(BY_NAME.filter((n) => n !== "d-active.com"));
   });
 
   it("сортировка по статусу поднимает ждущее действия и оставляет зону без статуса внизу", async () => {

@@ -568,12 +568,25 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
     }
   };
 
-  // Сводка прогона снимается, как только этот аккаунт проверяют заново: иначе
-  // «1 of 3 tokens failed: Second CF» продолжает дословно называть провалившимся
-  // аккаунт, у которого рядом, в его же карточке, стоит зелёное «✓ OK».
-  // Именно снять, а не вычеркнуть имя из списка: подправленная сводка перестала
-  // бы быть утверждением о ПОЛНОМ проходе, ради которого она и ставится целиком.
-  const handleTest = (accountId: number) => { setBulkSummary(null); void runTest(accountId); };
+  /**
+   * Обе зелёные плашки страницы — сводка прогона и «Cloudflare account created.»
+   * — утверждают об итоге ПОСЛЕДНЕГО действия, поэтому и гаснут одинаково: от
+   * следующего.
+   *
+   * Сводка иначе продолжает дословно называть провалившимся («1 of 3 tokens
+   * failed: Second CF») аккаунт, у которого рядом, в его же карточке, стоит
+   * зелёное «✓ OK». Именно снять, а не вычеркнуть имя из списка: подправленная
+   * сводка перестала бы быть утверждением о ПОЛНОМ проходе, ради которого она и
+   * ставится целиком.
+   *
+   * У статуса создания причина своя: он и сводка — две карточки одного зелёного,
+   * стоящие впритык, и различить их на экране нечем. Путь «создал аккаунт →
+   * проверил все токены» показывал обе разом, причём верхняя устарела ещё до
+   * начала прогона.
+   */
+  const clearBanners = () => { setBulkSummary(null); setStatusMessage(null); };
+
+  const handleTest = (accountId: number) => { clearBanners(); void runTest(accountId); };
 
   /**
    * Прогон по ВИДИМЫМ аккаунтам, а не по всем: поле поиска стоит на том же
@@ -598,7 +611,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const handleTestAll = async () => {
     const batch = visibleAccounts.map((a) => ({ id: a.id, name: a.name }));
     if (!batch.length) return;
-    setBulkSummary(null);
+    clearBanners();
     setBulkTest({ done: 0, total: batch.length });
     const failed: string[] = [];
     try {
@@ -778,9 +791,9 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         onEdit={() => setEditingAcc(acc)}
         onDelete={async () => {
           if (!(await confirmAction(`Delete account ${acc.name}?`))) return;
-          // Сводка снимается и здесь: иначе она продолжает называть поимённо
+          // Плашки снимаются и здесь: иначе сводка продолжает называть поимённо
           // провалившимся аккаунт, которого больше нет.
-          setBulkSummary(null);
+          clearBanners();
           deleteAcc.mutate(acc);
         }}
         onTest={() => handleTest(acc.id)}
@@ -791,7 +804,16 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       />
     )))}
 
-    {showAddAcc && <AddCfAccountModal onClose={()=>setShowAcc(false)} onStatus={setStatusMessage} />}
+    {showAddAcc && (
+      <AddCfAccountModal
+        onClose={()=>setShowAcc(false)}
+        // Созданный аккаунт делает сводку неверной ровно так же, как удалённый:
+        // «3 tokens verified.» утверждает про полный проход по списку, в котором
+        // теперь стоит четвёртая, ни разу не проверенная карточка. Статус при
+        // этом ставится — он и есть итог этого действия.
+        onStatus={(text) => { setBulkSummary(null); setStatusMessage(text); }}
+      />
+    )}
     {editingAcc && <EditCfAccountModal account={editingAcc} onClose={() => setEditingAcc(null)} />}
     {addZoneFor && <AddZoneModal acc={addZoneFor} onClose={() => setAddZoneFor(null)} />}
   </>;

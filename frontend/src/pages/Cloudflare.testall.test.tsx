@@ -337,6 +337,21 @@ describe("Cloudflare — «проверить все токены»", () => {
     release!();
   });
 
+  it("вне прогона кнопка уходит вместе с обнулённым списком", async () => {
+    setTauri(true);
+    renderPage();
+    await screen.findByText("Backup CF");
+
+    expect(testAllBtn().textContent).toBe("Test 3 tokens");
+
+    fireEvent.change(accountSearch(), { target: { value: "нетакого" } });
+
+    // Зеркало к случаю выше: там кнопку удерживает ИДУЩИЙ прогон, а здесь его
+    // нет, и проверять нечего — «Test 0 tokens» обещало бы ноль действий.
+    expect(queryTestAllBtn()).toBeNull();
+    expect(queryRunningBtn()).toBeNull();
+  });
+
   it("свежую проверку не гасит таймер предыдущей", async () => {
     setTauri(true);
     vi.useFakeTimers({ shouldAdvanceTime: true });
