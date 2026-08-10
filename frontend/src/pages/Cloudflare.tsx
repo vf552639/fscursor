@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
 import {
   useCloudflareAccounts,
@@ -496,10 +496,19 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
   /** Итог последнего ЗАВЕРШЁННОГО прогона; `failed` — имена аккаунтов. */
   const [bulkSummary, setBulkSummary] = useState<{ total: number; failed: string[] } | null>(null);
-  // Сторож от второго запуска — ref, а не `bulkTest`: два клика в одном тике
-  // прочитали бы одно и то же (ещё пустое) состояние, и прогонов уехало бы два.
-  // `disabled` у кнопки решает ту же задачу только для глаза.
-  const bulkRunning = useRef(false);
+  // Жива ли ещё страница. Вкладку рисует `{page === "cloudflare" && <Cloudflare/>}`
+  // (`DesktopWorkspace.tsx`), то есть уход на соседнюю вкладку РАЗМОНТИРУЕТ её —
+  // и осиротевший прогон продолжал бы ходить в Cloudflare по всему снимку, а
+  // вернувшийся пользователь запускал бы второй поверх ещё живого первого.
+  const alive = useRef(true);
+  // Таймеры «погасить зелёное через 3 секунды» — по одному на аккаунт. Общий
+  // (или ничей) таймер гасил бы проверку, идущую ПРЯМО СЕЙЧАС: успел проверить
+  // аккаунт руками, в те же 3 секунды запустил прогон — и старый таймер
+  // возвращал бы карточку в `idle` посреди её новой проверки, снова включая
+  // кнопку. С одиночными кликами это было экзотикой, с прогоном на десятки
+  // аккаунтов — штатное окно.
+  const resetTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => () => { alive.current = false; }, []);
   const visibleAccounts = filterAccounts(cfAccounts, accQuery);
   // Идущий прогон держит кнопку на экране даже тогда, когда порог соблюдён, а
   // проверять сейчас нечего: запрос, сузивший список до пустого, унёс бы с
@@ -524,13 +533,16 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
    * одиночная кнопка, и прогон ходят одним путём.
    */
   const runTest = async (accountId: number): Promise<boolean> => {
+    // Таймер прошлой проверки ЭТОГО аккаунта снимаем первым делом: иначе он
+    // погасит индикатор новой (см. `resetTimers`).
+    clearTimeout(resetTimers.current[accountId]);
     setTestState((prev) => ({ ...prev, [accountId]: { state: "loading" } }));
     try {
       const res = await testAcc.mutateAsync(accountId);
       const nextState = res.success ? "success" : "error";
       setTestState((prev) => ({ ...prev, [accountId]: { state: nextState, message: res.message } }));
       if (res.success) {
-        setTimeout(() => {
+        resetTimers.current[accountId] = setTimeout(() => {
           setTestState((prev) => ({ ...prev, [accountId]: { state: "idle" } }));
         }, 3000);
       }
@@ -544,7 +556,12 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
     }
   };
 
-  const handleTest = (accountId: number) => { void runTest(accountId); };
+  // Сводка прогона снимается, как только этот аккаунт проверяют заново: иначе
+  // «1 of 3 tokens failed: Second CF» продолжает дословно называть провалившимся
+  // аккаунт, у которого рядом, в его же карточке, стоит зелёное «✓ OK».
+  // Именно снять, а не вычеркнуть имя из списка: подправленная сводка перестала
+  // бы быть утверждением о ПОЛНОМ проходе, ради которого она и ставится целиком.
+  const handleTest = (accountId: number) => { setBulkSummary(null); void runTest(accountId); };
 
   /**
    * Прогон по ВИДИМЫМ аккаунтам, а не по всем: поле поиска стоит на том же
@@ -559,21 +576,22 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
    * мутация на странице одна (см. `runTest`), и десяток одновременных вызовов
    * оставил бы её `variables`/`isPending` описывающими случайный из них.
    *
-   * Отмены нет намеренно. Уход в зону эту страницу не размонтирует (`if (sel)` —
-   * ранний возврат ВНУТРИ компонента), так что вернувшись, пользователь увидит
-   * доехавшие итоги; уход на другую вкладку в React 18 делает `setState` после
-   * размонтирования безобидным no-op, а никаких подписок цикл не держит.
+   * Кнопки «отменить» нет, но у прогона есть одна точка остановки — уход со
+   * страницы. Выбор зоны ею не считается (`if (sel)` — ранний возврат ВНУТРИ
+   * компонента, страница жива и итоги доедут), а вот переключение вкладки
+   * размонтирует её насовсем: без сторожа цикл продолжал бы ходить в Cloudflare
+   * по всему снимку, а вернувшийся пользователь получил бы кнопку в исходном
+   * виде и мог бы запустить второй прогон поверх ещё живого первого.
    */
   const handleTestAll = async () => {
-    if (bulkRunning.current) return;
     const batch = visibleAccounts.map((a) => ({ id: a.id, name: a.name }));
     if (!batch.length) return;
-    bulkRunning.current = true;
     setBulkSummary(null);
     setBulkTest({ done: 0, total: batch.length });
     const failed: string[] = [];
     try {
       for (const acc of batch) {
+        if (!alive.current) return;
         if (!(await runTest(acc.id))) failed.push(acc.name);
         setBulkTest((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
       }
@@ -581,7 +599,6 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
       // «2 из 12 не прошли» умолчало бы о том, что восемь вообще не проверяли.
       setBulkSummary({ total: batch.length, failed });
     } finally {
-      bulkRunning.current = false;
       setBulkTest(null);
     }
   };
@@ -637,7 +654,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
               выключенным по своей причине: он привязан к аккаунту, и его
               отсутствие читалось бы как «у этого аккаунта проверять нечего». */}
           {showTestAll && (
-            <Btn variant="secondary" onClick={handleTestAll} disabled={bulkTest !== null}>
+            <Btn variant="secondary" onClick={() => { void handleTestAll(); }} disabled={bulkTest !== null}>
               {bulkTest
                 // Пока прогон идёт, показываем ТЕКУЩИЙ номер, а не число
                 // законченных: «Testing 0 of 12» выглядело бы зависшим.
@@ -747,7 +764,13 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         key={acc.id}
         acc={acc}
         onEdit={() => setEditingAcc(acc)}
-        onDelete={async () => { if (!(await confirmAction(`Delete account ${acc.name}?`))) return; deleteAcc.mutate(acc); }}
+        onDelete={async () => {
+          if (!(await confirmAction(`Delete account ${acc.name}?`))) return;
+          // Сводка снимается и здесь: иначе она продолжает называть поимённо
+          // провалившимся аккаунт, которого больше нет.
+          setBulkSummary(null);
+          deleteAcc.mutate(acc);
+        }}
         onTest={() => handleTest(acc.id)}
         testStatus={testState[acc.id]}
         domainZones={domainZonesByAccount.get(acc.id) || []}

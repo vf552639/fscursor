@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, within, act } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import Cloudflare from "./Cloudflare";
 import { queryClient } from "../api/queryClient";
@@ -108,6 +108,39 @@ const testAllBtn = () => screen.getByRole("button", { name: /^Test \d+ tokens?$/
 const queryTestAllBtn = () => screen.queryByRole("button", { name: /^Test \d+ tokens?$/ });
 /** Во время прогона подпись другая — это тот же контрол, но занятый. */
 const runningBtn = () => screen.getByRole("button", { name: /^Testing \d+ of \d+/ });
+const queryRunningBtn = () => screen.queryByRole("button", { name: /^Testing \d+ of \d+/ });
+const accountSearch = () => screen.getByLabelText("Search Cloudflare accounts");
+
+/**
+ * Шапка карточки аккаунта целиком (`CHd`): в ней и имя, и кнопки. Поднимаемся
+ * `closest`, а не счётом `parentElement`, — счёт ступеней ломается от любой
+ * новой обёртки в разметке.
+ */
+function cardHeaderOf(accName: string): HTMLElement {
+  const header = screen.getByText(accName).closest('[data-testid="account-header"]');
+  if (!header) throw new Error(`шапки аккаунта «${accName}» на экране нет`);
+  return header.parentElement as HTMLElement;
+}
+
+/** Карточка аккаунта целиком: в ней и шапка, и полоса итога Test connection. */
+function cardOf(accName: string): HTMLElement {
+  return cardHeaderOf(accName).parentElement as HTMLElement;
+}
+
+/** Кнопка одиночной проверки этого аккаунта — в любом из двух её состояний. */
+function cardTestBtn(accName: string): HTMLButtonElement {
+  return within(cardHeaderOf(accName)).getByRole("button", {
+    name: /^(Test connection|Testing\.\.\.)$/,
+  }) as HTMLButtonElement;
+}
+
+/**
+ * Дать циклу шанс уехать на следующий аккаунт. Нужен там, где проверяется
+ * ОТСУТСТВИЕ вызова: без паузы «его ещё нет» не отличить от «его не будет».
+ */
+async function settle() {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -195,7 +228,7 @@ describe("Cloudflare — «проверить все токены»", () => {
     expect(await screen.findByText("3 tokens verified.")).toBeTruthy();
   });
 
-  it("во время прогона повторный запуск не проходит", async () => {
+  it("во время прогона кнопка выключена и второго прогона не запускает", async () => {
     setTauri(true);
     let release: (() => void) | null = null;
     mockInvoke(async () => {
@@ -223,6 +256,123 @@ describe("Cloudflare — «проверить все токены»", () => {
     // Второй прогон удвоил бы список проверок — и итог по каждому аккаунту
     // приехал бы дважды.
     expect(verifiedIds()).toEqual(["5", "7", "9"]);
+  });
+
+  it("уход со страницы посреди прогона его останавливает", async () => {
+    setTauri(true);
+    let release: (() => void) | null = null;
+    mockInvoke(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return true;
+    });
+
+    const { unmount } = renderPage();
+    await screen.findByText("Backup CF");
+
+    fireEvent.click(testAllBtn());
+    await waitFor(() => expect(verifiedIds()).toEqual(["5"]));
+
+    // Вкладку рисует `{page === "cloudflare" && <Cloudflare/>}`, так что переход
+    // на соседнюю — это размонтирование. Осиротевший цикл продолжал бы ходить в
+    // Cloudflare по всему снимку, а вернувшийся пользователь запустил бы второй
+    // прогон поверх ещё живого первого.
+    unmount();
+    release!();
+    await settle();
+
+    expect(verifiedIds()).toEqual(["5"]);
+  });
+
+  it("кнопка прогона остаётся на экране, даже если запрос обнулил список", async () => {
+    setTauri(true);
+    let release: (() => void) | null = null;
+    mockInvoke(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return true;
+    });
+
+    renderPage();
+    await screen.findByText("Backup CF");
+
+    fireEvent.click(testAllBtn());
+    await waitFor(() => expect(verifiedIds()).toEqual(["5"]));
+
+    fireEvent.change(accountSearch(), { target: { value: "нетакого" } });
+
+    // Список пуст, но прогон-то идёт: убрать с экрана его единственный признак
+    // значило бы сделать вид, что ничего не происходит.
+    expect(queryRunningBtn()?.textContent).toBe("Testing 1 of 3…");
+    release!();
+  });
+
+  it("свежую проверку не гасит таймер предыдущей", async () => {
+    setTauri(true);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let hang = false;
+      let release: (() => void) | null = null;
+      mockInvoke(async () => {
+        if (hang) await new Promise<void>((resolve) => { release = resolve; });
+        return true;
+      });
+
+      renderPage();
+      await screen.findByText("Backup CF");
+
+      // Проверили руками — карточка зелёная, и на ней висит таймер на 3 секунды.
+      fireEvent.click(cardTestBtn("Main CF"));
+      expect(await within(cardOf("Main CF")).findByText("✓ OK")).toBeTruthy();
+
+      // В эти же 3 секунды запускаем прогон: тот же аккаунт уходит в проверку
+      // заново.
+      hang = true;
+      fireEvent.click(testAllBtn());
+      await waitFor(() => expect(verifiedIds()).toEqual(["5", "5"]));
+      expect(cardTestBtn("Main CF").textContent).toBe("Testing...");
+
+      act(() => { vi.advanceTimersByTime(3500); });
+
+      // Старый таймер не имеет права гасить НОВУЮ проверку: погасив, он вернул
+      // бы кнопку в активное состояние, и по тому же аккаунту можно было бы
+      // запустить второй `cf_verify_token` мимо прогона.
+      expect(cardTestBtn("Main CF").textContent).toBe("Testing...");
+      expect(cardTestBtn("Main CF").disabled).toBe(true);
+      release!();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("устаревшую сводку снимает и ручная перепроверка, и удаление аккаунта", async () => {
+    setTauri(true);
+    let broken = true;
+    mockInvoke((accountId) => !(broken && accountId === "7"));
+
+    renderPage();
+    await screen.findByText("Backup CF");
+
+    fireEvent.click(testAllBtn());
+    expect(await screen.findByText("1 of 3 tokens failed: Second CF.")).toBeTruthy();
+
+    // Токен починили и проверили руками. Красная строка сверху не имеет права
+    // дословно называть провалившимся аккаунт, у которого в его же карточке
+    // стоит зелёное «✓ OK», — это протухшее измерение, выданное за текущее.
+    broken = false;
+    fireEvent.click(cardTestBtn("Second CF"));
+    expect(await within(cardOf("Second CF")).findByText("✓ OK")).toBeTruthy();
+    expect(screen.queryByText(/tokens failed/)).toBeNull();
+
+    // И то же самое при удалении: провалившимся числился бы аккаунт, которого
+    // больше нет.
+    broken = true;
+    fireEvent.click(testAllBtn());
+    expect(await screen.findByText("1 of 3 tokens failed: Second CF.")).toBeTruthy();
+
+    mocks.confirmAction.mockResolvedValue(true);
+    mocks.apiDelete.mockResolvedValue(undefined);
+    fireEvent.click(within(cardHeaderOf("Second CF")).getByRole("button", { name: "✕" }));
+
+    await waitFor(() => expect(screen.queryByText(/tokens failed/)).toBeNull());
   });
 
   it("идёт по видимым аккаунтам, и подпись говорит по скольким", async () => {
