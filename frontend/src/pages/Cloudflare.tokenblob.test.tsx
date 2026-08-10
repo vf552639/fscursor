@@ -125,7 +125,7 @@ describe("Cloudflare — api_token через блоб", () => {
 
   it("в десктопе шлёт api_token_blob_id и НЕ шлёт api_token", async () => {
     setTauri(true);
-    mocks.apiPost.mockResolvedValue({ ...ACC, id: 6, sync_result: { updated: 2, skipped: 0, total_zones: 2 } });
+    mocks.apiPost.mockResolvedValue({ ...ACC, id: 6 });
 
     renderPage([]);
     await openAddModal();
@@ -155,9 +155,10 @@ describe("Cloudflare — api_token через блоб", () => {
     expect(JSON.stringify(body)).not.toContain(TOKEN);
     expect(body.name).toBe("cf-new");
 
-    // Итог синхронизации зон показывается по-прежнему: перевод формы на
-    // `mutateAsync` не должен был съесть ответ создания.
-    expect(await screen.findByText(/Linked Cloudflare to 2 existing domains/)).toBeTruthy();
+    // Итог создания показывается по-прежнему: перевод формы на `mutateAsync`
+    // не должен был съесть ответ. Что именно в нём написано — в
+    // `Cloudflare.createstatus.test.tsx`.
+    expect(await screen.findByText("Cloudflare account created.")).toBeTruthy();
   });
 
   it("упавшая запись блоба не создаёт аккаунт и не молчит", async () => {

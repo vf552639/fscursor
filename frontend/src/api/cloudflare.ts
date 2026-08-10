@@ -17,16 +17,8 @@ export interface CloudflareAccount {
   is_active: boolean;
   api_token_blob_id?: string | null;
   api_token_masked?: string | null;
-  sync_result?: CloudflareSyncResult | null;
-  sync_warning?: string | null;
   created_at: string;
   updated_at: string;
-}
-
-export interface CloudflareSyncResult {
-  updated: number;
-  skipped: number;
-  total_zones: number;
 }
 
 export interface CloudflareTestResponse {

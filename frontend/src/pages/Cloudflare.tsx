@@ -303,7 +303,7 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
   const [addZoneFor, setAddZoneFor] = useState<CfAccountRef | null>(null);
 
   const [editingAcc, setEditingAcc] = useState<any | null>(null);
-  const [statusMessage, setStatusMessage] = useState<{ kind: "success" | "warning"; text: string } | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [testState, setTestState] = useState<Record<number, { state: "idle" | "loading" | "success" | "error"; message?: string }>>({});
 
   const handleTest = (accountId: number) => {
@@ -374,10 +374,14 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
         <DesktopOnlyNote what="Saving secrets" />
       )}
     </div>
+    {/* Только успех: единственный источник этого баннера — создание аккаунта, а
+        его провал уходит в ошибку внутри формы и до страницы не доезжает.
+        Жёлтая ветка здесь была под «зоны не синхронизировались» — синхронизации
+        зон на сервере нет вовсе (см. `schemas/cloudflare.py`). */}
     {statusMessage && (
       <Card style={{marginBottom:14}}>
-        <div style={{padding:"12px 16px",fontSize:13,color:statusMessage.kind === "success" ? "#166534" : "#92400e",background:statusMessage.kind === "success" ? "#f0fdf4" : "#fffbeb",borderRadius:10}}>
-          {statusMessage.text}
+        <div style={{padding:"12px 16px",fontSize:13,color:"#166534",background:"#f0fdf4",borderRadius:10}}>
+          {statusMessage}
         </div>
       </Card>
     )}
@@ -433,8 +437,8 @@ export default function Cloudflare({ onNav }: { onNav?: (pg: string, ctx?: any) 
  */
 export function AddCfAccountModal({ onClose, onStatus }: {
   onClose: () => void;
-  /** Итог синхронизации зон приходит только в ответе создания — и больше нигде. */
-  onStatus: (s: { kind: "success" | "warning"; text: string }) => void;
+  /** Успех создания: сообщить о нём может только форма, а показывает — страница. */
+  onStatus: (text: string) => void;
 }) {
   const [accName, setAccName] = useState("");
   const [accId, setAccId] = useState("");
@@ -465,22 +469,14 @@ export function AddCfAccountModal({ onClose, onStatus }: {
       blobKind: BLOB_KIND.cloudflareApiToken,
       existingBlobId: null,
       persist: async (blobId) => {
-        const created = await createAcc.mutateAsync({
+        await createAcc.mutateAsync({
           name: accName,
           account_id: accId,
           api_token_blob_id: blobId,
         });
-        if (created.sync_result) {
-          onStatus({
-            kind: "success",
-            text: `Linked Cloudflare to ${created.sync_result.updated} existing domains. ${created.sync_result.skipped} zones had no matching domain in the service.`,
-          });
-        } else {
-          onStatus({
-            kind: "warning",
-            text: created.sync_warning || "Account created, but zone sync did not complete.",
-          });
-        }
+        // Ответ создания ничего сверх самого аккаунта не несёт: зон сервер не
+        // видит, и обещать «связали с N доменами» ему нечем.
+        onStatus("Cloudflare account created.");
       },
     });
     if (ok) onClose();

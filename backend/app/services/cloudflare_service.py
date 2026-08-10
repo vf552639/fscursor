@@ -20,8 +20,6 @@ def build_account_response(account: CloudflareAccount) -> CloudflareAccountRespo
         masked = "••••" + s[-4:]
     payload = CloudflareAccountResponse.model_validate(account).model_dump()
     payload["api_token_masked"] = masked
-    payload["sync_result"] = None
-    payload["sync_warning"] = None
     return CloudflareAccountResponse(**payload)
 
 
