@@ -12,6 +12,16 @@
  * Полноценным URL-парсером не притворяются: проверяются ровно четыре вещи —
  * схема `http(s)`, отсутствие `@`, форма «хост:порт» и отсутствие управляющих
  * символов. Возвращают текст ошибки или `null`, если поле в порядке.
+ *
+ * ⚠️ Известное ограничение: IPv6 в URL не принимается. Адресом СЕРВЕРА он быть
+ * может (`lib/ipInput`, `ipError(…, {ipv6: true})`), а адресом панели — пока
+ * нет: `HOST_PORT` ниже не знает про скобки («https://[2a01:4f8::1]:8888»), и
+ * то же самое верно для обеих парных проверок — `_HOST_PORT_RE`
+ * (`backend/app/core/validators.py`) и `host_port_regex()` в десктопе. Чинить
+ * это надо втроём и одновременно, иначе форма примет то, что отвергнет сервер;
+ * до тех пор форма подключения панели у IPv6-сервера открывается с пустым полем
+ * (`openConnectModal` в `pages/ServerDetail.tsx`), а не с заведомо невалидным
+ * значением.
  */
 
 const SCHEMES = ["https://", "http://"];
@@ -29,8 +39,8 @@ const HOST_PORT = /^[A-Za-z0-9._-]+:[0-9]{1,5}$/;
 
 export function fastpanelUrlError(value: string): string | null {
   // Проверяется обрезанное значение, и ровно оно же уезжает на сервер (см.
-  // `handleAdd` в `pages/Servers.tsx`): иначе форма зеленела бы там, где
-  // сервер откажет из-за пробела по краям.
+  // `handleSaveConnect` в `pages/ServerDetail.tsx`): иначе форма зеленела бы
+  // там, где сервер откажет из-за пробела по краям.
   const url = value.trim();
   if (!url) return "FastPanel URL is required";
   if (CONTROL_CHARS.test(url)) return "URL must not contain control characters";

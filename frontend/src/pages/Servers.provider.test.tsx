@@ -130,6 +130,27 @@ function fillProvider(value: string) {
   fireEvent.change(screen.getByPlaceholderText("e.g., Hetzner"), { target: { value } });
 }
 
+function fillIp(value: string) {
+  fireEvent.change(screen.getByPlaceholderText("e.g., 192.168.1.100"), { target: { value } });
+}
+
+/** Форма «Add Server» на экране. Общая для обоих `describe` ниже. */
+async function openModal() {
+  setTauri(true);
+  renderServers();
+  fireEvent.click(await screen.findByText("+ Add Server"));
+  await screen.findByPlaceholderText("e.g., production-web-01");
+}
+
+/** Обязательный минимум полей — всё, кроме того, что проверяет конкретный тест. */
+function fillForm() {
+  fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
+    target: { value: "srv-new" },
+  });
+  fillIp("10.0.0.9");
+  fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
+}
+
 describe("Servers — колонка и фильтр по провайдеру", () => {
   secretBlobLifecycle();
   // После `vi.resetAllMocks` из `secretBlobLifecycle` — иначе `apiGet` остался
@@ -191,45 +212,25 @@ describe("Servers — колонка и фильтр по провайдеру",
 describe("AddServerModal — поле провайдера", () => {
   secretBlobLifecycle();
 
-  async function openModal() {
-    setTauri(true);
-    renderServers();
-    fireEvent.click(await screen.findByText("+ Add Server"));
-    await screen.findByPlaceholderText("e.g., production-web-01");
-  }
-
-  function fillInstallTab() {
-    fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
-      target: { value: "srv-new" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("e.g., 192.168.1.100"), {
-      target: { value: "10.0.0.9" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
-  }
-
-  it("подсказывает уже введённых провайдеров — и на второй вкладке тоже", async () => {
+  it("подсказывает уже введённых провайдеров", async () => {
     await openModal();
 
-    for (const tab of ["Install New Fastpanel", "Connect Existing Fastpanel"]) {
-      fireEvent.click(screen.getByRole("button", { name: new RegExp(tab) }));
-      const input = screen.getByPlaceholderText("e.g., Hetzner") as HTMLInputElement;
-      // Именно привязка `list` → `<datalist>`: нарисованный, но не привязанный
-      // список подсказок не показывает вовсе.
-      const listId = input.getAttribute("list");
-      expect(listId).toBeTruthy();
-      const list = document.getElementById(listId as string) as HTMLDataListElement;
-      expect(Array.from(list.querySelectorAll("option")).map((o) => o.value)).toEqual([
-        "AWS",
-        "Hetzner",
-      ]);
-    }
+    const input = screen.getByPlaceholderText("e.g., Hetzner") as HTMLInputElement;
+    // Именно привязка `list` → `<datalist>`: нарисованный, но не привязанный
+    // список подсказок не показывает вовсе.
+    const listId = input.getAttribute("list");
+    expect(listId).toBeTruthy();
+    const list = document.getElementById(listId as string) as HTMLDataListElement;
+    expect(Array.from(list.querySelectorAll("option")).map((o) => o.value)).toEqual([
+      "AWS",
+      "Hetzner",
+    ]);
   });
 
-  it("сохраняет провайдера на вкладке установки", async () => {
+  it("сохраняет провайдера", async () => {
     mocks.apiPost.mockResolvedValue({ id: 9 });
     await openModal();
-    fillInstallTab();
+    fillForm();
     fillProvider("  Hetzner  ");
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
@@ -238,30 +239,10 @@ describe("AddServerModal — поле провайдера", () => {
     expect(mocks.apiPost.mock.calls[0][1].provider).toBe("Hetzner");
   });
 
-  it("сохраняет провайдера и на вкладке подключения существующей панели", async () => {
-    // Сервер заводится обеими вкладками — поле, забытое на одной из них, теряет
-    // провайдера у половины серверов.
-    mocks.apiPost.mockResolvedValue({ id: 9 });
-    await openModal();
-    fireEvent.click(screen.getByRole("button", { name: /Connect Existing Fastpanel/ }));
-    fireEvent.change(screen.getByPlaceholderText("e.g., production-web-01"), {
-      target: { value: "srv-new" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("https://192.168.1.100:8888"), {
-      target: { value: "https://10.0.0.9:8888" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("Enter password"), { target: { value: "pw" } });
-    fillProvider("AWS");
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
-    expect(mocks.apiPost.mock.calls[0][1].provider).toBe("AWS");
-  });
-
   it("пустое поле уезжает как null, а не пустой строкой", async () => {
     mocks.apiPost.mockResolvedValue({ id: 9 });
     await openModal();
-    fillInstallTab();
+    fillForm();
     fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
@@ -271,7 +252,7 @@ describe("AddServerModal — поле провайдера", () => {
 
   it("слишком длинное имя ловится ДО записи блоба", async () => {
     await openModal();
-    fillInstallTab();
+    fillForm();
     // 65 символов — на один больше ширины колонки. Литералом, а не через
     // константу: сверка константы с самой собой зеленела бы при любой границе.
     fillProvider("x".repeat(65));
@@ -282,5 +263,49 @@ describe("AddServerModal — поле провайдера", () => {
     // секрет, на который никто не ссылается.
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
     expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Поле адреса в форме создания. Правило у него общее со страницей сервера
+ * (`lib/ipInput`), а форма записи — НЕТ: сервер заводят по IPv4, и `ipError`
+ * зовётся отсюда без флага `ipv6`.
+ *
+ * Асимметрия двух форм — единственный смысл существования этого параметра, и
+ * стеречь её надо с обоих концов: сам модуль проверен своими тестами, а вот то,
+ * КАК его зовёт эта форма, до этих тестов не проверял никто — подмена вызова на
+ * `ipError(ip, { ipv6: true })` не красила ни одного теста.
+ */
+describe("AddServerModal — поле адреса", () => {
+  secretBlobLifecycle();
+
+  it("IPv6 в форме создания не принимается", async () => {
+    await openModal();
+    fillForm();
+    fillIp("2a01:4f8::1");
+    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
+
+    expect(await screen.findByText("Invalid IP address format")).toBeTruthy();
+    // Как и у провайдера выше: отказ до записи блоба, иначе в хранилище остался
+    // бы секрет, на который никто не ссылается.
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+
+  it("IPv4 принимается и уезжает на сервер обрезанным", async () => {
+    // Парный к предыдущему: без него «форма отвергает всё подряд» выглядело бы
+    // так же зелено, как правильное поведение.
+    mocks.apiPost.mockResolvedValue({ id: 9 });
+    await openModal();
+    fillForm();
+    // С пробелами по краям: проверка их обрезает (`ipError`), и ровно то же
+    // значение обязано уехать в тело. Бэкенд пробелы не срезает, а дальше адрес
+    // идёт в `host` SSH-коннекта и в URL панели — «10.0.0.9 » не откроет ни то,
+    // ни другое.
+    fillIp("  10.0.0.9  ");
+    fireEvent.click(screen.getByRole("button", { name: "Add Server" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPost.mock.calls[0][1].ip_address).toBe("10.0.0.9");
   });
 });

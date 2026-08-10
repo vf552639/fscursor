@@ -305,6 +305,30 @@ mod tests {
         assert_eq!(update_command("Cent OS 7"), "yum -y update");
     }
 
+    // Форма Add Server (frontend/src/pages/Servers.tsx, OS_OPTIONS) шлёт
+    // строго один из пяти вариантов без версии: "Debian", "Ubuntu", "CentOS",
+    // "AlmaLinux", "Rocky Linux". Тесты выше проверяют строки с версией
+    // ("CentOS 7") и легаси-подстроку ("Cent OS 7"), но не сами эти пять
+    // точных значений — этот тест фиксирует поведение update_command именно
+    // на них.
+    //
+    // Синхронность самого списка с фронтом этот тест НЕ проверяет: он
+    // хардкодит пять литералов здесь и Servers.tsx не читает. Добавят во
+    // фронте новый пункт (например, "Fedora Server") или переименуют
+    // существующий ("Rocky Linux" → "Rocky") — тест останется зелёным, а
+    // update_command молча отдаст apt на RHEL-подобной машине. Что тест
+    // реально ловит — правку матчера на этой, Rust-стороне (выкинут "alma"
+    // из подстрок — тест упадёт). При правке OS_OPTIONS во фронте этот тест
+    // надо синхронизировать руками.
+    #[test]
+    fn update_command_covers_every_ui_os_option() {
+        assert!(update_command("Debian").contains("apt-get"));
+        assert!(update_command("Ubuntu").contains("apt-get"));
+        assert_eq!(update_command("CentOS"), "yum -y update");
+        assert_eq!(update_command("AlmaLinux"), "yum -y update");
+        assert_eq!(update_command("Rocky Linux"), "yum -y update");
+    }
+
     #[test]
     fn parse_credentials_extracts_url_user_password() {
         let out = "Installation complete\n\

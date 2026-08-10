@@ -1,9 +1,12 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, mbToGb, InfoRow, CopyBtn, Modal, Inp, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, mbToGb, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
+import { ipError } from "../lib/ipInput";
+import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
+import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
 import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
@@ -16,6 +19,30 @@ import type { InstallFastpanelResult } from "../lib/deepLink";
 
 /** id `<datalist>` с подсказками провайдеров: на него ссылается `list` у поля. */
 const PROVIDER_LIST_ID = "server-detail-provider-options";
+
+// Пары `htmlFor`/`id` для полей новых форм: без них скринридер читает поле
+// безымянным, а `<label>` по соседству сам по себе его не именует.
+const IP_INPUT_ID = "server-detail-ip";
+const OS_SELECT_ID = "server-detail-os";
+
+/**
+ * Адрес панели: свой, если известен, иначе собранный из адреса сервера. Одним
+ * выражением на карточку доступа и на форму подключения — разъехавшись, они
+ * показывали бы человеку один URL, а сохраняли другой.
+ */
+function fastpanelUrlOf(server: any): string {
+  if (server?.fastpanel_url) return server.fastpanel_url;
+  const ip = server?.ip_address ?? "";
+  // IPv6 в URL — только в скобках (RFC 3986): без них «https://2a01:4f8::1:8888»
+  // разбирается как хост «2a01» с портом «4f8», и открытая панель уедет не туда.
+  // До появления правки адреса на этой странице IPv6 через UI сюда попасть не
+  // мог — теперь может (`ipError(…, {ipv6:true})`).
+  //
+  // Признак — двоеточие, а не «не IPv4»: в колонке у старых серверов могло
+  // осесть имя хоста, и его скобки как раз сломали бы.
+  const host = ip.includes(":") ? `[${ip}]` : ip;
+  return `https://${host}:8888`;
+}
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
   server?: any,
@@ -46,11 +73,41 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const sshPassword = useSecretSave("SSH password");
   const [editingDomain, setEditingDomain] = useState<any | null>(null);
 
+  // Переименование. Как и провайдер ниже — обычное поле сущности, не секрет.
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [nameValue, setNameValue] = useState("");
+  const [nameErr, setNameErr] = useState<string | null>(null);
+
+  // Подключение уже стоящей панели. Плейнтекст пароля держит хук — по той же
+  // причине, что и у SSH-формы выше: страница смонтирована целиком, модалку она
+  // только прячет.
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [fpUrl, setFpUrl] = useState("");
+  const [fpLogin, setFpLogin] = useState("fastuser");
+  const [fpConnectErr, setFpConnectErr] = useState<Record<string, string>>({});
+  const fpPassword = useSecretSave("FastPanel password");
+
   // Правка провайдера. Обычным `useState`, а не `useSecretSave`: провайдер —
   // не секрет, он едет полем сущности и хранится плейнтекстом в колонке.
   const [showProviderModal, setShowProviderModal] = useState(false);
   const [provider, setProvider] = useState("");
   const [providerErr, setProviderErr] = useState<string | null>(null);
+
+  // Правка адреса. Как имя и провайдер — обычное поле сущности, не секрет.
+  const [showIpModal, setShowIpModal] = useState(false);
+  const [ipValue, setIpValue] = useState("");
+  const [ipErr, setIpErr] = useState<string | null>(null);
+
+  // Правка ОС. Значение — из закрытого списка `OS_OPTIONS`, поэтому своего
+  // состояния под ошибку ВВОДА не нужно; `osErr` держит только отказ сервера.
+  //
+  // `null` — законное состояние: у сервера может стоять семейство, которого в
+  // списке нет (см. `openOsModal`). Именно поэтому не `OS_OPTIONS[0]`: значение
+  // по умолчанию тут означало бы «человек выбрал Debian», а он ничего не
+  // выбирал.
+  const [showOsModal, setShowOsModal] = useState(false);
+  const [osValue, setOsValue] = useState<(typeof OS_OPTIONS)[number] | null>(null);
+  const [osErr, setOsErr] = useState<string | null>(null);
 
   // Queries
   const { data: s } = useServer(server?.id);
@@ -156,6 +213,116 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     if (ok) setShowSshModal(false);
   };
 
+  const openConnectModal = () => {
+    // Адрес панели собирается из `ip_address` самого сервера: сюда попадают
+    // только с уже заведённого сервера, и IP известен. Пустое поле заставляло
+    // бы набирать руками то, что программа и так знает.
+    //
+    // Исключение — IPv6: `fastpanelUrlError` (и парные ему проверки на бэкенде и
+    // в десктопе) принимают только «хост:порт» без скобок, так что собранный
+    // адрес форма забраковала бы сама — предзаполнять поле заведомо невалидным
+    // значением хуже, чем оставить его пустым с плейсхолдером. Подключить панель
+    // по IPv6 сегодня нельзя вовсе; чинится это расширением трёх парных
+    // регулярок (`lib/fastpanelInput`, `backend/app/core/validators.py`,
+    // `host_port_regex()` в десктопе) на bracketed-IPv6 — работа за границами
+    // этой задачи, записана в долг.
+    setFpUrl(s?.ip_address?.includes(":") ? "" : fastpanelUrlOf(s));
+    setFpLogin(s?.fastpanel_user || "fastuser");
+    fpPassword.reset();
+    setFpConnectErr({});
+    setShowConnectModal(true);
+  };
+
+  // Как и у SSH-формы: ✕, клик по оверлею и Cancel зовут именно это, чтобы
+  // плейнтекст не пережил закрытие формы — страница-то смонтирована, и своё
+  // состояние лежало бы в памяти до ухода с неё.
+  //
+  // Тестом этот сброс НЕ стережётся, и это надо знать: `openConnectModal` зовёт
+  // `reset()` тоже, поэтому пустое поле в переоткрытой форме обеспечивает
+  // открытие, а не закрытие, — снимите `reset()` отсюда, и все тесты останутся
+  // зелёными. Инвариант тут свой (плейнтекст в памяти закрытой формы), и через
+  // DOM он не наблюдаем; двойной сброс — осознанная страховка, а не дубль.
+  const closeConnectModal = () => {
+    fpPassword.reset();
+    setShowConnectModal(false);
+  };
+
+  const handleSaveConnect = async () => {
+    // Проверка ДО `save()`, как и в «Add Server»: порядок «блоб → сущность», и
+    // отказ после записи оставил бы в хранилище пароль от панели, которую так и
+    // не подключили. Собираются ВСЕ промахи разом — иначе человек чинил бы URL,
+    // чтобы следующим кликом узнать про пустой пароль.
+    const errs: Record<string, string> = {};
+    const urlErr = fastpanelUrlError(fpUrl);
+    if (urlErr) errs.url = urlErr;
+    const loginErr = fastpanelUserError(fpLogin);
+    if (loginErr) errs.login = loginErr;
+    // Просто «Password», без имени панели: форма называется «Connect Existing
+    // Fastpanel», и уточнение в тексте ошибки отвечало бы на вопрос, которого
+    // никто не задавал. Шаблон «… is required» — общий для обязательных полей
+    // здесь и в «Add Server»: одно требование не должно объясняться двумя
+    // разными фразами.
+    if (!fpPassword.value) errs.password = "Password is required";
+    setFpConnectErr(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    const ok = await fpPassword.save({
+      blobKind: BLOB_KIND.serverFastpanelPassword,
+      // Как и у SSH: сервер мог уже носить пароль панели (например, после
+      // оборвавшейся попытки), и переписать надо именно его блоб — новый id
+      // оставил бы сущность указывать на прежний секрет.
+      existingBlobId: s?.fastpanel_password_blob_id ?? null,
+      persist: async (blobId) => {
+        // PUT, а не POST: сервер уже заведён — «Add Server» про панель не знает
+        // вовсе. `fastpanel_status` обязателен — без него блок установки так и
+        // остался бы поверх работающей панели.
+        await updateServer.mutateAsync({
+          fastpanel_user: fpLogin,
+          fastpanel_password_blob_id: blobId,
+          // Обрезанное — ровно то, что проверил `fastpanelUrlError`.
+          fastpanel_url: fpUrl.trim(),
+          fastpanel_status: "installed",
+        });
+      },
+    });
+    if (ok) setShowConnectModal(false);
+  };
+
+  // Поле заполняется ТЕКУЩИМ именем — по той же причине, что и в SSH-форме:
+  // пустая форма правки читается как «стереть» тем, кто открыл её посмотреть.
+  const openNameModal = () => {
+    setNameValue(s?.name || "");
+    setNameErr(null);
+    setShowNameModal(true);
+  };
+
+  const handleSaveName = () => {
+    // Проверка до отправки, как и в «Add Server»: пустое имя бэкенд отвергает
+    // 422-й строкой про схему, а не фразой про поле. Формулировка та же, что
+    // там, — одно требование не должно объясняться двумя разными фразами.
+    if (!nameValue.trim()) {
+      setNameErr("Server name is required");
+      return;
+    }
+    // Ровно одно поле в теле — тот же довод, что у провайдера ниже: PUT,
+    // собранный из всего состояния страницы, переписал бы заодно ssh_user и
+    // ssh_port дефолтами SSH-формы.
+    //
+    // Отказ — в СВОЁ состояние, а не через `updateServer.isError`: тем же хуком
+    // сохраняются и SSH-доступ, и провайдер, и чужая провалившаяся мутация
+    // висела бы в `isError` до следующей — открытая потом форма имени встречала
+    // бы пользователя красным баннером про чужую ошибку.
+    updateServer.mutate(
+      // Обрезанным: «web-01 » и «web-01» стояли бы в списке серверов двумя
+      // строками, различить которые глазом нечем.
+      { name: nameValue.trim() },
+      {
+        onSuccess: () => setShowNameModal(false),
+        onError: (e: any) => setNameErr(e?.message || "Не удалось сохранить"),
+      },
+    );
+  };
+
   // Как и у SSH-формы: поле заполняется ТЕКУЩИМ значением сервера. Пустая форма
   // правки читается как «стереть» тем, кто открыл её просто посмотреть.
   const openProviderModal = () => {
@@ -189,6 +356,82 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     );
   };
 
+  // Как и у формы имени: поле заполняется ТЕКУЩИМ адресом. Пустая форма правки
+  // читается как «стереть» тем, кто открыл её просто посмотреть.
+  const openIpModal = () => {
+    setIpValue(s?.ip_address || "");
+    setIpErr(null);
+    setShowIpModal(true);
+  };
+
+  const handleSaveIp = () => {
+    // Проверка до отправки тем же модулем, что и в «Add Server»: формат адреса
+    // бэкенд не проверяет вовсе (см. JSDoc `lib/ipInput`), так что принятый
+    // здесь мусор дальше некому остановить — он уедет в SSH-коннект и в адрес
+    // панели. `ipv6: true` — разница именно этой формы: у уже заведённого
+    // сервера адрес мог смениться на IPv6, и отвергать настоящий адрес машины
+    // форма правки не вправе.
+    const trimmed = ipValue.trim();
+    const err = ipError(trimmed, { ipv6: true });
+    if (err) {
+      setIpErr(err);
+      return;
+    }
+    // Ровно одно поле в теле и своё состояние под ошибку — тот же довод, что у
+    // имени и провайдера выше: общий PUT переписал бы ssh_user/ssh_port
+    // дефолтами SSH-формы, а общий `updateServer.isError` показал бы здесь
+    // чужую провалившуюся правку.
+    updateServer.mutate(
+      { ip_address: trimmed },
+      {
+        onSuccess: () => setShowIpModal(false),
+        onError: (e: any) => setIpErr(e?.message || "Не удалось сохранить"),
+      },
+    );
+  };
+
+  const openOsModal = () => {
+    // Через `serverOsName`, а не сырым `s.os`: у старых серверов в этой колонке
+    // лежит строка с версией и архитектурой («Ubuntu 22.04 LTS (x86_64)»), а
+    // `<select>` со значением вне своих опций показал бы первый пункт — человек
+    // увидел бы «Debian» там, где стоит Ubuntu, и сохранил бы это одним кликом.
+    // `serverOsName` приводит такую строку к «Ubuntu» и заодно даёт то самое
+    // правило приоритета (ручной `os` перекрывает автоопределённый `os_pretty`),
+    // которым карточка уже подписана.
+    const short = serverOsName(s || {});
+    const known = OS_OPTIONS.find((o) => o === short);
+    // Остаётся случай, которого закрытый список выразить не умеет вовсе:
+    // семейства вне пяти пунктов (Red Hat, Fedora, openSUSE — их приносит
+    // автоопределение по SSH, см. `FAMILY_NEEDLES`). Тогда `null`, и селект
+    // показывает НАСТОЯЩЕЕ имя отдельным нерабочим пунктом — подставленный
+    // «Debian» противоречил бы строке карточки, из которой форму и открыли, а
+    // цена случайного «Save» тут не косметическая: колонку `os` читает
+    // `update_command` в десктопе (`provision.rs`) и по ней выбирает apt или
+    // yum, то есть один клик ломал бы получасовую установку FastPanel. Вернуть
+    // прежнее значение после этого нечем: `os` перекрывает `os_pretty` в
+    // `serverOsName`, так что и бейдж остался бы врать.
+    setOsValue(known ?? null);
+    setOsErr(null);
+    setShowOsModal(true);
+  };
+
+  const handleSaveOs = () => {
+    // Не выбрано ничего — сохранять нечего: кнопка в этом состоянии мертва, и
+    // guard тут для полноты (клавиатура, повторный клик до перерисовки).
+    if (!osValue) return;
+    // Проверки ввода нет намеренно: значение приходит из `<select>` по закрытому
+    // списку `OS_OPTIONS`, свободного ввода в поле не бывает.
+    //
+    // Одно поле в теле и своя ошибка — по тем же причинам, что у соседей выше.
+    updateServer.mutate(
+      { os: osValue },
+      {
+        onSuccess: () => setShowOsModal(false),
+        onError: (e: any) => setOsErr(e?.message || "Не удалось сохранить"),
+      },
+    );
+  };
+
   const handleDelete = async () => {
     if (await confirmAction("Delete server?")) {
       delSrv.mutate(s!, { onSuccess: () => onBack("servers") });
@@ -206,7 +449,22 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // разъезжалась.
   const uiStatus = serverUiStatus(s, now);
   const checkStale = isCheckStale(s.last_check_at, now);
-  const osLabel = s.os_pretty || s.os || null;
+  // Приоритет ручного выбора над автоопределением — общее правило, см.
+  // JSDoc `serverOsName` в `lib/osName`.
+  const osLabel = serverOsName(s);
+  // Что ответила по SSH сама машина. Показывается только в форме правки ОС и
+  // только при расхождении с тем, что в этой форме выбрано: с тех пор как ручной
+  // `os` перекрывает `os_pretty` везде, автоопределённое значение не видно ни на
+  // одном экране — а состояние «человек выбрал CentOS, машина отвечает Ubuntu»
+  // это ровно то, в котором `update_command` берёт yum вместо apt и получасовая
+  // установка FastPanel ломается на первом шаге.
+  //
+  // Сравнивается с ПОКАЗАННЫМ в форме (`osValue ?? osLabel`), а не с `osValue`:
+  // у семейства вне списка `osValue` пуст, и селект показывает `osLabel` — там,
+  // где это то же самое имя, подсказка повторяла бы соседнюю строку слово в
+  // слово.
+  const osDetected = osShortName(s.os_pretty);
+  const osMismatch = osDetected && osDetected !== (osValue ?? osLabel) ? osDetected : null;
   const providers = providerOptions(serversList?.items || []);
   // Снимок есть ровно тогда, когда есть его отметка времени: и десктопный
   // сборщик (`apply_metrics`), и удалённый серверный до него ставили её всегда,
@@ -217,7 +475,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const metricsStale = isMetricsStale(metricsAt, now);
 
   const fp = {
-    url: s.fastpanel_url || `https://${s.ip_address}:8888`,
+    url: fastpanelUrlOf(s),
     login: s.fastpanel_user || "fastuser",
     password: "encrypted (hidden)", // Actual password not sent via API 
     version: s.fastpanel_version ?? "—",
@@ -255,11 +513,32 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
     </div>
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:24}}>
       <div>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={uiStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1>{osLabel ? <Badge variant="gray">{osLabel}</Badge> : null}{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
+        {/* Карандаш у самого имени: до него имя задавалось один раз в «Add
+            Server» и опечатка оставалась с сервером навсегда. Правка — мутация,
+            а значит только десктоп (заметка для веба — ниже, отдельной строкой).
+            Не OpenInDesktop: хоста `server-rename` в parseDeepLinkAction нет,
+            ссылка вела бы в {handled:false} и только тостила бы сама себя.
+
+            `RowActions`, а не `Btn`: это иконочная кнопка, а `RowActions` —
+            единственный примитив, который сам ставит глифу `title`/`aria-label`.
+            Голый «✎» без имени не читается ни скринридером, ни курсором — и
+            выпадал бы из ряда: все прочие карандаши в проекте несут слово. */}
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}><StatusDot status={uiStatus}/><h1 style={{fontSize:22,fontWeight:700,color:"#111"}}>{s.name}</h1>{isTauri() && (
+          <RowActions actions={[{ icon: "✎", title: "Rename server", onClick: openNameModal }]}/>
+        )}{osLabel ? <Badge variant="gray">{osLabel}</Badge> : null}{isFPInstalled&&<Badge variant="blue">FASTPANEL</Badge>}</div>
         {/* Пометка стоит вплотную к самой цифре: аптайм здесь — часть того же
             снимка, и «3d 0h» трёхмесячной давности без неё читается как «сервер
             работает три дня» прямо сейчас. */}
         <div style={{fontSize:13,color:"#6b7280"}}>{s.ip_address} · <span style={metricsStale?{color:STALE_TEXT}:undefined}>Uptime: {formatUptime(s.uptime_seconds)}{metricsStale?STALE_SUFFIX:""}</span> · Added {fmtDate(s.created_at)}</div>
+        {/* Объяснение вместо карандаша — своей строкой, а не на месте кнопки в
+            строке заголовка: заметка это блок с рамкой и padding'ом, и внутри
+            flex-строки «точка — имя — бейджи» она распирала бы её на ширину
+            целого предложения, утаскивая бейджи ОС и FASTPANEL вправо. `what`
+            тот же, что у правки провайдера: запрет один, и объяснение у него
+            должно быть одно. */}
+        {!isTauri() && (
+          <div style={{marginTop:8}}><DesktopOnlyNote what="Editing servers" /></div>
+        )}
         <button onClick={() => onNav?.("domains", { serverId: s.id })} style={{marginTop:8,border:"none",background:"transparent",padding:0,color:"#2563eb",fontSize:12.5,cursor:"pointer"}}>See all server domains in Domains →</button>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -463,13 +742,38 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             {/* Прогресс идёт отдельным каналом: Rust шлёт `fastpanel:progress`,
                 а тостит его один глобальный слушатель в DesktopWorkspace —
                 установка переживает уход с этой страницы. */}
-            <OpenInDesktop
-              variant="primary"
-              action={`install-fastpanel?serverId=${s.id}`}
-              label={fpRunning ? "Installing…" : "Install FastPanel"}
-              desktopOnClick={() => installFp.mutate(undefined)}
-              disabled={fpRunning}
-            />
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <OpenInDesktop
+                variant="primary"
+                action={`install-fastpanel?serverId=${s.id}`}
+                label={fpRunning ? "Installing…" : "Install FastPanel"}
+                desktopOnClick={() => installFp.mutate(undefined)}
+                disabled={fpRunning}
+              />
+              {/* Второй путь рядом с установкой: панель на сервере может уже
+                  стоять, и до этой кнопки единственным способом рассказать о ней
+                  SDMP была установка заново — получасовая и поверх работающих
+                  сайтов. В вебе — заметка, а НЕ
+                  OpenInDesktop: хоста `server-connect-fastpanel` в
+                  parseDeepLinkAction нет, ссылка вела бы в {handled:false} и
+                  только тостила бы сама себя. `what` тот же, что у SSH-формы:
+                  запрет один и тот же — пароль шифрует Rust мастер-ключом из
+                  keychain, из браузера его не сохранить.
+
+                  `disabled` тот же, что у установки, и по своей причине:
+                  подключение ставит `fastpanel_status: "installed"`, карточка
+                  установки исчезает вместе с индикатором «Installing…» — идущая
+                  установка становится невидимой, а её write-back через полчаса
+                  молча перезапишет только что подключённые креды на выданные
+                  инсталлятором. `size` тоже общий: сосед — `OpenInDesktop` со
+                  своим дефолтным "sm", и без него вторичная кнопка была бы
+                  крупнее первичной. */}
+              {isTauri() ? (
+                <Btn size="sm" variant="secondary" onClick={openConnectModal} disabled={fpRunning}>Connect Existing</Btn>
+              ) : (
+                <DesktopOnlyNote what="Saving secrets" />
+              )}
+            </div>
             {fpError && (
               <div role="alert" style={{marginTop:12, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
                 Install failed: {fpError.message || String(fpError)}
@@ -479,38 +783,48 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         </Card>}
 
         <Card>
-          {/* Правка — мутация, а значит только десктоп. Не OpenInDesktop: хоста
-              `server-provider` в parseDeepLinkAction нет, ссылка вела бы в
-              {handled:false} и только тостила бы сама себя — та же развилка и по
-              той же причине, что у «Изменить SSH» выше. */}
-          <CHd><CTi>🖥 Server Information</CTi>{isTauri() ? (
-            <Btn size="sm" variant="secondary" onClick={openProviderModal}>✎ Provider</Btn>
-          ) : (
-            <DesktopOnlyNote what="Editing servers" />
-          )}</CHd>
+          {/* Кнопки правки в шапке больше нет: каждое правимое поле открывает
+              свою форму карандашом в СВОЕЙ строке — точка входа стоит там, где
+              видно значение, а не в заголовке карточки, где ещё надо угадать,
+              которое из девяти полей она правит.
+
+              Для веба заметка остаётся: строчных карандашей там нет вовсе, и без
+              неё карточка молчала бы о том, почему значения нередактируемы. Не
+              OpenInDesktop: хостов `server-provider` и соседних в
+              parseDeepLinkAction нет, ссылка вела бы в {handled:false} и только
+              тостила бы сама себя — та же развилка и по той же причине, что у
+              «Изменить SSH» выше. */}
+          <CHd><CTi>🖥 Server Information</CTi>{!isTauri() && <DesktopOnlyNote what="Editing servers" />}</CHd>
           <CBo style={{padding:"6px 20px 14px"}}>
-            {[
-              ["Name",s.name],
-              ["IP",s.ip_address],
+            {/* Правка — мутация, а значит только десктоп: в вебе `onEdit` не
+                передаётся вовсе, и строка рисуется ровно как раньше. */}
+            {([
+              {k:"Name", v:s.name, onEdit: isTauri() ? openNameModal : undefined},
+              // `editLabel` — потому что скринридер читает «IP» и «OS» по
+              // буквам, а не словами: имя кнопки должно звучать так, как это
+              // поле называют вслух.
+              {k:"IP", v:s.ip_address, onEdit: isTauri() ? openIpModal : undefined, editLabel:"IP address"},
               // Рядом с OS: такой же описательный атрибут железа, и глаз ищет их
               // вместе.
-              ["Provider",s.provider || "—"],
-              ["OS",osLabel || "—"],
-              ["Uptime", formatUptime(s.uptime_seconds)],
+              {k:"Provider", v:s.provider || "—", onEdit: isTauri() ? openProviderModal : undefined},
+              {k:"OS", v:osLabel || "—", onEdit: isTauri() ? openOsModal : undefined, editLabel:"operating system"},
+              // Ниже — измерения и отметки времени: их правит не человек, а
+              // сбор метрик и проверка доступности, поэтому карандашей у них нет.
+              {k:"Uptime", v:formatUptime(s.uptime_seconds)},
               // Возраст снимка — сразу под аптаймом, который из него и взят.
-              ["Metrics", metricsAt
-                ? <span key="metrics" style={metricsStale?{color:STALE_TEXT}:undefined}>{formatAgoStale(metricsAt, metricsStale, now)}</span>
-                : "never"],
-              ["Status",<Badge key="status" variant={statusBadgeVariant(uiStatus)}>{uiStatus}</Badge>],
+              {k:"Metrics", v:metricsAt
+                ? <span style={metricsStale?{color:STALE_TEXT}:undefined}>{formatAgoStale(metricsAt, metricsStale, now)}</span>
+                : "never"},
+              {k:"Status", v:<Badge variant={statusBadgeVariant(uiStatus)}>{uiStatus}</Badge>},
               // И так же под статусом — возраст проверки, из которой он получен.
               // Два сигнала, две отметки: у метрик и у проверки разные источники
               // (десктоп по кнопке против бэкенда раз в 6 часов) и разная
               // свежесть, и общая подпись показывала бы один из них чужой.
-              ["Last check", s.last_check_at
-                ? <span key="check" style={checkStale?{color:STALE_TEXT}:undefined}>{formatAgoStale(s.last_check_at, checkStale, now)}</span>
-                : "never"],
-              ["Added",fmtDate(s.created_at)]
-            ].map(([k,v], i)=><InfoRow key={i} k={k} v={v}/>)}
+              {k:"Last check", v:s.last_check_at
+                ? <span style={checkStale?{color:STALE_TEXT}:undefined}>{formatAgoStale(s.last_check_at, checkStale, now)}</span>
+                : "never"},
+              {k:"Added", v:fmtDate(s.created_at)}
+            ]).map(row=><InfoRow key={row.k} {...row}/>)}
           </CBo>
         </Card>
       </div>
@@ -562,6 +876,70 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         </div>
       </Modal>
     )}
+    {showConnectModal && (
+      // Поле пароля без гейта `isTauri()`, в отличие от «Add Server»: сюда
+      // попадают только кнопкой, которой в вебе нет вовсе.
+      <Modal title="Connect Existing Fastpanel" onClose={closeConnectModal} width={420}>
+        <div style={{display:"flex", flexDirection:"column", gap:14}}>
+          <div>
+            {/* Поле открывается уже заполненным (`openConnectModal`), так что
+                плейсхолдер видит только тот, кто стёр значение. Схема и порт в
+                нём те же, что требует `fastpanelUrlError`: очищенное поле не
+                должно подсказывать формат слабее, чем подставленное. */}
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel URL</label>
+            <Inp value={fpUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setFpUrl(e.target.value); if(fpConnectErr.url) setFpConnectErr(prev=>({...prev, url:""}));}} placeholder="https://192.168.1.100:8888" style={{borderColor: fpConnectErr.url ? "#dc2626" : undefined}}/>
+            {fpConnectErr.url && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.url}</div>}
+          </div>
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Login</label>
+            <Inp value={fpLogin} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setFpLogin(e.target.value); if(fpConnectErr.login) setFpConnectErr(prev=>({...prev, login:""}));}} placeholder="Enter login" style={{borderColor: fpConnectErr.login ? "#dc2626" : undefined}}/>
+            {fpConnectErr.login && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.login}</div>}
+          </div>
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Fastpanel Password</label>
+            <Inp type="password" value={fpPassword.value} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{fpPassword.setValue(e.target.value); if(fpConnectErr.password) setFpConnectErr(prev=>({...prev, password:""}));}} placeholder="Enter password" style={{borderColor: fpConnectErr.password ? "#dc2626" : undefined}}/>
+            {fpConnectErr.password && <div style={{color:"#dc2626",fontSize:11.5,marginTop:4}}>{fpConnectErr.password}</div>}
+          </div>
+        </div>
+        {fpPassword.error && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {fpPassword.error}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          {/* Кнопка мёртвая всё время записи блоба И сохранения сервера: между
+              ними нет кадра, где `saving` ложен, — второй клик писал бы второй
+              блоб на тот же секрет. */}
+          <Btn variant="primary" onClick={handleSaveConnect} disabled={fpPassword.saving} style={{width:"100%",justifyContent:"center"}}>{fpPassword.saving ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={closeConnectModal} disabled={fpPassword.saving} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
+        </div>
+      </Modal>
+    )}
+    {showNameModal && (
+      <Modal title="Rename server" onClose={()=>setShowNameModal(false)} width={420}>
+        <div>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Server Name</label>
+          {/* Плейсхолдер и подпись — те же, что в «Add Server»: поле одно и то
+              же, и разные примеры в двух формах читались бы как разные правила
+              именования. */}
+          <Inp
+            value={nameValue}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setNameValue(e.target.value); setNameErr(null);}}
+            placeholder="e.g., production-web-01"
+            style={{borderColor: nameErr ? "#dc2626" : undefined}}
+          />
+        </div>
+        {nameErr && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {nameErr}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          <Btn variant="primary" onClick={handleSaveName} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={()=>setShowNameModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
+        </div>
+      </Modal>
+    )}
     {showProviderModal && (
       <Modal title="Hosting Provider" onClose={()=>setShowProviderModal(false)} width={420}>
         <div>
@@ -590,6 +968,75 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
           <Btn variant="primary" onClick={handleSaveProvider} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
           <Btn variant="secondary" onClick={()=>setShowProviderModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
+        </div>
+      </Modal>
+    )}
+    {showIpModal && (
+      <Modal title="IP Address" onClose={()=>setShowIpModal(false)} width={420}>
+        <div>
+          {/* `htmlFor`/`id`, в отличие от соседних форм этого файла: без пары
+              скринридер объявляет поле безымянным, а `<label>` рядом сам по себе
+              его не именует. Соседи это правило нарушают исторически — новый код
+              его не тиражирует. */}
+          <label htmlFor={IP_INPUT_ID} style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>IP Address</label>
+          {/* Плейсхолдер тот же, что в «Add Server»: поле одно и то же, и разные
+              примеры в двух формах читались бы как разные правила записи. */}
+          <Inp
+            id={IP_INPUT_ID}
+            value={ipValue}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>)=>{setIpValue(e.target.value); setIpErr(null);}}
+            placeholder="e.g., 192.168.1.100"
+            style={{borderColor: ipErr ? "#dc2626" : undefined}}
+          />
+        </div>
+        {ipErr && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {ipErr}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          <Btn variant="primary" onClick={handleSaveIp} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={()=>setShowIpModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
+        </div>
+      </Modal>
+    )}
+    {showOsModal && (
+      <Modal title="Operating System" onClose={()=>setShowOsModal(false)} width={420}>
+        <div>
+          <label htmlFor={OS_SELECT_ID} style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>OS</label>
+          {/* Закрытый список, а не свободный текст, — тот же `OS_OPTIONS`, что и
+              в «Add Server»: по этому имени десктоп выбирает пакетный менеджер
+              для установки FastPanel, и «убунту» руками сломало бы установку
+              молча (см. JSDoc `OS_OPTIONS`). */}
+          <Sel id={OS_SELECT_ID} value={osValue ?? ""} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>{setOsValue(e.target.value as (typeof OS_OPTIONS)[number]); setOsErr(null);}} style={{width:"100%"}}>
+            {/* Семейство, которого в списке нет, — нерабочим пунктом с его
+                НАСТОЯЩИМ именем (тем же `osLabel`, что в строке карточки):
+                селект не вправе называть ОС иначе, чем строка, из которой его
+                открыли. Выбрать этот пункт нельзя, сохранить — тоже (кнопка
+                мертва, пока не выбрано настоящее значение). */}
+            {!osValue && (
+              <option value="" disabled>{osLabel ? `${osLabel} — не в списке` : "ОС не определена"}</option>
+            )}
+            {OS_OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}
+          </Sel>
+          {/* Правда от машины — рядом с выбором, но НЕ вместо него: ручной выбор
+              перекрывает автоопределение осознанно (см. `serverOsName`), и
+              подсказка ничего не меняет сама. Она лишь показывает расхождение,
+              которое иначе не видно нигде. */}
+          {osMismatch && (
+            <div style={{fontSize:11.5,color:"#9ca3af",marginTop:6}}>По SSH определено: {osMismatch}</div>
+          )}
+        </div>
+        {osErr && (
+          <div role="alert" style={{marginTop:14, padding:"10px 12px", background:"#fee2e2", borderRadius:8, color:"#991b1b", fontSize:13}}>
+            {osErr}
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+          {/* Мертва и пока ничего не выбрано: сохранять «то, что показал
+              селект» тут нечего — показать он мог и «Fedora — не в списке». */}
+          <Btn variant="primary" onClick={handleSaveOs} disabled={updateServer.isPending || !osValue} style={{width:"100%",justifyContent:"center"}}>{updateServer.isPending ? "Saving..." : "Save"}</Btn>
+          <Btn variant="secondary" onClick={()=>setShowOsModal(false)} disabled={updateServer.isPending} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
         </div>
       </Modal>
     )}

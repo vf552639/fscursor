@@ -1,10 +1,11 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import ServerDetail from "./ServerDetail";
 import { b64ToU8 } from "../lib/b64";
+import { desktopOnly } from "../lib/runtime";
 import {
   setTauri,
   UUID_V4,
@@ -255,20 +256,39 @@ describe("ServerDetail — SSH-пароль через блоб", () => {
     });
   });
 
-  it.each([
-    ["без SSH — баннер", SERVER_NO_SSH, "Добавить SSH"],
-    ["с SSH — шапка карточки", SERVER, "Изменить SSH"],
-  ])("в вебе (%s) форма не открывается, а объяснение — общей фразой", async (_name, fixture, label) => {
+  /**
+   * Место, где стоял бы убранный SSH-контрол. Заметка ищется В НЁМ, а не по
+   * всему документу: ту же фразу показывает подключение существующей панели в
+   * карточке установки (там тоже секрет), и поиск по документу проходил бы,
+   * даже если бы у SSH не осталось ВООБЩЕ ничего.
+   */
+  it.each<[string, typeof SERVER, string, () => HTMLElement]>([
+    [
+      "без SSH — баннер",
+      SERVER_NO_SSH,
+      "Добавить SSH",
+      // Заголовок баннера → его текстовый блок → сам баннер.
+      () => screen.getByText("⚠ SSH-доступ не настроен").parentElement!.parentElement!,
+    ],
+    [
+      "с SSH — шапка карточки",
+      SERVER,
+      "Изменить SSH",
+      // Ряд действий в шапке: соседняя заметка «Testing SSH» — его прямой ребёнок.
+      () => screen.getByText(desktopOnly("Testing SSH")).parentElement!,
+    ],
+  ])("в вебе (%s) форма не открывается, а объяснение — общей фразой", async (_name, fixture, label, scope) => {
     setTauri(false);
-    const { container } = renderDetail(fixture as typeof SERVER);
+    const { container } = renderDetail(fixture);
 
-    expect(await screen.findByText(DESKTOP_NOTE)).toBeTruthy();
+    await screen.findAllByText(DESKTOP_NOTE);
+    expect(within(scope()).getByText(DESKTOP_NOTE)).toBeTruthy();
     // Не OpenInDesktop: хоста `server-ssh` parseDeepLinkAction не знает —
     // ссылка вела бы в {handled:false} и только тостила бы сама себя.
     expect(container.querySelectorAll('a[href^="sdmp://server-ssh"]').length).toBe(0);
     // И не кнопка: набирать пароль там, где его физически нельзя сохранить,
     // пользователю не предлагаем — объясняем это до ввода, а не после.
-    expect(screen.queryByText(label as string)).toBeNull();
+    expect(screen.queryByText(label)).toBeNull();
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
     expect(mocks.apiPut).not.toHaveBeenCalled();

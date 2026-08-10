@@ -223,8 +223,49 @@ export function StatCard({label, value, sub, pct, color="#2563eb"}: any){
   </Card>;
 }
 
-export function InfoRow({k, v}: any){
-  return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderBottom:"1px solid #f3f4f6"}}><div style={{fontSize:12.5,color:"#6b7280",fontWeight:500}}>{k}</div><div style={{fontSize:13,fontWeight:600,color:"#111",display:"flex",alignItems:"center",gap:6}}>{v}</div></div>;
+/**
+ * `k`/`v` остаются `any` — стиль файла, здесь их не ужесточаем нарочно.
+ * `onEdit`/`editLabel` типизированы честно отдельным полем: `any & {...}` в TS
+ * схлопывается обратно в `any` и защиты не даёт, поэтому сигнатура развёрнута
+ * явно.
+ */
+type InfoRowProps = {
+  k: any;
+  v: any;
+  /** Есть проп — есть карандаш; нет — разметка и поведение ровно прежние. */
+  onEdit?: () => void;
+  /**
+   * Доступное имя карандаша, если само значение `k` неудачно для чтения вслух
+   * — например, аббревиатура «OS» скринридер произнесёт по буквам, а не как
+   * «operating system». Необязателен: по умолчанию имя строится из `k`.
+   *
+   * Так им и пользуется единственный сегодняшний потребитель — карточка Server
+   * Information (`pages/ServerDetail.tsx`): строки «OS» и «IP» передают
+   * «operating system» и «IP address», а «Name» и «Provider» обходятся своей
+   * подписью.
+   */
+  editLabel?: string;
+};
+
+export function InfoRow({k, v, onEdit, editLabel}: InfoRowProps){
+  // Источник доступного имени: явный `editLabel`, иначе подпись строки. Тип
+  // `k` здесь `any` (стиль файла) — сегодняшний единственный потребитель
+  // всегда передаёт строку, но раз тип это не гарантирует, подстраховка на
+  // случай JSX остаётся: подставлять его в title/aria-label нельзя, поэтому
+  // без строкового `k` и без `editLabel` карандаш падает на нейтральное «Edit».
+  const label = editLabel ?? (typeof k === "string" ? k : undefined);
+  return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderBottom:"1px solid #f3f4f6"}}>
+    <div style={{fontSize:12.5,color:"#6b7280",fontWeight:500}}>{k}</div>
+    <div style={{fontSize:13,fontWeight:600,color:"#111",display:"flex",alignItems:"center",gap:6}}>
+      {v}
+      {onEdit && (
+        // Тот же `RowActions`, что и у карандаша в шапке страницы: голый «✎»
+        // без имени не читается ни скринридером, ни курсором, а `RowActions` —
+        // единственный примитив, который сам проставляет `title`/`aria-label`.
+        <RowActions actions={[{icon: "✎", title: label ? `Edit ${label}` : "Edit", onClick: onEdit}]}/>
+      )}
+    </div>
+  </div>;
 }
 
 export function ActionIcons({icons=["✎","✕"]}: any){

@@ -174,11 +174,21 @@ function hasBar(label: string): boolean {
   return statCard(label).querySelectorAll('div[style*="transition"]').length > 0;
 }
 
-/** Значение строки «Server Information» по её подписи (`InfoRow`). */
+/**
+ * Значение строки «Server Information» по её подписи (`InfoRow`).
+ *
+ * Кнопки из строки выбрасываются: у правимых строк (Name/IP/Provider/OS)
+ * `InfoRow` рисует карандаш там же, и его глиф «✎» приклеился бы к значению без
+ * разделителя (`rowValue("Name")` вернул бы `"server-1✎"`). Убираем сам
+ * элемент, а не подчищаем строку от глифа: подгонка ожидания под мусор скрыла
+ * бы и настоящий мусор в значении.
+ */
 function rowValue(label: string): string {
   const row = screen.getByText(label).parentElement;
   if (!row) throw new Error(`строки «${label}» на экране нет`);
-  return (row.textContent || "").replace(label, "").trim();
+  const clone = row.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll("button").forEach((b) => b.remove());
+  return (clone.textContent || "").replace(label, "").trim();
 }
 
 function sshReturns(output: string) {
