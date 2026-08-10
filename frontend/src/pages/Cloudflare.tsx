@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState } from "../components/ui/Primitives";
+import { Card, CHd, CTi, Btn, StatCard, Badge, Modal, Inp, Sel, RowActions, EmptyState, ErrorState, CopyBtn } from "../components/ui/Primitives";
 import {
   useCloudflareAccounts,
   useCreateCloudflareAccount,
@@ -26,11 +26,16 @@ import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave, useSecretSave } from "../hooks/useSecretSave";
 
-/** Зона в UI. `nameServers` приходит вместе со списком зон из `cf_list_zones`. */
+/**
+ * Зона в UI. `nameServers` и `status` приходят вместе со списком зон из
+ * `cf_list_zones`, то есть только в десктопе: у резервного списка из доменов
+ * (`zonesOfAccount`) их нет и взяться им неоткуда.
+ */
 export interface CfZoneRef {
   id: string;
   name: string;
   nameServers?: string[] | null;
+  status?: string | null;
 }
 
 /** Аккаунт в контексте зоны: id нужен командам, name — хлебным крошкам. */
@@ -55,6 +60,19 @@ const DNS_TYPE_COLORS: Record<string, string> = {
 };
 
 const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV"];
+
+/**
+ * Цвет бейджа по статусу зоны у Cloudflare. Зелёный достаётся ровно одному
+ * значению — `active`: только оно означает «делегирование доехало». Всё
+ * незнакомое (`moved`, `deactivated`, `read only`, завтрашние) — серое: гадать
+ * в сторону здоровья нельзя, а называть чужое состояние «pending» — врать.
+ * Отсутствие статуса вовсе разбирается на месте: бейджа тогда нет совсем.
+ */
+const ZONE_STATUS_VARIANT: Record<string, string> = {
+  active: "green",
+  pending: "yellow",
+  initializing: "yellow",
+};
 
 /** Типы, у которых Cloudflare принимает priority. Для прочих поле слать нельзя. */
 const TYPES_WITH_PRIORITY = new Set(["MX", "SRV", "URI"]);
@@ -143,7 +161,7 @@ function AccountCard({
   // резервом для веба, у которого токена нет и быть не должно.
   const liveZones = useCloudflareZones(acc.id);
   const zones: CfZoneRef[] = liveZones.data
-    ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers }))
+    ? liveZones.data.map((z: Zone) => ({ id: z.id, name: z.name, nameServers: z.name_servers, status: z.status }))
     : domainZones;
   const zonesLoading = canExecute && liveZones.isPending;
   // Именно «отрисован», а не «есть testStatus»: `idle` — это состояние без
@@ -264,7 +282,17 @@ function AccountCard({
               style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderTop:"1px solid #f3f4f6"}}
             >
               <span style={{ fontSize: 13, fontWeight: 600, color: "#111", flex: 1 }}>{z.name}</span>
+              {/* Статуса нет — нет и бейджа: в вебе список зон собран из наших
+                  доменов, и о делегировании он не знает НИЧЕГО. Серый «pending»
+                  на этом месте был бы выдуманным измерением; почему список
+                  неполон, уже сказано подписью над ним. */}
+              {z.status ? (
+                <Badge variant={ZONE_STATUS_VARIANT[z.status] || "gray"}>{z.status}</Badge>
+              ) : null}
               <span style={{ fontFamily: "monospace", fontSize: 11.5, color: "#9ca3af" }}>{z.id}</span>
+              {/* Имя зоны в подписи — потому что кнопок на экране столько же,
+                  сколько зон, и «Copy zone ID» у всех читалось бы одинаково. */}
+              <CopyBtn value={z.id} label={`Copy zone ID for ${z.name}`} />
               <Btn size="sm" variant="secondary" onClick={() => onOpenZone(z)}>Open DNS</Btn>
             </div>
           ))
@@ -744,6 +772,14 @@ function CloudflareZoneView({ sel, onBack, showDns, setShowDns }: {
     {showNs && <Modal title={`Nameservers for ${zone.name}`} onClose={()=>setShowNs(false)} width={460}>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {nameServers.map((ns: string) => <div key={ns} style={{padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontFamily:"monospace",fontSize:13}}>{ns}</div>)}
+        {/* NS вбивают у регистратора все разом, поэтому копируется список
+            целиком и через `\n` — так он и вставляется в поля формы. Кнопки нет,
+            когда копировать нечего: в вебе NS не приезжают вовсе. */}
+        {nameServers.length > 0 && (
+          <div style={{display:"flex",justifyContent:"flex-end"}}>
+            <CopyBtn value={nameServers.join("\n")} label="Copy nameservers" />
+          </div>
+        )}
         {nameServers.length === 0 && (
           <div style={{fontSize:13,color:"#6b7280"}}>
             {canExecute ? "No nameservers returned for this zone." : `Nameservers come from Cloudflare. ${DESKTOP_ONLY_NOTE}`}

@@ -310,9 +310,15 @@ export function RowActions({ actions = [] }: { actions: RowAction[] }) {
   </div>;
 }
 
-export function CopyBtn({value}: any){
+/**
+ * `label` — доступное имя кнопки. Глиф «⎘» скринридер не произносит никак, а
+ * там, где копируемых значений в одном ряду несколько (id зоны, её NS),
+ * безымянные кнопки неразличимы и глазами. Необязателен: у кнопки, стоящей
+ * вплотную к единственному значению, нейтрального «Copy» хватает.
+ */
+export function CopyBtn({value, label = "Copy"}: any){
   const [c,setC] = useState(false);
-  return <button onClick={()=>{copyText(value);setC(true);setTimeout(()=>setC(false),1400);}} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280",flexShrink:0,transition:"all 0.15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#eff4ff";e.currentTarget.style.color="#2563eb";}} onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color="#6b7280";}}>{c?"✓":"⎘"}</button>;
+  return <button onClick={()=>{copyText(value);setC(true);setTimeout(()=>setC(false),1400);}} title={label} aria-label={label} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,cursor:"pointer",fontSize:13,color:"#6b7280",flexShrink:0,transition:"all 0.15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#eff4ff";e.currentTarget.style.color="#2563eb";}} onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color="#6b7280";}}>{c?"✓":"⎘"}</button>;
 }
 
 export const fmtDate = (iso: string) => iso ? new Date(iso).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—";
