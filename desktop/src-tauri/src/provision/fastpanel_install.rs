@@ -305,6 +305,23 @@ mod tests {
         assert_eq!(update_command("Cent OS 7"), "yum -y update");
     }
 
+    // Форма Add Server (frontend/src/pages/Servers.tsx, OS_OPTIONS) шлёт
+    // строго один из пяти вариантов без версии: "Debian", "Ubuntu", "CentOS",
+    // "AlmaLinux", "Rocky Linux". Тесты выше проверяют строки с версией
+    // ("CentOS 7") и легаси-подстроку ("Cent OS 7"), но не сами эти пять
+    // точных значений. Матчер здесь — это else-fallback, а не whitelist,
+    // поэтому если во фронте когда-нибудь добавят/переименуют пункт списка,
+    // который update_command не узнает, он молча уедет в apt-ветку на
+    // RHEL-подобной машине — этот тест ловит такое расхождение.
+    #[test]
+    fn update_command_covers_every_ui_os_option() {
+        assert!(update_command("Debian").contains("apt-get"));
+        assert!(update_command("Ubuntu").contains("apt-get"));
+        assert_eq!(update_command("CentOS"), "yum -y update");
+        assert_eq!(update_command("AlmaLinux"), "yum -y update");
+        assert_eq!(update_command("Rocky Linux"), "yum -y update");
+    }
+
     #[test]
     fn parse_credentials_extracts_url_user_password() {
         let out = "Installation complete\n\
