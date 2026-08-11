@@ -5,12 +5,15 @@ import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useBu
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
 import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, expiryTs, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
-import { DOMAIN_STATUSES, domainStatusLabel, domainStatusRank, sslStatusRank } from "../lib/domainStatus";
+import { domainStatusRank, sslStatusRank } from "../lib/domainStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
 import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
 import StatusBadge from "../components/StatusBadge";
 import { AddDomainModal } from "../components/domains/AddDomainModal";
+import DomainFilters from "../components/domains/DomainFilters";
+import DomainStats from "../components/domains/DomainStats";
+import { DomainUI, toDomainUI } from "../components/domains/types";
 import { describeQueryError } from "../lib/queryError";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
@@ -30,23 +33,6 @@ const NOOP_DESKTOP_ONLY_BRANCH = () => {};
 
 /** Сколько имён влезает в диалог подтверждения, не превращая его в стену текста. */
 const CONFIRM_NAMES_SHOWN = 20;
-
-interface DomainUI {
-  id: number;
-  domain: string;
-  server_id: number | null;
-  registrar_id: number | null;
-  cf_id: number | null;
-  ns_status: string;
-  status: string;
-  ssl_status?: string | null;
-  /** Срок домена у регистратора. `date` без времени — считаем сутками. */
-  expiry_date?: string | null;
-  /** Срок сертификата. Полноценный `datetime`, но вопрос к нему тот же суточный. */
-  ssl_expires_at?: string | null;
-  last_provision_error?: string | null;
-  created: string;
-}
 
 /** По какой колонке сортируем. Только те, у чьих значений есть порядок. */
 type SortKey = "domain" | "status" | "expiry_date" | "ssl" | "created";
@@ -281,20 +267,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const registrars = registrarsQ.data || [];
   const cfAccounts = cfAccountsQ.data || [];
 
-  const domains = useMemo((): DomainUI[] => domainsData.map((d: Domain) => ({
-    id: d.id,
-    domain: d.domain_name,
-    server_id: d.server_id,
-    registrar_id: d.registrar_id,
-    cf_id: d.cloudflare_account_id,
-    ns_status: d.ns_status || "pending",
-    status: d.status,
-    ssl_status: d.ssl_status,
-    expiry_date: d.expiry_date,
-    ssl_expires_at: d.ssl_expires_at,
-    last_provision_error: d.last_provision_error,
-    created: d.created_at,
-  })), [domainsData]);
+  const domains = useMemo((): DomainUI[] => domainsData.map(toDomainUI), [domainsData]);
 
   const initialStatusFilter = useMemo(() => {
     return new URLSearchParams(window.location.search).get("status") ?? "";
@@ -463,44 +436,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
    * строка отсортирована сама с собой.
    */
   const sorted = useMemo(() => sortDomains(filtered, sort), [filtered, sort]);
-  /**
-   * Домены, у которых провижининг дошёл до SSL и сертификата не получил.
-   *
-   * Считается по `ssl_status === "error"` — единственному признаку, который
-   * такой прогон о себе действительно оставляет: провал выпуска (как и пропуск
-   * из-за DNS или отсутствия почты) намеренно НЕ роняет провижининг, поэтому
-   * домен остаётся `site_created`, а не `failed`, и в `last_provision_error`
-   * ничего не пишется — там живут только фатальные провалы, и их текст
-   * (`provision failed at {шаг}: {класс}`) слова «ssl» не содержит вовсе.
-   * Прежний предикат (`status === "failed"` И текст ошибки со словом «ssl»)
-   * не мог стать истинным ни при одном прогоне.
-   */
-  const failedAtSslCount = useMemo(
-    () => domains.filter((d) => d.ssl_status === "error").length,
-    [domains]
-  );
-  /**
-   * Срез по жизненному циклу домена — второй ряд карточек рядом с NS-срезом.
-   *
-   * Ряд, а не переключатель NS ↔ lifecycle: оба среза отвечают на разные
-   * вопросы («доехало ли делегирование» и «доехал ли сайт»), и спрятать один за
-   * клик значит показать половину состояния тому, кто на страницу как раз и
-   * пришёл узнать, всё ли в порядке. Числа тут маленькие и постоянные — место
-   * они стоят дешевле, чем стоил бы невидимый счётчик провалов.
-   *
-   * «In progress» считается ОСТАТКОМ, а не перечислением промежуточных
-   * статусов, и это не лень: перечисление молча теряет любой статус, которого
-   * автор не вспомнил (а ровно так и потерялся `ns_ok` — см.
-   * `lib/domainStatus`), и ряд переставал бы сходиться с Total. Остаток сходится
-   * по построению.
-   */
-  const lifecycle = useMemo(() => {
-    const count = (s: string) => domains.filter((d) => d.status === s).length;
-    const fresh = count("new");
-    const active = count("active");
-    const failed = count("failed");
-    return { fresh, active, failed, inProgress: domains.length - fresh - active - failed };
-  }, [domains]);
 
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
   /** Повторный клик по той же колонке переворачивает; новая колонка начинает с возрастания. */
@@ -807,48 +742,14 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Domain</Btn>
       </div>
     </div>
-    {([
-      // Первый ряд — про делегирование, второй — про жизненный цикл домена.
-      // Total стоит в первом и относится к обоим: он же и есть сумма второго.
-      [
-        ["Total",domains.length,"#2563eb","#eff4ff"],
-        ["NS OK",domains.filter((d: DomainUI)=>d.ns_status==="ok").length,"#16a34a","#f0fdf4"],
-        ["NS Pending",domains.filter((d: DomainUI)=>d.ns_status==="pending").length,"#d97706","#fffbeb"],
-        ["NS Errors",domains.filter((d: DomainUI)=>d.ns_status==="error").length,"#dc2626","#fef2f2"]
-      ],
-      [
-        ["New",lifecycle.fresh,"#6b7280","#f3f4f6"],
-        ["In progress",lifecycle.inProgress,"#2563eb","#eff4ff"],
-        ["Active",lifecycle.active,"#16a34a","#f0fdf4"],
-        ["Failed",lifecycle.failed,"#dc2626","#fef2f2"]
-      ]
-    ] as [string, number, string, string][][]).map((row, i)=>(
-      <div key={i} style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:i===0?12:20}}>
-        {row.map(([l,v,c,bg])=>(
-          <div key={l} style={{background:bg,border:"1px solid",borderColor:bg,borderRadius:10,padding:"14px 18px"}}><div style={{fontSize:22,fontWeight:700,color:c}}>{v}</div><div style={{fontSize:12,color:c,opacity:0.8}}>{l}</div></div>
-        ))}
-      </div>
-    ))}
-    {failedAtSslCount > 0 ? (
-      <div style={{ marginBottom: 12 }}>
-        <Badge variant="red">Failed at SSL: {failedAtSslCount}</Badge>
-      </div>
-    ) : null}
-    <Card style={{marginBottom:16}}>
-      <div style={{padding:"12px 16px",display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
-        <div style={{position:"relative",flex:1,minWidth:180}}><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#9ca3af",fontSize:13}}>⌕</span><input value={search} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setSearch(e.target.value)} placeholder="Search domains…" style={{width:"100%",padding:"7px 12px 7px 30px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,outline:"none",background:"#f9fafb",boxSizing:"border-box",fontFamily:"inherit"}}/></div>
-        <Sel value={fSrv} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFS(e.target.value)}><option value="">All Servers</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel>
-        <Sel value={fReg} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFR(e.target.value)}><option value="">All Registrars</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel>
-        <Sel value={fCF} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFCF(e.target.value)}><option value="">All CF</option>{cfAccounts.map((c: CloudflareAccount)=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel>
-        {/* Пункты строятся из общей лестницы, а не перечислены руками: списком
-            руками они и разошлись с бэкендом — в нём не было `ns_ok`, и домен в
-            этом статусе нельзя было найти фильтром вовсе. */}
-        <Sel value={fStatus} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFStatus(e.target.value)}>
-          <option value="">All Statuses</option>
-          {DOMAIN_STATUSES.map((s)=><option key={s.status} value={s.status}>{domainStatusLabel(s.status)}</option>)}
-        </Sel>
-      </div>
-    </Card>
+    <DomainStats domains={domains} />
+    <DomainFilters
+      search={search} onSearchChange={setSearch}
+      serverId={fSrv} onServerChange={setFS} servers={servers}
+      registrarId={fReg} onRegistrarChange={setFR} registrars={registrars}
+      cfId={fCF} onCfChange={setFCF} cfAccounts={cfAccounts}
+      status={fStatus} onStatusChange={setFStatus}
+    />
     {/* Живёт ровно столько, сколько живёт набор, на котором случился отказ:
         гасит его эффект по `sel` выше, а не время и не следующий рендер. */}
     {bulkProvisionError ? (
