@@ -56,7 +56,7 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
 
 ## Фазы
 
-### Фаза 1 — Bulk «Provision» тулбара переводится на Tauri  `[ ]`
+### Фаза 1 — Bulk «Provision» тулбара переводится на Tauri  `[x]`
 
 Файлы: `frontend/src/pages/Domains.tsx`, `frontend/src/pages/DesktopWorkspace.tsx`.
 
@@ -82,7 +82,7 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
   `sdmp://bulk-provision` (так уже устроен `OpenInDesktop`) — исполнять в вебе
   нечем, а ссылка ведёт в рабочий путь.
 
-### Фаза 2 — Удалить фикцию из тулбара и страницы  `[ ]`
+### Фаза 2 — Удалить фикцию из тулбара и страницы  `[x]`
 
 Файлы: `frontend/src/pages/Domains.tsx`, `frontend/src/components/BulkActionToolbar.tsx`.
 
@@ -100,7 +100,7 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
 - Почистить `vi.mock` удалённых компонентов в тестах, где они станут висеть на
   несуществующие модули.
 
-### Фаза 3 — `DomainDetailModal`: 5 вкладок → 2  `[ ]`
+### Фаза 3 — `DomainDetailModal`: 5 вкладок → 2  `[x]`
 
 Файл: `frontend/src/components/DomainDetailModal.tsx`.
 
@@ -167,5 +167,24 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
 
 ## Итог
 
-- Реализован целиком: —
-- Что осталось: —
+- Реализован целиком: нет. Сделаны фазы 1–3.
+  - Кнопка «Provision» тулбара идёт через `runBulkProvisionDomains` →
+    `provision_bulk`; отчёт уходит новым обязательным пропом
+    `onBulkProvisionResult` в `DesktopWorkspace`, который раскладывает его по
+    уже существующим очередям (`provisionQueue` — пароли, `bulkReportQueue` —
+    итог) общей функцией `deliverBulkProvision` — той же, что обслуживает
+    deep link. Отказ запуска показывается баннером `role="alert"` над тулбаром.
+  - Из тулбара и страницы удалены «Refresh SSL» и «Full Setup» вместе с
+    `BulkSetupWizard.tsx`, `MultiTaskProgressModal.tsx` и ветками
+    `TaskProgressModal`/`MultiTaskProgressModal` (сам `TaskProgressModal`
+    оставлен — его использует `pages/Activity.tsx`).
+  - `DomainDetailModal` — две вкладки; `runAction`/`actionErrors` удалены как
+    выродившиеся (действие осталось одно), свойство «отказ Set NS переживает
+    закрытие карточки» сохранено (`setNsError` из `MutationCache`).
+  - Тесты: добавлен `pages/Domains.bulkprovision.test.tsx` (7 кейсов), из
+    `DomainDetailModal.setns.test.tsx` убраны кейсы про удалённые вкладки и
+    добавлен кейс «две вкладки вместо пяти». `npx tsc --noEmit` чист,
+    `npm test` — 65 файлов / 619 тестов зелёные.
+- Что осталось: фаза 4 (удалить мёртвые хуки и осиротевшие типы из
+  `api/domains.ts` — их определения ещё на месте, вызывающих нет) и остаток
+  фазы 5 (финальные grep-проверки после фазы 4).

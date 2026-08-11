@@ -13,8 +13,6 @@ export default function BulkActionToolbar({
   onAssignServer,
   onAssignCF,
   onProvision,
-  onBulkRefreshSsl,
-  onFullSetup,
   onDelete,
   pending,
 }: {
@@ -24,8 +22,6 @@ export default function BulkActionToolbar({
   onAssignServer: () => void;
   onAssignCF: () => void;
   onProvision: () => void;
-  onBulkRefreshSsl?: () => void;
-  onFullSetup?: () => void;
   onDelete: () => void;
   pending?: boolean;
 }) {
@@ -74,23 +70,14 @@ export default function BulkActionToolbar({
           бэкенде не существует. Массовый вариант был вдобавок хуже одиночного —
           `Promise.all(ids.map(mutateAsync))` без `catch` давал на 50 доменах 50
           штук 404 и unhandled rejection. */}
-      {onBulkRefreshSsl ? (
-        <OpenInDesktop
-          action={`refresh-ssl${q}`}
-          label="Refresh SSL"
-          desktopOnClick={onBulkRefreshSsl}
-          disabled={Boolean(pending)}
-        />
-      ) : null}
-      {onFullSetup ? (
-        <OpenInDesktop
-          action={`bulk-full-setup${q}`}
-          label="Full Setup"
-          variant="primary"
-          desktopOnClick={onFullSetup}
-          disabled={Boolean(pending) || webBulkDisabled}
-        />
-      ) : null}
+      {/* «Refresh SSL» и «Full Setup» удалены по той же причине, что и «Set NS»
+          выше: роутов `POST /domains/{id}/refresh-ssl` и
+          `/domains/bulk-full-setup` на бэкенде нет, а `sdmp://refresh-ssl` и
+          `sdmp://bulk-full-setup` не разбирает `parseDeepLinkAction` — обе
+          кнопки вели в никуда в обеих средах. Перевести их на Tauri сегодня
+          нечем: SSL — это отдельная SSH-операция без своей команды, а Full Setup
+          — связка assign → `cf_create_zone` → `registrar_set_nameservers`. И то
+          и другое — функция со своим планом, а не проброс кнопки. */}
       <OpenInDesktop
         action={`bulk-provision${q}`}
         label="Provision"

@@ -67,10 +67,8 @@ vi.mock("./Settings", () => ({ default: () => null }));
 // Тяжёлые дети самой страницы Domains, которые этот сценарий не открывает.
 vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
-vi.mock("../components/BulkSetupWizard", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
-vi.mock("../components/MultiTaskProgressModal", () => ({ default: () => null }));
 
 function domainRow(id: number, name: string) {
   return {

@@ -388,71 +388,10 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     ).toBeTruthy();
   });
 
-  it("ошибка ЧУЖОГО действия не переживает удавшийся Set NS", async () => {
-    setTauri(true);
-    mocks.mutate.mockResolvedValue(true);
-    mocks.apiPost.mockRejectedValue(new Error("SSL request failed: rate limited"));
-
-    renderModal();
-    // Баннер один на всю модалку, и между действиями она не размонтируется:
-    // без явного сброса в начале КАЖДОГО действия красное от прошлого висит
-    // над успехом следующего. Пара «SSL → Set NS» ловит это там, где пара
-    // «Set NS → Set NS» не поймала бы: у Set NS ошибка своя, из MutationCache.
-    fireEvent.click(screen.getByText("SSL"));
-    fireEvent.click(screen.getByText("Request SSL"));
-    expect(await screen.findByText(/rate limited/)).toBeTruthy();
-
-    const btn = await openNsTab();
-    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
-    fireEvent.click(btn);
-
-    await waitFor(() => expect(setNsCalls().length).toBe(1));
-    await waitFor(() => expect(screen.queryByText(/rate limited/)).toBeNull());
-  });
-
-  /**
-   * Пара обязана быть симметричной. Прошлый круг закрыл только направление
-   * «чужая ошибка → успех Set NS» и тем же движением открыл обратное: отказ
-   * Set NS живёт в MutationCache, `runAction` до него не дотягивается, и он
-   * повисал над удавшимся Create DB. Непарный тест — причина, по которой этот
-   * дефект дожил до третьего круга.
-   */
-  it("отказ Set NS не переживает удавшийся Request SSL", async () => {
-    setTauri(true);
-    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
-    mocks.apiPost.mockResolvedValue({});
-
-    renderModal();
-    const btn = await openNsTab();
-    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
-    fireEvent.click(btn);
-    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
-
-    fireEvent.click(screen.getByText("SSL"));
-    fireEvent.click(screen.getByText("Request SSL"));
-
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
-    // Красное «failed» над успешным действием толкает повторять операцию.
-    await waitFor(() => expect(screen.queryByText(/Invalid nameserver/)).toBeNull());
-  });
-
-  it("отказ Set NS не переживает удавшийся Create DB", async () => {
-    setTauri(true);
-    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
-    mocks.apiPost.mockResolvedValue({});
-
-    renderModal();
-    const btn = await openNsTab();
-    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
-    fireEvent.click(btn);
-    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
-
-    fireEvent.click(screen.getByText("DB"));
-    fireEvent.click(screen.getByText("Create DB"));
-
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByText(/Invalid nameserver/)).toBeNull());
-  });
+  // Пары «чужая ошибка ↔ удавшийся Set NS» удалены вместе с вкладками `db`,
+  // `ssl` и `nginx`: чужих действий в карточке больше нет ни одного, а с ними
+  // ушли `runAction` и карта ошибок по вкладкам. Осталось то, что и осталось в
+  // коде: отказ Set NS из MutationCache, живущий на своей вкладке.
 
   it("не встречает красным на Overview того, кто в этой сессии ничего не жал", async () => {
     setTauri(true);
@@ -473,168 +412,6 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     // Но на своей вкладке он никуда не делся — это и задумано.
     fireEvent.click(screen.getByText("NS"));
     expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
-  });
-
-  /**
-   * Владелец баннера обязан определяться моментом КЛИКА, а не моментом ответа.
-   * `actionErrorTab` был глобальным слотом: `runAction` переписывал его на
-   * каждом клике, а `onError` дописывал текст когда вернётся ответ, — и между
-   * этими двумя моментами пользователь успевает нажать что-то на другой
-   * вкладке. Любое действие завершается асинхронно, так что дело не в
-   * действиях, запускаемых с двух вкладок.
-   */
-  it("поздний отказ не приписывается вкладке, на которой всё удалось", async () => {
-    setTauri(true);
-    let failSsl: (e: Error) => void = () => {};
-    mocks.apiPost.mockImplementation(async (url: string) => {
-      if (String(url).includes("ssl-request")) {
-        return new Promise((_res, rej) => { failSsl = rej; });
-      }
-      return {};
-    });
-
-    renderModal();
-    fireEvent.click(screen.getByText("SSL"));
-    fireEvent.click(screen.getByText("Request SSL"));
-
-    // Пока SSL летит, уходим на DB и делаем там удачное действие.
-    fireEvent.click(screen.getByText("DB"));
-    fireEvent.click(screen.getByText("Create DB"));
-    await act(async () => {});
-
-    await act(async () => { failSsl(new Error("SSL request failed: rate limited")); });
-
-    // Красное от чужого действия над удавшимся Create DB — та же ложь, только
-    // приехавшая с задержкой.
-    expect(screen.queryByText(/rate limited/)).toBeNull();
-    // А на своей вкладке отказ на месте: он не потерян, он на месте.
-    fireEvent.click(screen.getByText("SSL"));
-    expect(await screen.findByText(/rate limited/)).toBeTruthy();
-  });
-
-  it("поздний чужой отказ не заслоняет ошибку Set NS", async () => {
-    setTauri(true);
-    let failSsl: (e: Error) => void = () => {};
-    mocks.apiPost.mockImplementation(async (url: string) => {
-      if (String(url).includes("ssl-request")) {
-        return new Promise((_res, rej) => { failSsl = rej; });
-      }
-      return {};
-    });
-    mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
-
-    renderModal();
-    fireEvent.click(screen.getByText("SSL"));
-    fireEvent.click(screen.getByText("Request SSL"));
-
-    const btn = await openNsTab();
-    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
-    fireEvent.click(btn);
-    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
-
-    await act(async () => { failSsl(new Error("SSL request failed: rate limited")); });
-
-    // Ровно та дыра, которую закрывал прошлый круг: чужая ошибка на вкладке NS
-    // маскирует собой отказ Set NS. Через задержку она открывалась снова.
-    expect(screen.queryByText(/rate limited/)).toBeNull();
-    expect(screen.getByText(/Invalid nameserver/)).toBeTruthy();
-  });
-
-  it("удавшийся повтор гасит своё же красное на той же вкладке", async () => {
-    setTauri(true);
-    let attempt = 0;
-    mocks.apiPost.mockImplementation(async (url: string) => {
-      if (String(url).includes("create-db")) {
-        attempt += 1;
-        if (attempt === 1) throw new Error("Create DB failed: no space left");
-      }
-      return {};
-    });
-
-    renderModal();
-    fireEvent.click(screen.getByText("DB"));
-    fireEvent.click(screen.getByText("Create DB"));
-    expect(await screen.findByText(/no space left/)).toBeTruthy();
-
-    // Повтор на месте — тот самый сценарий, ради которого сброс в начале
-    // действия и заводился. Пер-вкладочная карта не должна была его потерять:
-    // гасим свой ключ, а не чужие.
-    fireEvent.click(screen.getByText("Create DB"));
-    await waitFor(() => expect(screen.queryByText(/no space left/)).toBeNull());
-  });
-
-  it("поздний чужой отказ не стирает ошибку, на которую сейчас смотрят", async () => {
-    setTauri(true);
-    let failSsl: (e: Error) => void = () => {};
-    mocks.apiPost.mockImplementation(async (url: string) => {
-      if (String(url).includes("ssl-request")) {
-        return new Promise((_res, rej) => { failSsl = rej; });
-      }
-      if (String(url).includes("create-db")) throw new Error("Create DB failed: no space left");
-      return {};
-    });
-
-    renderModal();
-    fireEvent.click(screen.getByText("SSL"));
-    fireEvent.click(screen.getByText("Request SSL"));
-
-    fireEvent.click(screen.getByText("DB"));
-    fireEvent.click(screen.getByText("Create DB"));
-    expect(await screen.findByText(/no space left/)).toBeTruthy();
-
-    // Пути чтения и гашения пер-вкладочные, а путь ЗАПИСИ был глобальным:
-    // вернувшийся отказ SSL затирал слот целиком. Чужого текста на DB не
-    // появлялось — но и своё исчезало, и пустая вкладка утверждала, что здесь
-    // ничего не падало. Текст, по которому чинят, терялся.
-    await act(async () => { failSsl(new Error("SSL request failed: rate limited")); });
-
-    expect(screen.queryByText(/no space left/)).not.toBeNull();
-    expect(screen.queryByText(/rate limited/)).toBeNull();
-
-    // Обе ошибки живут одновременно, каждая на своей вкладке.
-    fireEvent.click(screen.getByText("SSL"));
-    expect(await screen.findByText(/rate limited/)).toBeTruthy();
-    expect(screen.queryByText(/no space left/)).toBeNull();
-  });
-
-  it("не теряет чужую ошибку из-за действия на другой вкладке", async () => {
-    setTauri(true);
-    mocks.apiPost.mockImplementation(async (url: string) => {
-      if (String(url).includes("create-db")) throw new Error("Create DB failed: no space left");
-      return {};
-    });
-
-    renderModal();
-    fireEvent.click(screen.getByText("DB"));
-    fireEvent.click(screen.getByText("Create DB"));
-    expect(await screen.findByText(/no space left/)).toBeTruthy();
-
-    // Удачное действие на СОСЕДНЕЙ вкладке гасило слот целиком, и вернувшийся
-    // на DB видел пустоту вместо своей ошибки. Это не дезинформация, а потеря
-    // информации, но исправлять её всё равно должен он.
-    fireEvent.click(screen.getByText("SSL"));
-    fireEvent.click(screen.getByText("Refresh SSL"));
-    await act(async () => {});
-
-    fireEvent.click(screen.getByText("DB"));
-    expect(screen.getByText(/no space left/)).toBeTruthy();
-  });
-
-  it("чужая ошибка не показывается на вкладке NS", async () => {
-    setTauri(true);
-    mocks.apiPost.mockRejectedValue(new Error("Create DB failed: no space left"));
-
-    renderModal();
-    fireEvent.click(screen.getByText("DB"));
-    fireEvent.click(screen.getByText("Create DB"));
-    expect(await screen.findByText(/no space left/)).toBeTruthy();
-
-    // Дыра варианта «скоупить только setNsError»: сам `actionError` тоже живёт
-    // между вкладками и переезжает на NS, где такого действия вообще нет — и
-    // там ещё и заслоняет собой ошибку Set NS. Баннер принадлежит вкладке,
-    // на которой запущено действие.
-    await openNsTab();
-    expect(screen.queryByText(/no space left/)).toBeNull();
   });
 
   it("не теряет отказ, прилетевший после закрытия карточки", async () => {
@@ -729,6 +506,29 @@ describe("Set NS — веб только смотрит", () => {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
     }
     expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("карточка домена — две вкладки вместо пяти", () => {
+  it("не предлагает DB / SSL / NGINX и Create Site и не ходит по их роутам", async () => {
+    setTauri(true);
+
+    renderModal();
+    await screen.findByText("OVERVIEW");
+
+    // Роутов `create-site`, `create-db`, `db-credentials`, `ssl-request`,
+    // `ssl-cancel`, `refresh-ssl` и `nginx-override` на бэкенде нет — каждая из
+    // этих вкладок всегда отвечала 404 в общий баннер.
+    for (const dead of ["DB", "SSL", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
+      expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
+    }
+    expect(screen.getByText("NS")).toBeTruthy();
+
+    // Запросы вкладок уходили при ОТКРЫТИИ карточки, а не по клику: креды БД и
+    // nginx-override тянулись `useQuery` с `enabled: !!domainId`.
+    await act(async () => {});
+    expect(mocks.apiGet.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
+    expect(mocks.apiPost.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
   });
 });
 

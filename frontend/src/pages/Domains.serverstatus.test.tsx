@@ -39,10 +39,7 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 // Тяжёлые соседи страницы, к колонке сервера отношения не имеющие (см.
 // Domains.setns.test.tsx — там та же преамбула и по той же причине).
-vi.mock("../components/BulkSetupWizard", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
-vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
-vi.mock("../components/MultiTaskProgressModal", () => ({ default: () => null }));
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -138,7 +135,7 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={() => {}} />
+      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} />
     </QueryClientProvider>,
   );
 }

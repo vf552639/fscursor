@@ -49,10 +49,7 @@ vi.mock("../components/RevealSecret", () => ({
 // выключенными флагами). Тянуть их дерево ради вкладки NS незачем: этот файл и
 // так единственный, который поднимает страницу целиком, и лишний импорт тут
 // замедляет весь прогон.
-vi.mock("../components/BulkSetupWizard", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
-vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
-vi.mock("../components/MultiTaskProgressModal", () => ({ default: () => null }));
 
 const ZONE = {
   id: "zone-a",
@@ -89,7 +86,7 @@ function setTauri(on: boolean) {
 function renderPage() {
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={() => {}} />
+      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} />
     </QueryClientProvider>
   );
 }

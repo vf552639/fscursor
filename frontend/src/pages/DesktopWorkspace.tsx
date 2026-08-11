@@ -192,6 +192,24 @@ export default function DesktopWorkspace() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
+  /**
+   * Разложить отчёт массового прогона по обеим очередям.
+   *
+   * Поставщиков у него два — ссылка `sdmp://bulk-provision` и кнопка «Provision»
+   * тулбара `Domains`, — а раскладка обязана быть одна: пропустив половину, мы
+   * либо потеряем пароли FTP, либо не скажем, что прогон оборвался.
+   */
+  const deliverBulkProvision = (outcome: BulkProvisionOutcome) => {
+    // Каждый отработавший домен — своя показ-один-раз модалка: пароль FTP
+    // каждого существует в единственном экземпляре, и сложить их в один слот
+    // значило бы потерять все, кроме последнего. Очередь для того и заведена.
+    for (const result of outcome.results) provisionQueue.push(result);
+    // Итог — отдельным экраном ПОСЛЕ паролей, а не тостом: тост живёт 2200 мс
+    // под этими самыми модалками, и «прогон оборвался на третьем домене»
+    // пользователь просто не увидит.
+    bulkReportQueue.push(outcome);
+  };
+
   useEffect(() => {
     if (!isTauri() || !userId) return;
     let unlisten: (() => void) | undefined;
@@ -204,17 +222,7 @@ export default function DesktopWorkspace() {
           else if (res.cancelled) showToast("Deep link cancelled — nothing was run");
           else if (res.fastpanel) fpQueue.push(res.fastpanel);
           else if (res.provision) provisionQueue.push(res.provision);
-          else if (res.bulkProvision) {
-            // Каждый отработавший домен — своя показ-один-раз модалка: пароль
-            // FTP каждого существует в единственном экземпляре, и сложить их в
-            // один слот значило бы потерять все, кроме последнего. Очередь для
-            // того и заведена.
-            for (const outcome of res.bulkProvision.results) provisionQueue.push(outcome);
-            // Итог — отдельным экраном ПОСЛЕ паролей, а не тостом: тост живёт
-            // 2200 мс под этими самыми модалками, и «прогон оборвался на
-            // третьем домене» пользователь просто не увидит.
-            bulkReportQueue.push(res.bulkProvision);
-          }
+          else if (res.bulkProvision) deliverBulkProvision(res.bulkProvision);
         } catch (e) {
           showToast(e instanceof Error ? e.message : String(e));
         }
@@ -690,7 +698,12 @@ export default function DesktopWorkspace() {
         {page === "dashboard" && <Dashboard onNav={nav} />}
         {page === "servers" && <Servers onNav={nav} />}
         {page === "domains" && (
-          <Domains onNav={nav} ctx={srvCtx} onProvisionResult={provisionQueue.push} />
+          <Domains
+            onNav={nav}
+            ctx={srvCtx}
+            onProvisionResult={provisionQueue.push}
+            onBulkProvisionResult={deliverBulkProvision}
+          />
         )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}
         {page === "notifications" && <Notifications onNav={nav} />}

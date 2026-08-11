@@ -34,10 +34,7 @@ vi.mock("../api/client", async (importOriginal) => ({
 
 vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
-vi.mock("../components/BulkSetupWizard", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
-vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
-vi.mock("../components/MultiTaskProgressModal", () => ({ default: () => null }));
 
 const PROVISION_ERROR = "provision failed at create_site: the command failed on the server";
 
@@ -71,7 +68,7 @@ function renderPage(rows: ReturnType<typeof domainRow>[]) {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={vi.fn()} />
+      <Domains onProvisionResult={vi.fn()} onBulkProvisionResult={vi.fn()} />
     </QueryClientProvider>
   );
 }

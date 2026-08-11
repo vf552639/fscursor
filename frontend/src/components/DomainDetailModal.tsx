@@ -4,14 +4,6 @@ import { useMutationState } from "@tanstack/react-query";
 import {
   Domain,
   SetNameserversVars,
-  useCancelSsl,
-  useCreateDb,
-  useCreateSite,
-  useDbCredentials,
-  useGetNginxOverride,
-  useRefreshSsl,
-  useRequestSsl,
-  useSetNginxOverride,
   useSetNameservers,
   normalizeNameservers,
   MIN_NAMESERVERS,
@@ -40,7 +32,15 @@ function sameNameservers(a: string[], b: string[]): boolean {
   return norm(a) === norm(b);
 }
 
-type Tab = "overview" | "db" | "ssl" | "nginx" | "ns";
+/**
+ * Осталось две вкладки из пяти. `db`, `ssl` и `nginx` (и кнопка «Create Site» на
+ * `overview`) удалены целиком: их действия били в `POST /domains/{id}/create-db`,
+ * `/ssl-request`, `/ssl-cancel`, `/refresh-ssl`, `/nginx-override`,
+ * `/create-site` и `GET /domains/{id}/db-credentials`, которых на бэкенде нет —
+ * все они всегда давали 404. Вернуть их можно только новыми Tauri-командами с
+ * SSH-логикой, это отдельная функция со своим планом, а не достижимость.
+ */
+type Tab = "overview" | "ns";
 
 export default function DomainDetailModal({
   domain,
@@ -50,65 +50,8 @@ export default function DomainDetailModal({
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
-  const [snippet, setSnippet] = useState("");
-  const [presets, setPresets] = useState({
-    force_https: false,
-    www_redirect: false,
-    custom_404: false,
-    basic_auth: false,
-  });
 
-  const createSite = useCreateSite();
-  const createDb = useCreateDb();
-  const dbCreds = useDbCredentials(domain.id);
-  const requestSsl = useRequestSsl();
-  const cancelSsl = useCancelSsl();
-  const refreshSsl = useRefreshSsl();
   const setNs = useSetNameservers();
-  const setNginx = useSetNginxOverride();
-  const nginxOverride = useGetNginxOverride(domain.id);
-  /**
-   * Ошибка вместе с вкладкой, которой она принадлежит — ОДНИМ стейтом. Баннер
-   * один на всю модалку и живёт между попытками (`key` меняется только при
-   * смене домена), поэтому одного сброса в начале действия мало: ошибка Create
-   * DB переезжала на вкладку NS, где такого действия нет вовсе, и там ещё и
-   * заслоняла ошибку Set NS. Каждое действие живёт ровно на одной вкладке
-   * (`overview` — Create Site, `db` — Create DB, `ssl` — три кнопки SSL,
-   * `nginx` — override, `ns` — Set NS), так что «показывать отчёт только там,
-   * где нажимали» — это и есть правило.
-   *
-   * Два отдельных `useState` под текст и вкладку разъезжались ровно там, где и
-   * должны были: слот вкладки был глобальный и перезаписывался следующим
-   * кликом, а текст дописывался, когда вернётся ответ.
-   *
-   * Хранилище — по одной ошибке НА ВКЛАДКУ, а не один слот с меткой вкладки.
-   * Права на собственный отказ есть у каждой из пяти, и с единственным слотом
-   * вернувшийся отказ SSL стирал ошибку Create DB, на которую пользователь
-   * смотрел прямо сейчас: чужого текста не появлялось, но и своего не
-   * оставалось, а пустая вкладка утверждает, что здесь ничего не падало.
-   */
-  const [actionErrors, setActionErrors] = useState<Partial<Record<Tab, string>>>({});
-
-  /**
-   * Владелец берётся на момент КЛИКА и уезжает в замыкание, а не читается из
-   * стейта на момент ответа: между кликом и ответом пользователь успевает уйти
-   * на другую вкладку и нажать там что-то ещё. Дело не в действиях, которые
-   * можно запустить с двух вкладок, — асинхронно завершается любое.
-   *
-   * И гашение при старте, и запись при отказе идут по СВОЕМУ ключу: соседняя
-   * вкладка не теряет свою ошибку ни в тот момент, когда здесь начинают новое
-   * действие, ни в тот, когда сюда возвращается поздний ответ.
-   */
-  const runAction = (fn: (fail: (message: string) => void) => void) => {
-    const owner = tab;
-    setActionErrors((prev) => {
-      if (prev[owner] === undefined) return prev;
-      const next = { ...prev };
-      delete next[owner];
-      return next;
-    });
-    fn((message) => setActionErrors((prev) => ({ ...prev, [owner]: message })));
-  };
 
   /**
    * Отказ смены NS переживает закрытие карточки: читаем последнюю попытку по
@@ -131,22 +74,20 @@ export default function DomainDetailModal({
       : null;
 
   /**
-   * Баннер принадлежит вкладке, на которой запущено действие, — по одной и той
-   * же причине для обеих половин.
+   * Баннер принадлежит вкладке, на которой запущено действие. Действие теперь
+   * ровно одно (Set NS на вкладке `ns`), поэтому карта «ошибка на каждую
+   * вкладку» вместе с `runAction` удалена следом за вкладками, которые её
+   * наполняли: с единственным источником ей нечего разводить. Скоуп по вкладке
+   * при этом остался — он про другое и продолжает работать: без него отказ Set
+   * NS встречал бы на Overview пользователя, который в этой сессии ничего не
+   * нажимал.
    *
-   * `setNsError` живёт в MutationCache и `runAction` его не касается: без
-   * скоупа отказ Set NS висел бы красным над удавшимся Create DB на соседней
-   * вкладке и встречал бы на Overview пользователя, который в этой сессии
-   * ничего не нажимал. `actionErrors` живут в стейте модалки и переживают
-   * переключение вкладок: без скоупа ошибка показывалась бы на NS, где такого
-   * действия нет, да ещё и заслоняла бы собой `setNsError`.
-   *
-   * Скоуп не прячет отказ Set NS насовсем: на своей вкладке он по-прежнему
-   * виден и после закрытия и повторного открытия карточки (это задумано —
-   * ответ регистратора может прийти уже после закрытия). Долговременный след
-   * — `ns_status: error` в строке таблицы.
+   * Скоуп не прячет отказ насовсем: на своей вкладке он по-прежнему виден и
+   * после закрытия и повторного открытия карточки (это задумано — ответ
+   * регистратора может прийти уже после закрытия). Долговременный след —
+   * `ns_status: error` в строке таблицы.
    */
-  const banner = actionErrors[tab] ?? (tab === "ns" ? setNsError : null);
+  const banner = tab === "ns" ? setNsError : null;
 
   // NS зоны Cloudflare — источник по умолчанию: в этом продукте «Set NS» почти
   // всегда значит «прописать регистратору те NS, что выдал Cloudflare». Но поле
@@ -154,9 +95,9 @@ export default function DomainDetailModal({
   // бы заперт, а команда список NS сама не добывает.
   //
   // Запрос — только на своей вкладке: `cf_list_zones` листает аккаунт по 50 зон,
-  // и платить за это при открытии карточки на вкладке SSL незачем. Ключ кэша
-  // общий с остальными потребителями зон, так что переключение вкладок туда-сюда
-  // второго похода не стоит.
+  // и платить за это при открытии карточки на Overview незачем (а открывается
+  // она всегда на нём). Ключ кэша общий с остальными потребителями зон, так что
+  // переключение вкладок туда-сюда второго похода не стоит.
   const zoneNs = useZoneNameservers(
     tab === "ns" ? domain.cloudflare_account_id : null,
     domain.cloudflare_zone_id
@@ -187,26 +128,6 @@ export default function DomainDetailModal({
     setNsPrefilled(true);
   }, [zoneNs.data, nsEdited, nsPrefilled]);
 
-  React.useEffect(() => {
-    if (nginxOverride.data) {
-      setSnippet(nginxOverride.data.snippet || "");
-      const p = nginxOverride.data.presets || {};
-      setPresets({
-        force_https: Boolean(p.force_https),
-        www_redirect: Boolean(p.www_redirect),
-        custom_404: Boolean(p.custom_404),
-        basic_auth: Boolean(p.basic_auth),
-      });
-    }
-  }, [nginxOverride.data]);
-
-  const sslLabel = useMemo(() => {
-    if (domain.ssl_status === "active") return `Active${domain.ssl_expires_at ? ` (exp: ${new Date(domain.ssl_expires_at).toLocaleDateString()})` : ""}`;
-    if (domain.ssl_status === "pending") return "Pending";
-    if (domain.ssl_status === "error") return "Error";
-    return "None";
-  }, [domain.ssl_expires_at, domain.ssl_status]);
-
   return (
     <Modal title={`Domain: ${domain.domain_name}`} onClose={onClose} width={760}>
       {banner ? (
@@ -215,7 +136,7 @@ export default function DomainDetailModal({
         </div>
       ) : null}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {(["overview", "db", "ssl", "nginx", "ns"] as Tab[]).map((t) => (
+        {(["overview", "ns"] as Tab[]).map((t) => (
           <Btn key={t} variant={tab === t ? "primary" : "secondary"} size="sm" onClick={() => setTab(t)}>
             {t.toUpperCase()}
           </Btn>
@@ -230,80 +151,6 @@ export default function DomainDetailModal({
           <div><b>Cloudflare:</b> {domain.cloudflare_account_id ?? "—"}</div>
           <div><b>NS:</b> {domain.ns_status ?? "pending"} ({domain.ns_check_mode ?? "auto"})</div>
           <div><b>Last error:</b> {domain.last_provision_error || "—"}</div>
-          <div style={{ marginTop: 10 }}>
-            <Btn
-              variant="secondary"
-              onClick={() => runAction((fail) => createSite.mutate({ domainId: domain.id, site_only: true }, { onError: (e: any) => fail(e?.message || "Create site failed") }))}
-              disabled={createSite.isPending}
-            >
-              {createSite.isPending ? "Starting..." : "Create Site"}
-            </Btn>
-          </div>
-        </div>
-      )}
-
-      {tab === "db" && (
-        <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10 }}>
-          <div><b>DB name:</b> {dbCreds.data?.db_name ?? domain.db_name ?? "—"}</div>
-          <div><b>DB user:</b> {dbCreds.data?.db_user ?? domain.db_user ?? "—"}</div>
-          <div><b>DB password:</b> {dbCreds.data?.db_password ?? "—"}</div>
-          <Btn variant="secondary" onClick={() => runAction((fail) => createDb.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Create DB failed") }))} disabled={createDb.isPending}>
-            {createDb.isPending ? "Creating..." : "Create DB"}
-          </Btn>
-        </div>
-      )}
-
-      {tab === "ssl" && (
-        <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10 }}>
-          <div><b>Status:</b> {sslLabel}</div>
-          <div><b>Issuer:</b> {domain.ssl_issuer ?? "—"}</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Btn variant="secondary" onClick={() => runAction((fail) => requestSsl.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Request SSL failed") }))} disabled={requestSsl.isPending}>
-              Request SSL
-            </Btn>
-            <Btn variant="secondary" onClick={() => runAction((fail) => refreshSsl.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Refresh SSL failed") }))} disabled={refreshSsl.isPending}>
-              Refresh SSL
-            </Btn>
-            <Btn variant="danger" onClick={() => runAction((fail) => cancelSsl.mutate(domain.id, { onError: (e: any) => fail(e?.message || "Cancel SSL failed") }))} disabled={cancelSsl.isPending}>
-              Cancel SSL
-            </Btn>
-          </div>
-        </div>
-      )}
-
-      {tab === "nginx" && (
-        <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10 }}>
-          <label><input type="checkbox" checked={presets.force_https} onChange={(e) => setPresets((p) => ({ ...p, force_https: e.target.checked }))} /> Force HTTPS</label>
-          <label><input type="checkbox" checked={presets.www_redirect} onChange={(e) => setPresets((p) => ({ ...p, www_redirect: e.target.checked }))} /> www -&gt; non-www</label>
-          <label><input type="checkbox" checked={presets.custom_404} onChange={(e) => setPresets((p) => ({ ...p, custom_404: e.target.checked }))} /> custom 404</label>
-          <label><input type="checkbox" checked={presets.basic_auth} onChange={(e) => setPresets((p) => ({ ...p, basic_auth: e.target.checked }))} /> basic auth</label>
-          <textarea
-            value={snippet}
-            onChange={(e) => setSnippet(e.target.value)}
-            placeholder="Custom nginx snippet"
-            style={{ width: "100%", minHeight: 140, borderRadius: 8, border: "1px solid #e5e7eb", padding: 8, fontFamily: "monospace" }}
-          />
-          <div style={{ fontSize: 12, color: "#6b7280", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 10px", whiteSpace: "pre-wrap" }}>
-            Preview:
-            {"\n"}
-            {(presets.force_https ? "if ($scheme = http) { return 301 https://$host$request_uri; }\n" : "") +
-              (presets.www_redirect ? `if ($host = "www.${domain.domain_name}") { return 301 https://${domain.domain_name}$request_uri; }\n` : "") +
-              snippet}
-          </div>
-          <Btn
-            variant="secondary"
-            onClick={() =>
-              runAction((fail) =>
-                setNginx.mutate(
-                  { domainId: domain.id, data: { snippet, presets } },
-                  { onError: (e: any) => fail(e?.message || "Save nginx override failed") }
-                )
-              )
-            }
-            disabled={setNginx.isPending}
-          >
-            Save and Reload nginx
-          </Btn>
         </div>
       )}
 
@@ -386,14 +233,12 @@ export default function DomainDetailModal({
                 // с размонтированием, а отказ регистратора может прилететь уже
                 // после закрытия карточки.
                 onClick={() =>
-                  runAction(() =>
-                    setNs.mutate({
-                      domainId: domain.id,
-                      domainName: domain.domain_name,
-                      registrarAccountId: domain.registrar_id,
-                      nameservers,
-                    })
-                  )
+                  setNs.mutate({
+                    domainId: domain.id,
+                    domainName: domain.domain_name,
+                    registrarAccountId: domain.registrar_id,
+                    nameservers,
+                  })
                 }
                 disabled={
                   setNs.isPending ||

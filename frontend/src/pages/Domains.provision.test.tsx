@@ -50,10 +50,7 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 // времени всему прогону — файл и так поднимает страницу целиком.
 vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
-vi.mock("../components/BulkSetupWizard", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
-vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
-vi.mock("../components/MultiTaskProgressModal", () => ({ default: () => null }));
 
 const DB_PASSWORD = "db-pw-Nx9-secret";
 const FTP_PASSWORD = "ftp-pw-Qz4-secret";
@@ -110,7 +107,7 @@ function renderPage(onProvisionResult: (r: any) => void = vi.fn()) {
   // клиентом утверждения про кэш мутаций были бы зелены вхолостую.
   const ui = (
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={onProvisionResult} />
+      <Domains onProvisionResult={onProvisionResult} onBulkProvisionResult={vi.fn()} />
     </QueryClientProvider>
   );
   // `remount` — уход со страницы и возврат: тот же клиент, новый `Domains`.
@@ -130,7 +127,7 @@ function Workspace({ rows }: { rows: Array<{ id: number; name: string }> }) {
   const queue = useShowOnceQueue<ProvisionOutcome>();
   return (
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={queue.push} />
+      <Domains onProvisionResult={queue.push} onBulkProvisionResult={vi.fn()} />
       {queue.current && (
         <ProvisionResultModal
           domain={queue.current.domain}

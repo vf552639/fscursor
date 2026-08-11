@@ -1,22 +1,20 @@
 import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useBulkProvisionDomains, useProvisionDomain, useRefreshSsl, useBulkFullSetup, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useProvisionDomain, runBulkProvisionDomains, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
 import StatusBadge from "../components/StatusBadge";
 import { describeQueryError } from "../lib/queryError";
-import TaskProgressModal from "../components/TaskProgressModal";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
-import BulkSetupWizard from "../components/BulkSetupWizard";
-import MultiTaskProgressModal from "../components/MultiTaskProgressModal";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
+import { useAuthStore } from "../store/auth";
 
 /**
  * Заглушка для обязательного `desktopOnClick` у `OpenInDesktop` там, где сам
@@ -246,7 +244,7 @@ function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: E
   </Modal>;
 }
 
-export default function Domains({ onNav, ctx, onProvisionResult }: {
+export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult }: {
   onNav?: (pg: string, ctx?: any) => void;
   ctx?: any;
   /**
@@ -260,6 +258,17 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
    * невыразимой — комментарий умеет только объяснить её задним числом.
    */
   onProvisionResult: (outcome: ProvisionOutcome) => void;
+  /**
+   * То же самое для массового прогона, и обязателен по той же причине, только
+   * дороже: в отчёте лежит пароль FTP КАЖДОГО отработавшего домена, то есть
+   * потерять можно сразу N. Уход со страницы во время прогона — не редкость: он
+   * идёт минутами на каждый домен.
+   *
+   * Отдаём отчёт целиком, а не по одному результату: DesktopWorkspace обязан
+   * поставить в очередь и пароли, и итог прогона (`already_ran`, оборвался ли
+   * он и на чём), а итог живёт только в отчёте.
+   */
+  onBulkProvisionResult: (outcome: BulkProvisionOutcome) => void;
 }){
   const domainsQ = useDomains();
   const serversQ = useServers();
@@ -309,10 +318,15 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
 
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
-  const bulkProvision = useBulkProvisionDomains();
-  const refreshSsl = useRefreshSsl();
-  const bulkFullSetup = useBulkFullSetup();
   const singleProvision = useProvisionDomain(onProvisionResult);
+  // Массовый прогон идёт не мутацией, а прямым `await` (см. `handleBulkProvision`),
+  // поэтому «идёт ли он» приходится держать самим: `pending` кнопки читать
+  // больше неоткуда. Подоменный гейт этот флаг НЕ заменяет — он в MutationCache
+  // и защищает от второго прогона по тому же домену из ссылки и из ⚙.
+  const [bulkProvisionRunning, setBulkProvisionRunning] = useState(false);
+  // Отказ запуска обязан быть виден: «уже провижинится», «только десктоп» и
+  // отказ самой команды — это ответ на вопрос «почему ничего не произошло».
+  const [bulkProvisionError, setBulkProvisionError] = useState<string | null>(null);
   // Состояние provision читаем из MutationCache, а не из локального observer:
   // операция идёт минутами (SSH + certbot) и переживает уход со страницы, а
   // observer при размонтировании теряет с ней связь. Без этого после возврата
@@ -324,14 +338,12 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
   });
   const isProvisioning = (id: number) => provisioningIds.includes(id);
   const deleteDomain = useDeleteDomain();
-  const [progressTaskId, setProgressTaskId] = useState<number | null>(null);
-  const [progressTaskIds, setProgressTaskIds] = useState<number[]>([]);
-  // Desktop provisioning is synchronous (no server-side task log to poll), so
-  // its outcome is shown directly instead of routed through progressTaskId/
-  // TaskProgressModal — that pair is for the backend-queued flows below
-  // (bulk full setup, Activity page). Показывает результат не эта страница, а
-  // DesktopWorkspace (см. `onProvisionResult`): пароли БД и FTP не должны
-  // зависеть от того, ушёл ли пользователь со страницы, пока шёл provision.
+  // Provision в десктопе синхронен: серверного task log'а, который можно было бы
+  // поллить, у него нет — поэтому ни `TaskProgressModal`, ни его multi-версии на
+  // этой странице больше нет вовсе (их единственным поставщиком был bulk full
+  // setup, ушедший вместе с несуществующим роутом). Показывает результат не эта
+  // страница, а DesktopWorkspace (см. `onProvisionResult`): пароли БД и FTP не
+  // должны зависеть от того, ушёл ли пользователь со страницы, пока шёл provision.
   //
   // Диалог перед запуском: домен, для которого он открыт, и выбор «создавать ли
   // базу». Выбор живёт здесь, а не в аргументах строки, чтобы не залипать между
@@ -343,7 +355,6 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
     setProvisionTarget(d);
   };
   const [showFileImport, setShowFileImport] = useState(false);
-  const [showFullSetup, setShowFullSetup] = useState(false);
 
   useEffect(() => {
     if (ctx?.serverId) {
@@ -477,16 +488,48 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
     );
   };
 
-  const handleBulkProvision = () => {
-    bulkProvision.mutate(Array.from(sel), {
-      onSuccess: () => setSel(new Set())
-    });
-  };
-
-  const handleBulkRefreshSsl = async () => {
-    const ids = Array.from(sel);
-    await Promise.all(ids.map((id) => refreshSsl.mutateAsync(id)));
-    setSel(new Set());
+  /**
+   * Массовый provision — через Tauri-команду `provision_bulk`, тем же путём,
+   * что и ссылка `sdmp://bulk-provision` (см. `lib/deepLink.ts`). Прежний
+   * `POST /domains/bulk-provision` на бэкенде не существует: кнопка всегда
+   * давала 404, то есть обещала функцию, которой нет.
+   *
+   * Не прямой `invokeSynced`, а `runBulkProvisionDomains` — по тем же двум
+   * причинам, что и у ссылки: только он отдаёт наружу результат КАЖДОГО домена
+   * (пароль FTP существует только там) и только он занимает подоменный гейт в
+   * `MutationCache`, из-за чего ⚙ строки и ссылка не откроют вторую SSH-сессию
+   * по домену из набора.
+   *
+   * Результат не через `mutate`: возврат `mutationFn` react-query кладёт в
+   * `data` `MutationCache`, откуда его не убирает даже `reset()`. Паролям там
+   * не место, поэтому отчёт уезжает прямым вызовом пропа.
+   */
+  const handleBulkProvision = async () => {
+    // Тот же источник, что у `useSetNameservers`: id пользователя нужен команде,
+    // чтобы расшифровать креды сервера.
+    const userId = useAuthStore.getState().userId;
+    setBulkProvisionError(null);
+    if (!userId) {
+      setBulkProvisionError("Not signed in — sign in again to run provisioning.");
+      return;
+    }
+    // Команда адресует домены строками.
+    const ids = Array.from(sel).map(String);
+    setBulkProvisionRunning(true);
+    try {
+      const outcome = await runBulkProvisionDomains(userId, ids);
+      // Отчёт отдаём ПЕРВЫМ действием после ответа: всё остальное здесь —
+      // косметика стейта, а он существует в единственном экземпляре.
+      onBulkProvisionResult(outcome);
+      setSel(new Set());
+    } catch (e) {
+      // «Provisioning of #N is already running.», «только десктоп» и отказ самой
+      // команды — всё это обязано доехать до пользователя: молчащая кнопка
+      // неотличима от сломанной.
+      setBulkProvisionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkProvisionRunning(false);
+    }
   };
 
   const handleBulkDelete = async () => {
@@ -560,16 +603,22 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
         </Sel>
       </div>
     </Card>
+    {/* Вне тулбара намеренно: тулбар исчезает при `selectedCount <= 0`, а набор
+        сбрасывается удавшимся прогоном — вместе с ним исчезла бы и причина
+        отказа предыдущего. */}
+    {bulkProvisionError ? (
+      <div role="alert" style={{marginBottom:12,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
+        {bulkProvisionError}
+      </div>
+    ) : null}
     <BulkActionToolbar
       selectedCount={sel.size}
       selectedDomainIds={Array.from(sel)}
       onAssignServer={() => setShowAssignServer(true)}
       onAssignCF={() => setShowAssignCF(true)}
-      onBulkRefreshSsl={handleBulkRefreshSsl}
-      onFullSetup={() => setShowFullSetup(true)}
-      onProvision={handleBulkProvision}
+      onProvision={() => { void handleBulkProvision(); }}
       onDelete={handleBulkDelete}
-      pending={bulkProvision.isPending || refreshSsl.isPending || bulkFullSetup.isPending}
+      pending={bulkProvisionRunning}
     />
     <Card>
       <div style={{overflowX:"auto"}}>
@@ -733,33 +782,6 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
         onClose={() => setDetailDomain(null)}
       />
     )}
-    {showFullSetup && (
-      <BulkSetupWizard
-        selectedCount={sel.size}
-        selectedDomainIds={Array.from(sel)}
-        servers={servers}
-        cfAccounts={cfAccounts}
-        registrars={registrars}
-        isRunning={bulkFullSetup.isPending}
-        onClose={() => setShowFullSetup(false)}
-        onRun={(payload) => {
-          bulkFullSetup.mutate(
-            { domain_ids: Array.from(sel), ...payload },
-            {
-              onSuccess: (res) => {
-                if (res.task_log_ids.length > 0) {
-                  setProgressTaskId(res.task_log_ids[0]);
-                  setProgressTaskIds(res.task_log_ids);
-                }
-                setSel(new Set());
-                setShowFullSetup(false);
-              },
-            }
-          );
-        }}
-      />
-    )}
-
     {showBulk&&<Modal title="Bulk Add Domains" onClose={()=>setSB(false)} width={520}>
       <div style={{display:"flex",background:"#f3f4f6",borderRadius:8,padding:3,marginBottom:20}}>
         {[["text","Plain Text"],["csv","CSV / Semicolon"]].map(([k,l])=>(
@@ -840,21 +862,13 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
             `provision_domain` принимает `with_db`, но до этого чекбокса ни один
             вызывающий его не передавал — опциональная БД была недостижима.
 
-            Массового аналога нет по двум причинам, и обе проверяемые.
-            (1) `BulkSetupWizard` вообще не провижинит: он назначает сервер и
-            Cloudflare, создаёт зону и пушит NS.
-            (2) Tauri-команда `provision_bulk` намеренно не принимает `with_db`.
-            Показать пароли теперь есть где — с фазы 3 спринта 4 массовый прогон
-            возвращает результат по каждому домену, и воркспейс ставит их в ту же
-            очередь показов. Но запускается bulk только ссылкой
-            `sdmp://bulk-provision`, у которой параметра «создавать ли базу» нет:
-            молча создать сотню баз значит сделать за пользователя выбор,
-            которого он не делал.
-
-            NB на будущее: обе массовые кнопки («Provision» тулбара и «Run Full
-            Setup») бьют в `POST /domains/bulk-provision` и
-            `/domains/bulk-full-setup`, которых на бэкенде НЕТ (grep по
-            `backend/app/` пуст) — сегодня это 404, разбор в отдельной задаче. */}
+            У массового прогона такого выбора нет, и это не недосмотр:
+            Tauri-команда `provision_bulk` намеренно не принимает `with_db`.
+            Молча создать сотню баз значит сделать за пользователя выбор,
+            которого он не делал, а спросить про каждый домен отдельно эта
+            кнопка не умеет. Пароли показать есть где — массовый прогон
+            возвращает результат по каждому домену, и воркспейс ставит их в ту
+            же очередь показов. */}
         <label
           style={{
             display: "flex",
@@ -905,16 +919,6 @@ export default function Domains({ onNav, ctx, onProvisionResult }: {
           </Btn>
         </div>
       </Modal>
-    )}
-    {progressTaskId !== null && (
-      <TaskProgressModal taskId={progressTaskId} onClose={() => setProgressTaskId(null)} />
-    )}
-    {progressTaskIds.length > 1 && (
-      <MultiTaskProgressModal
-        taskIds={progressTaskIds}
-        onOpenTask={(taskId) => setProgressTaskId(taskId)}
-        onClose={() => setProgressTaskIds([])}
-      />
     )}
   </>;
 }
