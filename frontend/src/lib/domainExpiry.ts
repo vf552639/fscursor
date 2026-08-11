@@ -40,8 +40,25 @@ export const NO_VALUE = "—";
  */
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
-function isDateOnly(iso: string): boolean {
-  return DATE_ONLY.test(iso);
+function isDateOnly(iso: string | null | undefined): boolean {
+  return !!iso && DATE_ONLY.test(iso);
+}
+
+/**
+ * Разбор ISO-строки БЕЗ каких-либо сдвигов; `null` — строки нет или она
+ * нечитаема.
+ *
+ * Одна на модуль, хотя пользуются ею двое и по-разному: `expiryTs` прибавляет
+ * date-only значению сутки (срок такой даты — конец дня), а `formatExpiryDate`
+ * печатает саму дату и потому обязана видеть её несдвинутой. Общая у них
+ * ровно политика «чего мы не разобрали, того мы не знаем» — и разъехаться этим
+ * двум копиям `Number.isNaN` было бы нечем себя выдать: одна ячейка печатала бы
+ * «Invalid Date», а соседняя подпись под ней — честный прочерк.
+ */
+function parse(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ts = new Date(iso).getTime();
+  return Number.isNaN(ts) ? null : ts;
 }
 
 /**
@@ -72,9 +89,8 @@ function isDateOnly(iso: string): boolean {
  * и у `null` в компараторе есть одно явное правило (в конец, в обе стороны).
  */
 export function expiryTs(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const ts = new Date(iso).getTime();
-  if (Number.isNaN(ts)) return null;
+  const ts = parse(iso);
+  if (ts === null) return null;
   return isDateOnly(iso) ? ts + DAY_MS : ts;
 }
 
@@ -97,9 +113,11 @@ export function expiryTs(iso: string | null | undefined): number | null {
  * экранах: два написания одной даты читатель принимает за две разные даты.
  */
 export function formatExpiryDate(iso: string | null | undefined): string {
-  if (!iso) return NO_VALUE;
-  const ts = new Date(iso).getTime();
-  if (Number.isNaN(ts)) return NO_VALUE;
+  // НЕ через `expiryTs`: тот сдвигает date-only значение на конец дня, и печать
+  // от него называла бы СЛЕДУЮЩИЙ день. Общий у них разбор (`parse`), а сдвиг —
+  // нет: это разные вопросы, «когда истекает» и «что за дата написана».
+  const ts = parse(iso);
+  if (ts === null) return NO_VALUE;
   return new Date(ts).toLocaleDateString("ru-RU", {
     day: "2-digit",
     month: "2-digit",
