@@ -176,11 +176,16 @@ async function readZones(
 }
 
 /**
- * Свободен ли домен ПРЯМО СЕЙЧАС — по самому свежему, что есть на клиенте.
+ * Свободен ли домен по САМОМУ СВЕЖЕМУ СПИСКУ, который клиент успел получить.
  *
  * Источник — та же запись кэша, которую рисует страница (`useDomains()` без
- * фильтров): её обновляют и `useBulkAssignCloudflare`, и любая другая правка
- * домена, потому что все они гасят `domainsKeys.all`.
+ * фильтров): её гасят и `useBulkAssignCloudflare`, и любая другая правка
+ * домена. Именно «получить», а не «прямо сейчас»: `invalidateQueries` запускает
+ * перезапрос, но до его ответа `getQueryData` отдаёт СТАРЫЕ строки. То есть
+ * окно перезаписи не закрыто, а сужено — с десятков секунд (весь прогон) до
+ * одного круга `GET /domains`. Закрыть его совсем можно только условной записью
+ * на бэкенде («поставь аккаунт, только если он пуст»), и это записано в долг
+ * плана: бэкенд в этой задаче не трогаем.
  *
  * Кэша нет или домена в нём нет — считаем свободным: свежее снимка, с которым
  * прогон начался, у нас в этом случае ничего нет, и отказаться писать значило
@@ -327,6 +332,21 @@ export interface CfBindNotice {
  * - `manual` (кнопка) обязан ответить всегда: кнопка, которая молчит, не
  *   отличима от сломанной.
  */
+/**
+ * «Привязывать нечего» — одной фразой на два случая: домены были привязаны ещё
+ * до прогона и домены, которых разобрали, пока прогон шёл. Для пользователя это
+ * одна и та же новость, и двух формулировок у неё быть не должно.
+ */
+function nothingToDo(skipped: number): CfBindNotice {
+  return {
+    kind: "info",
+    text:
+      skipped > 0
+        ? `Cloudflare: nothing to do — all ${skipped} selected domain(s) are already linked.`
+        : "Cloudflare: nothing to match.",
+  };
+}
+
 export function summarizeCfBind(
   report: CfBindReport,
   mode: "auto" | "manual",
@@ -338,14 +358,7 @@ export function summarizeCfBind(
       : { kind: "warn", text: "Cloudflare: no active account is connected — nothing to match against." };
   }
   if (report.status === "nothing-to-do") {
-    if (mode === "auto") return null;
-    return {
-      kind: "info",
-      text:
-        report.skipped > 0
-          ? `Cloudflare: nothing to do — all ${report.skipped} selected domain(s) are already linked.`
-          : "Cloudflare: nothing to match.",
-    };
+    return mode === "auto" ? null : nothingToDo(report.skipped);
   }
 
   // Прогон был, но не сделал и не скрыл ничего: ни одной привязки, ни одной
@@ -361,6 +374,12 @@ export function summarizeCfBind(
 
   const considered =
     report.bound.length + report.none.length + report.ambiguous.length + report.writeFailed.length;
+  // Рассматривать оказалось нечего, хотя на старте было что: все кандидаты
+  // разобрали по дороге (`isStillUnbound`). Это тот же «привязывать нечего»,
+  // что и до начала прогона, и говорить о нём надо теми же словами — «0 of 0
+  // linked» ниже формально не врёт, но читается как поломка счётчика.
+  if (considered === 0) return nothingToDo(report.skipped);
+
   const parts = [`${report.bound.length} of ${considered} linked`];
   // Каждая из четырёх строк ниже отвечает на свой вопрос «почему не
   // привязано», и слитые в одно число они бы на него не отвечали. «Без зоны»
@@ -389,4 +408,20 @@ export function summarizeCfBind(
   const halfSuccess =
     report.ambiguous.length > 0 || report.writeFailed.length > 0 || report.unreadAccounts.length > 0;
   return { kind: halfSuccess ? "warn" : "info", text };
+}
+
+/**
+ * Что сказать, когда прогон не состоялся вовсе.
+ *
+ * Бросить `autoBindDomainsToCloudflare` может только на чтении СПИСКА
+ * аккаунтов: всё остальное — непрочитанный аккаунт, несостоявшийся `PUT` —
+ * приезжает строками отчёта. Живёт эта фраза здесь, рядом с `summarizeCfBind`,
+ * а не у места вызова, ровно по двум причинам, по которым здесь живёт и она:
+ * весь текст привязки должен быть проверяем без DOM, и чужая ошибка обязана
+ * пройти через `clip`. Пока строка собиралась в `Domains.tsx`, обрезки у неё не
+ * было — а текст туда приезжает тот же самый, `e.to_string()` через прокси
+ * `api_request`, то есть в пределе тело ответа сервера.
+ */
+export function summarizeCfBindFailure(e: unknown): CfBindNotice {
+  return { kind: "warn", text: `Cloudflare: could not match zones — ${clip(errorText(e))}` };
 }

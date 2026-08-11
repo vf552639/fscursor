@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-import { autoBindDomainsToCloudflare, summarizeCfBind, CfBindReport } from "./cfAutoBind";
+import {
+  autoBindDomainsToCloudflare,
+  summarizeCfBind,
+  summarizeCfBindFailure,
+  CfBindReport,
+} from "./cfAutoBind";
 import { domainsKeys } from "./domains";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
@@ -449,6 +454,19 @@ describe("summarizeCfBind", () => {
     expect(unread?.kind).toBe("warn");
   });
 
+  it("про набор, разобранный по дороге, говорит «нечего делать», а не «0 of 0»", () => {
+    // Единственный кандидат оказался занят чужой привязкой, пока шёл прогон
+    // (`isStillUnbound`), — и рассматривать стало нечего. «Cloudflare: 0 of 0
+    // linked, 1 already linked» формально не врёт, но читается как поломка
+    // счётчика; новость же ровно та, что и до старта прогона.
+    const notice = summarizeCfBind(report({ skipped: 1 }), "manual");
+
+    expect(notice).toEqual({
+      kind: "info",
+      text: "Cloudflare: nothing to do — all 1 selected domain(s) are already linked.",
+    });
+  });
+
   it("длинную чужую ошибку обрезает", () => {
     const notice = summarizeCfBind(
       report({
@@ -464,6 +482,18 @@ describe("summarizeCfBind", () => {
     expect(notice!.text.length).toBeLessThan(300);
     expect(notice!.text).toContain("…");
     expect(notice!.text).toContain('"no match" is not final');
+  });
+
+  it("провал прогона тоже говорит словами и тоже обрезает ошибку", () => {
+    const notice = summarizeCfBindFailure(new Error("y".repeat(400)));
+
+    // Единственный путь, который бросает, — чтение списка аккаунтов; в десктопе
+    // текст приезжает через прокси `api_request` и в пределе может быть телом
+    // ответа. Пока строка собиралась на странице, обрезки у неё не было.
+    expect(notice.kind).toBe("warn");
+    expect(notice.text).toContain("could not match zones");
+    expect(notice.text.length).toBeLessThan(200);
+    expect(notice.text).toContain("…");
   });
 
   it("после создания домена молчит, когда прогона не было", () => {

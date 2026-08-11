@@ -372,13 +372,18 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
   });
 
-  it("не оставляет прежний итог стоять над новым, промолчавшим прогоном", async () => {
+  it("не оставляет прежний автоматический итог стоять над новым, промолчавшим прогоном", async () => {
     setTauri(true);
-    zonesAre([{ id: "zone-a", name: "a.com" }]);
+    zonesAre([{ id: "zone-x", name: "x.com" }]);
+    mocks.apiPost.mockResolvedValue({ created: [domainRow(11, "x.com")], skipped: [] });
 
-    const { container } = renderPage([domainRow(1, "a.com")]);
+    renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
-    fireEvent.click((await selectAll(container))!);
+    fireEvent.click(screen.getByText("⊕ Bulk Add"));
+    fireEvent.change(await screen.findByPlaceholderText(/example.com/), {
+      target: { value: "x.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Import Domains" }));
     expect((await screen.findByRole("status")).textContent).toContain("1 of 1 linked");
 
     // Следующее действие привязывать нечего (аккаунт выбран руками), и в
@@ -388,6 +393,26 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
     await addDomain("new.com");
 
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
+
+  it("отчёт, которого дождались по кнопке, переживает заведение соседнего домена", async () => {
+    setTauri(true);
+    zonesAre([{ id: "zone-a", name: "a.com" }]);
+
+    const { container } = renderPage([domainRow(1, "a.com")]);
+    await screen.findByText("a.com");
+    fireEvent.click((await selectAll(container))!);
+    expect((await screen.findByRole("status")).textContent).toContain("1 of 1 linked");
+
+    // Автопривязка нового домена привязывать ничего не стала и потому промолчит
+    // — а вместе с ней исчез бы и отчёт по пятидесяти доменам, которого человек
+    // ждал. Наверх такой прогон тоже ничего не отдаёт, так что потеря была бы
+    // полной.
+    mocks.apiPost.mockResolvedValue(domainRow(9, "new.com", 42));
+    await addDomain("new.com");
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
+
+    expect(screen.getByRole("status").textContent).toContain("1 of 1 linked");
   });
 
   it("фоновая автопривязка не затирает отчёт, которого дождались по кнопке", async () => {

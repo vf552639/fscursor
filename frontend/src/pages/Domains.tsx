@@ -8,7 +8,7 @@ import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, expiryTs, for
 import { DOMAIN_STATUSES, domainStatusLabel, domainStatusRank, sslStatusRank } from "../lib/domainStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
-import { autoBindDomainsToCloudflare, summarizeCfBind, CfBindNotice } from "../api/cfAutoBind";
+import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
 import StatusBadge from "../components/StatusBadge";
 import { describeQueryError } from "../lib/queryError";
 import BulkActionToolbar from "../components/BulkActionToolbar";
@@ -722,21 +722,28 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       setBindPending(true);
     }
     // Гасим ПРЕЖНИЙ итог сразу, а не по приходу нового: у нового его может не
-    // быть вовсе. `auto` молчит на `no-accounts` и `nothing-to-do` — то есть
-    // после «Cloudflare: 2 of 3 linked» пользователь заводит домен с уже
-    // выбранным аккаунтом, привязывать нечего, а старая строка остаётся стоять
-    // и читается как отчёт об этом, последнем действии.
-    clearBindNotice();
+    // быть вовсе. `auto` молчит, когда менять оказалось нечего, — то есть после
+    // «Cloudflare: 2 of 3 linked» пользователь заводит домен с уже выбранным
+    // аккаунтом, привязывать нечего, а старая строка остаётся стоять и читается
+    // как отчёт об этом, последнем действии.
+    //
+    // Но отчёт, которого дождались по кнопке, фоновая привязка не гасит — по
+    // той же причине, по которой не затирает его на финише
+    // (`deliverBindNotice`): иначе «12 of 50 linked» исчезало бы от заведения
+    // одного домена, и на этом пути даже без тоста — промолчавший прогон
+    // наверх ничего не отдаёт. Своё же гасит любой прогон: заказал новое —
+    // читаешь новое.
+    if (mode === "manual" || bannerOwnerRef.current !== "manual") clearBindNotice();
     try {
       const notice = summarizeCfBind(await autoBindDomainsToCloudflare(rows), mode);
       if (notice) deliverBindNotice(notice, mode);
     } catch (e) {
       // Сюда доходит только провал чтения СПИСКА аккаунтов: непрочитанный
       // аккаунт и несостоявшийся `PUT` — это строки отчёта, а не исключение.
-      deliverBindNotice({
-        kind: "warn",
-        text: `Cloudflare: could not match zones — ${e instanceof Error ? e.message : String(e)}`,
-      }, mode);
+      // Текст собирает тот же модуль, что и текст удачного прогона: он у
+      // привязки весь должен быть проверяем без DOM, а чужая ошибка — обрезана
+      // (`e.to_string()` через прокси `api_request` в пределе тело ответа).
+      deliverBindNotice(summarizeCfBindFailure(e), mode);
     } finally {
       if (mode === "manual") {
         bindRunningRef.current = false;
