@@ -1,5 +1,32 @@
 # Вкладка Domains — аудит и роадмап улучшений
 
+> ## ⚠️ Документ исполнен целиком — читать как историческую запись
+>
+> Все четыре плана роадмапа реализованы (ветка `feat/domains-tab-overhaul`).
+> Соответствие «номер здесь → файл плана», где и лежит фактический итог и
+> оставшийся долг:
+>
+> | # здесь | План |
+> |---|---|
+> | №1 Чистка слоя исполнения | `plans/2026-08-11-domains-chistka-sloya-ispolneniya.md` |
+> | №2 Сроки, сортировка, статистика | `plans/2026-08-11-domains-sroki-sortirovka-statistika.md` |
+> | №3 Автопривязка Cloudflare по зоне | `plans/2026-08-11-avtoprivyazka-cloudflare-po-zone.md` |
+> | №4 Разбивка God-компонента | `plans/2026-08-11-domains-razbivka-god-komponenta.md` |
+>
+> **Все числа и ссылки на строки ниже — состояние НА МОМЕНТ АУДИТА, а не
+> сегодняшнее.** Крупнейшие расхождения, чтобы никто не сверялся по ним с кодом:
+> `pages/Domains.tsx` — 399 строк, а не 920 (плюс 25 модулей в
+> `components/domains/` и `hooks/`); `api/domains.ts` — 835, а не 906;
+> `DomainDetailModal` — 2 вкладки, а не 5; `EditDomainModal` удалён вместе с
+> остальным мёртвым слоем исполнения; `StatusBadge`, `BulkSetupWizard` и
+> `MultiTaskProgressModal` удалены. Актуальное состояние — в четырёх планах выше,
+> в их итоговых блоках.
+>
+> Файл лежит в корне вопреки соглашению CLAUDE.md («исполненные спеки убираются
+> из корня, ищи в истории git»): удалять его или нет — решение пользователя,
+> задано отдельно. Единственная правка по существу, внесённая после исполнения, —
+> исправлена неверная посылка про `apiPost` в долге №1 (см. там же).
+
 ## Context (зачем это)
 
 Пользователь попросил изучить вкладку Domains, предложить улучшения и обратить
@@ -27,8 +54,15 @@ HTTP-слой исполнения во фронте не убрали и мес
 `backend/app/core/constants.py`, `desktop/src-tauri/src/lib.rs` (реестр команд).
 
 ### Долг №1 — мёртвый слой исполнения (404)
-- `apiPost` (`frontend/src/api/client.ts:135`) — чистый HTTP (axios), **не**
-  Tauri-aware. Значит все хуки на `apiPost` в вебе и десктопе идут по HTTP.
+- ~~`apiPost` (`frontend/src/api/client.ts:135`) — чистый HTTP (axios), **не**
+  Tauri-aware. Значит все хуки на `apiPost` в вебе и десктопе идут по HTTP.~~
+  **Посылка неверна, исправлено по факту кода (2026-08-11).** `apiPost`
+  Tauri-aware ровно как соседи: `frontend/src/api/client.ts:136` —
+  `if (isTauri()) return tauriRequest<T>("POST", …)`, то есть в десктопе вызов
+  уходит Tauri-командой `api_request`. Вывод долга №1 от этого не меняется:
+  `api_request` — прокси в тот же REST API, где перечисленных ниже роутов нет,
+  так что хуки дают 404 на ОБОИХ транспортах, а не только в вебе. Механика
+  другая, диагноз тот же.
 - В `backend/app/api/routes/domains.py` объявлены только: list, `failed-export.csv`,
   get/{id}, create, `bulk`, `bulk-structured`, put/{id}, delete/{id},
   `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
