@@ -4,6 +4,8 @@ import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, Empt
 import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
+import { expiryState, expiryTextColor, expiryTs, formatExpiry } from "../lib/domainExpiry";
+import { DOMAIN_STATUSES, domainStatusLabel, domainStatusRank } from "../lib/domainStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
 import StatusBadge from "../components/StatusBadge";
@@ -43,8 +45,80 @@ interface DomainUI {
   ns_status: string;
   status: string;
   ssl_status?: string | null;
+  /** Срок домена у регистратора. `date` без времени — считаем сутками. */
+  expiry_date?: string | null;
+  /** Срок сертификата. Полноценный `datetime`, но вопрос к нему тот же суточный. */
+  ssl_expires_at?: string | null;
   last_provision_error?: string | null;
   created: string;
+}
+
+/** По какой колонке сортируем. Только те, у чьих значений есть порядок. */
+type SortKey = "domain" | "status" | "expiry_date" | "ssl_expires_at" | "created";
+
+interface Sort {
+  key: SortKey;
+  dir: "asc" | "desc";
+}
+
+/**
+ * Порядок по умолчанию — по имени домена, по возрастанию.
+ *
+ * Не «сначала свежие» и не «сначала просроченные»: список из сотен доменов —
+ * это в первую очередь поверхность поиска («где тут shop.example.com»), а найти
+ * известное имя глазами можно только в алфавите. Порядок, в котором строки
+ * приезжают с бэкенда (по id, то есть по времени заведения), пользователю не
+ * значит ничего: он не помнит, каким по счёту завёл домен.
+ *
+ * Срочное при этом не спрятано — оно в одном клике по заголовку Expires, и цвет
+ * подписи виден в любом порядке.
+ */
+const DEFAULT_SORT: Sort = { key: "domain", dir: "asc" };
+
+/** Значение, по которому сортируется строка для данного ключа-даты. */
+function dateOf(d: DomainUI, key: SortKey): string | null | undefined {
+  if (key === "expiry_date") return d.expiry_date;
+  if (key === "ssl_expires_at") return d.ssl_expires_at;
+  return d.created;
+}
+
+/**
+ * Отсортированная копия списка.
+ *
+ * Вынесена из тела `useMemo` целиком: правило «строки без даты — в конец при
+ * ЛЮБОМ направлении» стоит того, чтобы быть видимым, а не спрятанным в
+ * замыкании между фильтром и разметкой. Проверяется оно кликами по заголовкам
+ * (`Domains.expiry.test.tsx`) — то есть тем самым порядком, который видит
+ * пользователь, а не возвратом функции.
+ *
+ * Само правило — про честность, а не про удобство: перевернув сортировку по
+ * сроку, пользователь ищет либо самый горящий домен, либо самый дальний. И в
+ * том и в другом случае список начинался бы с доменов, про чей срок мы НЕ
+ * ЗНАЕМ, — то есть ответ на оба вопроса заслоняли бы те, про кого ответа нет
+ * вовсе.
+ */
+function sortDomains(rows: DomainUI[], sort: Sort): DomainUI[] {
+  const mul = sort.dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    if (sort.key === "domain") return a.domain.localeCompare(b.domain) * mul;
+    let primary: number;
+    if (sort.key === "status") {
+      primary = (domainStatusRank(a.status) - domainStatusRank(b.status)) * mul;
+    } else {
+      const ta = expiryTs(dateOf(a, sort.key));
+      const tb = expiryTs(dateOf(b, sort.key));
+      // Незнание не участвует в сравнении и не переворачивается вместе с ним:
+      // ветки стоят ДО умножения на направление.
+      if (ta === null && tb === null) primary = 0;
+      else if (ta === null) primary = 1;
+      else if (tb === null) primary = -1;
+      else primary = (ta - tb) * mul;
+    }
+    // Равные ключи — по имени. Иначе полсотни доменов с одной датой покупки
+    // встают в порядке заведения, в котором глазами не найти ничего, и порядок
+    // этот меняется от каждой вставки строки в базу.
+    return primary !== 0 ? primary : a.domain.localeCompare(b.domain);
+  });
 }
 
 /**
@@ -173,6 +247,8 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     ns_status: d.ns_status || "pending",
     status: d.status,
     ssl_status: d.ssl_status,
+    expiry_date: d.expiry_date,
+    ssl_expires_at: d.ssl_expires_at,
     last_provision_error: d.last_provision_error,
     created: d.created_at,
   })), [domainsData]);
@@ -181,6 +257,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     return new URLSearchParams(window.location.search).get("status") ?? "";
   }, []);
   const [search,setSearch]=useState(""); const [fSrv,setFS]=useState(""); const [fReg,setFR]=useState(""); const [fCF,setFCF]=useState(""); const [fStatus, setFStatus] = useState(initialStatusFilter);
+  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
   const [sel,setSel]=useState<Set<number>>(new Set()); 
   const [showBulk,setSB]=useState(false);
   const [showAdd,setSA]=useState(false);
@@ -303,6 +380,16 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     (!focusDomainId || d.id === focusDomainId)
   ), [search, fSrv, fReg, fCF, fStatus, focusDomainId, domains]);
   /**
+   * Порядок применяется ПОСЛЕ фильтрации и живёт в `useMemo`: список бывает на
+   * сотни строк, а сортировка внутри рендера строки означала бы полную
+   * пересортировку на каждую из них.
+   *
+   * Фокус-режим (`ctx.domainId`) сюда не вмешивается — он всего лишь ещё одно
+   * условие фильтра выше, поэтому сортировку не ломает: единственная оставшаяся
+   * строка отсортирована сама с собой.
+   */
+  const sorted = useMemo(() => sortDomains(filtered, sort), [filtered, sort]);
+  /**
    * Домены, у которых провижининг дошёл до SSL и сертификата не получил.
    *
    * Считается по `ssl_status === "error"` — единственному признаку, который
@@ -318,10 +405,54 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     () => domains.filter((d) => d.ssl_status === "error").length,
     [domains]
   );
-  
+  /**
+   * Срез по жизненному циклу домена — второй ряд карточек рядом с NS-срезом.
+   *
+   * Ряд, а не переключатель NS ↔ lifecycle: оба среза отвечают на разные
+   * вопросы («доехало ли делегирование» и «доехал ли сайт»), и спрятать один за
+   * клик значит показать половину состояния тому, кто на страницу как раз и
+   * пришёл узнать, всё ли в порядке. Числа тут маленькие и постоянные — место
+   * они стоят дешевле, чем стоил бы невидимый счётчик провалов.
+   *
+   * «In progress» считается ОСТАТКОМ, а не перечислением промежуточных
+   * статусов, и это не лень: перечисление молча теряет любой статус, которого
+   * автор не вспомнил (а ровно так и потерялся `ns_ok` — см.
+   * `lib/domainStatus`), и ряд переставал бы сходиться с Total. Остаток сходится
+   * по построению.
+   */
+  const lifecycle = useMemo(() => {
+    const count = (s: string) => domains.filter((d) => d.status === s).length;
+    const fresh = count("new");
+    const active = count("active");
+    const failed = count("failed");
+    return { fresh, active, failed, inProgress: domains.length - fresh - active - failed };
+  }, [domains]);
+
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
-  const Th=({c,children}: {c?: string, children: React.ReactNode})=><th style={{padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap",...(c?{color:c}:{})}}>{children}</th>;
-  
+  /** Повторный клик по той же колонке переворачивает; новая колонка начинает с возрастания. */
+  const toggleSort = (k: SortKey) => setSort((p) => ({ key: k, dir: p.key === k && p.dir === "asc" ? "desc" : "asc" }));
+  const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap"};
+  /**
+   * Заголовок колонки. `k` есть — заголовок сортирует, нет — просто подпись: у
+   * чекбокса и у колонки действий сортировать нечего, и кликабельный заголовок
+   * над ними обещал бы порядок, которого у кнопок не бывает.
+   *
+   * Стрелка стоит и на неактивных сортируемых заголовках (бледная «↕»): иначе
+   * то, что колонка вообще кликабельна, узнаётся только случайным попаданием
+   * курсора. `aria-sort` — на `th`, потому что спрашивают о состоянии колонки
+   * скринридеры именно у ячейки заголовка, а не у кнопки внутри.
+   */
+  const Th=({k,children}: {k?: SortKey, children: React.ReactNode})=>{
+    if (!k) return <th style={TH_STYLE}>{children}</th>;
+    const active = sort.key === k;
+    return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+      <button type="button" onClick={()=>toggleSort(k)} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?"#2563eb":"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
+        {children}
+        <span aria-hidden="true" style={{color:active?"#2563eb":"#d1d5db"}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+      </button>
+    </th>;
+  };
+
   const bulkCreate = useBulkCreateDomains();
   const bulkStructured = useBulkCreateStructuredDomains();
   const [bulkTab, setBulkTab] = useState("text");
@@ -517,16 +648,28 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Domain</Btn>
       </div>
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
-      {[
+    {([
+      // Первый ряд — про делегирование, второй — про жизненный цикл домена.
+      // Total стоит в первом и относится к обоим: он же и есть сумма второго.
+      [
         ["Total",domains.length,"#2563eb","#eff4ff"],
-        ["NS OK",domains.filter((d: any)=>d.ns_status==="ok").length,"#16a34a","#f0fdf4"],
-        ["NS Pending",domains.filter((d: any)=>d.ns_status==="pending").length,"#d97706","#fffbeb"],
-        ["NS Errors",domains.filter((d: any)=>d.ns_status==="error").length,"#dc2626","#fef2f2"]
-      ].map(([l,v,c,bg])=>(
-        <div key={l as string} style={{background:bg as string,border:"1px solid",borderColor:bg as string,borderRadius:10,padding:"14px 18px"}}><div style={{fontSize:22,fontWeight:700,color:c as string}}>{v as number}</div><div style={{fontSize:12,color:c as string,opacity:0.8}}>{l as string}</div></div>
-      ))}
-    </div>
+        ["NS OK",domains.filter((d: DomainUI)=>d.ns_status==="ok").length,"#16a34a","#f0fdf4"],
+        ["NS Pending",domains.filter((d: DomainUI)=>d.ns_status==="pending").length,"#d97706","#fffbeb"],
+        ["NS Errors",domains.filter((d: DomainUI)=>d.ns_status==="error").length,"#dc2626","#fef2f2"]
+      ],
+      [
+        ["New",lifecycle.fresh,"#6b7280","#f3f4f6"],
+        ["In progress",lifecycle.inProgress,"#2563eb","#eff4ff"],
+        ["Active",lifecycle.active,"#16a34a","#f0fdf4"],
+        ["Failed",lifecycle.failed,"#dc2626","#fef2f2"]
+      ]
+    ] as [string, number, string, string][][]).map((row, i)=>(
+      <div key={i} style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:i===0?12:20}}>
+        {row.map(([l,v,c,bg])=>(
+          <div key={l} style={{background:bg,border:"1px solid",borderColor:bg,borderRadius:10,padding:"14px 18px"}}><div style={{fontSize:22,fontWeight:700,color:c}}>{v}</div><div style={{fontSize:12,color:c,opacity:0.8}}>{l}</div></div>
+        ))}
+      </div>
+    ))}
     {failedAtSslCount > 0 ? (
       <div style={{ marginBottom: 12 }}>
         <Badge variant="red">Failed at SSL: {failedAtSslCount}</Badge>
@@ -538,15 +681,12 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         <Sel value={fSrv} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFS(e.target.value)}><option value="">All Servers</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel>
         <Sel value={fReg} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFR(e.target.value)}><option value="">All Registrars</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel>
         <Sel value={fCF} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFCF(e.target.value)}><option value="">All CF</option>{cfAccounts.map((c: CloudflareAccount)=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel>
+        {/* Пункты строятся из общей лестницы, а не перечислены руками: списком
+            руками они и разошлись с бэкендом — в нём не было `ns_ok`, и домен в
+            этом статусе нельзя было найти фильтром вовсе. */}
         <Sel value={fStatus} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setFStatus(e.target.value)}>
           <option value="">All Statuses</option>
-          <option value="new">NEW</option>
-          <option value="ns_pending">NS_PENDING</option>
-          <option value="provisioning">PROVISIONING</option>
-          <option value="site_created">SITE_CREATED</option>
-          <option value="ssl_pending">SSL_PENDING</option>
-          <option value="active">ACTIVE</option>
-          <option value="failed">FAILED</option>
+          {DOMAIN_STATUSES.map((s)=><option key={s.status} value={s.status}>{domainStatusLabel(s.status)}</option>)}
         </Sel>
       </div>
     </Card>
@@ -587,19 +727,24 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
           </EmptyState>
         ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
-          <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===filtered.length&&filtered.length>0} onChange={()=>setSel(sel.size===filtered.length?new Set():new Set(filtered.map((d: any)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {["Domain","Server","Registrar","Cloudflare","Status","SSL","Added",""].map((h: string)=><Th key={h}>{h}</Th>)}
+          <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===sorted.length&&sorted.length>0} onChange={()=>setSel(sel.size===sorted.length?new Set():new Set(sorted.map((d: DomainUI)=>d.id)))} style={{cursor:"pointer"}}/></th>
+            {([["Domain","domain"],["Server"],["Registrar"],["Cloudflare"],["Status","status"],["Expires","expiry_date"],["SSL","ssl_expires_at"],["Added","created"],[""]] as [string, SortKey?][]).map(([h,k])=><Th key={h} k={k}>{h}</Th>)}
           </tr></thead>
           <tbody>
-            {filtered.length === 0 && domainsData.length > 0 ? (
+            {sorted.length === 0 && domainsData.length > 0 ? (
               <tr>
-                <td colSpan={9} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
+                <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
                   No domains match the current filters.
                 </td>
               </tr>
             ) : null}
-            {filtered.map((d: DomainUI)=>{
+            {sorted.map((d: DomainUI)=>{
               const srv=servers.find((s: Server)=>s.id===d.server_id); const reg=registrars.find((r: RegistrarAccount)=>r.id===d.registrar_id); const cf=cfAccounts.find((c: CloudflareAccount)=>c.id===d.cf_id);
+              // Оба срока — через один модуль и через одно «сейчас» (`now`
+              // выше): своя арифметика в ячейке разъехалась бы с соседней,
+              // причём молча.
+              const expState = expiryState(d.expiry_date, now);
+              const sslExpState = expiryState(d.ssl_expires_at, now);
               // Четвёртый экран, где рисуется состояние сервера, — и разбор
               // здесь был свой, до `last_check_*` не доходивший вовсе: колонку
               // `status` монитор не трогает, поэтому подтверждённо упавшая
@@ -645,10 +790,30 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
                     </div>
                   ) : null}
                 </td>
-                <td style={{padding:"11px 16px"}}>
+                {/* Срок домена. Дата и подпись «сколько осталось» стоят вместе:
+                    одна дата требует считать в уме (а тут сотня строк), одна
+                    подпись — лишает возможности сверить с письмом регистратора.
+                    Незнание — прочерк и БЕЗ подписи: «—» под «—» ничего не
+                    добавляет. */}
+                <td data-testid="expiry-cell" style={{padding:"11px 16px",fontSize:12.5}}>
+                  <div style={{color:expiryTextColor(expState),fontWeight:expState==="ok"||expState==="unknown"?400:600}}>
+                    {expState === "unknown" ? "—" : fmtDate(d.expiry_date ?? "")}
+                  </div>
+                  {expState !== "unknown" ? (
+                    <div style={{fontSize:11,color:expiryTextColor(expState)}}>{formatExpiry(d.expiry_date, now)}</div>
+                  ) : null}
+                </td>
+                <td data-testid="ssl-cell" style={{padding:"11px 16px"}}>
                   <Badge variant={d.ssl_status === "active" ? "green" : d.ssl_status === "pending" ? "yellow" : d.ssl_status === "error" ? "red" : "gray"}>
                     {d.ssl_status === "active" ? "SSL active" : d.ssl_status === "pending" ? "SSL pending" : d.ssl_status === "error" ? "SSL error" : "— No SSL"}
                   </Badge>
+                  {/* Второй колонки под срок сертификата нет: он про тот же
+                      предмет, что и бейдж, и в отрыве от него не читается. Строка
+                      рисуется ВСЕГДА, в том числе прочерком под «No SSL»:
+                      «активный сертификат без известного срока» и «сертификата
+                      нет» — разные вещи, но обе означают, что дату перевыпуска мы
+                      не знаем, и молчать об этом нельзя. */}
+                  <div style={{marginTop:4,fontSize:11,color:expiryTextColor(sslExpState)}}>{formatExpiry(d.ssl_expires_at, now)}</div>
                 </td>
                 <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
                 <td style={{padding:"11px 16px"}}>

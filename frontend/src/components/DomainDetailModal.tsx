@@ -11,8 +11,9 @@ import {
   SET_NAMESERVERS_KEY,
 } from "../api/domains";
 import { useZoneNameservers } from "../api/cloudflare";
+import { expiryState, expiryTextColor, formatExpiry } from "../lib/domainExpiry";
 import { isTauri } from "../lib/runtime";
-import { Btn, Modal } from "./ui/Primitives";
+import { Btn, Modal, fmtDate } from "./ui/Primitives";
 
 /**
  * Разбор поля NS: по одному на строку, но запятые и лишние пробелы прощаем.
@@ -33,6 +34,43 @@ function sameNameservers(a: string[], b: string[]): boolean {
 }
 
 /**
+ * Строка карточки. Пустое значение рисуется прочерком, а не пустым местом:
+ * незаполненное поле должно читаться как «не знаем», иначе строка «PHP:» без
+ * ничего выглядит как обрезанная вёрстка, а не как ответ.
+ *
+ * Значения `null`, `undefined` и `""` уравнены намеренно: бэкенд отдаёт пустое
+ * поле и так и эдак, и разница между «NULL» и «пустая строка» — наша, а не
+ * пользователя.
+ */
+function Field({ k, v }: { k: string; v: React.ReactNode }) {
+  const empty = v === null || v === undefined || v === "";
+  return (
+    <div>
+      <b>{k}:</b> {empty ? "—" : v}
+    </div>
+  );
+}
+
+/**
+ * Значение поля со сроком: дата и «сколько осталось» рядом, цветом состояния.
+ * Дата без остатка требует считать в уме, остаток без даты нечем сверить с
+ * письмом регистратора.
+ *
+ * Неизвестный срок отдаёт `null`, а не «—»: прочерк дорисует `Field`, и он
+ * будет ТЕМ ЖЕ прочерком, что у остальных пустых полей карточки, а не вторым,
+ * похожим.
+ */
+function expiryValue(iso: string | null | undefined, now: number): React.ReactNode {
+  const state = expiryState(iso, now);
+  if (state === "unknown") return null;
+  return (
+    <span style={{ color: expiryTextColor(state) }}>
+      {fmtDate(iso ?? "")} · {formatExpiry(iso, now)}
+    </span>
+  );
+}
+
+/**
  * Осталось две вкладки из пяти. `db`, `ssl` и `nginx` (и кнопка «Create Site» на
  * `overview`) удалены целиком: их действия били в `POST /domains/{id}/create-db`,
  * `/ssl-request`, `/ssl-cancel`, `/refresh-ssl`, `/nginx-override`,
@@ -50,6 +88,9 @@ export default function DomainDetailModal({
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
+  // Одно чтение часов на рендер карточки — тот же приём, что в списке доменов:
+  // два срока на одном экране обязаны отвечать на «сейчас» одинаково.
+  const now = Date.now();
 
   const setNs = useSetNameservers();
 
@@ -144,13 +185,44 @@ export default function DomainDetailModal({
       </div>
 
       {tab === "overview" && (
-        <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 8 }}>
-          <div><b>Status:</b> {domain.status}</div>
-          <div><b>Server:</b> {domain.server_id ?? "—"}</div>
-          <div><b>Registrar:</b> {domain.registrar_id ?? "—"}</div>
-          <div><b>Cloudflare:</b> {domain.cloudflare_account_id ?? "—"}</div>
-          <div><b>NS:</b> {domain.ns_status ?? "pending"} ({domain.ns_check_mode ?? "auto"})</div>
-          <div><b>Last error:</b> {domain.last_provision_error || "—"}</div>
+        /* Два столбца: слева — чем домен является (учётки, статус, сроки),
+           справа — что развёрнуто на сервере. В один столбец полтора десятка
+           строк уезжали бы под сгиб модалки.
+
+           Server/Registrar/Cloudflare остаются ЧИСЛАМИ — это id, и имён у
+           карточки нет: за ними пришлось бы тянуть сюда три списка (`useServers`,
+           `useRegistrarAccounts`, `useCloudflareAccounts`) или три новых пропа,
+           то есть менять контракт компонента. Это работа плана про разбор
+           страницы на компоненты, а не этой.
+
+           Паролей здесь нет и быть не может: сервер их не знает (FTP и БД
+           показываются один раз сразу после provision и нигде не хранятся).
+           Пустых полей под них тоже нет — пустое поле «FTP password: —» обещало
+           бы, что значение когда-нибудь появится. */
+        <div style={{ fontSize: 13, color: "#374151", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
+            <Field k="Status" v={domain.status} />
+            <Field k="Server" v={domain.server_id} />
+            <Field k="Registrar" v={domain.registrar_id} />
+            <Field k="Cloudflare" v={domain.cloudflare_account_id} />
+            <Field k="NS" v={`${domain.ns_status ?? "pending"} (${domain.ns_check_mode ?? "auto"})`} />
+            {/* Срок — тем же модулем, что и колонка списка: два разных ответа
+                про один домен на двух поверхностях хуже, чем отсутствие
+                одного из них. */}
+            <Field k="Expires" v={expiryValue(domain.expiry_date, now)} />
+            <Field k="Last error" v={domain.last_provision_error} />
+          </div>
+          <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
+            <Field k="SSL" v={domain.ssl_status} />
+            <Field k="SSL expires" v={expiryValue(domain.ssl_expires_at, now)} />
+            <Field k="SSL issuer" v={domain.ssl_issuer} />
+            <Field k="PHP" v={domain.php_version} />
+            <Field k="Site user" v={domain.site_user} />
+            <Field k="Site path" v={domain.site_path} />
+            <Field k="FTP user" v={domain.ftp_user} />
+            <Field k="DB name" v={domain.db_name} />
+            <Field k="DB user" v={domain.db_user} />
+          </div>
         </div>
       )}
 

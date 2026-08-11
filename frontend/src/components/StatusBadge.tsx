@@ -1,17 +1,14 @@
 import React from "react";
 
+import { domainStatusLabel, domainStatusVariant } from "../lib/domainStatus";
 import { Badge } from "./ui/Primitives";
 
-const map: Record<string, { variant: string; label: string }> = {
-  new: { variant: "gray", label: "NEW" },
-  ns_pending: { variant: "yellow", label: "NS_PENDING" },
-  provisioning: { variant: "blue", label: "PROVISIONING" },
-  site_created: { variant: "blue", label: "SITE_CREATED" },
-  ssl_pending: { variant: "yellow", label: "SSL_PENDING" },
-  active: { variant: "green", label: "ACTIVE" },
-  failed: { variant: "red", label: "FAILED" },
-};
-
+/**
+ * Бейдж статуса домена. Своей карты статусов у него больше нет: она была одной
+ * из двух копий лестницы, и обе разошлись с бэкендом на `ns_ok` — домен в
+ * штатном статусе получал серый бейдж «мы такого не знаем». Список живёт в
+ * `lib/domainStatus`, здесь остаётся только показ.
+ */
 export default function StatusBadge({
   status,
   title,
@@ -19,10 +16,9 @@ export default function StatusBadge({
   status: string;
   title?: string;
 }) {
-  const item = map[status] ?? { variant: "gray", label: status || "UNKNOWN" };
   return (
     <span title={title}>
-      <Badge variant={item.variant}>{item.label}</Badge>
+      <Badge variant={domainStatusVariant(status)}>{domainStatusLabel(status)}</Badge>
     </span>
   );
 }
