@@ -1,15 +1,19 @@
-import React, { useState, useMemo, useRef, ChangeEvent, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { Card, Btn, Sel, Modal, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
-import { useServers, Server } from "../api/servers";
-import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
-import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
+import { Card, Btn, EmptyState, ErrorState } from "../components/ui/Primitives";
+import { useDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
+import { useServers } from "../api/servers";
+import { useRegistrarAccounts } from "../api/registrars";
+import { useCloudflareAccounts } from "../api/cloudflare";
 import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
 import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
 import DomainStats from "../components/domains/DomainStats";
 import DomainTable from "../components/domains/DomainTable";
+import AssignCloudflareDialog from "../components/domains/AssignCloudflareDialog";
+import AssignServerDialog from "../components/domains/AssignServerDialog";
+import BulkAddDialog from "../components/domains/BulkAddDialog";
+import ProvisionDialog from "../components/domains/ProvisionDialog";
 import { DEFAULT_SORT, Sort, SortKey, sortDomains } from "../components/domains/sortDomains";
 import { DomainUI, toDomainUI } from "../components/domains/types";
 import { describeQueryError } from "../lib/queryError";
@@ -140,8 +144,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
 
   const [showAssignServer, setShowAssignServer] = useState(false);
   const [showAssignCF, setShowAssignCF] = useState(false);
-  const [assignServerId, setAssignServerId] = useState("");
-  const [assignCFId, setAssignCFId] = useState("");
   const [focusDomainId, setFocusDomainId] = useState<number | null>(null);
 
   const bulkAssignServer = useBulkAssignServer();
@@ -214,11 +216,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   // базу». Выбор живёт здесь, а не в аргументах строки, чтобы не залипать между
   // доменами — БД это отдельный артефакт на сервере, и умолчание у него «нет».
   const [provisionTarget, setProvisionTarget] = useState<DomainUI | null>(null);
-  const [provisionWithDb, setProvisionWithDb] = useState(false);
-  const openProvisionDialog = (d: DomainUI) => {
-    setProvisionWithDb(false);
-    setProvisionTarget(d);
-  };
   const [showFileImport, setShowFileImport] = useState(false);
   /**
    * Итог привязки доменов к зонам Cloudflare — и почему его основное место
@@ -300,98 +297,34 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   /** Повторный клик по той же колонке переворачивает; новая колонка начинает с возрастания. */
   const toggleSort = (k: SortKey) => setSort((p) => ({ key: k, dir: p.key === k && p.dir === "asc" ? "desc" : "asc" }));
 
-  const bulkCreate = useBulkCreateDomains();
-  const bulkStructured = useBulkCreateStructuredDomains();
-  const [bulkTab, setBulkTab] = useState("text");
-  const [bulkText, setBulkText] = useState("");
-  const [bulkRegId, setBulkRegId] = useState("");
-  const [csvText, setCsvText] = useState("");
-  const [bulkError, setBulkError] = useState("");
-
-  const handleBulkAdd = async () => {
-    setBulkError("");
-    try {
-      if (bulkTab === "text") {
-        const lines: string[] = bulkText.split('\n').map((l: string) => l.trim()).filter(Boolean);
-        if (lines.length === 0) {
-          setBulkError("Please enter at least one domain");
-          return;
-        }
-        const result = await bulkCreate.mutateAsync({
-          domains_text: lines.join("\n"),
-          registrar_id: bulkRegId ? Number(bulkRegId) : null
-        });
-
-        if (result.created.length === 0 && result.skipped.length > 0) {
-          setBulkError(`❌ Все указанные домены были пропущены (неверный формат или уже существуют):\n ${result.skipped.join(", ")}`);
-          return;
-        }
-
-        setSB(false);
-        setBulkText("");
-        setBulkRegId("");
-        // Привязка — ПОСЛЕ закрытия модалки и вне её try/catch по смыслу: домены
-        // созданы, и это главный результат. `void` — потому что обработчик
-        // привязки свои ошибки показывает сам, а превратить их в `bulkError`
-        // значило бы объявить провалом успешный импорт.
-        void runCloudflareBind(result.created, "auto");
-      } else {
-        const lines: string[] = csvText.split('\n').map((l: string) => l.trim()).filter(Boolean);
-        if (lines.length === 0) {
-          setBulkError("Please enter at least one CSV line");
-          return;
-        }
-
-        if (lines.some((l: string) => l.includes(',') && !l.includes(';'))) {
-          setBulkError("Похоже, вы используете запятые вместо точек с запятой. Пожалуйста, исправьте разделитель.");
-          return;
-        }
-
-        const items = lines.map((line: string) => {
-          const parts = line.split(';');
-          return {
-            domain_name: parts[0]?.trim(),
-            registrar_name: parts[1]?.trim() || null
-          };
-        }).filter((item: { domain_name: string }) => item.domain_name);
-
-        if (items.length === 0) {
-          setBulkError("No valid domains found in CSV");
-          return;
-        }
-
-        const result = await bulkStructured.mutateAsync({ items });
-
-        if (result.created.length === 0 && result.skipped.length > 0) {
-          setBulkError(`❌ Все указанные домены были пропущены (неверный формат или уже существуют):\n ${result.skipped.join(", ")}`);
-          return;
-        }
-
-        setSB(false);
-        setCsvText("");
-        // Та же привязка, что и у текстовой ветки: путь создания другой
-        // (`/domains/bulk-structured`), а домены — те же.
-        void runCloudflareBind(result.created, "auto");
-      }
-    } catch (err: any) {
-      setBulkError(err.response?.data?.message || err.message || "Failed to import domains");
-    }
-  }
-
-  const handleAssignServer = () => {
-    if (!assignServerId) return;
+  const handleAssignServer = (serverId: string) => {
+    if (!serverId) return;
     bulkAssignServer.mutate(
-      { domain_ids: Array.from(sel), server_id: Number(assignServerId) },
-      { onSuccess: () => { setShowAssignServer(false); setSel(new Set()); setAssignServerId(""); } }
+      { domain_ids: Array.from(sel), server_id: Number(serverId) },
+      { onSuccess: () => { setShowAssignServer(false); setSel(new Set()); } }
     );
   };
 
-  const handleAssignCF = () => {
-    if (!assignCFId) return;
+  const handleAssignCF = (cfAccountId: string) => {
+    if (!cfAccountId) return;
     bulkAssignCF.mutate(
-      { domain_ids: Array.from(sel), cloudflare_account_id: Number(assignCFId) },
-      { onSuccess: () => { setShowAssignCF(false); setSel(new Set()); setAssignCFId(""); } }
+      { domain_ids: Array.from(sel), cloudflare_account_id: Number(cfAccountId) },
+      { onSuccess: () => { setShowAssignCF(false); setSel(new Set()); } }
     );
+  };
+
+  const handleProvision = (target: DomainUI, withDb: boolean) => {
+    if (isProvisioning(target.id)) return;
+    // Без per-call `onSuccess`: результат доставляет замыкание `mutationFn`
+    // (см. `useProvisionDomain`), потому что per-call коллбэки react-query
+    // глушит при размонтировании наблюдателя — а именно после ухода со
+    // страницы пароли и терялись.
+    singleProvision.mutate({
+      domainId: target.id,
+      domainName: target.domain,
+      withDb,
+    });
+    setProvisionTarget(null);
   };
 
   /**
@@ -706,7 +639,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
           focusDomainId={focusDomainId}
           isProvisioning={isProvisioning}
           onOpenDetail={(id)=>setDetailDomain(domainsData.find((x) => x.id === id) || null)}
-          onProvision={openProvisionDialog}
+          onProvision={setProvisionTarget}
           onDelete={(d)=>{ void handleDeleteDomain(d); }}
         />
         )}
@@ -729,60 +662,32 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         onClose={() => setDetailDomain(null)}
       />
     )}
-    {showBulk&&<Modal title="Bulk Add Domains" onClose={()=>setSB(false)} width={520}>
-      <div style={{display:"flex",background:"#f3f4f6",borderRadius:8,padding:3,marginBottom:20}}>
-        {[["text","Plain Text"],["csv","CSV / Semicolon"]].map(([k,l])=>(
-          <button key={k} onClick={()=>setBulkTab(k as string)} style={{flex:1,padding:"8px 12px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all 0.15s",background:bulkTab===k?"#2563eb":"transparent",color:bulkTab===k?"#fff":"#6b7280"}}>{bulkTab===k&&"✓ "}{l}</button>
-        ))}
-      </div>
-      
-      {bulkTab === "text" ? <>
-        <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Enter one domain per line. Duplicates will be skipped.</p>
-        <textarea value={bulkText} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>)=>setBulkText(e.target.value)} placeholder={"example.com\nshop.example.com\nblog.example.com"} style={{width:"100%",height:160,padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
-        <div style={{display:"grid",gridTemplateColumns:"1fr",gap:12,margin:"14px 0"}}>
-          <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign to Registrar</label><Sel value={bulkRegId} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setBulkRegId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></div>
-        </div>
-      </> : <>
-        <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Paste values in format: <code style={{background:"#eee",padding:2}}>domain.com;provider_name</code></p>
-        <textarea value={csvText} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>)=>setCsvText(e.target.value)} placeholder={"example.com;Namecheap\nshop.com;Hostiq"} style={{width:"100%",height:160,padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
-      </>}
-      
-      {bulkError && <div style={{background:"#fef2f2",border:"1px solid #fee2e2",color:"#dc2626",padding:"10px 12px",borderRadius:8,fontSize:13,marginBottom:14}}>❌ {bulkError}</div>}
-      
-      <Btn variant="primary" onClick={handleBulkAdd} disabled={bulkCreate.isPending || bulkStructured.isPending} style={{width:"100%",justifyContent:"center",padding:"10px 0", marginTop: 14}}>{(bulkCreate.isPending || bulkStructured.isPending) ? "Importing..." : "Import Domains"}</Btn>
-      <div style={{marginTop:8}}><Btn variant="secondary" onClick={()=>setSB(false)} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
-    </Modal>}
+    {showBulk && (
+      <BulkAddDialog
+        onClose={()=>setSB(false)}
+        registrars={registrars}
+        onCreated={(created: Domain[])=>{ void runCloudflareBind(created, "auto"); }}
+      />
+    )}
 
     {showAssignServer && (
-      <Modal title="Assign Server" onClose={() => setShowAssignServer(false)} width={400}>
-        <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Назначить сервер для {sel.size} доменов:</p>
-        <Sel value={assignServerId} onChange={(e: ChangeEvent<HTMLSelectElement>) => setAssignServerId(e.target.value)} style={{width:"100%"}}>
-          <option value="">— Select Server —</option>
-          {servers.map((s: Server) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </Sel>
-        <div style={{marginTop:18, display:"flex", gap:8}}>
-          <Btn variant="primary" onClick={handleAssignServer} disabled={!assignServerId || bulkAssignServer.isPending}>
-            {bulkAssignServer.isPending ? "Assigning..." : "Assign"}
-          </Btn>
-          <Btn variant="secondary" onClick={() => setShowAssignServer(false)}>Cancel</Btn>
-        </div>
-      </Modal>
+      <AssignServerDialog
+        selectedCount={sel.size}
+        servers={servers}
+        pending={bulkAssignServer.isPending}
+        onAssign={handleAssignServer}
+        onClose={() => setShowAssignServer(false)}
+      />
     )}
 
     {showAssignCF && (
-      <Modal title="Assign Cloudflare" onClose={() => setShowAssignCF(false)} width={400}>
-        <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Назначить Cloudflare аккаунт для {sel.size} доменов:</p>
-        <Sel value={assignCFId} onChange={(e: ChangeEvent<HTMLSelectElement>) => setAssignCFId(e.target.value)} style={{width:"100%"}}>
-          <option value="">— Select CF Account —</option>
-          {cfAccounts.map((c: CloudflareAccount) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </Sel>
-        <div style={{marginTop:18, display:"flex", gap:8}}>
-          <Btn variant="primary" onClick={handleAssignCF} disabled={!assignCFId || bulkAssignCF.isPending}>
-            {bulkAssignCF.isPending ? "Assigning..." : "Assign"}
-          </Btn>
-          <Btn variant="secondary" onClick={() => setShowAssignCF(false)}>Cancel</Btn>
-        </div>
-      </Modal>
+      <AssignCloudflareDialog
+        selectedCount={sel.size}
+        cfAccounts={cfAccounts}
+        pending={bulkAssignCF.isPending}
+        onAssign={handleAssignCF}
+        onClose={() => setShowAssignCF(false)}
+      />
     )}
     {showFileImport && (
       <DomainBulkImportDialog
@@ -796,76 +701,12 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       />
     )}
     {provisionTarget && (
-      <Modal
-        title={`Provision ${provisionTarget.domain}`}
+      <ProvisionDialog
+        domain={provisionTarget}
+        isProvisioning={isProvisioning(provisionTarget.id)}
+        onProvision={(withDb: boolean) => handleProvision(provisionTarget, withDb)}
         onClose={() => setProvisionTarget(null)}
-        width={460}
-      >
-        <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.5, marginBottom: 14 }}>
-          SDMP will connect over SSH to this domain's server and create the site, its FTP
-          account and its SSL certificate.
-        </div>
-        {/* Единственное место, где «создавать ли БД» вообще решается: команда
-            `provision_domain` принимает `with_db`, но до этого чекбокса ни один
-            вызывающий его не передавал — опциональная БД была недостижима.
-
-            У массового прогона такого выбора нет, и это не недосмотр:
-            Tauri-команда `provision_bulk` намеренно не принимает `with_db`.
-            Молча создать сотню баз значит сделать за пользователя выбор,
-            которого он не делал, а спросить про каждый домен отдельно эта
-            кнопка не умеет. Пароли показать есть где — массовый прогон
-            возвращает результат по каждому домену, и воркспейс ставит их в ту
-            же очередь показов. */}
-        <label
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 8,
-            fontSize: 13,
-            color: "#374151",
-            cursor: "pointer",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={provisionWithDb}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => setProvisionWithDb(e.target.checked)}
-            style={{ marginTop: 2, cursor: "pointer" }}
-          />
-          <span>
-            Also create a database
-            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-              A MySQL database and its user are created on the server. The password is shown
-              once, right after provisioning — it is not stored anywhere.
-            </div>
-          </span>
-        </label>
-        <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
-          <Btn
-            variant="primary"
-            onClick={() => {
-              const target = provisionTarget;
-              if (isProvisioning(target.id)) return;
-              // Без per-call `onSuccess`: результат доставляет замыкание
-              // `mutationFn` (см. `useProvisionDomain`), потому что per-call
-              // коллбэки react-query глушит при размонтировании наблюдателя —
-              // а именно после ухода со страницы пароли и терялись.
-              singleProvision.mutate({
-                domainId: target.id,
-                domainName: target.domain,
-                withDb: provisionWithDb,
-              });
-              setProvisionTarget(null);
-            }}
-            disabled={isProvisioning(provisionTarget.id)}
-          >
-            {isProvisioning(provisionTarget.id) ? "Provisioning…" : "Provision"}
-          </Btn>
-          <Btn variant="secondary" onClick={() => setProvisionTarget(null)}>
-            Cancel
-          </Btn>
-        </div>
-      </Modal>
+      />
     )}
   </>;
 }
