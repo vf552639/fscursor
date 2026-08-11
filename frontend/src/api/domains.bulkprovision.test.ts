@@ -8,6 +8,8 @@ import {
   type BulkProvisionDesktopResult,
   type ProvisionOutcome,
 } from "./domains";
+import { onlineManager } from "@tanstack/react-query";
+
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -80,6 +82,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Менеджер сети общий на весь прогон тестов — оставить его выключенным значит
+  // сломать соседние файлы.
+  onlineManager.setOnline(true);
   queryClient.clear();
   queryClient.getMutationCache().clear();
   useAuthStore.getState().clear();
@@ -322,6 +327,30 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
     );
     // И по SSH при этом никто не пошёл.
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  // `navigator.onLine === false` — это про сеть БРАУЗЕРА, а провижн идёт по SSH
+  // из десктопа. С дефолтным `networkMode: "online"` retryer ставит заявку в
+  // `pending` и не зовёт её `mutationFn` вовсе: `held` никто не ждёт, `release()`
+  // резолвит промис в пустоту, и заявка висит `pending` до возвращения сети —
+  // ⚙ читается как «Provisioning…» бесконечно, а каждый повтор отвечает
+  // «already running», и снять это из UI нечем.
+  it("не залипает заявками, когда браузер считает себя оффлайном", async () => {
+    onlineManager.setOnline(false);
+    mocks.invokeSynced.mockResolvedValue(report({ items: [doneItem("1", "PW-1")] }));
+
+    const out = await runBulkProvisionDomains("user-1", ["1"]);
+    expect(out.results).toHaveLength(1);
+
+    await vi.waitFor(() =>
+      expect(
+        queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: PROVISION_DOMAIN_KEY, status: "pending" }),
+      ).toHaveLength(0),
+    );
+    // И гейт снова открыт: следующий прогон по тому же домену стартует.
+    await expect(runBulkProvisionDomains("user-1", ["1"])).resolves.toBeTruthy();
   });
 
   it("отпускает гейт и когда прогон упал целиком", async () => {

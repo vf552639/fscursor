@@ -20,7 +20,7 @@ import { FastPanelCredsModal } from "../components/FastPanelCredsModal";
 import { ProvisionResultModal } from "../components/ProvisionResultModal";
 import { BulkProvisionReportModal } from "../components/BulkProvisionReportModal";
 import { useShowOnceQueue } from "../hooks/useShowOnceQueue";
-import type { BulkProvisionOutcome, ProvisionOutcome } from "../api/domains";
+import type { BulkProvisionOutcome, BulkProvisionReport, ProvisionOutcome } from "../api/domains";
 
 /**
  * Шаг установки FastPanel → текст в тосте (события `fastpanel:progress`).
@@ -98,6 +98,16 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "registrar.ns_set": "Nameservers set",
 };
 
+/**
+ * Тон тоста. `error` — про неудачу, `info` — про ход дела.
+ *
+ * Разделение не косметическое: тост — единственная поверхность для отказа
+ * массового прогона, чью страницу пользователь уже покинул (см.
+ * `onBulkProvisionError` в `Domains`), и с общей зелёной галочкой он произносил
+ * бы «✓ keychain is locked».
+ */
+type ToastKind = "info" | "error";
+
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
   sidebarWidth: 200,
@@ -117,7 +127,7 @@ export default function DesktopWorkspace() {
     }
   });
   const [srvCtx, setSrv] = useState<any>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
   // Креды FastPanel живут только в стейте этого компонента: их нет ни на
   // сервере, ни в кэше, и они НЕ должны туда попадать. Поставщика два —
   // deep link `sdmp://install-fastpanel` и кнопка на ServerDetail, — а место
@@ -136,7 +146,13 @@ export default function DesktopWorkspace() {
   const provisionQueue = useShowOnceQueue<ProvisionOutcome>();
   // Итог массового прогона — тоже очередь и тоже экран, а не тост: он переживает
   // и модалки с паролями, которые сам породил, и уход пользователя за кофе.
-  const bulkReportQueue = useShowOnceQueue<BulkProvisionOutcome>();
+  //
+  // Тип СУЖЕН до `BulkProvisionReport`: у него в `results` только имена доменов,
+  // без паролей. Присваивается структурно, так что класть сюда полный отчёт
+  // по-прежнему можно, а вот достать из очереди пароль — уже нельзя, и держит
+  // это компилятор, а не договорённость. Соседняя `provisionQueue` остаётся
+  // широкой намеренно: она и есть то место, где пароли показываются.
+  const bulkReportQueue = useShowOnceQueue<BulkProvisionReport>();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tweaks, setTweaks] = useState(false);
   const [tw, setTw] = useState(TWEAK_DEFAULTS);
@@ -183,11 +199,19 @@ export default function DesktopWorkspace() {
   // Таймер предыдущего тоста гасим: без этого второй тост живёт остаток чужого
   // таймера и исчезает раньше, чем его успевают прочитать.
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showToast = (message: string) => {
+  const showToastAs = (kind: ToastKind, message: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast(message);
+    setToast({ kind, message });
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
+  const showToast = (message: string) => showToastAs("info", message);
+  /**
+   * Тост о неудаче. Отдельный от `showToast` не ради красоты: с зелёной галочкой
+   * во главе тот же виджет произносил «✓ keychain is locked» и «✓ Provisioning
+   * of #1, #2 is already running» — а для отказа массового прогона, запущенного
+   * кнопкой с уже размонтированной страницы, этот тост единственная поверхность.
+   */
+  const showError = (message: string) => showToastAs("error", message);
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
@@ -224,7 +248,9 @@ export default function DesktopWorkspace() {
           else if (res.provision) provisionQueue.push(res.provision);
           else if (res.bulkProvision) deliverBulkProvision(res.bulkProvision);
         } catch (e) {
-          showToast(e instanceof Error ? e.message : String(e));
+          // Тот же класс отказа, что уходит в `onBulkProvisionError`, — и та же
+          // поверхность: провалившееся исполнение по ссылке не «✓».
+          showError(e instanceof Error ? e.message : String(e));
         }
       };
       const start = await getCurrent();
@@ -256,7 +282,7 @@ export default function DesktopWorkspace() {
     // hot reload их копилось бы по одной на перезагрузку, то есть по лишнему
     // `confirm` на каждый незнакомый ключ.
     let cancelled = false;
-    void listenHostKeyPrompts(() => showToast("Could not save host key")).then((off) => {
+    void listenHostKeyPrompts(() => showError("Could not save host key")).then((off) => {
       if (cancelled) off();
       else unlisten = off;
     });
@@ -705,7 +731,7 @@ export default function DesktopWorkspace() {
             onBulkProvisionResult={deliverBulkProvision}
             // Тем же тостом, что и отказ этой же операции по `sdmp://`-ссылке:
             // страницы, на которой был бы баннер, к этому моменту уже нет.
-            onBulkProvisionError={showToast}
+            onBulkProvisionError={showError}
           />
         )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}
@@ -748,11 +774,14 @@ export default function DesktopWorkspace() {
 
       {toast && (
         <div
+          // `alert` только для отказа: он перебивает чтение экрана, и делать это
+          // ради «Provision: connecting over SSH…» незачем.
+          role={toast.kind === "error" ? "alert" : "status"}
           style={{
             position: "fixed",
             bottom: 24,
             right: 24,
-            background: "#111",
+            background: toast.kind === "error" ? "#7f1d1d" : "#111",
             color: "#fff",
             padding: "10px 18px",
             borderRadius: 8,
@@ -762,7 +791,7 @@ export default function DesktopWorkspace() {
             animation: "slideIn 0.2s ease",
           }}
         >
-          ✓ {toast}
+          {toast.kind === "error" ? "✕" : "✓"} {toast.message}
         </div>
       )}
 

@@ -14,7 +14,7 @@ export default function BulkActionToolbar({
   onAssignCF,
   onProvision,
   onDelete,
-  pending,
+  provisionPending,
 }: {
   selectedCount: number;
   /** Selected domain IDs for `sdmp://…?ids=` deep links on web. */
@@ -23,7 +23,18 @@ export default function BulkActionToolbar({
   onAssignCF: () => void;
   onProvision: () => void;
   onDelete: () => void;
-  pending?: boolean;
+  /**
+   * Идёт ли массовый provision. Гасит ТОЛЬКО свою кнопку.
+   *
+   * Раньше здесь был общий `pending`, гасивший заодно «Assign Server» и «Assign
+   * CF». Пока он складывался из трёх HTTP-мутаций, которые отвечали 404 за
+   * миллисекунды, этого никто не видел. Теперь признак живёт в `MutationCache`,
+   * держится весь прогон (десятки минут), переживает навигацию и истинен даже
+   * для прогона, запущенного ссылкой по СОВЕРШЕННО ДРУГИМ доменам, — то есть
+   * пользователь вернулся бы на страницу, выделил три чужих домена и увидел две
+   * мёртвые кнопки без единого объяснения рядом с живой «Delete».
+   */
+  provisionPending?: boolean;
 }) {
   if (selectedCount <= 0) return null;
 
@@ -49,13 +60,11 @@ export default function BulkActionToolbar({
         action={`assign-server${q}`}
         label="Assign Server"
         desktopOnClick={onAssignServer}
-        disabled={Boolean(pending)}
       />
       <OpenInDesktop
         action={`assign-cf${q}`}
         label="Assign CF"
         desktopOnClick={onAssignCF}
-        disabled={Boolean(pending)}
       />
       {/* Массового «Set NS» здесь намеренно нет: `POST /domains/bulk-set-ns` на
           бэкенде не существует, а `sdmp://set-ns` не разбирает
@@ -82,7 +91,7 @@ export default function BulkActionToolbar({
         action={`bulk-provision${q}`}
         label="Provision"
         desktopOnClick={onProvision}
-        disabled={Boolean(pending) || webBulkDisabled}
+        disabled={Boolean(provisionPending) || webBulkDisabled}
       />
       <div style={{ marginLeft: "auto" }}>
         <OpenInDesktop action={`bulk-delete${q}`} label="Delete" variant="danger" desktopOnClick={onDelete} />

@@ -40,9 +40,7 @@ interface DomainUI {
   server_id: number | null;
   registrar_id: number | null;
   cf_id: number | null;
-  cf_zone_id: string | null;
   ns_status: string;
-  ns_updated_at: string | null;
   status: string;
   ssl_status?: string | null;
   last_provision_error?: string | null;
@@ -172,9 +170,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     server_id: d.server_id,
     registrar_id: d.registrar_id,
     cf_id: d.cloudflare_account_id,
-    cf_zone_id: d.cloudflare_zone_id,
     ns_status: d.ns_status || "pending",
-    ns_updated_at: d.ns_updated_at,
     status: d.status,
     ssl_status: d.ssl_status,
     last_provision_error: d.last_provision_error,
@@ -236,6 +232,15 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   // заявки висят pending ровно столько, сколько идёт прогон. Без этого признака
   // «идёт массовый прогон» после возврата на страницу превращалось бы в «нет», и
   // второй прогон по ДРУГИМ доменам подоменный гейт не остановил бы вовсе.
+  //
+  // Правило здесь СТРОЖЕ, чем у ссылки, и это выбор, а не расхождение. Кнопка
+  // отказывает на любом идущем прогоне, `sdmp://bulk-provision` — только на
+  // пересечении наборов (`alreadyProvisioning`). У кнопки пользователь стоит
+  // перед списком и видит, что что-то идёт: второй параллельный прогон отсюда —
+  // почти всегда «не понял, что первый ещё работает», и стоит он часов SSH.
+  // Ссылка приходит извне, её набор может быть намеренно непересекающимся
+  // (соседняя пачка доменов на другом сервере), и запрещать его было бы запретом
+  // сценария, ради которого ссылка и заведена.
   const pendingProvisions = useMutationState({
     filters: { mutationKey: PROVISION_DOMAIN_KEY, status: "pending" },
     select: (m) => ({
@@ -559,7 +564,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       onAssignCF={() => setShowAssignCF(true)}
       onProvision={() => { void handleBulkProvision(); }}
       onDelete={handleBulkDelete}
-      pending={bulkProvisionRunning}
+      provisionPending={bulkProvisionRunning}
     />
     <Card>
       <div style={{overflowX:"auto"}}>

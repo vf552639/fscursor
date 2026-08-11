@@ -440,6 +440,12 @@ export const PROVISION_DOMAIN_KEY = ["provision-domain"] as const;
 function provisionDomainOptions(onResult: (outcome: ProvisionOutcome) => void) {
   return {
     mutationKey: PROVISION_DOMAIN_KEY,
+    // Провижн идёт по SSH из десктопа, а не из webview: `navigator.onLine`
+    // ничего про эту сеть не знает. С дефолтным `networkMode: "online"`
+    // react-query на «оффлайне» браузера переводит мутацию в `pending`, но
+    // `mutationFn` не запускает вовсе — то есть ⚙ показывал бы «Provisioning…»
+    // для прогона, который не начинался, и гейт держал бы домен занятым.
+    networkMode: "always" as const,
     mutationFn: async (vars: ProvisionDomainVars) => {
       if (!isTauri()) {
         throw new Error(desktopOnly("Provisioning"));
@@ -664,6 +670,14 @@ function claimProvisionGate(domainIds: number[]): () => void {
     for (const domainId of domainIds) {
       const claim = queryClient.getMutationCache().build(queryClient, {
         mutationKey: PROVISION_DOMAIN_KEY,
+        // Тот же `networkMode: "always"`, что у настоящего provision, и здесь он
+        // спасает от худшего: на «оффлайне» браузера retryer ставит мутацию в
+        // `pending` и НЕ зовёт `mutationFn`, а значит заявка никогда не дождётся
+        // `held` — `release()` в `finally` резолвит промис, которого никто не
+        // ждёт. Заявка так и висит `pending` до возвращения сети: ⚙ на этих
+        // доменах читается как «Provisioning…» бесконечно, каждый повтор
+        // отвечает «already running», и снять это из UI нечем.
+        networkMode: "always" as const,
         mutationFn: async (vars: ProvisionDomainVars) => {
           await held;
           return { domain_id: String(vars.domainId) };

@@ -11,9 +11,11 @@ import { useAuthStore } from "../store/auth";
  * Кнопка «Provision» панели массовых действий.
  *
  * Она била в `POST /domains/bulk-provision`, которого на бэкенде нет, — то есть
- * всегда возвращала 404, а `apiPost` не Tauri-aware и подменить его нечем.
- * Рабочий путь один и он же у ссылки `sdmp://bulk-provision`: Tauri-команда
- * `provision_bulk` через `runBulkProvisionDomains`.
+ * всегда возвращала 404. Транспорт тут ни при чём: в Tauri `apiPost` уходит не
+ * в axios, а в команду `api_request` (`api/client.ts`), но та проксирует к тому
+ * же REST API — 404 одинаково в вебе и в десктопе. Рабочий путь один и он же у
+ * ссылки `sdmp://bulk-provision`: Tauri-команда `provision_bulk` через
+ * `runBulkProvisionDomains`.
  *
  * Проверяется ровно то, что ломалось: вызов уходит командой, а не по HTTP;
  * отчёт (в нём пароли FTP каждого домена) доезжает наверх, а не оседает на
@@ -452,6 +454,27 @@ describe("Domains — массовый provision: набор и повтор", (
     expect(onBulk.mock.calls[0][0].status).toBe("already_ran");
     expect(onBulk.mock.calls[0][0].previousStatus).toBe("done");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("идущий прогон не гасит соседние массовые действия", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    const first = renderPage();
+    fireEvent.click(await selectAllAndFindProvision(first.container));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // Признак «идёт прогон» живёт в MutationCache: он держится десятками минут,
+    // переживает навигацию и истинен даже для прогона по СОВЕРШЕННО ДРУГИМ
+    // доменам, запущенного ссылкой. Гасить им «Assign Server»/«Assign CF»
+    // значит оставить пользователя перед двумя мёртвыми кнопками без единого
+    // объяснения — рядом с живой «Delete».
+    cleanup();
+    const second = renderPage();
+    const provision = await selectAllAndFindProvision(second.container);
+    expect(provision.disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Assign Server" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Assign CF" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("после ухода со страницы и возврата не даёт запустить второй прогон", async () => {

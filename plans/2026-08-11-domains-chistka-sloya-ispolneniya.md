@@ -53,7 +53,10 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
   `Provisioning of #N is already running.`; кнопка не должна глотать эту ошибку
   молча, текст обязан доехать до пользователя.
 - **Двойной клик по «Provision»** — гейт подоменный (`PROVISION_DOMAIN_KEY` в
-  `MutationCache`), плюс собственный `isPending` кнопки.
+  `MutationCache`); он же даёт кнопке признак «идёт прогон». Отдельно закрыто
+  окно до старта: пока висит диалог подтверждения, кнопка ничем не занята, и
+  второй клик гасится ref'ом (иначе второй диалог → «already running» поверх
+  прекрасно идущего прогона).
 - **Веб (не Tauri)** — исполнения нет; остаётся CTA `sdmp://bulk-provision`
   (`OpenInDesktop` уже так и устроен). Кнопка не должна пытаться исполнять.
 - **`already_ran`** — отчёт про идемпотентность обязан доехать до пользователя
@@ -82,8 +85,13 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
   пользователя. `DesktopWorkspace` уже держит `bulkReportQueue`
   (`useShowOnceQueue<BulkProvisionOutcome>`) и `BulkProvisionReportModal` —
   подключаемся к ним, второй очереди не заводим.
-- Локальное состояние «идёт массовый прогон» (`useState`) для `disabled`
-  кнопки: `pending` у `BulkActionToolbar` больше не может читаться из мутации.
+- Признак «идёт массовый прогон» для `disabled` кнопки: из мутации его больше не
+  прочитать. Изначально планировался локальный `useState` — по ревью заменён на
+  чтение `MutationCache` по маркеру `bulkGateClaim` (`isBulkGateClaim`):
+  `useState` не переживает размонтирование страницы, а оно случается на любой
+  навигации, и кнопка воскресала бы живой посреди прогона. Гасит признак ТОЛЬКО
+  свою кнопку (`provisionPending`): «Assign Server»/«Assign CF» он держал бы
+  мёртвыми весь прогон, в том числе запущенный ссылкой по чужим доменам.
 - Ошибку запуска (`already running`, `desktopOnly`, отказ команды) показать —
   не проглатывать. Достаточно того же канала, что уже используется на странице
   (баннер/тост); не изобретать третий.
@@ -205,11 +213,10 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
   - `DomainDetailModal` — две вкладки; `runAction`/`actionErrors` удалены как
     выродившиеся (действие осталось одно), свойство «отказ Set NS переживает
     закрытие карточки» сохранено (`setNsError` из `MutationCache`).
-  - Тесты: добавлен `pages/Domains.bulkprovision.test.tsx` (17 кейсов),
+  - Тесты: добавлен `pages/Domains.bulkprovision.test.tsx` (18 кейсов),
     в `DesktopWorkspace.provision.test.tsx` — сквозной «клик тулбара → очереди
-    воркспейса», из `DomainDetailModal.setns.test.tsx` убраны кейсы про
-    удалённые вкладки и добавлен кейс «две вкладки вместо пяти».
-    `npx tsc --noEmit` чист, `npm test` — 65 файлов / 630 тестов зелёные.
+    воркспейса» и тост неудачи, из `DomainDetailModal.setns.test.tsx` убраны
+    кейсы про удалённые вкладки и добавлен кейс «две вкладки вместо пяти».
   - Фаза 4: из `api/domains.ts` удалены все десять хуков HTTP-исполнения и
     семь осиротевших типов ответа. `SetNsResponse` тоже удалён — его последними
     потребителями были ровно эти хуки (`useCreateDb`, `useRequestSsl`,
@@ -231,8 +238,8 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
     `useZoneNameservers` зовёт `DomainDetailModal`, `useUpdateDomain` —
     `ServerDetail`, а `useZoneDetails` не зовёт больше никто (см. долг ниже).
     Тестов у модалки не было: открыть её было нечем.
-  - Фаза 5: `npx tsc --noEmit` чист, `npm test` — 65 файлов / 630 тестов
-    зелёные (то же, что до чистки: удалённое не было покрыто). Grep по
+  - Фаза 5: `npx tsc --noEmit` чист, `npm test` — 65 файлов / 633 теста
+    зелёные (удалённое покрыто не было). Grep по
     `bulk-provision|bulk-full-setup|create-site|refresh-ssl|ssl-request|`
     `ssl-cancel|create-db|nginx-override` во `frontend/src` даёт только
     `sdmp://`-CTA, разбор deep link'ов, их тесты и объясняющие комментарии —
@@ -253,6 +260,18 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
     её читает вкладка NS карточки домена, но только под `isTauri()` (в вебе
     блок заменён одной строкой про «десктоп выполняет»), то есть флаг там
     ничего бы не изменил.
+  - По итогам сквозного ревью ветки: `pending` тулбара разделён
+    (`provisionPending` гасит только «Provision» — общий флаг держал бы «Assign
+    Server»/«Assign CF» мёртвыми весь прогон, включая запущенный ссылкой по
+    чужим доменам); тост воркспейса получил вариант неудачи (с общей зелёной
+    галочкой он произносил «✓ keychain is locked», а для отказа прогона с уже
+    покинутой страницы это единственная поверхность); заявкам гейта и самому
+    provision проставлен `networkMode: "always"` (на «оффлайне» браузера
+    react-query ставил заявку в `pending`, не запуская `mutationFn`, — она
+    никогда не дожидалась `release()` и держала ⚙ «Provisioning…» бесконечно);
+    очередь итога сужена до `BulkProvisionReport`, чтобы пароли не лежали в
+    стейте воркспейса даже структурно; из `DomainUI` убраны поля `cf_zone_id` и
+    `ns_updated_at`, осиротевшие с удалением `EditDomainModal`.
 - Что осталось: ничего в объёме плана. Отложенное осознанно — в разделе «Явно
   откладываем» (гранулярные операции по домену и Full Setup через Tauri).
 - Долг, заведённый этой чисткой: `useZoneDetails` (`api/cloudflare.ts:205`)

@@ -277,6 +277,26 @@ describe("DesktopWorkspace — владелец результатов provision
     expect(report).not.toContain("PW-");
   });
 
+  it("об отказе прогона говорит тостом неудачи, а не зелёной галочкой", async () => {
+    mocks.invokeSynced.mockRejectedValue(new Error("keychain is locked"));
+    mocks.confirmAction.mockResolvedValue(true);
+
+    renderWorkspace([{ id: 1, name: "a.com" }]);
+    await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
+    const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
+
+    handler(["sdmp://bulk-provision?ids=1"]);
+
+    // Тот же тост — единственная поверхность для отказа прогона, запущенного
+    // кнопкой тулбара, если пользователь успел уйти со страницы (проп
+    // `onBulkProvisionError`). С общей зелёной галочкой во главе он произносил
+    // «✓ keychain is locked».
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("keychain is locked");
+    expect(alert.textContent).toContain("✕");
+    expect(alert.textContent).not.toContain("✓");
+  });
+
   it("показывает результат каждого домена bulk-провижининга — по одному", async () => {
     mocks.invokeSynced.mockResolvedValue({
       idempotency_key: "k-run",
