@@ -86,7 +86,7 @@ function setTauri(on: boolean) {
 function renderPage() {
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} />
+      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} />
     </QueryClientProvider>
   );
 }

@@ -703,6 +703,9 @@ export default function DesktopWorkspace() {
             ctx={srvCtx}
             onProvisionResult={provisionQueue.push}
             onBulkProvisionResult={deliverBulkProvision}
+            // Тем же тостом, что и отказ этой же операции по `sdmp://`-ссылке:
+            // страницы, на которой был бы баннер, к этому моменту уже нет.
+            onBulkProvisionError={showToast}
           />
         )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}

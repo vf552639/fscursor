@@ -68,6 +68,8 @@ vi.mock("./Settings", () => ({ default: () => null }));
 vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
+// А этот — ребёнок `Activity` (страница `Domains` его больше не импортирует):
+// он поллит журнал задач, которого в этом сценарии нет вовсе.
 vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
 
 function domainRow(id: number, name: string) {
@@ -237,6 +239,42 @@ describe("DesktopWorkspace — владелец результатов provision
     expect(screen.getByText("PW-LINK")).toBeTruthy();
     expect(JSON.stringify(localStorage)).not.toContain("PW-LINK");
     expect(JSON.stringify(sessionStorage)).not.toContain("PW-LINK");
+  });
+
+  it("раскладывает по очередям и прогон, запущенный кнопкой тулбара", async () => {
+    mocks.invokeSynced.mockResolvedValue({
+      idempotency_key: "k-btn",
+      status: "ok",
+      items: [
+        { domain_id: "1", outcome: "done", result: result("1", "PW-A") },
+        { domain_id: "2", outcome: "done", result: result("2", "PW-B") },
+      ],
+    });
+    mocks.confirmAction.mockResolvedValue(true);
+
+    const { container } = renderWorkspace([
+      { id: 1, name: "a.com" },
+      { id: 2, name: "b.com" },
+    ]);
+    await screen.findByText("a.com");
+    fireEvent.click(container.querySelector('thead input[type="checkbox"]') as HTMLInputElement);
+    fireEvent.click(await screen.findByRole("button", { name: "Provision" }));
+
+    // У прогона два входа — ссылка и эта кнопка, — а раскладка отчёта обязана
+    // быть одна: пропустив половину, воркспейс либо потерял бы пароли FTP, либо
+    // не сказал бы, чем кончился прогон. Кнопка тулбара раньше вообще не
+    // доходила до Tauri: она била в несуществующий `POST /domains/bulk-provision`.
+    expect(await screen.findByText("PW-A-ftp")).toBeTruthy();
+    expect(screen.queryByText("PW-B-ftp")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("PW-B-ftp")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+    expect(await screen.findByText("Bulk provision finished")).toBeTruthy();
+    const report = document.body.textContent ?? "";
+    expect(report).toContain("2 provisioned");
+    expect(report).toContain("Run key: k-btn");
+    expect(report).not.toContain("PW-");
   });
 
   it("показывает результат каждого домена bulk-провижининга — по одному", async () => {

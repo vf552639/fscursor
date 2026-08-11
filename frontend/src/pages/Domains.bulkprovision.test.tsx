@@ -1,9 +1,9 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
-import Domains from "./Domains";
+import Domains, { describeBulkProvision } from "./Domains";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -26,7 +26,14 @@ const mocks = vi.hoisted(() => ({
   apiPut: vi.fn(),
   apiDelete: vi.fn(),
   invokeSynced: vi.fn(),
+  confirmAction: vi.fn(),
 }));
+
+// Подтверждение спрашивает нативный диалог, а не `window.confirm`: последний в
+// десктопном webview молча возвращает `false` (см. `lib/confirmDialog.ts`).
+// Поэтому мок модуля, а не `stubGlobal("confirm")` — подмена глобали проверяла
+// бы путь, которым приложение не ходит.
+vi.mock("../lib/confirmDialog", () => ({ confirmAction: mocks.confirmAction }));
 
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
@@ -89,7 +96,10 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-function renderPage(onBulkProvisionResult: (r: any) => void = vi.fn()) {
+function renderPage(
+  onBulkProvisionResult: (r: any) => void = vi.fn(),
+  onBulkProvisionError: (m: string) => void = vi.fn(),
+) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/domains") return [domainRow(1, "a.com"), domainRow(2, "b.com")];
     if (url === "/servers") return { items: [], total: 0 };
@@ -102,9 +112,21 @@ function renderPage(onBulkProvisionResult: (r: any) => void = vi.fn()) {
   // прогон. Со своим клиентом утверждения про гейт были бы зелены вхолостую.
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={vi.fn()} onBulkProvisionResult={onBulkProvisionResult} />
+      <Domains
+        onProvisionResult={vi.fn()}
+        onBulkProvisionResult={onBulkProvisionResult}
+        onBulkProvisionError={onBulkProvisionError}
+      />
     </QueryClientProvider>,
   );
+}
+
+/** Запустить одиночный provision строки: ⚙ → диалог → «Provision». */
+async function startSingleProvision(domain: string) {
+  const row = (await screen.findByText(domain)).closest("tr") as HTMLElement;
+  fireEvent.click(within(row).getByRole("button", { name: "Provision domain" }));
+  await screen.findByLabelText(/Also create a database/i);
+  fireEvent.click(screen.getByRole("button", { name: "Provision" }));
 }
 
 /** Выделить оба домена шапочным чекбоксом и вернуть кнопку «Provision» тулбара. */
@@ -129,6 +151,9 @@ beforeEach(() => {
     mutations: { ...base.mutations, retry: false },
   });
   useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
+  // По умолчанию пользователь подтверждает — иначе каждый тест проверял бы
+  // только гейт подтверждения. Отказ проверяется отдельным кейсом.
+  mocks.confirmAction.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -230,22 +255,54 @@ describe("Domains — массовый provision из тулбара", () => {
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
     const { container } = renderPage();
-    const btn = await selectAllAndFindProvision(container);
-    fireEvent.click(btn);
+    // Одиночный provision по a.com — тот самый случай, ради которого гейт
+    // подоменный: пока он идёт, набор, в который входит этот домен, стартовать
+    // не должен. Молчащая кнопка неотличима от сломанной, поэтому текст обязан
+    // доехать до пользователя.
+    await startSingleProvision("a.com");
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
-    // Гейт подоменный и живёт в MutationCache: пока первый прогон висит, второй
-    // по тем же доменам не стартует. Молчащая кнопка неотличима от сломанной —
-    // текст обязан доехать до пользователя.
-    cleanup();
-    const second = renderPage();
-    fireEvent.click(await selectAllAndFindProvision(second.container));
+    fireEvent.click(await selectAllAndFindProvision(container));
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/already running/i);
     expect(alert.textContent).toMatch(/#1/);
     // И по SSH второй раз никто не пошёл.
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+
+  it("отказ, прилетевший после ухода со страницы, уходит наверх, а не в мёртвый стейт", async () => {
+    setTauri(true);
+    let fail: (e: Error) => void = () => {};
+    mocks.invokeSynced.mockReturnValue(new Promise((_res, rej) => { fail = rej; }));
+    const onError = vi.fn();
+
+    const { container } = renderPage(vi.fn(), onError);
+    fireEvent.click(await selectAllAndFindProvision(container));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // Уйти смотреть тосты по шагам прогона — нормальное поведение, а страница
+    // размонтируется на любой навигации. Отказ, положенный в её стейт, не увидит
+    // никто: пользователь вернётся к обычной странице в уверенности, что прогон
+    // идёт, хотя не стартовал ни один домен.
+    cleanup();
+    fail(new Error("keychain is locked"));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("keychain is locked"));
+  });
+
+  it("показывает отказ, прилетевший уже после старта", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockRejectedValue(new Error("ssh: handshake failed"));
+
+    const { container } = renderPage();
+    fireEvent.click(await selectAllAndFindProvision(container));
+
+    // Отказ ПОСЛЕ старта (сорвался `invokeSynced`) — не то же самое, что отказ
+    // гейта до старта: он приходит другим путём и раньше терялся бы так же молча.
+    expect((await screen.findByRole("alert")).textContent).toMatch(/handshake failed/);
+    // Набор не тронут: повторять прогон пользователю по этим же доменам.
+    expect(screen.getByText("2 selected")).toBeTruthy();
   });
 
   it("без userId не зовёт команду и говорит почему", async () => {
@@ -257,6 +314,137 @@ describe("Domains — массовый provision из тулбара", () => {
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/sign in/i);
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
+    // Спрашивать подтверждение, когда запускать всё равно нечем, незачем.
+    expect(mocks.confirmAction).not.toHaveBeenCalled();
+  });
+
+  it("гасит отказ, когда набор, к которому он относился, изменили", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockRejectedValue(new Error("ssh: handshake failed"));
+
+    const { container } = renderPage();
+    fireEvent.click(await selectAllAndFindProvision(container));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/handshake failed/);
+
+    // «Provisioning of #1, #2 is already running» после снятия галочек с #1 и #2
+    // говорит уже не про то, что пользователь видит перед собой.
+    fireEvent.click(container.querySelector('tbody input[type="checkbox"]') as HTMLInputElement);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+});
+
+describe("Domains — массовый provision: подтверждение", () => {
+  it("спрашивает перед запуском и называет домены поимённо", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockResolvedValue({ idempotency_key: "k", status: "ok", items: [] });
+
+    const { container } = renderPage();
+    fireEvent.click(await selectAllAndFindProvision(container));
+
+    await waitFor(() => expect(mocks.confirmAction).toHaveBeenCalledTimes(1));
+    const text = String(mocks.confirmAction.mock.calls[0][0]);
+    // Промах мимо соседней кнопки («Assign Server» стоит рядом) стоил бы часов
+    // необратимой работы: остановить прогон нечем, а идемпотентность после него
+    // пометит набор отработавшим.
+    expect(text).toContain("Provision 2 domain(s)?");
+    expect(text).toContain("a.com, b.com");
+    expect(text).toMatch(/cannot be stopped/i);
+  });
+
+  it("на сотне доменов не превращает диалог в стену текста", () => {
+    const many = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, domain: `d${i + 1}.com` }));
+    const text = describeBulkProvision(many as any, many.map((d) => d.id));
+
+    // Диалог, который нельзя прочитать, закрывают не читая — а это ровно тот
+    // диалог, который должен остановить случайный запуск.
+    expect(text).toContain("Provision 100 domain(s)?");
+    expect(text).toContain("d1.com");
+    expect(text).toContain("d20.com");
+    expect(text).not.toContain("d21.com");
+    expect(text).toContain("(+80 more)");
+  });
+
+  it("отказ в подтверждении не запускает ничего", async () => {
+    setTauri(true);
+    mocks.confirmAction.mockResolvedValue(false);
+
+    const { container } = renderPage();
+    fireEvent.click(await selectAllAndFindProvision(container));
+
+    await waitFor(() => expect(mocks.confirmAction).toHaveBeenCalledTimes(1));
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+    // И набор на месте: пользователь передумал, а не выполнил.
+    expect(screen.getByText("2 selected")).toBeTruthy();
+  });
+});
+
+describe("Domains — массовый provision: набор и повтор", () => {
+  it("оборвавшийся прогон оставляет набор выделенным", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockResolvedValue({
+      idempotency_key: "key-1",
+      status: "failed",
+      error: "failed on domain 2: ssh: connect: refused",
+      items: [
+        doneItem("1", FTP_PASSWORD_1),
+        { domain_id: "2", outcome: "skipped" as const },
+      ],
+    });
+    const onBulk = vi.fn();
+
+    const { container } = renderPage(onBulk);
+    fireEvent.click(await selectAllAndFindProvision(container));
+    await waitFor(() => expect(onBulk).toHaveBeenCalledTimes(1));
+
+    // Хвост (`skipped`) назван поимённо ровно затем, чтобы прогон повторили по
+    // нему. Сняв выделение, страница заставила бы разыскивать эти домены заново
+    // в списке на двести строк.
+    expect(screen.getByText("2 selected")).toBeTruthy();
+  });
+
+  it("про already_ran отдаёт отчёт наверх, а не молчит", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockResolvedValue({
+      idempotency_key: "key-1",
+      status: "already_ran",
+      previous_status: "done",
+      items: [
+        { domain_id: "1", outcome: "skipped" as const },
+        { domain_id: "2", outcome: "skipped" as const },
+      ],
+    });
+    const onBulk = vi.fn();
+
+    const { container } = renderPage(onBulk);
+    fireEvent.click(await selectAllAndFindProvision(container));
+
+    // Пустой успех выглядел бы как «готово», хотя не тронут ни один домен и
+    // пароли прошлого прогона показать уже некому. Различает `running` и `done`
+    // текст `summarizeBulkProvision`, который рисует отчёт воркспейса.
+    await waitFor(() => expect(onBulk).toHaveBeenCalledTimes(1));
+    expect(onBulk.mock.calls[0][0].status).toBe("already_ran");
+    expect(onBulk.mock.calls[0][0].previousStatus).toBe("done");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("после ухода со страницы и возврата не даёт запустить второй прогон", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    const first = renderPage();
+    fireEvent.click(await selectAllAndFindProvision(first.container));
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // Страница размонтируется на любой навигации, а прогон идёт десятками минут.
+    // Локальный флаг «идёт прогон» воскресал бы в `false`, и кнопка снова
+    // выглядела бы рабочей — второй прогон по ДРУГИМ доменам подоменный гейт
+    // при этом не остановил бы вовсе.
+    cleanup();
+    const second = renderPage();
+    const btn = await selectAllAndFindProvision(second.container);
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
   });
 });
 

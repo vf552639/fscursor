@@ -68,7 +68,7 @@ function renderPage(rows: ReturnType<typeof domainRow>[]) {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={vi.fn()} onBulkProvisionResult={vi.fn()} />
+      <Domains onProvisionResult={vi.fn()} onBulkProvisionResult={vi.fn()} onBulkProvisionError={vi.fn()} />
     </QueryClientProvider>
   );
 }

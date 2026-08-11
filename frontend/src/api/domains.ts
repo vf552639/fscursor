@@ -736,6 +736,20 @@ function gateClaimVars(domainId: number): ProvisionDomainVars & { bulkGateClaim:
   return { domainId, domainName: `#${domainId}`, withDb: false, bulkGateClaim: true };
 }
 
+/**
+ * Заявка ли это гейта массового прогона? Читается по тому же маркеру, который
+ * ставит `gateClaimVars`, — и живёт рядом с ним намеренно: страница `Domains`
+ * гасит по этому признаку кнопку «Provision» тулбара, и разъехавшийся с
+ * записью литерал сделал бы кнопку живой во время прогона.
+ *
+ * Признак «идёт массовый прогон» берётся отсюда, а не из локального `useState`,
+ * по той же причине, что и подоменный гейт для ⚙: прогон идёт минутами и
+ * переживает уход со страницы, а `useState` размонтированной страницы — нет.
+ */
+export function isBulkGateClaim(vars: unknown): boolean {
+  return (vars as { bulkGateClaim?: unknown } | undefined)?.bulkGateClaim === true;
+}
+
 /** Домены набора, по которым provision уже летит (кнопкой, ссылкой или другим bulk). */
 function alreadyProvisioning(domainIds: number[]): number[] {
   return domainIds.filter((id) =>

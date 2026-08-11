@@ -1,7 +1,7 @@
-import React, { useState, useMemo, ChangeEvent, useEffect } from "react";
+import React, { useState, useMemo, useRef, ChangeEvent, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useProvisionDomain, runBulkProvisionDomains, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
@@ -31,6 +31,9 @@ interface AddDomainModalProps {
   cfAccounts: CloudflareAccount[];
 }
 
+/** Сколько имён влезает в диалог подтверждения, не превращая его в стену текста. */
+const CONFIRM_NAMES_SHOWN = 20;
+
 interface DomainUI {
   id: number;
   domain: string;
@@ -44,6 +47,31 @@ interface DomainUI {
   ssl_status?: string | null;
   last_provision_error?: string | null;
   created: string;
+}
+
+/**
+ * Текст подтверждения массового provision.
+ *
+ * Отдельная чистая функция, а не шаблон внутри обработчика: её проверяет тест, а
+ * этот текст — единственное, что стоит между промахом мимо соседней кнопки и
+ * часами необратимой работы на чужих машинах.
+ *
+ * Устроен как `describeDeepLinkAction` для той же операции (`lib/deepLink.ts`):
+ * называет и действие, и цели. Цели названы ИМЕНАМИ, а не id: у ссылки имён нет,
+ * а у страницы есть, и выбирал пользователь именно имена. Строки «Continue only
+ * if you started this yourself» здесь нет намеренно — она про ссылку, пришедшую
+ * с чужой страницы, а не про кнопку, которую только что нажали.
+ */
+export function describeBulkProvision(domains: DomainUI[], ids: number[]): string {
+  const names = ids.map((id) => domains.find((d) => d.id === id)?.domain ?? `#${id}`);
+  const rest = names.length - CONFIRM_NAMES_SHOWN;
+  const list = names.slice(0, CONFIRM_NAMES_SHOWN).join(", ") + (rest > 0 ? `, … (+${rest} more)` : "");
+  return (
+    `Provision ${ids.length} domain(s)?\n\n` +
+    `${list}\n\n` +
+    "SDMP will connect over SSH to each domain's server and create the site, " +
+    "its FTP account and its SSL certificate. Once started, the run cannot be stopped."
+  );
 }
 
 export function AddDomainModal({onClose, servers, registrars, cfAccounts}: AddDomainModalProps){
@@ -244,7 +272,7 @@ function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: E
   </Modal>;
 }
 
-export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult }: {
+export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError }: {
   onNav?: (pg: string, ctx?: any) => void;
   ctx?: any;
   /**
@@ -269,6 +297,21 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
    * он и на чём), а итог живёт только в отчёте.
    */
   onBulkProvisionResult: (outcome: BulkProvisionOutcome) => void;
+  /**
+   * Куда отдать причину НЕзапуска, если баннера страницы больше нет.
+   *
+   * Отказ («уже провижинится», «только десктоп», сорвавшийся `invokeSynced`)
+   * может прилететь через секунды после клика, а страница к этому моменту
+   * размонтирована — она размонтируется на любой навигации (`<main key={page}>`
+   * в DesktopWorkspace), и уйти смотреть тосты по шагам прогона тут нормальное
+   * поведение. Стейт мёртвого компонента этот текст съедает молча, и
+   * пользователь возвращается к обычной странице в уверенности, что прогон идёт.
+   *
+   * Зовётся ТОЛЬКО когда страница уже размонтирована: пока она жива, у той же
+   * ошибки есть своё место — баннер над тулбаром, который не исчезнет через
+   * 2200 мс. Одно событие — одна поверхность.
+   */
+  onBulkProvisionError: (message: string) => void;
 }){
   const domainsQ = useDomains();
   const serversQ = useServers();
@@ -319,14 +362,20 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
   const singleProvision = useProvisionDomain(onProvisionResult);
-  // Массовый прогон идёт не мутацией, а прямым `await` (см. `handleBulkProvision`),
-  // поэтому «идёт ли он» приходится держать самим: `pending` кнопки читать
-  // больше неоткуда. Подоменный гейт этот флаг НЕ заменяет — он в MutationCache
-  // и защищает от второго прогона по тому же домену из ссылки и из ⚙.
-  const [bulkProvisionRunning, setBulkProvisionRunning] = useState(false);
   // Отказ запуска обязан быть виден: «уже провижинится», «только десктоп» и
   // отказ самой команды — это ответ на вопрос «почему ничего не произошло».
   const [bulkProvisionError, setBulkProvisionError] = useState<string | null>(null);
+  // Жива ли ещё страница к моменту, когда вернулся отказ. Отказ приходит через
+  // секунды после клика, а страница размонтируется на любой навигации — без
+  // этого признака текст уходил бы в стейт мёртвого компонента, то есть в
+  // никуда (см. проп `onBulkProvisionError`).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Состояние provision читаем из MutationCache, а не из локального observer:
   // операция идёт минутами (SSH + certbot) и переживает уход со страницы, а
   // observer при размонтировании теряет с ней связь. Без этого после возврата
@@ -337,6 +386,20 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     select: (m) => (m.state.variables as ProvisionDomainVars | undefined)?.domainId,
   });
   const isProvisioning = (id: number) => provisioningIds.includes(id);
+  // «Идёт массовый прогон» — из того же кэша и по той же причине, что и строчкой
+  // выше, а не из `useState`: страница размонтируется на любой навигации
+  // (`<main key={page}>`), и локальный флаг воскресал бы в `false` — кнопка
+  // снова живая, хотя по SSH прямо сейчас идёт сорокаминутный прогон. Второй
+  // прогон по ДРУГИМ доменам подоменный гейт при этом не остановит.
+  //
+  // Признак — маркер `bulkGateClaim` в заявках гейта (см. `isBulkGateClaim`):
+  // заявки висят pending ровно столько, сколько идёт прогон, и заводит их сам
+  // `runBulkProvisionDomains`.
+  const bulkClaims = useMutationState({
+    filters: { mutationKey: PROVISION_DOMAIN_KEY, status: "pending" },
+    select: (m) => isBulkGateClaim(m.state.variables),
+  });
+  const bulkProvisionRunning = bulkClaims.some(Boolean);
   const deleteDomain = useDeleteDomain();
   // Provision в десктопе синхронен: серверного task log'а, который можно было бы
   // поллить, у него нет — поэтому ни `TaskProgressModal`, ни его multi-версии на
@@ -365,6 +428,13 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       setSearch("");
     }
   }, [ctx]);
+
+  // Причина отказа привязана к набору, на котором он случился: «Provisioning of
+  // #1, #2 is already running» после снятия галочек с #1 и #2 говорит уже не про
+  // то, что пользователь видит перед собой.
+  useEffect(() => {
+    setBulkProvisionError(null);
+  }, [sel]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -513,22 +583,38 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       setBulkProvisionError("Not signed in — sign in again to run provisioning.");
       return;
     }
+    const targets = Array.from(sel);
+    // Спрашиваем, как спрашивают массовое удаление и как спрашивает
+    // `sdmp://bulk-provision`: один клик запускает часы необратимой работы на
+    // чужих машинах (site + FTP-аккаунт + certbot на каждом домене), остановить
+    // прогон нечем, а идемпотентность после него пометит набор отработавшим —
+    // то есть промах по «Assign Server» стоил бы и лишнего прогона, и
+    // возможности повторить правильный.
+    //
+    // Домены названы ИМЕНАМИ, а не id, как в тексте ссылки: имя — это то, чем
+    // пользователь их выбирал. Длинный список урезаем: диалог, который нельзя
+    // прочитать, закрывают не читая.
+    if (!(await confirmAction(describeBulkProvision(domains, targets)))) return;
     // Команда адресует домены строками.
-    const ids = Array.from(sel).map(String);
-    setBulkProvisionRunning(true);
+    const ids = targets.map(String);
     try {
       const outcome = await runBulkProvisionDomains(userId, ids);
       // Отчёт отдаём ПЕРВЫМ действием после ответа: всё остальное здесь —
       // косметика стейта, а он существует в единственном экземпляре.
       onBulkProvisionResult(outcome);
-      setSel(new Set());
+      // Снимаем выделение только с полностью удавшегося прогона. У оборвавшегося
+      // хвост (`skipped`) назван поимённо ровно затем, чтобы повторить прогон по
+      // нему, — а повторять его пользователю пришлось бы, заново разыскивая
+      // домены в списке на двести строк.
+      if (outcome.status === "ok") setSel(new Set());
     } catch (e) {
       // «Provisioning of #N is already running.», «только десктоп» и отказ самой
       // команды — всё это обязано доехать до пользователя: молчащая кнопка
-      // неотличима от сломанной.
-      setBulkProvisionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBulkProvisionRunning(false);
+      // неотличима от сломанной. Куда именно — зависит от того, жива ли ещё
+      // страница: в стейте размонтированной текст умирает так же молча.
+      const message = e instanceof Error ? e.message : String(e);
+      if (mountedRef.current) setBulkProvisionError(message);
+      else onBulkProvisionError(message);
     }
   };
 
@@ -603,9 +689,10 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         </Sel>
       </div>
     </Card>
-    {/* Вне тулбара намеренно: тулбар исчезает при `selectedCount <= 0`, а набор
-        сбрасывается удавшимся прогоном — вместе с ним исчезла бы и причина
-        отказа предыдущего. */}
+    {/* Вне тулбара намеренно: он исчезает при `selectedCount <= 0`, а набор
+        снимается и без прогона — массовым удалением и просто снятием галочек.
+        Внутри тулбара отказ пропадал бы ровно в тот момент, когда пользователь
+        разбирается, что произошло. */}
     {bulkProvisionError ? (
       <div role="alert" style={{marginBottom:12,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
         {bulkProvisionError}
