@@ -4,8 +4,8 @@ import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, Empt
 import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
-import { expiryState, expiryTextColor, expiryTs, formatExpiry } from "../lib/domainExpiry";
-import { DOMAIN_STATUSES, domainStatusLabel, domainStatusRank } from "../lib/domainStatus";
+import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, expiryTs, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
+import { DOMAIN_STATUSES, domainStatusLabel, domainStatusRank, sslStatusRank } from "../lib/domainStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
 import StatusBadge from "../components/StatusBadge";
@@ -54,7 +54,7 @@ interface DomainUI {
 }
 
 /** По какой колонке сортируем. Только те, у чьих значений есть порядок. */
-type SortKey = "domain" | "status" | "expiry_date" | "ssl_expires_at" | "created";
+type SortKey = "domain" | "status" | "expiry_date" | "ssl" | "created";
 
 interface Sort {
   key: SortKey;
@@ -75,11 +75,34 @@ interface Sort {
  */
 const DEFAULT_SORT: Sort = { key: "domain", dir: "asc" };
 
-/** Значение, по которому сортируется строка для данного ключа-даты. */
+/**
+ * Сравнение двух значений, у которых бывает «не знаем» (`null`): неизвестное
+ * всегда в конец, при ЛЮБОМ направлении.
+ *
+ * Ветки `null` стоят ДО умножения на направление — в этом всё правило и есть.
+ * Одна функция на все ключи (даты, статус домена, статус сертификата) именно
+ * потому, что незнание у них одно и то же: перевернув сортировку, пользователь
+ * ищет либо самый горящий домен, либо самый дальний, и в обоих случаях список
+ * начинался бы с тех, про кого ответа нет вовсе.
+ */
+function compareUnknownLast(a: number | null, b: number | null, mul: number): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return (a - b) * mul;
+}
+
+/**
+ * Значение, по которому сортируется строка для ключа-даты.
+ *
+ * Ключей-дат ровно два, и вызывается это только из ветки, где остальные уже
+ * разобраны; `created` стоит фолбэком, а не третьей веткой, потому что колонка
+ * Added — единственная оставшаяся. Компилятор эту связь не держит: новый
+ * `SortKey` уедет сюда молча и отсортируется по дате заведения. Разбор страницы
+ * (план №4) должен заменить это `switch`'ем с проверкой `never`.
+ */
 function dateOf(d: DomainUI, key: SortKey): string | null | undefined {
-  if (key === "expiry_date") return d.expiry_date;
-  if (key === "ssl_expires_at") return d.ssl_expires_at;
-  return d.created;
+  return key === "expiry_date" ? d.expiry_date : d.created;
 }
 
 /**
@@ -91,28 +114,28 @@ function dateOf(d: DomainUI, key: SortKey): string | null | undefined {
  * (`Domains.expiry.test.tsx`) — то есть тем самым порядком, который видит
  * пользователь, а не возвратом функции.
  *
- * Само правило — про честность, а не про удобство: перевернув сортировку по
- * сроку, пользователь ищет либо самый горящий домен, либо самый дальний. И в
- * том и в другом случае список начинался бы с доменов, про чей срок мы НЕ
- * ЗНАЕМ, — то есть ответ на оба вопроса заслоняли бы те, про кого ответа нет
- * вовсе.
+ * Незнание (даты нет, статус незнакомый) уходит в конец при любом направлении —
+ * см. `compareUnknownLast`.
+ *
+ * Колонка SSL сортируется ПО СТАТУСУ сертификата, а срок — лишь второй ключ.
+ * Так устроена и сама ячейка: бейдж крупно, срок подписью под ним. Сортировать
+ * колонку по подписи, когда заголовок называет её «SSL», значило бы упорядочить
+ * список по тому, чего в заголовке нет, — угадать такое нельзя.
  */
 function sortDomains(rows: DomainUI[], sort: Sort): DomainUI[] {
   const mul = sort.dir === "asc" ? 1 : -1;
   return [...rows].sort((a, b) => {
-    if (sort.key === "domain") return a.domain.localeCompare(b.domain) * mul;
     let primary: number;
-    if (sort.key === "status") {
-      primary = (domainStatusRank(a.status) - domainStatusRank(b.status)) * mul;
+    if (sort.key === "domain") {
+      primary = a.domain.localeCompare(b.domain) * mul;
+    } else if (sort.key === "status") {
+      primary = compareUnknownLast(domainStatusRank(a.status), domainStatusRank(b.status), mul);
+    } else if (sort.key === "ssl") {
+      primary =
+        compareUnknownLast(sslStatusRank(a.ssl_status), sslStatusRank(b.ssl_status), mul) ||
+        compareUnknownLast(expiryTs(a.ssl_expires_at), expiryTs(b.ssl_expires_at), mul);
     } else {
-      const ta = expiryTs(dateOf(a, sort.key));
-      const tb = expiryTs(dateOf(b, sort.key));
-      // Незнание не участвует в сравнении и не переворачивается вместе с ним:
-      // ветки стоят ДО умножения на направление.
-      if (ta === null && tb === null) primary = 0;
-      else if (ta === null) primary = 1;
-      else if (tb === null) primary = -1;
-      else primary = (ta - tb) * mul;
+      primary = compareUnknownLast(expiryTs(dateOf(a, sort.key)), expiryTs(dateOf(b, sort.key)), mul);
     }
     // Равные ключи — по имени. Иначе полсотни доменов с одной датой покупки
     // встают в порядке заведения, в котором глазами не найти ничего, и порядок
@@ -133,6 +156,12 @@ const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",font
  * `aria-sort` — на `th`, потому что о состоянии колонки скринридеры спрашивают
  * именно ячейку заголовка, а не кнопку внутри.
  *
+ * `aria-label` кнопке нужен именно потому, что `aria-sort` живёт на ячейке: в
+ * режиме форм (focus mode) скринридер читает только саму кнопку, и без имени
+ * действия она звучала бы как «Expires, кнопка» — то есть о том, что нажатие
+ * переупорядочивает список, пользователь бы не узнал. Стрелка тут не помощник:
+ * она `aria-hidden`, и это правильно — вслух она читалась бы мусорным символом.
+ *
  * Живёт на уровне модуля, а НЕ внутри `Domains`, и это не стилистика. Компонент,
  * объявленный в теле другого компонента, — новый тип на каждый рендер, то есть
  * React перемонтирует ячейки шапки при любом изменении стейта страницы. С
@@ -142,11 +171,11 @@ const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",font
  * заголовку. Клавиатурному пользователю приходилось протабливаться к нему
  * заново; мышью дефект не виден вовсе. Есть тест.
  */
-function Th({k, sort, onSort, children}: {k?: SortKey, sort: Sort, onSort: (k: SortKey) => void, children: React.ReactNode}){
+function Th({k, label, sort, onSort, children}: {k?: SortKey, label?: string, sort: Sort, onSort: (k: SortKey) => void, children: React.ReactNode}){
   if (!k) return <th style={TH_STYLE}>{children}</th>;
   const active = sort.key === k;
   return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
-    <button type="button" onClick={()=>onSort(k)} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?"#2563eb":"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
+    <button type="button" onClick={()=>onSort(k)} aria-label={`Sort by ${label ?? k}`} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?"#2563eb":"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
       {children}
       <span aria-hidden="true" style={{color:active?"#2563eb":"#d1d5db"}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
     </button>
@@ -739,7 +768,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===sorted.length&&sorted.length>0} onChange={()=>setSel(sel.size===sorted.length?new Set():new Set(sorted.map((d: DomainUI)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {([["Domain","domain"],["Server"],["Registrar"],["Cloudflare"],["Status","status"],["Expires","expiry_date"],["SSL","ssl_expires_at"],["Added","created"],[""]] as [string, SortKey?][]).map(([h,k])=><Th key={h} k={k} sort={sort} onSort={toggleSort}>{h}</Th>)}
+            {([["Domain","domain"],["Server"],["Registrar"],["Cloudflare"],["Status","status"],["Expires","expiry_date"],["SSL","ssl"],["Added","created"],[""]] as [string, SortKey?][]).map(([h,k])=><Th key={h} k={k} label={h} sort={sort} onSort={toggleSort}>{h}</Th>)}
           </tr></thead>
           <tbody>
             {sorted.length === 0 && domainsData.length > 0 ? (
@@ -807,8 +836,11 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
                     Незнание — прочерк и БЕЗ подписи: «—» под «—» ничего не
                     добавляет. */}
                 <td data-testid="expiry-cell" style={{padding:"11px 16px",fontSize:12.5}}>
-                  <div style={{color:expiryTextColor(expState),fontWeight:expState==="ok"||expState==="unknown"?400:600}}>
-                    {expState === "unknown" ? "—" : fmtDate(d.expiry_date ?? "")}
+                  <div style={{color:expiryTextColor(expState),fontWeight:expiryTextWeight(expState)}}>
+                    {/* И дата, и подпись под ней — из одного модуля: дату без
+                        времени он печатает в UTC, а `toLocaleDateString` по
+                        месту показа сдвигал её на день западнее UTC. */}
+                    {expState === "unknown" ? NO_VALUE : formatExpiryDate(d.expiry_date)}
                   </div>
                   {expState !== "unknown" ? (
                     <div style={{fontSize:11,color:expiryTextColor(expState)}}>{formatExpiry(d.expiry_date, now)}</div>

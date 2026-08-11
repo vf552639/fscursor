@@ -37,6 +37,13 @@ const DAY = 24 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
 /** Час сверху — чтобы граница полных суток не перескакивала от задержки рендера. */
 const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+/** `expiry_date` в производственном виде: `date`, без времени и без зоны. */
+const dateOnly = (ms: number) => new Date(Date.now() + ms).toISOString().slice(0, 10);
+/** `2026-09-01` → `01.09.2026`, своей арифметикой — не форматтером продукта. */
+const ddMmYyyy = (iso: string) => {
+  const [y, m, d] = iso.split("-");
+  return `${d}.${m}.${y}`;
+};
 
 function domain(over: Record<string, unknown> = {}) {
   return {
@@ -85,8 +92,9 @@ afterEach(() => {
 
 describe("DomainDetailModal — overview", () => {
   it("показывает то, что модель про домен знает", () => {
+    const expiry = dateOnly(10 * DAY);
     show({
-      expiry_date: at(10 * DAY + HOUR),
+      expiry_date: expiry,
       ssl_status: "active",
       ssl_expires_at: at(60 * DAY + HOUR),
       ssl_issuer: "Let's Encrypt",
@@ -104,12 +112,16 @@ describe("DomainDetailModal — overview", () => {
     expect(field("DB name")).toBe("example_db");
     expect(field("DB user")).toBe("example_dbu");
     // Срок — тем же модулем, что и колонка списка: дата плюс остаток словами.
+    // Дата — та, которую называет регистратор: `expiry_date` приходит без
+    // времени, и печатать её надо в UTC, иначе западнее UTC карточка называет
+    // предыдущий день.
+    expect(field("Expires")).toContain(ddMmYyyy(expiry));
     expect(field("Expires")).toContain("in 10 days");
     expect(field("SSL expires")).toContain("in 60 days");
   });
 
   it("близкий срок красит, дальний — нет", () => {
-    show({ expiry_date: at(10 * DAY + HOUR), ssl_expires_at: at(60 * DAY + HOUR) });
+    show({ expiry_date: dateOnly(10 * DAY), ssl_expires_at: at(60 * DAY + HOUR) });
     expect((screen.getByText(/in 10 days/).closest("span") as HTMLElement).style.color).toBe(
       "rgb(217, 119, 6)",
     );

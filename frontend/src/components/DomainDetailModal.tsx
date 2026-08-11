@@ -11,9 +11,9 @@ import {
   SET_NAMESERVERS_KEY,
 } from "../api/domains";
 import { useZoneNameservers } from "../api/cloudflare";
-import { expiryState, expiryTextColor, formatExpiry } from "../lib/domainExpiry";
+import { NO_VALUE, expiryState, expiryTextColor, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
 import { isTauri } from "../lib/runtime";
-import { Btn, Modal, fmtDate } from "./ui/Primitives";
+import { Btn, Modal } from "./ui/Primitives";
 
 /**
  * Разбор поля NS: по одному на строку, но запятые и лишние пробелы прощаем.
@@ -46,7 +46,7 @@ function Field({ k, v }: { k: string; v: React.ReactNode }) {
   const empty = v === null || v === undefined || v === "";
   return (
     <div>
-      <b>{k}:</b> {empty ? "—" : v}
+      <b>{k}:</b> {empty ? NO_VALUE : v}
     </div>
   );
 }
@@ -56,16 +56,22 @@ function Field({ k, v }: { k: string; v: React.ReactNode }) {
  * Дата без остатка требует считать в уме, остаток без даты нечем сверить с
  * письмом регистратора.
  *
- * Неизвестный срок отдаёт `null`, а не «—»: прочерк дорисует `Field`, и он
+ * Неизвестный срок отдаёт `null`, а не прочерк: его дорисует `Field`, и он
  * будет ТЕМ ЖЕ прочерком, что у остальных пустых полей карточки, а не вторым,
- * похожим.
+ * похожим. Сам символ приходит из `lib/domainExpiry` (`NO_VALUE`) — там он
+ * объявлен ответом «мы не знаем», и три копии этого литерала по файлам уже
+ * начинали жить своей жизнью.
+ *
+ * Дата — оттуда же (`formatExpiryDate`), а не из общего `fmtDate`: `expiry_date`
+ * приходит датой без времени, и печатать её надо в UTC, иначе западнее UTC
+ * карточка называет вчерашний день.
  */
 function expiryValue(iso: string | null | undefined, now: number): React.ReactNode {
   const state = expiryState(iso, now);
   if (state === "unknown") return null;
   return (
     <span style={{ color: expiryTextColor(state) }}>
-      {fmtDate(iso ?? "")} · {formatExpiry(iso, now)}
+      {formatExpiryDate(iso)} · {formatExpiry(iso, now)}
     </span>
   );
 }

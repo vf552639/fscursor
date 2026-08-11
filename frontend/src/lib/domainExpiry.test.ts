@@ -2,11 +2,12 @@ import { describe, it, expect } from "vitest";
 
 import {
   EXPIRY_SOON_DAYS,
-  daysLeft,
   expiryState,
   expiryTextColor,
+  expiryTextWeight,
   expiryTs,
   formatExpiry,
+  formatExpiryDate,
 } from "./domainExpiry";
 
 /**
@@ -45,7 +46,6 @@ describe("expiryState", () => {
     // ветки такой домен молча уехал бы в «ok».
     expect(expiryState("not-a-date", NOW)).toBe("unknown");
     expect(expiryState("2026-13-45", NOW)).toBe("unknown");
-    expect(daysLeft("not-a-date", NOW)).toBeNull();
   });
 
   it("граница ровно на пороге входит в «soon»", () => {
@@ -100,6 +100,61 @@ describe("formatExpiry", () => {
   });
 });
 
+/**
+ * `expiry_date` приезжает с бэкенда РОВНО в этом виде — `Optional[date]`, то
+ * есть строка «2026-09-01» без времени и без зоны. До этого блока весь модуль
+ * проверялся полными ISO-датами (`at()`), то есть единственная форма, в которой
+ * поле вообще существует в проде, не проверялась ничем — и сдвиг даты на день
+ * западнее UTC прошёл мимо зелёной сюиты именно так.
+ */
+describe("дата без времени — это весь день", () => {
+  // Полдень UTC 1 сентября: домен со сроком «1 сентября» в этот момент ЖИВ.
+  const NOON_SEP_1 = new Date("2026-09-01T12:00:00Z").getTime();
+
+  it("в день своего срока домен ещё не просрочен", () => {
+    // Срок такой даты — конец дня, а не его начало: у регистратора «expiry
+    // date: 1 сентября» значит, что первого числа домен работает. Красное
+    // «expired today» на живом домене зовёт продлевать то, что не истекло.
+    expect(expiryState("2026-09-01", NOON_SEP_1)).toBe("soon");
+    expect(formatExpiry("2026-09-01", NOON_SEP_1)).toBe("in <1 day");
+  });
+
+  it("просрочка начинается со следующих суток", () => {
+    const noonSep2 = new Date("2026-09-02T12:00:00Z").getTime();
+    expect(expiryState("2026-09-01", noonSep2)).toBe("expired");
+    expect(formatExpiry("2026-09-01", noonSep2)).toBe("expired today");
+  });
+
+  it("остаток считается от конца дня", () => {
+    expect(formatExpiry("2026-09-11", NOON_SEP_1)).toBe("in 10 days");
+    // Порог в 30 суток от полудня 1 сентября приходится на конец 1 октября.
+    expect(expiryState("2026-10-01", NOON_SEP_1)).toBe("soon");
+    expect(expiryState("2026-10-02", NOON_SEP_1)).toBe("ok");
+  });
+
+  it("печатается в UTC, а не в зоне читателя", () => {
+    // `new Date("2026-09-01")` — полночь UTC, и `toLocaleDateString` без зоны
+    // переводит её в зону читателя: западнее UTC (Нью-Йорк, Гонолулу) выходило
+    // «31.08.2026» — дата, которой у домена нет. Восточнее (наш UTC+3) ошибку
+    // не увидеть вовсе, поэтому зона тут задаётся явно.
+    const tz = process.env.TZ;
+    try {
+      process.env.TZ = "America/New_York";
+      expect(formatExpiryDate("2026-09-01")).toBe("01.09.2026");
+    } finally {
+      process.env.TZ = tz;
+    }
+  });
+
+  it("у полноценного datetime мгновение настоящее, и сдвигать его нечем", () => {
+    // Сертификат истекает в известную секунду — прибавить ему день значило бы
+    // выдумать сутки, которых у сертификата нет.
+    const t = new Date("2026-09-01T00:00:00Z");
+    expect(expiryTs(t.toISOString())).toBe(t.getTime());
+    expect(expiryTs("2026-09-01")).toBe(t.getTime() + DAY);
+  });
+});
+
 describe("expiryTs", () => {
   it("нечитаемый и отсутствующий срок отдаёт одним `null`, а не NaN", () => {
     // На этом значении держится сортировка: `NaN` в компараторе ложен во всех
@@ -121,5 +176,14 @@ describe("expiryTextColor", () => {
     expect(expiryTextColor("ok")).toBe("#374151");
     // А «не знаем» — приглушённое: тем же серым на странице нарисованы прочерки.
     expect(expiryTextColor("unknown")).toBe("#9ca3af");
+  });
+
+  it("те же состояния выделяет и начертанием — цвет не единственный канал", () => {
+    // Второй канал нужен тем, кто цвет не различает; и он обязан совпадать с
+    // цветом состояние в состояние, иначе строка спорит сама с собой.
+    expect(expiryTextWeight("expired")).toBe(600);
+    expect(expiryTextWeight("soon")).toBe(600);
+    expect(expiryTextWeight("ok")).toBe(400);
+    expect(expiryTextWeight("unknown")).toBe(400);
   });
 });
