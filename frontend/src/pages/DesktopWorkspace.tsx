@@ -779,6 +779,13 @@ export default function DesktopWorkspace() {
             // Тем же тостом, что и отказ этой же операции по `sdmp://`-ссылке:
             // страницы, на которой был бы баннер, к этому моменту уже нет.
             onBulkProvisionError={showError}
+            // Итог привязки к Cloudflare — только когда страницы уже нет (пока
+            // она жива, он живёт её баннером). Тон приезжает готовым: у
+            // полууспеха — «часть привязана, часть нет», ровно тот случай, ради
+            // которого заведён `showWarning`. Четвёртого вида тоста не нужно.
+            onCloudflareBindNotice={(n) =>
+              n.kind === "warn" ? showWarning(n.text) : showToast(n.text)
+            }
           />
         )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}

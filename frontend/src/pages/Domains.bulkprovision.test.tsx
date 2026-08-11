@@ -118,6 +118,7 @@ function renderPage(
         onProvisionResult={vi.fn()}
         onBulkProvisionResult={onBulkProvisionResult}
         onBulkProvisionError={onBulkProvisionError}
+        onCloudflareBindNotice={vi.fn()}
       />
     </QueryClientProvider>,
   );

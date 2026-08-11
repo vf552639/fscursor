@@ -88,6 +88,12 @@ function zonesAre(zones: Array<{ id: string; name: string }>) {
   });
 }
 
+/**
+ * Куда уезжает итог, если страницы уже нет. Тот же приём, что у
+ * `onBulkProvisionError`: пока страница жива, отчёт живёт её баннером.
+ */
+const onNotice = vi.fn();
+
 function renderPage(rows = [domainRow(1, "a.com")]) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/domains") return rows;
@@ -102,6 +108,7 @@ function renderPage(rows = [domainRow(1, "a.com")]) {
         onProvisionResult={vi.fn()}
         onBulkProvisionResult={vi.fn()}
         onBulkProvisionError={vi.fn()}
+        onCloudflareBindNotice={onNotice}
       />
     </QueryClientProvider>,
   );
@@ -305,6 +312,7 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
           onProvisionResult={vi.fn()}
           onBulkProvisionResult={vi.fn()}
           onBulkProvisionError={vi.fn()}
+          onCloudflareBindNotice={onNotice}
         />
       </QueryClientProvider>,
     );
@@ -362,6 +370,48 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
       cloudflare_zone_id: "zone-n",
     }));
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+
+  it("не оставляет прежний итог стоять над новым, промолчавшим прогоном", async () => {
+    setTauri(true);
+    zonesAre([{ id: "zone-a", name: "a.com" }]);
+
+    const { container } = renderPage([domainRow(1, "a.com")]);
+    await screen.findByText("a.com");
+    fireEvent.click((await selectAll(container))!);
+    expect((await screen.findByRole("status")).textContent).toContain("1 of 1 linked");
+
+    // Следующее действие привязывать нечего (аккаунт выбран руками), и в
+    // режиме `auto` о таком прогоне не сообщают. Прежняя строка, оставшись на
+    // экране, читалась бы как отчёт об этом, последнем действии.
+    mocks.apiPost.mockResolvedValue(domainRow(9, "new.com", 42));
+    await addDomain("new.com");
+
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
+
+  it("итог, доехавший после ухода со страницы, уходит наверх, а не пропадает", async () => {
+    setTauri(true);
+    let releaseZones: (zones: unknown) => void = () => {};
+    mocks.invokeSynced.mockReturnValue(new Promise((resolve) => { releaseZones = resolve; }));
+
+    const { container } = renderPage([domainRow(1, "a.com")]);
+    await screen.findByText("a.com");
+    fireEvent.click((await selectAll(container))!);
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // На пачке в двести доменов прогон идёт десятками секунд (вычитка зон с
+    // пагинацией плюс двести PUT по четыре за раз), и уход со страницы за это
+    // время — обычное дело. Привязка изменила данные, НЕ спросив: молчание о
+    // ней неотличимо от тихой правки за спиной у пользователя.
+    cleanup();
+    releaseZones([{ id: "zone-a", name: "a.com", name_servers: [], status: "active" }]);
+
+    await waitFor(() => expect(onNotice).toHaveBeenCalledTimes(1));
+    expect(onNotice.mock.calls[0][0]).toEqual({
+      kind: "info",
+      text: "Cloudflare: 1 of 1 linked.",
+    });
   });
 
   it("не гасит соседние массовые действия", async () => {
