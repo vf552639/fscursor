@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useCallback } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { Card } from "../components/ui/Primitives";
 import { useDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
@@ -29,6 +29,13 @@ import { useBulkProvision } from "../hooks/useBulkProvision";
 import { useCloudflareBind } from "../hooks/useCloudflareBind";
 import { useDomainFilters } from "../hooks/useDomainFilters";
 import { useDomainSort } from "../hooks/useDomainSort";
+
+/**
+ * Как часто вкладка перечитывает часы. Минута — шаг, мельче которого ни одна
+ * подпись на экране не отличима: и возраст проверки, и остаток срока считаются
+ * сутками и часами.
+ */
+const CLOCK_TICK_MS = 60_000;
 
 export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
   ctx?: any;
@@ -98,10 +105,21 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   const registrarsQ = useRegistrarAccounts();
   const cfAccountsQ = useCloudflareAccounts();
 
-  // Одно чтение часов на рендер — тот же приём, что на трёх остальных экранах:
-  // отдельный `Date.now()` внутри каждой функции дал бы разные «сейчас» для
-  // статуса сервера и для подписи его возраста в соседней строке.
-  const now = Date.now();
+  // Одно «сейчас» на все ячейки вкладки — тот же приём, что на трёх остальных
+  // экранах: отдельный `Date.now()` внутри каждой функции дал бы разные
+  // «сейчас» для статуса сервера и для подписи его возраста в соседней строке.
+  //
+  // Но НЕ новое чтение на каждый рендер, и это не микрооптимизация: `now`
+  // уезжает пропсом в каждую строку, а значение, меняющееся от любого нажатия
+  // клавиши в поиске, делает мемоизацию строки невозможной по построению —
+  // двести строк перерисовывались бы на букву. Часы идут по таймеру: подписи
+  // «checked 2h ago» и «in 3 days» обязаны стареть сами, а точности мельче
+  // минуты у них нет.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
 
   const domainsData = domainsQ.data ?? [];
   const servers = serversQ.data?.items || [];
@@ -192,7 +210,14 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     }
   }, [ctx, onServerChange, onSearchChange]);
 
-  const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
+  // Обработчики строки — `useCallback`, и это не ритуал: они уезжают пропсами
+  // в мемоизированный `DomainRow`, и новая функция на каждый рендер страницы
+  // отменяла бы мемоизацию целиком (см. `CLOCK_TICK_MS` выше про ту же беду с
+  // `now`). Все три обходятся стабильными зависимостями: `setSel` и
+  // `setProvisionTarget` — сеттеры, `mutate` react-query привязан навсегда.
+  const toggle = useCallback((id: number) => {
+    setSel((p: Set<number>) => { const s = new Set<number>(p); s.has(id) ? s.delete(id) : s.add(id); return s; });
+  }, []);
 
   const handleAssignServer = (serverId: string) => {
     if (!serverId) return;
@@ -225,10 +250,17 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   };
 
   /** Удаление одного домена по ✕ строки. Спрашивает страница, а не строка: строка не знает и не должна знать, чем оно кончится. */
-  const handleDeleteDomain = async (d: DomainUI) => {
-    if (!(await confirmAction(`Delete ${d.domain}?`))) return;
-    deleteDomain.mutate(d.id);
-  };
+  const deleteMutate = deleteDomain.mutate;
+  const handleDeleteDomain = useCallback((d: DomainUI) => {
+    void (async () => {
+      if (!(await confirmAction(`Delete ${d.domain}?`))) return;
+      deleteMutate(d.id);
+    })();
+  }, [deleteMutate]);
+
+  const openDetail = useCallback((id: number) => {
+    setDetailDomain(domainsData.find((x) => x.id === id) || null);
+  }, [domainsData]);
 
   const handleBulkDelete = async () => {
     if (!(await confirmAction(`Удалить ${sel.size} доменов?`))) return;
@@ -305,9 +337,9 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
           onToggleAll={()=>setSel(sel.size===filters.filtered.length?new Set():new Set(filters.filtered.map((d: DomainUI)=>d.id)))}
           focusDomainId={focusDomainId}
           isProvisioning={isProvisioning}
-          onOpenDetail={(id)=>setDetailDomain(domainsData.find((x) => x.id === id) || null)}
+          onOpenDetail={openDetail}
           onProvision={setProvisionTarget}
-          onDelete={(d)=>{ void handleDeleteDomain(d); }}
+          onDelete={handleDeleteDomain}
         />
         )}
       </div>

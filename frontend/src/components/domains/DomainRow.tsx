@@ -32,7 +32,14 @@ export interface DomainRowProps {
    */
   now: number;
   selected: boolean;
-  onToggleSelected: () => void;
+  /**
+   * Колбэки принимают строку (или её id), а не замыкаются на неё у вызывающего.
+   *
+   * Не стилистика: `DomainRow` мемоизирован, а замыкание, созданное на каждый
+   * рендер таблицы, — новый пропс на каждый рендер, то есть мемоизации нет
+   * вовсе. Так таблица передаёт одну и ту же функцию всем двумстам строкам.
+   */
+  onToggleSelected: (id: number) => void;
   /** Строка, на которую пришли по ссылке `?domainId=`: подсвечена и не гаснет от курсора. */
   focused: boolean;
   /**
@@ -41,12 +48,22 @@ export interface DomainRowProps {
    * страницы, строка про соседей ничего знать не должна.
    */
   isProvisioning: boolean;
-  onOpenDetail: () => void;
-  onProvision: () => void;
-  onDelete: () => void;
+  onOpenDetail: (id: number) => void;
+  onProvision: (domain: DomainUI) => void;
+  onDelete: (domain: DomainUI) => void;
 }
 
-export default function DomainRow({
+/**
+ * Строка списка доменов.
+ *
+ * `memo` здесь окупается тем, чего страница делает много: ввод в поиске,
+ * выделение соседней строки, приход отчёта — каждое такое событие
+ * перерисовывало все строки списка, а их бывает двести. Работает это ровно
+ * пока пропсы стабильны: `now` идёт по таймеру, а не читается на каждый рендер,
+ * и колбэки приезжают из `useCallback` страницы. Есть тест на число рендеров —
+ * без него следующая правка снимет мемоизацию молча.
+ */
+function DomainRow({
   domain: d,
   server: srv,
   registrar: reg,
@@ -71,9 +88,9 @@ export default function DomainRow({
   const srvStatus = srv ? serverUiStatus(srv, now) : "";
   const srvCheckStale = isCheckStale(srv?.last_check_at, now);
   return <tr style={focused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!focused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!focused) e.currentTarget.style.background=""; }}>
-    <td style={{padding:"11px 16px"}}><input type="checkbox" checked={selected} onChange={onToggleSelected} style={{cursor:"pointer"}}/></td>
+    <td style={{padding:"11px 16px"}}><input type="checkbox" checked={selected} onChange={()=>onToggleSelected(d.id)} style={{cursor:"pointer"}}/></td>
     <td style={{padding:"11px 16px"}}>
-      <button onClick={onOpenDetail} style={{fontWeight:600,fontSize:13.5,color:"#111",background:"transparent",border:"none",padding:0,cursor:"pointer"}}>
+      <button onClick={()=>onOpenDetail(d.id)} style={{fontWeight:600,fontSize:13.5,color:"#111",background:"transparent",border:"none",padding:0,cursor:"pointer"}}>
         {d.domain}
       </button>
     </td>
@@ -140,7 +157,7 @@ export default function DomainRow({
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <RowActions
           actions={[
-            { icon: "↗", title: "Open detail", onClick: onOpenDetail },
+            { icon: "↗", title: "Open detail", onClick: () => onOpenDetail(d.id) },
             ...(isTauri()
               ? [
                   {
@@ -152,7 +169,7 @@ export default function DomainRow({
                     disabled: isProvisioning,
                     onClick: () => {
                       if (isProvisioning) return;
-                      onProvision();
+                      onProvision(d);
                     },
                   },
                 ]
@@ -161,7 +178,7 @@ export default function DomainRow({
               icon: "✕",
               title: "Delete domain",
               variant: "danger" as const,
-              onClick: onDelete,
+              onClick: () => onDelete(d),
             },
           ]}
         />
@@ -187,3 +204,5 @@ export default function DomainRow({
     </td>
   </tr>;
 }
+
+export default React.memo(DomainRow);

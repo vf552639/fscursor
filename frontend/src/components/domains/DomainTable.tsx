@@ -142,12 +142,12 @@ export default function DomainTable({
           cfAccount={cfAccounts.find((c: CloudflareAccount)=>c.id===d.cf_id)}
           now={now}
           selected={selectedIds.has(d.id)}
-          onToggleSelected={()=>onToggleRow(d.id)}
+          onToggleSelected={onToggleRow}
           focused={focusDomainId === d.id}
           isProvisioning={isProvisioning(d.id)}
-          onOpenDetail={()=>onOpenDetail(d.id)}
-          onProvision={()=>onProvision(d)}
-          onDelete={()=>onDelete(d)}
+          onOpenDetail={onOpenDetail}
+          onProvision={onProvision}
+          onDelete={onDelete}
         />
       ))}
     </tbody>
