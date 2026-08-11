@@ -115,6 +115,11 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
 
   const [showAssignServer, setShowAssignServer] = useState(false);
   const [showAssignCF, setShowAssignCF] = useState(false);
+  // Выбор в диалогах назначения гасит только удачное назначение — закрытие
+  // диалога его сохраняет, поэтому он и живёт здесь. Промахнуться мимо Cancel
+  // легко, а выбор сделан в списке из сотни машин.
+  const [assignServerId, setAssignServerId] = useState("");
+  const [assignCFId, setAssignCFId] = useState("");
   const [focusDomainId, setFocusDomainId] = useState<number | null>(null);
   const filters = useDomainFilters(domains, focusDomainId);
 
@@ -197,7 +202,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     if (!serverId) return;
     bulkAssignServer.mutate(
       { domain_ids: Array.from(sel), server_id: Number(serverId) },
-      { onSuccess: () => { setShowAssignServer(false); setSel(new Set()); } }
+      { onSuccess: () => { setShowAssignServer(false); setSel(new Set()); setAssignServerId(""); } }
     );
   };
 
@@ -205,7 +210,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     if (!cfAccountId) return;
     bulkAssignCF.mutate(
       { domain_ids: Array.from(sel), cloudflare_account_id: Number(cfAccountId) },
-      { onSuccess: () => { setShowAssignCF(false); setSel(new Set()); } }
+      { onSuccess: () => { setShowAssignCF(false); setSel(new Set()); setAssignCFId(""); } }
     );
   };
 
@@ -333,18 +338,19 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         onClose={() => setDetailDomain(null)}
       />
     )}
-    {showBulk && (
-      <BulkAddDialog
-        onClose={()=>setSB(false)}
-        registrars={registrars}
-        onCreated={(created: Domain[])=>{ void cfBind.run(created, "auto"); }}
-      />
-    )}
+    <BulkAddDialog
+      open={showBulk}
+      onClose={()=>setSB(false)}
+      registrars={registrars}
+      onCreated={(created: Domain[])=>{ void cfBind.run(created, "auto"); }}
+    />
 
     {showAssignServer && (
       <AssignServerDialog
         selectedCount={sel.size}
         servers={servers}
+        serverId={assignServerId}
+        onServerChange={setAssignServerId}
         pending={bulkAssignServer.isPending}
         onAssign={handleAssignServer}
         onClose={() => setShowAssignServer(false)}
@@ -355,6 +361,8 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       <AssignCloudflareDialog
         selectedCount={sel.size}
         cfAccounts={cfAccounts}
+        cfId={assignCFId}
+        onCfChange={setAssignCFId}
         pending={bulkAssignCF.isPending}
         onAssign={handleAssignCF}
         onClose={() => setShowAssignCF(false)}
@@ -373,6 +381,9 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     )}
     {provisionTarget && (
       <ProvisionDialog
+        // `key` — чтобы выбор «создавать ли БД» не залипал между доменами:
+        // диалог принадлежит домену, а не странице.
+        key={provisionTarget.id}
         domain={provisionTarget}
         isProvisioning={isProvisioning(provisionTarget.id)}
         onProvision={(withDb: boolean) => handleProvision(provisionTarget, withDb)}

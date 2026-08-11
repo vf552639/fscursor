@@ -13,10 +13,21 @@ import { RegistrarAccount } from "../../api/registrars";
  * одинаково.
  */
 export default function BulkAddDialog({
+  open,
   onClose,
   registrars,
   onCreated,
 }: {
+  /**
+   * Диалог живёт, пока живёт страница, и прячется этим флагом, а не
+   * размонтированием, — набранный список это переживает.
+   *
+   * Не косметика: сюда вставляют сотни строк, а закрыть модалку случайно легко
+   * (кнопка Cancel в сантиметре от Import, крестик, клик мимо). Отмонтированный
+   * диалог терял бы весь ввод молча, и восстановить его было бы нечем. Успешный
+   * импорт поля чистит сам — там ввод уже отработал.
+   */
+  open: boolean;
   onClose: () => void;
   registrars: RegistrarAccount[];
   /**
@@ -101,6 +112,8 @@ export default function BulkAddDialog({
       setBulkError(err.response?.data?.message || err.message || "Failed to import domains");
     }
   }
+
+  if (!open) return null;
 
   return <Modal title="Bulk Add Domains" onClose={onClose} width={520}>
     <div style={{display:"flex",background:"#f3f4f6",borderRadius:8,padding:3,marginBottom:20}}>
