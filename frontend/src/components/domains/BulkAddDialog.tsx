@@ -44,6 +44,19 @@ export default function BulkAddDialog({
   const [csvText, setCsvText] = useState("");
   const [bulkError, setBulkError] = useState("");
 
+  /**
+   * Закрытие гасит ошибку ПРОШЛОЙ попытки, но не набранный текст.
+   *
+   * Разные сроки жизни у разных вещей: список доменов пользователь набирал сам
+   * и потерять его от промаха по Cancel нельзя, а красное «все домены
+   * пропущены» относится к отправке, которой больше нет, — увиденное при
+   * следующем открытии, оно описывало бы несуществующее событие.
+   */
+  const close = () => {
+    setBulkError("");
+    onClose();
+  };
+
   const handleBulkAdd = async () => {
     setBulkError("");
     try {
@@ -115,7 +128,7 @@ export default function BulkAddDialog({
 
   if (!open) return null;
 
-  return <Modal title="Bulk Add Domains" onClose={onClose} width={520}>
+  return <Modal title="Bulk Add Domains" onClose={close} width={520}>
     <div style={{display:"flex",background:"#f3f4f6",borderRadius:8,padding:3,marginBottom:20}}>
       {[["text","Plain Text"],["csv","CSV / Semicolon"]].map(([k,l])=>(
         <button key={k} onClick={()=>setBulkTab(k as string)} style={{flex:1,padding:"8px 12px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all 0.15s",background:bulkTab===k?"#2563eb":"transparent",color:bulkTab===k?"#fff":"#6b7280"}}>{bulkTab===k&&"✓ "}{l}</button>
@@ -136,6 +149,6 @@ export default function BulkAddDialog({
     {bulkError && <div style={{background:"#fef2f2",border:"1px solid #fee2e2",color:"#dc2626",padding:"10px 12px",borderRadius:8,fontSize:13,marginBottom:14}}>❌ {bulkError}</div>}
 
     <Btn variant="primary" onClick={handleBulkAdd} disabled={bulkCreate.isPending || bulkStructured.isPending} style={{width:"100%",justifyContent:"center",padding:"10px 0", marginTop: 14}}>{(bulkCreate.isPending || bulkStructured.isPending) ? "Importing..." : "Import Domains"}</Btn>
-    <div style={{marginTop:8}}><Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
+    <div style={{marginTop:8}}><Btn variant="secondary" onClick={close} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn></div>
   </Modal>;
 }

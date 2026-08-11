@@ -10,7 +10,9 @@ import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
 import DomainStats from "../components/domains/DomainStats";
 import DomainTable from "../components/domains/DomainTable";
+import BulkProvisionErrorBanner from "../components/domains/BulkProvisionErrorBanner";
 import CloudflareBindBanner from "../components/domains/CloudflareBindBanner";
+import DomainsLoading from "../components/domains/DomainsLoading";
 import DomainsHeader from "../components/domains/DomainsHeader";
 import DomainsLoadError from "../components/domains/DomainsLoadError";
 import DomainsEmptyState from "../components/domains/DomainsEmptyState";
@@ -28,8 +30,7 @@ import { useCloudflareBind } from "../hooks/useCloudflareBind";
 import { useDomainFilters } from "../hooks/useDomainFilters";
 import { useDomainSort } from "../hooks/useDomainSort";
 
-export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
-  onNav?: (pg: string, ctx?: any) => void;
+export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
   ctx?: any;
   /**
    * Куда отдать результат provision. Показывает его модалка показа-один-раз,
@@ -163,13 +164,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const isProvisioning = (id: number) => pendingProvisions.some((p) => p.domainId === id);
   const bulkProvisionRunning = pendingProvisions.some((p) => p.bulkClaim);
   const deleteDomain = useDeleteDomain();
-  // Provision в десктопе синхронен: серверного task log'а, который можно было бы
-  // поллить, у него нет — поэтому ни `TaskProgressModal`, ни его multi-версии на
-  // этой странице больше нет вовсе (их единственным поставщиком был bulk full
-  // setup, ушедший вместе с несуществующим роутом). Показывает результат не эта
-  // страница, а DesktopWorkspace (см. `onProvisionResult`): пароли БД и FTP не
-  // должны зависеть от того, ушёл ли пользователь со страницы, пока шёл provision.
-  //
   // Домен, для которого открыт диалог запуска, — и только он: выбор «создавать
   // ли базу» принадлежит самому диалогу и умирает вместе с ним, чтобы не
   // залипать между доменами (см. `ProvisionDialog`).
@@ -247,7 +241,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   }
 
   if (domainsQ.isPending || serversQ.isPending || registrarsQ.isPending || cfAccountsQ.isPending) {
-    return <div style={{ padding: 40, textAlign: "center", color: "#6b7280" }}>Loading domains data...</div>;
+    return <DomainsLoading />;
   }
 
   return <>
@@ -259,14 +253,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     />
     <DomainStats domains={domains} />
     <DomainFilters {...filters.controls} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />
-    {/* Живёт ровно столько, сколько живёт набор, на котором случился отказ:
-        гасит его сам `useBulkProvision` по смене выделения, а не время и не
-        следующий рендер. */}
-    {bulkProvision.error ? (
-      <div role="alert" style={{marginBottom:12,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
-        {bulkProvision.error}
-      </div>
-    ) : null}
+    {bulkProvision.error ? <BulkProvisionErrorBanner message={bulkProvision.error} /> : null}
     {cfBind.notice ? (
       <CloudflareBindBanner notice={cfBind.notice} onDismiss={cfBind.dismiss} />
     ) : null}

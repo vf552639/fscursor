@@ -772,7 +772,6 @@ export default function DesktopWorkspace() {
         {page === "servers" && <Servers onNav={nav} />}
         {page === "domains" && (
           <Domains
-            onNav={nav}
             ctx={srvCtx}
             onProvisionResult={provisionQueue.push}
             onBulkProvisionResult={deliverBulkProvision}

@@ -195,7 +195,13 @@ export function useCloudflareBind(onAway: (notice: CfBindNotice) => void): Cloud
         networkMode: "always" as const,
         mutationFn: () => bind(rows, mode),
       })
-      .execute(undefined);
+      // `execute` отклоняет промис, если `mutationFn` бросил, а все три входа
+      // зовут `run` через `void` — то есть отказ стал бы unhandled rejection.
+      // Бросить внутри `bind` может только сама доставка: `onAway` — чужой
+      // проп, и он же единственная поверхность, куда об этом можно было бы
+      // сказать. Гейт при этом уже своё отработал: заявка снята в любом исходе.
+      .execute(undefined)
+      .catch(() => {});
   };
 
   return { notice, dismiss, pending, run };
