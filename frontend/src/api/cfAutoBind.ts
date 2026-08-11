@@ -244,6 +244,13 @@ export async function autoBindDomainsToCloudflare(
   return report;
 }
 
+/** Сообщение об исходе прогона — то, что читает пользователь. */
+export interface CfBindNotice {
+  /** `warn` — полууспех: что-то привязано, а что-то нет (те же два тона, что у тостов воркспейса). */
+  kind: "info" | "warn";
+  text: string;
+}
+
 /**
  * Что сказать пользователю об исходе. `null` — сказать нечего, и молчание тут
  * правильный ответ.
@@ -261,12 +268,6 @@ export async function autoBindDomainsToCloudflare(
  * - `manual` (кнопка) обязан ответить всегда: кнопка, которая молчит, не
  *   отличима от сломанной.
  */
-export interface CfBindNotice {
-  /** `warn` — полууспех: что-то привязано, а что-то нет (те же два тона, что у тостов воркспейса). */
-  kind: "info" | "warn";
-  text: string;
-}
-
 export function summarizeCfBind(
   report: CfBindReport,
   mode: "auto" | "manual",
