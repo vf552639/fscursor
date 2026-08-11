@@ -101,6 +101,21 @@ function errorText(e: unknown): string {
 }
 
 /**
+ * Сколько символов чужой ошибки влезает в сообщение.
+ *
+ * Текст сюда приезжает из `client::list_zones` (`e.to_string()`) и в пределе
+ * может оказаться телом ответа Cloudflare. В баннере это переживаемо, а вот в
+ * тосте — 2200 мс на экран текста, из которого не прочитать ни числа привязок,
+ * ни того, что часть аккаунтов не опрошена, то есть ровно то, ради чего
+ * сообщение и показывается.
+ */
+const ERROR_CHARS_SHOWN = 120;
+
+function clip(text: string): string {
+  return text.length > ERROR_CHARS_SHOWN ? `${text.slice(0, ERROR_CHARS_SHOWN)}…` : text;
+}
+
+/**
  * Выполнить задачи пачками по `limit`, сохранив порядок результатов.
  *
  * Порядок важен: отчёт читается рядом со списком доменов, а конкурентные
@@ -161,10 +176,32 @@ async function readZones(
 }
 
 /**
+ * Свободен ли домен ПРЯМО СЕЙЧАС — по самому свежему, что есть на клиенте.
+ *
+ * Источник — та же запись кэша, которую рисует страница (`useDomains()` без
+ * фильтров): её обновляют и `useBulkAssignCloudflare`, и любая другая правка
+ * домена, потому что все они гасят `domainsKeys.all`.
+ *
+ * Кэша нет или домена в нём нет — считаем свободным: свежее снимка, с которым
+ * прогон начался, у нас в этом случае ничего нет, и отказаться писать значило
+ * бы не привязать НИЧЕГО (например, когда прогон запущен со страницы, где
+ * список ещё не загружен). Мы страхуем от чужой записи, а не заменяем ею
+ * решение.
+ */
+function isStillUnbound(domainId: number): boolean {
+  const fresh = queryClient.getQueryData<Domain[]>(domainsKeys.list());
+  if (!fresh) return true;
+  const row = fresh.find((d) => d.id === domainId);
+  return row ? row.cloudflare_account_id == null : true;
+}
+
+/**
  * Привязать домены к зонам Cloudflare по точному совпадению имени.
  *
  * Ничего не перезаписывает: домены, у которых `cloudflare_account_id` уже
- * заполнен, попадают в `skipped` и до записи не доходят.
+ * заполнен, попадают в `skipped` и до записи не доходят — и проверяется это
+ * дважды, по входному списку и по свежему кэшу перед каждой записью
+ * (см. `isStillUnbound`).
  *
  * Не бросает на частных провалах: непрочитанный аккаунт и несостоявшийся `PUT`
  * — это строки отчёта, а не конец прогона. Бросить может только чтение списка
@@ -205,6 +242,17 @@ export async function autoBindDomainsToCloudflare(
   }
 
   const written = await mapWithLimit(toWrite, WRITE_CONCURRENCY, async (m) => {
+    // Свежесть проверяется ПЕРЕД КАЖДОЙ записью, а не один раз по входному
+    // списку, и это не перестраховка. Список, с которым прогон начался, —
+    // снимок, а живёт прогон десятками секунд: вычитка зон каждого аккаунта
+    // плюс очередь `PUT` по четыре. За это время пользователь успевает
+    // выделить те же домены и нажать «Assign CF» (кнопка намеренно не гаснет
+    // во время прогона — гасить соседей мы уже пробовали, см. `provisionPending`
+    // в `BulkActionToolbar`). Снимок этого не видит, и прогон записывал бы свой
+    // аккаунт ПОВЕРХ только что сделанного выбора — то есть нарушал бы главное
+    // правило «перезаписи не происходит», да ещё и отчитывался бы за такой
+    // домен как за привязанный.
+    if (!isStillUnbound(m.domainId)) return { kind: "taken" } as const;
     try {
       // `PUT /domains/{id}`, а не `bulk-assign-cloudflare`: тот роут знает
       // только `account_id`, а без `zone_id` привязка не даёт главного —
@@ -213,24 +261,31 @@ export async function autoBindDomainsToCloudflare(
         cloudflare_account_id: m.accountId,
         cloudflare_zone_id: m.zoneId,
       });
-      return null;
+      return { kind: "ok" } as const;
     } catch (e) {
       // Прогон не останавливается: домен, которому не записалась привязка, —
       // это одна строка отчёта, а не повод бросить остальные девяносто девять.
-      return errorText(e);
+      return { kind: "failed", error: errorText(e) } as const;
     }
   });
-  written.forEach((error, i) => {
+  written.forEach((outcome, i) => {
     const m = toWrite[i];
-    if (error === null) {
+    if (outcome.kind === "ok") {
       report.bound.push({
         domainId: m.domainId,
         domain: m.domain,
         accountId: m.accountId,
         zoneId: m.zoneId,
       });
+    } else if (outcome.kind === "taken") {
+      // Тот же `skipped`, что и у домена, привязанного до прогона: для
+      // пользователя это одно и то же — «этот домен уже за аккаунтом, мы его не
+      // трогали». Отдельного исхода он не завёл бы: разница между «был привязан
+      // минуту назад» и «привязан во время прогона» ему ничего не говорит, а
+      // главное — что его выбор остался на месте.
+      report.skipped += 1;
     } else {
-      report.writeFailed.push({ domainId: m.domainId, domain: m.domain, error });
+      report.writeFailed.push({ domainId: m.domainId, domain: m.domain, error: outcome.error });
     }
   });
 
@@ -262,9 +317,13 @@ export interface CfBindNotice {
  * пользователя (2026-08-11). «Молча» значит «без диалога», а не «без следа».
  *
  * `mode` разводит два вызывающих, и разводит по существу:
- * - `auto` (после создания домена) молчит, когда прогона не было. «Cloudflare:
- *   аккаунтов нет» после каждого заведённого домена — это шум тому, кто
- *   Cloudflare не пользуется вовсе.
+ * - `auto` (после создания домена) молчит, когда НИЧЕГО НЕ ПРОИЗОШЛО: прогона
+ *   не было (аккаунтов нет, привязывать нечего) или он ничего не изменил и ни о
+ *   чём не умолчал. Обязанность отчитаться берётся из того, что привязка меняет
+ *   данные не спрашивая, — а там, где менять оказалось нечего, обязанности нет,
+ *   есть только шум. У того, кто подключил Cloudflare, но зоны заводит потом,
+ *   иначе на КАЖДЫЙ заведённый домен вылезает «0 of 1 linked», и каждую такую
+ *   строку надо закрывать крестиком руками.
  * - `manual` (кнопка) обязан ответить всегда: кнопка, которая молчит, не
  *   отличима от сломанной.
  */
@@ -289,6 +348,17 @@ export function summarizeCfBind(
     };
   }
 
+  // Прогон был, но не сделал и не скрыл ничего: ни одной привязки, ни одной
+  // неоднозначности, ни одной незаписанной строки, все аккаунты прочитаны.
+  // Сказать тут можно только «мы сходили и ничего не нашли» — по кнопке это
+  // ответ, а после создания домена это шум (см. `mode` в JSDoc).
+  const changedOrHid =
+    report.bound.length > 0 ||
+    report.ambiguous.length > 0 ||
+    report.writeFailed.length > 0 ||
+    report.unreadAccounts.length > 0;
+  if (mode === "auto" && !changedOrHid) return null;
+
   const considered =
     report.bound.length + report.none.length + report.ambiguous.length + report.writeFailed.length;
   const parts = [`${report.bound.length} of ${considered} linked`];
@@ -312,7 +382,7 @@ export function summarizeCfBind(
     const more = report.unreadAccounts.length - 1;
     text +=
       ` ${report.unreadAccounts.length} account(s) could not be read` +
-      ` (${first.name}: ${first.error}${more > 0 ? `, +${more} more` : ""}),` +
+      ` (${first.name}: ${clip(first.error)}${more > 0 ? `, +${more} more` : ""}),` +
       ` so "no match" is not final.`;
   }
 

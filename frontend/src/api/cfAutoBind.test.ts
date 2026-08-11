@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { autoBindDomainsToCloudflare, summarizeCfBind, CfBindReport } from "./cfAutoBind";
+import { domainsKeys } from "./domains";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -177,6 +178,77 @@ describe("autoBindDomainsToCloudflare", () => {
     expect(report.none).toEqual([]);
   });
 
+  it("не перезаписывает привязку, появившуюся уже после старта прогона", async () => {
+    mocks.apiGet.mockResolvedValue([account(7, "main")]);
+    zonesByAccount({ "7": [{ id: "zone-a", name: "a.com" }] });
+    // Список страницы говорит: домен уже за аккаунтом 42. Это свежее входного
+    // снимка — так выглядит «Assign CF», нажатый пока прогон читал зоны.
+    queryClient.setQueryData(domainsKeys.list(), [
+      { id: 1, domain_name: "a.com", cloudflare_account_id: 42 },
+    ]);
+
+    const report = await autoBindDomainsToCloudflare([domain(1, "a.com")]);
+
+    // Выбор пользователя остаётся на месте, и домен не выдаётся за
+    // привязанный этим прогоном.
+    expect(mocks.apiPut).not.toHaveBeenCalled();
+    expect(report.bound).toEqual([]);
+    expect(report.skipped).toBe(1);
+  });
+
+  it("замечает чужую привязку, случившуюся посреди очереди записи", async () => {
+    mocks.apiGet.mockResolvedValue([account(7, "main")]);
+    const names = ["a.com", "b.com", "c.com", "d.com", "e.com"];
+    zonesByAccount({ "7": names.map((n, i) => ({ id: `zone-${i + 1}`, name: n })) });
+    queryClient.setQueryData(
+      domainsKeys.list(),
+      names.map((n, i) => ({ id: i + 1, domain_name: n, cloudflare_account_id: null })),
+    );
+    mocks.apiPut.mockImplementation(async (url: string) => {
+      if (url === "/domains/1") {
+        // Пятый домен уходит за чужим аккаунтом, пока очередь ещё работает:
+        // конкурентность 4, так что до него дело дойдёт только после этой
+        // записи. Проверка свежести стоит перед КАЖДЫМ `PUT` именно поэтому —
+        // разовой проверки на старте очереди тут не хватило бы.
+        queryClient.setQueryData(
+          domainsKeys.list(),
+          names.map((n, i) => ({
+            id: i + 1,
+            domain_name: n,
+            cloudflare_account_id: i === 4 ? 42 : null,
+          })),
+        );
+      }
+      return {};
+    });
+
+    const report = await autoBindDomainsToCloudflare(
+      names.map((n, i) => domain(i + 1, n)),
+    );
+
+    expect(mocks.apiPut.mock.calls.map((c: any[]) => c[0]).sort()).toEqual([
+      "/domains/1",
+      "/domains/2",
+      "/domains/3",
+      "/domains/4",
+    ]);
+    expect(report.bound.map((b) => b.domainId).sort()).toEqual([1, 2, 3, 4]);
+    expect(report.skipped).toBe(1);
+  });
+
+  it("без кэша списка доменов пишет по входному снимку, а не отказывается", async () => {
+    mocks.apiGet.mockResolvedValue([account(7, "main")]);
+    zonesByAccount({ "7": [{ id: "zone-a", name: "a.com" }] });
+    // Кэша нет — прогон запущен со страницы, где список ещё не загружен.
+    // Свежее снимка у нас в этом случае ничего нет, и отказ писать означал бы
+    // «не привязали ничего» на ровном месте.
+    expect(queryClient.getQueryData(domainsKeys.list())).toBeUndefined();
+
+    const report = await autoBindDomainsToCloudflare([domain(1, "a.com")]);
+
+    expect(report.bound.map((b) => b.domainId)).toEqual([1]);
+  });
+
   it("зоны читаются один раз на аккаунт, сколько бы ни было доменов", async () => {
     mocks.apiGet.mockResolvedValue([account(7, "main")]);
     const zones = Array.from({ length: 50 }, (_, i) => ({ id: `z${i}`, name: `d${i}.com` }));
@@ -234,6 +306,24 @@ describe("autoBindDomainsToCloudflare", () => {
       (c: any[]) => JSON.stringify(c[0]?.queryKey) === JSON.stringify(["domains"]),
     );
     expect(domainInvalidations).toHaveLength(1);
+    invalidate.mockRestore();
+  });
+
+  it("прогон, не привязавший ничего, не дёргает список доменов", async () => {
+    mocks.apiGet.mockResolvedValue([account(7, "main")]);
+    zonesByAccount({ "7": [{ id: "zone-a", name: "other.com" }] });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    const report = await autoBindDomainsToCloudflare([domain(1, "a.com")]);
+
+    expect(report.bound).toEqual([]);
+    // Перезапрос списка на две сотни строк ради прогона, который ничего не
+    // изменил, — это работа впустую на каждом заведённом домене.
+    expect(
+      invalidate.mock.calls.filter(
+        (c: any[]) => JSON.stringify(c[0]?.queryKey) === JSON.stringify(["domains"]),
+      ),
+    ).toHaveLength(0);
     invalidate.mockRestore();
   });
 
@@ -326,6 +416,54 @@ describe("summarizeCfBind", () => {
     expect(notice?.text).toContain("could not be read");
     expect(notice?.text).toContain("broken: token invalid");
     expect(notice?.text).toContain('"no match" is not final');
+  });
+
+  it("после создания домена молчит, когда прогон ничего не изменил", () => {
+    // Подключил Cloudflare, зоны заведёт потом — и на КАЖДЫЙ добавленный домен
+    // получал «0 of 1 linked, 1 with no matching zone», который ещё и надо
+    // закрывать крестиком. Обязанность отчитаться берётся из того, что привязка
+    // меняет данные не спрашивая; здесь менять было нечего.
+    expect(summarizeCfBind(report({ none: [{ domainId: 1, domain: "a.com" }] }), "auto")).toBeNull();
+    // …а по кнопке ответ есть: молчащая кнопка неотличима от сломанной.
+    expect(summarizeCfBind(report({ none: [{ domainId: 1, domain: "a.com" }] }), "manual")?.text)
+      .toContain("0 of 1 linked");
+  });
+
+  it("после создания домена говорит, как только что-то произошло", () => {
+    // Обратная сторона того же правила: одна привязка — уже изменение данных,
+    // о котором пользователя не спрашивали.
+    const bound = summarizeCfBind(
+      report({ bound: [{ domainId: 1, domain: "a.com", accountId: 7, zoneId: "z" }] }),
+      "auto",
+    );
+    expect(bound?.text).toContain("1 of 1 linked");
+    // Непрочитанный аккаунт — тоже повод заговорить: «совпадений нет» при нём
+    // неокончательно, и умолчать об этом нельзя.
+    const unread = summarizeCfBind(
+      report({
+        none: [{ domainId: 1, domain: "a.com" }],
+        unreadAccounts: [{ accountId: 9, name: "broken", error: "token invalid" }],
+      }),
+      "auto",
+    );
+    expect(unread?.kind).toBe("warn");
+  });
+
+  it("длинную чужую ошибку обрезает", () => {
+    const notice = summarizeCfBind(
+      report({
+        none: [{ domainId: 1, domain: "a.com" }],
+        unreadAccounts: [{ accountId: 9, name: "broken", error: "x".repeat(500) }],
+      }),
+      "manual",
+    );
+
+    // Текст приезжает из `e.to_string()` в Rust и в пределе может оказаться
+    // телом ответа Cloudflare. В тосте (2200 мс) такой отчёт не прочитать
+    // вовсе — ни чисел, ни оговорки про непрочитанные аккаунты.
+    expect(notice!.text.length).toBeLessThan(300);
+    expect(notice!.text).toContain("…");
+    expect(notice!.text).toContain('"no match" is not final');
   });
 
   it("после создания домена молчит, когда прогона не было", () => {

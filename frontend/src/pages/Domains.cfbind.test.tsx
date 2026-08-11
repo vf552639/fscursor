@@ -390,6 +390,47 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 
+  it("фоновая автопривязка не затирает отчёт, которого дождались по кнопке", async () => {
+    setTauri(true);
+    zonesAre([
+      { id: "zone-a", name: "a.com" },
+      { id: "zone-x", name: "x.com" },
+    ]);
+    mocks.apiPost.mockResolvedValue({ created: [domainRow(11, "x.com")], skipped: [] });
+    let finishAuto: () => void = () => {};
+    mocks.apiPut.mockImplementation(async (url: string) => {
+      // Привязка домена из bulk-add висит: так выглядит автопрогон по двум
+      // сотням доменов, идущий десятки секунд.
+      if (url === "/domains/11") await new Promise<void>((r) => { finishAuto = r; });
+      return {};
+    });
+
+    // Второй строкой — уже привязанный домен: он делает отчёт кнопки отличимым
+    // от отчёта фонового прогона, иначе тест не увидел бы подмены.
+    const { container } = renderPage([domainRow(1, "a.com"), domainRow(2, "b.com", 42)]);
+    await screen.findByText("a.com");
+    fireEvent.click(screen.getByText("⊕ Bulk Add"));
+    fireEvent.change(await screen.findByPlaceholderText(/example.com/), {
+      target: { value: "x.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Import Domains" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledWith("/domains/11", expect.anything()));
+
+    // Пользователь не стал ждать и нажал кнопку по видимым строкам — его
+    // прогон короче и финиширует первым.
+    fireEvent.click((await selectAll(container))!);
+    expect((await screen.findByRole("status")).textContent).toContain("1 of 1 linked, 1 already linked");
+
+    finishAuto();
+
+    // Отчёт, которого человек дождался, на месте: страница не отвечает чужими
+    // числами на вопрос, который ей задали. Фоновый итог при этом не пропал —
+    // он уехал тостом.
+    await waitFor(() => expect(onNotice).toHaveBeenCalledTimes(1));
+    expect(onNotice.mock.calls[0][0].text).toContain("1 of 1 linked");
+    expect(screen.getByRole("status").textContent).toContain("1 already linked");
+  });
+
   it("итог, доехавший после ухода со страницы, уходит наверх, а не пропадает", async () => {
     setTauri(true);
     let releaseZones: (zones: unknown) => void = () => {};

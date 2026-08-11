@@ -121,9 +121,12 @@ export function matchDomainsToZones(
       return { outcome: "skipped", domainId: d.id, domain };
     }
     const key = normalizeZoneName(domain);
-    // Пустое имя (строка из пробелов) не должно совпасть с чем попало: пустой
-    // ключ в индекс не кладётся, но сравнить его с ним всё равно нельзя.
-    const hits = key ? byName.get(key) : undefined;
+    // Проверки на пустой ключ здесь НЕТ намеренно: пустое имя не совпадает ни с
+    // чем потому, что пустой ключ не кладётся в индекс выше (`if (!key)
+    // continue`), — то есть защита стоит в одном месте, а не в двух. Ветка
+    // `key ? … : undefined` тут была неотличима от её отсутствия ни одним
+    // тестом, но обещала читателю вторую защиту.
+    const hits = byName.get(key);
     if (!hits || hits.length === 0) {
       return { outcome: "none", domainId: d.id, domain };
     }

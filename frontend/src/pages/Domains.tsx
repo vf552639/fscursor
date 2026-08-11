@@ -460,6 +460,13 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
    * итог уезжает наверх тостом — см. `deliverBindNotice`.
    */
   const [bindNotice, setBindNotice] = useState<CfBindNotice | null>(null);
+  /**
+   * Чей отчёт сейчас в баннере. Нужен ровно для одного правила: фоновая
+   * автопривязка не затирает отчёт, которого пользователь дождался, нажав
+   * кнопку (см. `deliverBindNotice`). Реф, а не стейт: значение читается в
+   * колбэке завершившегося прогона и само по себе ничего не рисует.
+   */
+  const bannerOwnerRef = useRef<"auto" | "manual" | null>(null);
   /** Идёт ли прогон ПО КНОПКЕ — то есть надо ли её гасить (см. `runCloudflareBind`). */
   const [bindPending, setBindPending] = useState(false);
   // Тот же признак рефом: `setBindPending` доезжает до следующего рендера, а два
@@ -648,25 +655,42 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   };
 
   /**
-   * Куда положить итог привязки: в баннер страницы, а если её уже нет — наверх,
-   * тостом воркспейса.
+   * Куда положить итог привязки: в баннер страницы, а если он недоступен —
+   * наверх, тостом воркспейса.
    *
-   * Баннер — основная поверхность (см. `bindNotice`), но «прогон секундный» —
-   * это про один домен, а не про пачку: на двухстах доменах это последовательная
-   * вычитка зон каждого аккаунта (с пагинацией и ретраем) плюс двести `PUT` по
-   * четыре за раз, то есть десятки секунд. Уйти за это время со страницы —
-   * обычное дело, а размонтированный компонент съел бы отчёт молча. Молчание
-   * здесь хуже всего: привязка меняет данные НЕ спросив, и след о ней —
-   * единственное, чем это отличается от порчи данных за спиной у пользователя.
+   * Недоступен он в двух случаях, и оба реальны.
    *
-   * Тот же приём и та же развилка, что у `onBulkProvisionError`: пока страница
-   * жива, у события одна поверхность — её баннер; тост включается ровно тогда,
-   * когда баннера больше нет. Тост беднее (2200 мс на пять чисел), но
-   * несравнимо лучше тишины.
+   * 1. Страницы больше нет. «Прогон секундный» — это про один домен, а не про
+   *    пачку: на двухстах доменах это последовательная вычитка зон каждого
+   *    аккаунта (с пагинацией и ретраем) плюс двести `PUT` по четыре за раз, то
+   *    есть десятки секунд. Уйти за это время со страницы — обычное дело, а
+   *    размонтированный компонент съел бы отчёт молча. Молчание здесь хуже
+   *    всего: привязка меняет данные НЕ спросив, и след о ней — единственное,
+   *    чем это отличается от правки за спиной у пользователя.
+   * 2. Место занято отчётом, который пользователь заказывал САМ. Прогонов бывает
+   *    два сразу: автопривязка после bulk-add идёт десятки секунд, и клик по
+   *    «Match Cloudflare zones» посреди неё финиширует раньше. Затерев отчёт
+   *    кнопки отчётом фоновой привязки, страница ответила бы не на тот вопрос,
+   *    который ей задали, — и человек, дождавшийся своего отчёта, увидел бы
+   *    вместо него чужие числа.
+   *
+   * Развилка та же, что у `onBulkProvisionError`. Тост беднее баннера (2200 мс
+   * на пять чисел), но несравнимо лучше тишины.
    */
-  const deliverBindNotice = (notice: CfBindNotice) => {
-    if (mountedRef.current) setBindNotice(notice);
-    else onCloudflareBindNotice(notice);
+  const deliverBindNotice = (notice: CfBindNotice, mode: "auto" | "manual") => {
+    const bannerTaken = mode === "auto" && bannerOwnerRef.current === "manual";
+    if (mountedRef.current && !bannerTaken) {
+      bannerOwnerRef.current = mode;
+      setBindNotice(notice);
+    } else {
+      onCloudflareBindNotice(notice);
+    }
+  };
+
+  /** Забыть, кому принадлежит баннер, вместе с самим баннером. */
+  const clearBindNotice = () => {
+    bannerOwnerRef.current = null;
+    setBindNotice(null);
   };
 
   /**
@@ -702,17 +726,17 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     // после «Cloudflare: 2 of 3 linked» пользователь заводит домен с уже
     // выбранным аккаунтом, привязывать нечего, а старая строка остаётся стоять
     // и читается как отчёт об этом, последнем действии.
-    setBindNotice(null);
+    clearBindNotice();
     try {
       const notice = summarizeCfBind(await autoBindDomainsToCloudflare(rows), mode);
-      if (notice) deliverBindNotice(notice);
+      if (notice) deliverBindNotice(notice, mode);
     } catch (e) {
       // Сюда доходит только провал чтения СПИСКА аккаунтов: непрочитанный
       // аккаунт и несостоявшийся `PUT` — это строки отчёта, а не исключение.
       deliverBindNotice({
         kind: "warn",
         text: `Cloudflare: could not match zones — ${e instanceof Error ? e.message : String(e)}`,
-      });
+      }, mode);
     } finally {
       if (mode === "manual") {
         bindRunningRef.current = false;
@@ -895,7 +919,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         <span style={{flex:1}}>{bindNotice.kind === "warn" ? "⚠" : "✓"} {bindNotice.text}</span>
         <button
           type="button"
-          onClick={()=>setBindNotice(null)}
+          onClick={clearBindNotice}
           aria-label="Dismiss Cloudflare match result"
           style={{background:"none",border:"none",padding:0,cursor:"pointer",color:"inherit",font:"inherit",lineHeight:1}}
         >
@@ -910,6 +934,17 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       onAssignCF={() => setShowAssignCF(true)}
       // Живые строки из свежего списка, а не `DomainUI`: привязке нужно
       // `cloudflare_account_id`, по которому она решает, кого не трогать.
+      //
+      // Выделение после прогона НЕ снимается — в отличие от четырёх соседних
+      // действий, и это выбор. «Assign Server», «Assign CF» и удаление делают с
+      // набором ровно то, о чём их просили, и набор после них не нужен;
+      // удавшийся массовый provision снимает выделение потому, что повторять
+      // его по тем же доменам нельзя (идемпотентность пометит набор
+      // отработавшим). У привязки же типичный исход — частичный: часть доменов
+      // осталась неоднозначной, часть не записалась, часть ждёт зоны, которую
+      // пользователь сейчас создаст. Всё это — работа ПО ТОМУ ЖЕ набору, и
+      // снятое выделение заставило бы разыскивать те же строки заново в списке
+      // на двести строк. Повтор безопасен: уже привязанное прогон пропускает.
       onMatchCFZones={() => {
         void runCloudflareBind(domainsData.filter((d) => sel.has(d.id)), "manual");
       }}
