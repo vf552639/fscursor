@@ -7,30 +7,34 @@ import { CloudflareAccount } from "../../api/cloudflare";
 import { DOMAIN_STATUSES, domainStatusLabel } from "../../lib/domainStatus";
 
 /**
- * Панель фильтров списка доменов. Ничего не помнит: значения и обработчики
- * приезжают со страницы, потому что по этим же значениям она фильтрует список,
- * пишет `?status=` в адрес и решает, что показывать вместо пустой таблицы.
+ * Значения фильтров и их обработчики. Отдельный тип, потому что панель ничего
+ * не помнит: и значения, и обработчики приезжают из `useDomainFilters` — по тем
+ * же значениям он фильтрует список и пишет `?status=` в адрес.
  */
+export interface DomainFilterControls {
+  search: string;
+  onSearchChange: (v: string) => void;
+  serverId: string;
+  onServerChange: (v: string) => void;
+  registrarId: string;
+  onRegistrarChange: (v: string) => void;
+  cfId: string;
+  onCfChange: (v: string) => void;
+  status: string;
+  onStatusChange: (v: string) => void;
+}
+
+/** Панель фильтров списка доменов. */
 export default function DomainFilters({
   search, onSearchChange,
   serverId, onServerChange, servers,
   registrarId, onRegistrarChange, registrars,
   cfId, onCfChange, cfAccounts,
   status, onStatusChange,
-}: {
-  search: string;
-  onSearchChange: (v: string) => void;
-  serverId: string;
-  onServerChange: (v: string) => void;
+}: DomainFilterControls & {
   servers: Server[];
-  registrarId: string;
-  onRegistrarChange: (v: string) => void;
   registrars: RegistrarAccount[];
-  cfId: string;
-  onCfChange: (v: string) => void;
   cfAccounts: CloudflareAccount[];
-  status: string;
-  onStatusChange: (v: string) => void;
 }) {
   return <Card style={{marginBottom:16}}>
     <div style={{padding:"12px 16px",display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>

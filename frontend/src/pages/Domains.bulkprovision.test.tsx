@@ -3,7 +3,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
-import Domains, { describeBulkProvision } from "./Domains";
+import Domains from "./Domains";
+import { describeBulkProvision } from "../components/domains/describeBulkProvision";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 

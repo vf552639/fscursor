@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { Card, Btn, EmptyState, ErrorState } from "../components/ui/Primitives";
-import { useDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
+import { Card } from "../components/ui/Primitives";
+import { useDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers } from "../api/servers";
 import { useRegistrarAccounts } from "../api/registrars";
 import { useCloudflareAccounts } from "../api/cloudflare";
@@ -10,48 +10,22 @@ import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
 import DomainStats from "../components/domains/DomainStats";
 import DomainTable from "../components/domains/DomainTable";
+import CloudflareBindBanner from "../components/domains/CloudflareBindBanner";
+import DomainsHeader from "../components/domains/DomainsHeader";
+import DomainsLoadError from "../components/domains/DomainsLoadError";
+import DomainsEmptyState from "../components/domains/DomainsEmptyState";
 import AssignCloudflareDialog from "../components/domains/AssignCloudflareDialog";
 import AssignServerDialog from "../components/domains/AssignServerDialog";
 import BulkAddDialog from "../components/domains/BulkAddDialog";
 import ProvisionDialog from "../components/domains/ProvisionDialog";
-import { DEFAULT_SORT, Sort, SortKey, sortDomains } from "../components/domains/sortDomains";
 import { DomainUI, toDomainUI } from "../components/domains/types";
-import { describeQueryError } from "../lib/queryError";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
 import { confirmAction } from "../lib/confirmDialog";
+import { useBulkProvision } from "../hooks/useBulkProvision";
 import { useCloudflareBind } from "../hooks/useCloudflareBind";
-import { useLiveOrAway } from "../hooks/useLiveOrAway";
-import { useAuthStore } from "../store/auth";
-
-/** Сколько имён влезает в диалог подтверждения, не превращая его в стену текста. */
-const CONFIRM_NAMES_SHOWN = 20;
-
-/**
- * Текст подтверждения массового provision.
- *
- * Отдельная чистая функция, а не шаблон внутри обработчика: её проверяет тест, а
- * этот текст — единственное, что стоит между промахом мимо соседней кнопки и
- * часами необратимой работы на чужих машинах.
- *
- * Устроен как `describeDeepLinkAction` для той же операции (`lib/deepLink.ts`):
- * называет и действие, и цели. Цели названы ИМЕНАМИ, а не id: у ссылки имён нет,
- * а у страницы есть, и выбирал пользователь именно имена. Строки «Continue only
- * if you started this yourself» здесь нет намеренно — она про ссылку, пришедшую
- * с чужой страницы, а не про кнопку, которую только что нажали.
- */
-export function describeBulkProvision(domains: DomainUI[], ids: number[]): string {
-  const names = ids.map((id) => domains.find((d) => d.id === id)?.domain ?? `#${id}`);
-  const rest = names.length - CONFIRM_NAMES_SHOWN;
-  const list = names.slice(0, CONFIRM_NAMES_SHOWN).join(", ") + (rest > 0 ? `, … (+${rest} more)` : "");
-  return (
-    `Provision ${ids.length} domain(s)?\n\n` +
-    `${list}\n\n` +
-    "SDMP will connect over SSH to each domain's server and create the site, " +
-    "its FTP account and its SSL certificate. Once started, the run cannot be stopped."
-  );
-}
+import { useDomainFilters } from "../hooks/useDomainFilters";
 
 export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
   onNav?: (pg: string, ctx?: any) => void;
@@ -134,11 +108,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
 
   const domains = useMemo((): DomainUI[] => domainsData.map(toDomainUI), [domainsData]);
 
-  const initialStatusFilter = useMemo(() => {
-    return new URLSearchParams(window.location.search).get("status") ?? "";
-  }, []);
-  const [search,setSearch]=useState(""); const [fSrv,setFS]=useState(""); const [fReg,setFR]=useState(""); const [fCF,setFCF]=useState(""); const [fStatus, setFStatus] = useState(initialStatusFilter);
-  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
   const [sel,setSel]=useState<Set<number>>(new Set()); 
   const [showBulk,setSB]=useState(false);
   const [showAdd,setSA]=useState(false);
@@ -147,25 +116,11 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const [showAssignServer, setShowAssignServer] = useState(false);
   const [showAssignCF, setShowAssignCF] = useState(false);
   const [focusDomainId, setFocusDomainId] = useState<number | null>(null);
+  const filters = useDomainFilters(domains, focusDomainId);
 
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
   const singleProvision = useProvisionDomain(onProvisionResult);
-  // Отказ запуска обязан быть виден: «уже провижинится», «только десктоп» и
-  // отказ самой команды — это ответ на вопрос «почему ничего не произошло».
-  const [bulkProvisionError, setBulkProvisionError] = useState<string | null>(null);
-  // Жива ли ещё страница к моменту, когда вернулся отказ. Отказ приходит через
-  // секунды после клика, а страница размонтируется на любой навигации — без
-  // этой развилки текст уходил бы в стейт мёртвого компонента, то есть в
-  // никуда (см. проп `onBulkProvisionError`).
-  const { deliver: deliverBulkProvisionError } = useLiveOrAway();
-  // Открыт ли диалог подтверждения массового прогона. Первое, что делает клик, —
-  // это `await` (загрузка чанка плагина плюс сам диалог), поэтому до ответа
-  // пользователя кнопка ничем не занята и выглядит незалипшей: второй клик по
-  // «неотзывчивой» кнопке открывал второй диалог. Подтвердив оба, пользователь
-  // получал запущенный прогон И красный баннер «уже провижинится» над ним —
-  // выполнялся набор при этом ровно один раз (подоменный гейт), врал только UI.
-  const confirmingBulkRef = useRef(false);
   // Что провижинится прямо сейчас — из MutationCache, а не из локального
   // observer'а или `useState`: операция идёт минутами (SSH + certbot) и
   // переживает уход со страницы, а страница размонтируется на любой навигации
@@ -208,59 +163,35 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   // страница, а DesktopWorkspace (см. `onProvisionResult`): пароли БД и FTP не
   // должны зависеть от того, ушёл ли пользователь со страницы, пока шёл provision.
   //
-  // Диалог перед запуском: домен, для которого он открыт, и выбор «создавать ли
-  // базу». Выбор живёт здесь, а не в аргументах строки, чтобы не залипать между
-  // доменами — БД это отдельный артефакт на сервере, и умолчание у него «нет».
+  // Домен, для которого открыт диалог запуска, — и только он: выбор «создавать
+  // ли базу» принадлежит самому диалогу и умирает вместе с ним, чтобы не
+  // залипать между доменами (см. `ProvisionDialog`).
   const [provisionTarget, setProvisionTarget] = useState<DomainUI | null>(null);
   const [showFileImport, setShowFileImport] = useState(false);
   const cfBind = useCloudflareBind(onCloudflareBindNotice);
+  const bulkProvision = useBulkProvision({
+    domains,
+    selected: sel,
+    onResult: onBulkProvisionResult,
+    onErrorAway: onBulkProvisionError,
+    onSetSpent: () => setSel(new Set()),
+  });
+
+  // Приход по ссылке: с карточки сервера — со срезом по нему, с уведомления о
+  // домене — в режим одной строки. Поиск при этом гасится: строка, набранная
+  // раньше, к домену из ссылки отношения не имеет и может его же и спрятать.
+  const { onServerChange, onSearchChange } = filters.controls;
   useEffect(() => {
     if (ctx?.serverId) {
-      setFS(String(ctx.serverId));
+      onServerChange(String(ctx.serverId));
     }
     if (ctx?.domainId) {
       setFocusDomainId(Number(ctx.domainId));
-      setSearch("");
+      onSearchChange("");
     }
-  }, [ctx]);
-
-  // Причина отказа привязана к набору, на котором он случился: «Provisioning of
-  // #1, #2 is already running» после снятия галочек с #1 и #2 говорит уже не про
-  // то, что пользователь видит перед собой.
-  useEffect(() => {
-    setBulkProvisionError(null);
-  }, [sel]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (fStatus) params.set("status", fStatus);
-    else params.delete("status");
-    const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`;
-    window.history.replaceState({}, "", next);
-  }, [fStatus]);
-
-  const filtered = useMemo(() => domains.filter((d: DomainUI) => 
-    (!search || d.domain.toLowerCase().includes(search.toLowerCase()) || String(d.id) === search) &&
-    (!fSrv || d.server_id === Number(fSrv)) &&
-    (!fReg || d.registrar_id === Number(fReg)) &&
-    (!fCF || d.cf_id === Number(fCF)) &&
-    (!fStatus || d.status === fStatus) &&
-    (!focusDomainId || d.id === focusDomainId)
-  ), [search, fSrv, fReg, fCF, fStatus, focusDomainId, domains]);
-  /**
-   * Порядок применяется ПОСЛЕ фильтрации и живёт в `useMemo`: список бывает на
-   * сотни строк, а сортировка внутри рендера строки означала бы полную
-   * пересортировку на каждую из них.
-   *
-   * Фокус-режим (`ctx.domainId`) сюда не вмешивается — он всего лишь ещё одно
-   * условие фильтра выше, поэтому сортировку не ломает: единственная оставшаяся
-   * строка отсортирована сама с собой.
-   */
-  const sorted = useMemo(() => sortDomains(filtered, sort), [filtered, sort]);
+  }, [ctx, onServerChange, onSearchChange]);
 
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
-  /** Повторный клик по той же колонке переворачивает; новая колонка начинает с возрастания. */
-  const toggleSort = (k: SortKey) => setSort((p) => ({ key: k, dir: p.key === k && p.dir === "asc" ? "desc" : "asc" }));
 
   const handleAssignServer = (serverId: string) => {
     if (!serverId) return;
@@ -292,79 +223,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     setProvisionTarget(null);
   };
 
-  /**
-   * Массовый provision — через Tauri-команду `provision_bulk`, тем же путём,
-   * что и ссылка `sdmp://bulk-provision` (см. `lib/deepLink.ts`). Прежний
-   * `POST /domains/bulk-provision` на бэкенде не существует: кнопка всегда
-   * давала 404, то есть обещала функцию, которой нет.
-   *
-   * Не прямой `invokeSynced`, а `runBulkProvisionDomains` — по тем же двум
-   * причинам, что и у ссылки: только он отдаёт наружу результат КАЖДОГО домена
-   * (пароль FTP существует только там) и только он занимает подоменный гейт в
-   * `MutationCache`, из-за чего ⚙ строки и ссылка не откроют вторую SSH-сессию
-   * по домену из набора.
-   *
-   * Результат не через `mutate`: возврат `mutationFn` react-query кладёт в
-   * `data` `MutationCache`, откуда его не убирает даже `reset()`. Паролям там
-   * не место, поэтому отчёт уезжает прямым вызовом пропа.
-   */
-  const handleBulkProvision = async () => {
-    // Тот же источник, что у `useSetNameservers`: id пользователя нужен команде,
-    // чтобы расшифровать креды сервера.
-    const userId = useAuthStore.getState().userId;
-    setBulkProvisionError(null);
-    if (!userId) {
-      setBulkProvisionError("Not signed in — sign in again to run provisioning.");
-      return;
-    }
-    const targets = Array.from(sel);
-    // Спрашиваем, как спрашивают массовое удаление и как спрашивает
-    // `sdmp://bulk-provision`: один клик запускает часы необратимой работы на
-    // чужих машинах (site + FTP-аккаунт + certbot на каждом домене), остановить
-    // прогон нечем, а идемпотентность после него пометит набор отработавшим —
-    // то есть промах по «Assign Server» стоил бы и лишнего прогона, и
-    // возможности повторить правильный.
-    //
-    // Домены названы ИМЕНАМИ, а не id, как в тексте ссылки: имя — это то, чем
-    // пользователь их выбирал. Длинный список урезаем: диалог, который нельзя
-    // прочитать, закрывают не читая.
-    //
-    // Второй клик, пока висит диалог, — это тот же клик, а не второй запуск:
-    // спрашивать одно и то же дважды не о чем.
-    if (confirmingBulkRef.current) return;
-    confirmingBulkRef.current = true;
-    let confirmed: boolean;
-    try {
-      confirmed = await confirmAction(describeBulkProvision(domains, targets));
-    } finally {
-      confirmingBulkRef.current = false;
-    }
-    if (!confirmed) return;
-    // Команда адресует домены строками.
-    const ids = targets.map(String);
-    try {
-      const outcome = await runBulkProvisionDomains(userId, ids);
-      // Отчёт отдаём ПЕРВЫМ действием после ответа: всё остальное здесь —
-      // косметика стейта, а он существует в единственном экземпляре.
-      onBulkProvisionResult(outcome);
-      // Снимаем выделение только с полностью удавшегося прогона. У оборвавшегося
-      // хвост (`skipped`) назван поимённо ровно затем, чтобы повторить прогон по
-      // нему, — а повторять его пользователю пришлось бы, заново разыскивая
-      // домены в списке на двести строк.
-      if (outcome.status === "ok") setSel(new Set());
-    } catch (e) {
-      // «Provisioning of #N is already running.», «только десктоп» и отказ самой
-      // команды — всё это обязано доехать до пользователя: молчащая кнопка
-      // неотличима от сломанной. Куда именно — зависит от того, жива ли ещё
-      // страница: в стейте размонтированной текст умирает так же молча.
-      const message = e instanceof Error ? e.message : String(e);
-      deliverBulkProvisionError(
-        () => setBulkProvisionError(message),
-        () => onBulkProvisionError(message),
-      );
-    }
-  };
-
   /** Удаление одного домена по ✕ строки. Спрашивает страница, а не строка: строка не знает и не должна знать, чем оно кончится. */
   const handleDeleteDomain = async (d: DomainUI) => {
     if (!(await confirmAction(`Delete ${d.domain}?`))) return;
@@ -378,19 +236,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   };
 
   if (domainsQ.isError) {
-    return (
-      <div style={{ padding: "8px 0" }}>
-        <div style={{ marginBottom: 20 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 2 }}>Domains</h1>
-          <div style={{ fontSize: 13, color: "#6b7280" }}>Domain inventory</div>
-        </div>
-        <ErrorState
-          title={describeQueryError(domainsQ.error).title}
-          message={`The domains list could not be loaded. ${describeQueryError(domainsQ.error).message}`}
-          hint={describeQueryError(domainsQ.error).hint}
-        />
-      </div>
-    );
+    return <DomainsLoadError error={domainsQ.error} />;
   }
 
   if (domainsQ.isPending || serversQ.isPending || registrarsQ.isPending || cfAccountsQ.isPending) {
@@ -398,55 +244,24 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   }
 
   return <>
-    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-      <div>
-        <h1 style={{fontSize:22,fontWeight:700,color:"#111",marginBottom:2}}>Domains</h1>
-        <div style={{fontSize:13,color:"#6b7280"}}>{domains.length} domains total</div>
-      </div>
-      <div style={{display:"flex",gap:8}}>
-        <Btn variant="secondary" onClick={()=>setShowFileImport(true)}>⇪ File Import</Btn>
-        <Btn variant="secondary" onClick={()=>setSB(true)}>⊕ Bulk Add</Btn>
-        <Btn variant="primary" onClick={()=>setSA(true)}>+ Add Domain</Btn>
-      </div>
-    </div>
-    <DomainStats domains={domains} />
-    <DomainFilters
-      search={search} onSearchChange={setSearch}
-      serverId={fSrv} onServerChange={setFS} servers={servers}
-      registrarId={fReg} onRegistrarChange={setFR} registrars={registrars}
-      cfId={fCF} onCfChange={setFCF} cfAccounts={cfAccounts}
-      status={fStatus} onStatusChange={setFStatus}
+    <DomainsHeader
+      total={domains.length}
+      onFileImport={()=>setShowFileImport(true)}
+      onBulkAdd={()=>setSB(true)}
+      onAddDomain={()=>setSA(true)}
     />
+    <DomainStats domains={domains} />
+    <DomainFilters {...filters.controls} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />
     {/* Живёт ровно столько, сколько живёт набор, на котором случился отказ:
-        гасит его эффект по `sel` выше, а не время и не следующий рендер. */}
-    {bulkProvisionError ? (
+        гасит его сам `useBulkProvision` по смене выделения, а не время и не
+        следующий рендер. */}
+    {bulkProvision.error ? (
       <div role="alert" style={{marginBottom:12,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
-        {bulkProvisionError}
+        {bulkProvision.error}
       </div>
     ) : null}
-    {/* Итог привязки к Cloudflare. `alert` только у полууспеха (тот же порог,
-        что у тостов воркспейса): «привязано 3 из 3» перебивать чтение экрана
-        незачем, а «одно совпало в двух аккаунтах» — это то, ради чего человек и
-        читает эту строку.
-
-        Гасится кнопкой, а не таймером и не сменой выделения: при создании
-        домена выделение вообще ни при чём, а исчезнувшая через две секунды
-        строка с пятью числами — это строка, которую не успели прочитать. */}
     {cfBind.notice ? (
-      <div
-        role={cfBind.notice.kind === "warn" ? "alert" : "status"}
-        style={{marginBottom:12,padding:"10px 12px",borderRadius:8,fontSize:13,display:"flex",alignItems:"flex-start",gap:10,background:cfBind.notice.kind === "warn" ? "#fffbeb" : "#eff4ff",color:cfBind.notice.kind === "warn" ? "#92400e" : "#1e40af"}}
-      >
-        <span style={{flex:1}}>{cfBind.notice.kind === "warn" ? "⚠" : "✓"} {cfBind.notice.text}</span>
-        <button
-          type="button"
-          onClick={cfBind.dismiss}
-          aria-label="Dismiss Cloudflare match result"
-          style={{background:"none",border:"none",padding:0,cursor:"pointer",color:"inherit",font:"inherit",lineHeight:1}}
-        >
-          ✕
-        </button>
-      </div>
+      <CloudflareBindBanner notice={cfBind.notice} onDismiss={cfBind.dismiss} />
     ) : null}
     <BulkActionToolbar
       selectedCount={sel.size}
@@ -470,41 +285,28 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         void cfBind.run(domainsData.filter((d) => sel.has(d.id)), "manual");
       }}
       matchCFZonesPending={cfBind.pending}
-      onProvision={() => { void handleBulkProvision(); }}
+      onProvision={() => { void bulkProvision.run(); }}
       onDelete={handleBulkDelete}
       provisionPending={bulkProvisionRunning}
     />
     <Card>
       <div style={{overflowX:"auto"}}>
         {domainsData.length === 0 ? (
-          <EmptyState
-            title="No domains yet"
-            description="Add a domain or import many at once. An empty list means there are no rows in the database — not a failed request."
-          >
-            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-              <Btn variant="secondary" onClick={() => setShowFileImport(true)}>
-                ⇪ File import
-              </Btn>
-              <Btn variant="secondary" onClick={() => setSB(true)}>
-                ⊕ Bulk import
-              </Btn>
-              <Btn variant="primary" onClick={() => setSA(true)}>
-                + Add Domain
-              </Btn>
-            </div>
-          </EmptyState>
+          <DomainsEmptyState
+            onFileImport={() => setShowFileImport(true)}
+            onBulkImport={() => setSB(true)}
+            onAddDomain={() => setSA(true)}
+          />
         ) : (
         <DomainTable
-          rows={sorted}
+          rows={filters.filtered}
           servers={servers}
           registrars={registrars}
           cfAccounts={cfAccounts}
           now={now}
-          sort={sort}
-          onSort={toggleSort}
           selectedIds={sel}
           onToggleRow={toggle}
-          onToggleAll={()=>setSel(sel.size===sorted.length?new Set():new Set(sorted.map((d: DomainUI)=>d.id)))}
+          onToggleAll={()=>setSel(sel.size===filters.filtered.length?new Set():new Set(filters.filtered.map((d: DomainUI)=>d.id)))}
           focusDomainId={focusDomainId}
           isProvisioning={isProvisioning}
           onOpenDetail={(id)=>setDetailDomain(domainsData.find((x) => x.id === id) || null)}
