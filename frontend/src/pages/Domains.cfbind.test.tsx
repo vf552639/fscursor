@@ -42,7 +42,6 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 }));
 
 // Тяжёлые соседи страницы, которых этот сценарий не открывает.
-vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 
@@ -213,7 +212,9 @@ describe("Domains — автопривязка при создании", () => {
     // которую эта функция убирает.
     await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(2));
     expect(mocks.apiPut.mock.calls.map((c: any[]) => c[0])).toEqual(["/domains/11", "/domains/12"]);
-    expect((await screen.findByRole("status")).textContent).toContain("2 of 3 linked");
+    // `alert`, а не `status`: z.com остался без зоны, то есть привязано не всё
+    // — «✓» баннер тут сказать не вправе (см. `summarizeCfBind`).
+    expect((await screen.findByRole("alert")).textContent).toContain("2 of 3 linked");
   });
 
   it("провал привязки не выдаёт создание домена за неудачу", async () => {
@@ -282,8 +283,10 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
       cloudflare_account_id: 7,
       cloudflare_zone_id: "zone-a",
     });
-    // Все три исхода названы: привязали, совпадения нет, уже привязан.
-    const notice = (await screen.findByRole("status")).textContent ?? "";
+    // Все три исхода названы: привязали, совпадения нет, уже привязан. Тон —
+    // `alert`: b.com остался непривязанным, и зелёная галочка над этой строкой
+    // означала бы «всё сделано».
+    const notice = (await screen.findByRole("alert")).textContent ?? "";
     expect(notice).toContain("1 of 2 linked");
     expect(notice).toContain("1 already linked");
   });

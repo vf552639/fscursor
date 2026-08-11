@@ -382,9 +382,46 @@ describe("summarizeCfBind", () => {
 
     // «Без зоны» — числом, а не вычитанием из «N of M»: причин «не привязано»
     // три, и считать их в уме читателю нечем.
+    //
+    // Тон — `warn`: один из двух доменов остался непривязанным, а «✓» баннера
+    // означает «привязано всё».
+    expect(notice).toEqual({
+      kind: "warn",
+      text: "Cloudflare: 1 of 2 linked, 1 with no matching zone.",
+    });
+  });
+
+  it("прогон, не привязавший НИЧЕГО, не говорит «✓»", () => {
+    // Единственный видимый исход прогона по кнопке, где ни один домен не
+    // нашёлся в Cloudflare. Текст честен («0 of 5 linked»), а тон `info` рисует
+    // над ним зелёную галочку — то есть глиф сообщает об успехе там, где не
+    // сделано ровно ничего. Тот же порок, из-за которого у тостов воркспейса
+    // появился третий тон.
+    const notice = summarizeCfBind(
+      report({
+        none: [1, 2, 3, 4, 5].map((id) => ({ domainId: id, domain: `d${id}.com` })),
+      }),
+      "manual",
+    );
+
+    expect(notice?.text).toBe("Cloudflare: 0 of 5 linked, 5 with no matching zone.");
+    expect(notice?.kind).toBe("warn");
+  });
+
+  it("привязав всё, говорит «✓» — тон не съехал в предупреждение поголовно", () => {
+    // Обратная сторона правила: там, где непривязанных не осталось, ⚠ было бы
+    // ложной тревогой, а привыкший к ней читатель перестаёт замечать настоящую.
+    const notice = summarizeCfBind(
+      report({
+        bound: [1, 2].map((id) => ({ domainId: id, domain: `d${id}.com`, accountId: 7, zoneId: "z" })),
+        skipped: 1,
+      }),
+      "manual",
+    );
+
     expect(notice).toEqual({
       kind: "info",
-      text: "Cloudflare: 1 of 2 linked, 1 with no matching zone.",
+      text: "Cloudflare: 2 of 2 linked, 1 already linked.",
     });
   });
 
