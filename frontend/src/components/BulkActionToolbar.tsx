@@ -1,6 +1,7 @@
 import React from "react";
 
 import { OpenInDesktop } from "./OpenInDesktop";
+import { Btn } from "./ui/Primitives";
 import { isTauri } from "../lib/runtime";
 
 function idsQuery(ids: number[]): string {
@@ -12,8 +13,10 @@ export default function BulkActionToolbar({
   selectedDomainIds = [],
   onAssignServer,
   onAssignCF,
+  onMatchCFZones,
   onProvision,
   onDelete,
+  matchCFZonesPending,
   provisionPending,
 }: {
   selectedCount: number;
@@ -21,8 +24,16 @@ export default function BulkActionToolbar({
   selectedDomainIds?: number[];
   onAssignServer: () => void;
   onAssignCF: () => void;
+  /**
+   * Найти зоны Cloudflare по именам выделенных доменов и проставить привязку.
+   * Обязателен, хотя кнопка рисуется только в десктопе: кнопка без обработчика
+   * — это кнопка, которая молчит, а такую от сломанной не отличить.
+   */
+  onMatchCFZones: () => void;
   onProvision: () => void;
   onDelete: () => void;
+  /** Идёт ли прогон привязки. Гасит ТОЛЬКО свою кнопку — см. `provisionPending`. */
+  matchCFZonesPending?: boolean;
   /**
    * Идёт ли массовый provision. Гасит ТОЛЬКО свою кнопку.
    *
@@ -66,6 +77,24 @@ export default function BulkActionToolbar({
         label="Assign CF"
         desktopOnClick={onAssignCF}
       />
+      {/* Не `OpenInDesktop`, и это выбор, а не пропущенная унификация: зоны
+          Cloudflare в базе не лежат вовсе — их вживую читает Tauri-команда
+          `cf_list_zones`, — поэтому в вебе действие невозможно даже теоретически.
+          CTA «открыть в десктопе» под него потребовал бы нового хоста в
+          `parseDeepLinkAction` (`lib/deepLink.ts`), а хост, которого там нет, —
+          это ссылка в никуда: ровно те кнопки, которые на этой ветке только что
+          удалены («Set NS», «Refresh SSL», «Full Setup»). Поэтому в вебе кнопки
+          просто нет. */}
+      {isTauri() ? (
+        <Btn
+          variant="secondary"
+          size="sm"
+          onClick={onMatchCFZones}
+          disabled={Boolean(matchCFZonesPending)}
+        >
+          {matchCFZonesPending ? "Matching…" : "Match Cloudflare zones"}
+        </Btn>
+      ) : null}
       {/* Массового «Set NS» здесь намеренно нет: `POST /domains/bulk-set-ns` на
           бэкенде не существует, а `sdmp://set-ns` не разбирает
           parseDeepLinkAction — кнопка вела в никуда в обеих средах. Смена NS

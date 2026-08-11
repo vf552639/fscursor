@@ -556,6 +556,7 @@ describe("мёртвые NS-действия удалены", () => {
           selectedDomainIds={[1, 2]}
           onAssignServer={() => {}}
           onAssignCF={() => {}}
+          onMatchCFZones={() => {}}
           onProvision={() => {}}
           onDelete={() => {}}
         />
@@ -581,6 +582,7 @@ describe("массовый Set NS", () => {
           selectedDomainIds={[1, 2]}
           onAssignServer={() => {}}
           onAssignCF={() => {}}
+          onMatchCFZones={() => {}}
           onProvision={() => {}}
           onDelete={() => {}}
         />

@@ -112,8 +112,15 @@ export const cloudflareKeys = {
  * зоны, и её nameservers: Cloudflare отдаёт `name_servers` прямо в списке, так
  * что отдельные команды под зону и NS были бы лишними походами с тем же
  * ответом. Три хука ниже — три `select` над одной записью кэша.
+ *
+ * Экспортируется ради четвёртого потребителя, который живёт ВНЕ React:
+ * `api/cfAutoBind.ts` зовёт `queryClient.fetchQuery(zonesQuery(id))` на каждый
+ * аккаунт. Свой `invokeSynced` там означал бы вторую копию и ключа, и
+ * `staleTime` — то есть прогон привязки ходил бы в Cloudflare за зонами,
+ * которые страница прочитала секунду назад, и не видел бы зону, только что
+ * созданную `useCreateZone` (та гасит именно эту запись кэша).
  */
-function zonesQuery(accountId: number | null | undefined) {
+export function zonesQuery(accountId: number | null | undefined) {
   return {
     queryKey: accountId ? cloudflareKeys.zones(accountId) : (["cloudflare", "zones", "disabled"] as const),
     queryFn: async (): Promise<Zone[]> => {
@@ -131,11 +138,23 @@ function zonesQuery(accountId: number | null | undefined) {
   };
 }
 
-export function useCloudflareAccounts() {
-  return useQuery({
+/**
+ * Список аккаунтов Cloudflare. Вынесен из хука по той же причине, что и
+ * `zonesQuery`: его читает и React (`useCloudflareAccounts`), и прогон привязки
+ * вне React (`api/cfAutoBind.ts`). Разъехавшийся `queryKey` дал бы две записи
+ * кэша на один и тот же ответ — то есть лишний запрос там, где страница уже всё
+ * загрузила, и невидимость только что подключённого аккаунта после
+ * инвалидации.
+ */
+export function cloudflareAccountsQuery() {
+  return {
     queryKey: cloudflareKeys.accounts,
     queryFn: () => apiGet<CloudflareAccount[]>("/cloudflare/accounts"),
-  });
+  };
+}
+
+export function useCloudflareAccounts() {
+  return useQuery(cloudflareAccountsQuery());
 }
 
 export function useCreateCloudflareAccount() {
@@ -217,8 +236,14 @@ export function useCloudflareZones(accountId: number | null | undefined) {
     // статус зоны просился бы на вкладку overview, а она открыта всегда — то
     // есть `cf_list_zones` (аккаунт по 50 зон) уходил бы на каждое открытие
     // любой карточки, ради одного слова. Вкладка NS платит эту цену потому, что
-    // без списка NS ей нечего показывать вовсе. Кому статус зоны нужен по делу
-    // — привязке домена к зоне по имени, — тот план ещё не сделан.
+    // без списка NS ей нечего показывать вовсе.
+    //
+    // Привязка домена к зоне по имени (`api/cfAutoBind.ts`) — тот самый план,
+    // на который этот долг откладывали, — его вызывающим тоже не стала, и это
+    // не забывчивость: она ищет зону по ИМЕНИ по всему списку сразу и работает
+    // вне React, а `useZoneDetails` — это хук, выбирающий ОДНУ зону по уже
+    // известному `zoneId`. Ей нужен ровно тот список, поверх которого он
+    // сделан, поэтому она берёт `zonesQuery` напрямую. Долг остаётся открытым.
     enabled: !!accountId && isTauri(),
   });
 }
