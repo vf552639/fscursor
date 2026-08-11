@@ -53,7 +53,6 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 }));
 
 // Тяжёлые соседи страницы, которых этот сценарий не открывает вовсе.
-vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 

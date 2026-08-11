@@ -42,7 +42,6 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   syncLocalCache: vi.fn(async () => {}),
 }));
 
-vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 

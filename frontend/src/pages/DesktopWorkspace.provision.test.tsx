@@ -69,12 +69,12 @@ vi.mock("./Activity", () => ({ default: () => null }));
 vi.mock("./Notifications", () => ({ default: () => null }));
 vi.mock("./Settings", () => ({ default: () => null }));
 // Тяжёлые дети самой страницы Domains, которые этот сценарий не открывает.
-vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
+// `TaskProgressModal` здесь больше не мокается: его единственный импортёр —
+// `Activity`, а она сама подменена на `null` строкой выше, так что модуль в этот
+// прогон не приезжает вовсе. `RevealSecret` — тем же порядком: его импортируют
+// только `ServerDetail` и `Cloudflare`, обе замоканы.
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
-// А этот — ребёнок `Activity` (страница `Domains` его больше не импортирует):
-// он поллит журнал задач, которого в этом сценарии нет вовсе.
-vi.mock("../components/TaskProgressModal", () => ({ default: () => null }));
 
 function domainRow(id: number, name: string) {
   return {

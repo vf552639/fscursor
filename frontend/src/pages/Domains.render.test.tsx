@@ -56,7 +56,6 @@ vi.mock("../components/domains/DomainStatusBadge", async (importOriginal) => {
   };
 });
 
-vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 

@@ -47,7 +47,6 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   syncLocalCache: vi.fn(async () => {}),
 }));
 
-vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 // Тяжёлый сосед страницы, к срокам отношения не имеющий (та же преамбула, что в
 // Domains.serverstatus.test.tsx, и по той же причине).
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
