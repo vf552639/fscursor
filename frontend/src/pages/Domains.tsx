@@ -5,7 +5,7 @@ import { useDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDoma
 import { useServers } from "../api/servers";
 import { useRegistrarAccounts } from "../api/registrars";
 import { useCloudflareAccounts } from "../api/cloudflare";
-import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
+import { CfBindNotice } from "../api/cfAutoBind";
 import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
 import DomainStats from "../components/domains/DomainStats";
@@ -21,6 +21,8 @@ import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
 import { confirmAction } from "../lib/confirmDialog";
+import { useCloudflareBind } from "../hooks/useCloudflareBind";
+import { useLiveOrAway } from "../hooks/useLiveOrAway";
 import { useAuthStore } from "../store/auth";
 
 /** Сколько имён влезает в диалог подтверждения, не превращая его в стену текста. */
@@ -154,15 +156,9 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const [bulkProvisionError, setBulkProvisionError] = useState<string | null>(null);
   // Жива ли ещё страница к моменту, когда вернулся отказ. Отказ приходит через
   // секунды после клика, а страница размонтируется на любой навигации — без
-  // этого признака текст уходил бы в стейт мёртвого компонента, то есть в
+  // этой развилки текст уходил бы в стейт мёртвого компонента, то есть в
   // никуда (см. проп `onBulkProvisionError`).
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
+  const { deliver: deliverBulkProvisionError } = useLiveOrAway();
   // Открыт ли диалог подтверждения массового прогона. Первое, что делает клик, —
   // это `await` (загрузка чанка плагина плюс сам диалог), поэтому до ответа
   // пользователя кнопка ничем не занята и выглядит незалипшей: второй клик по
@@ -217,38 +213,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   // доменами — БД это отдельный артефакт на сервере, и умолчание у него «нет».
   const [provisionTarget, setProvisionTarget] = useState<DomainUI | null>(null);
   const [showFileImport, setShowFileImport] = useState(false);
-  /**
-   * Итог привязки доменов к зонам Cloudflare — и почему его основное место
-   * ЗДЕСЬ, а не наверху, как у результатов provision.
-   *
-   * Provision показывается воркспейсом всегда, потому что несёт пароли, которых
-   * нет больше нигде: потерянный пароль невосстановим. У привязки секретов в
-   * отчёте нет вовсе, а повторить прогон можно тем же кликом — правило
-   * идемпотентно, уже привязанные домены оно пропускает. Поэтому основная
-   * поверхность у неё здесь: итог называет домены ЭТОГО списка, и показывать его
-   * поверх страницы серверов не о чем. Тост вдобавок живёт 2200 мс, а в итоге до
-   * пяти чисел плюс оговорка про непрочитанные аккаунты — та часть, которую
-   * пропустить нельзя. Место у баннера то же, где страница уже показывает исход
-   * массового действия (`bulkProvisionError` ниже).
-   *
-   * «Основная», а не единственная: если страницы к возврату отчёта уже нет,
-   * итог уезжает наверх тостом — см. `deliverBindNotice`.
-   */
-  const [bindNotice, setBindNotice] = useState<CfBindNotice | null>(null);
-  /**
-   * Чей отчёт сейчас в баннере. Нужен ровно для одного правила: фоновая
-   * автопривязка не затирает отчёт, которого пользователь дождался, нажав
-   * кнопку (см. `deliverBindNotice`). Реф, а не стейт: значение читается в
-   * колбэке завершившегося прогона и само по себе ничего не рисует.
-   */
-  const bannerOwnerRef = useRef<"auto" | "manual" | null>(null);
-  /** Идёт ли прогон ПО КНОПКЕ — то есть надо ли её гасить (см. `runCloudflareBind`). */
-  const [bindPending, setBindPending] = useState(false);
-  // Тот же признак рефом: `setBindPending` доезжает до следующего рендера, а два
-  // клика по кнопке успевают случиться в одном — и тогда зоны читались бы
-  // дважды, а `PUT`'ы уходили бы парами.
-  const bindRunningRef = useRef(false);
-
+  const cfBind = useCloudflareBind(onCloudflareBindNotice);
   useEffect(() => {
     if (ctx?.serverId) {
       setFS(String(ctx.serverId));
@@ -328,104 +293,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   };
 
   /**
-   * Куда положить итог привязки: в баннер страницы, а если он недоступен —
-   * наверх, тостом воркспейса.
-   *
-   * Недоступен он в двух случаях, и оба реальны.
-   *
-   * 1. Страницы больше нет. «Прогон секундный» — это про один домен, а не про
-   *    пачку: на двухстах доменах это последовательная вычитка зон каждого
-   *    аккаунта (с пагинацией и ретраем) плюс двести `PUT` по четыре за раз, то
-   *    есть десятки секунд. Уйти за это время со страницы — обычное дело, а
-   *    размонтированный компонент съел бы отчёт молча. Молчание здесь хуже
-   *    всего: привязка меняет данные НЕ спросив, и след о ней — единственное,
-   *    чем это отличается от правки за спиной у пользователя.
-   * 2. Место занято отчётом, который пользователь заказывал САМ. Прогонов бывает
-   *    два сразу: автопривязка после bulk-add идёт десятки секунд, и клик по
-   *    «Match Cloudflare zones» посреди неё финиширует раньше. Затерев отчёт
-   *    кнопки отчётом фоновой привязки, страница ответила бы не на тот вопрос,
-   *    который ей задали, — и человек, дождавшийся своего отчёта, увидел бы
-   *    вместо него чужие числа.
-   *
-   * Развилка та же, что у `onBulkProvisionError`. Тост беднее баннера (2200 мс
-   * на пять чисел), но несравнимо лучше тишины.
-   */
-  const deliverBindNotice = (notice: CfBindNotice, mode: "auto" | "manual") => {
-    const bannerTaken = mode === "auto" && bannerOwnerRef.current === "manual";
-    if (mountedRef.current && !bannerTaken) {
-      bannerOwnerRef.current = mode;
-      setBindNotice(notice);
-    } else {
-      onCloudflareBindNotice(notice);
-    }
-  };
-
-  /** Забыть, кому принадлежит баннер, вместе с самим баннером. */
-  const clearBindNotice = () => {
-    bannerOwnerRef.current = null;
-    setBindNotice(null);
-  };
-
-  /**
-   * Прогон привязки к зонам Cloudflare: и автоматический (после создания
-   * домена), и по кнопке тулбара.
-   *
-   * Один обработчик на оба входа намеренно — правило привязки одно, и разница
-   * между входами ровно в `mode`: после создания домена молчим, когда прогона
-   * не было (аккаунтов нет — это не новость тому, кто Cloudflare не
-   * пользуется), а по кнопке отвечаем всегда. Всё остальное решает
-   * `summarizeCfBind`.
-   *
-   * Ничего не бросает наружу: провал привязки — это отдельная строка сообщения,
-   * а не провал создания домена. Домен к этому моменту уже создан.
-   *
-   * Гейт «один прогон за раз» стоит ТОЛЬКО у кнопки, и это не асимметрия ради
-   * асимметрии. Он существует, чтобы второй клик по кнопке не запускал второй
-   * проход; распространив его на автопривязку, мы получили бы худшее из
-   * возможного — домен, заведённый во время прогона по кнопке, молча остался бы
-   * непривязанным, то есть ровно тем «доменом, которому нечем прописать NS»,
-   * ради которого функция и сделана. Параллельные прогоны безопасны: зоны они
-   * делят одной записью кэша (`fetchQuery` схлопывает одинаковые запросы), а
-   * `PUT` привязки идемпотентен.
-   */
-  const runCloudflareBind = async (rows: Domain[], mode: "auto" | "manual") => {
-    if (mode === "manual") {
-      if (bindRunningRef.current) return;
-      bindRunningRef.current = true;
-      setBindPending(true);
-    }
-    // Гасим ПРЕЖНИЙ итог сразу, а не по приходу нового: у нового его может не
-    // быть вовсе. `auto` молчит, когда менять оказалось нечего, — то есть после
-    // «Cloudflare: 2 of 3 linked» пользователь заводит домен с уже выбранным
-    // аккаунтом, привязывать нечего, а старая строка остаётся стоять и читается
-    // как отчёт об этом, последнем действии.
-    //
-    // Но отчёт, которого дождались по кнопке, фоновая привязка не гасит — по
-    // той же причине, по которой не затирает его на финише
-    // (`deliverBindNotice`): иначе «12 of 50 linked» исчезало бы от заведения
-    // одного домена, и на этом пути даже без тоста — промолчавший прогон
-    // наверх ничего не отдаёт. Своё же гасит любой прогон: заказал новое —
-    // читаешь новое.
-    if (mode === "manual" || bannerOwnerRef.current !== "manual") clearBindNotice();
-    try {
-      const notice = summarizeCfBind(await autoBindDomainsToCloudflare(rows), mode);
-      if (notice) deliverBindNotice(notice, mode);
-    } catch (e) {
-      // Сюда доходит только провал чтения СПИСКА аккаунтов: непрочитанный
-      // аккаунт и несостоявшийся `PUT` — это строки отчёта, а не исключение.
-      // Текст собирает тот же модуль, что и текст удачного прогона: он у
-      // привязки весь должен быть проверяем без DOM, а чужая ошибка — обрезана
-      // (`e.to_string()` через прокси `api_request` в пределе тело ответа).
-      deliverBindNotice(summarizeCfBindFailure(e), mode);
-    } finally {
-      if (mode === "manual") {
-        bindRunningRef.current = false;
-        if (mountedRef.current) setBindPending(false);
-      }
-    }
-  };
-
-  /**
    * Массовый provision — через Tauri-команду `provision_bulk`, тем же путём,
    * что и ссылка `sdmp://bulk-provision` (см. `lib/deepLink.ts`). Прежний
    * `POST /domains/bulk-provision` на бэкенде не существует: кнопка всегда
@@ -491,8 +358,10 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       // неотличима от сломанной. Куда именно — зависит от того, жива ли ещё
       // страница: в стейте размонтированной текст умирает так же молча.
       const message = e instanceof Error ? e.message : String(e);
-      if (mountedRef.current) setBulkProvisionError(message);
-      else onBulkProvisionError(message);
+      deliverBulkProvisionError(
+        () => setBulkProvisionError(message),
+        () => onBulkProvisionError(message),
+      );
     }
   };
 
@@ -563,15 +432,15 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         Гасится кнопкой, а не таймером и не сменой выделения: при создании
         домена выделение вообще ни при чём, а исчезнувшая через две секунды
         строка с пятью числами — это строка, которую не успели прочитать. */}
-    {bindNotice ? (
+    {cfBind.notice ? (
       <div
-        role={bindNotice.kind === "warn" ? "alert" : "status"}
-        style={{marginBottom:12,padding:"10px 12px",borderRadius:8,fontSize:13,display:"flex",alignItems:"flex-start",gap:10,background:bindNotice.kind === "warn" ? "#fffbeb" : "#eff4ff",color:bindNotice.kind === "warn" ? "#92400e" : "#1e40af"}}
+        role={cfBind.notice.kind === "warn" ? "alert" : "status"}
+        style={{marginBottom:12,padding:"10px 12px",borderRadius:8,fontSize:13,display:"flex",alignItems:"flex-start",gap:10,background:cfBind.notice.kind === "warn" ? "#fffbeb" : "#eff4ff",color:cfBind.notice.kind === "warn" ? "#92400e" : "#1e40af"}}
       >
-        <span style={{flex:1}}>{bindNotice.kind === "warn" ? "⚠" : "✓"} {bindNotice.text}</span>
+        <span style={{flex:1}}>{cfBind.notice.kind === "warn" ? "⚠" : "✓"} {cfBind.notice.text}</span>
         <button
           type="button"
-          onClick={clearBindNotice}
+          onClick={cfBind.dismiss}
           aria-label="Dismiss Cloudflare match result"
           style={{background:"none",border:"none",padding:0,cursor:"pointer",color:"inherit",font:"inherit",lineHeight:1}}
         >
@@ -598,9 +467,9 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       // снятое выделение заставило бы разыскивать те же строки заново в списке
       // на двести строк. Повтор безопасен: уже привязанное прогон пропускает.
       onMatchCFZones={() => {
-        void runCloudflareBind(domainsData.filter((d) => sel.has(d.id)), "manual");
+        void cfBind.run(domainsData.filter((d) => sel.has(d.id)), "manual");
       }}
-      matchCFZonesPending={bindPending}
+      matchCFZonesPending={cfBind.pending}
       onProvision={() => { void handleBulkProvision(); }}
       onDelete={handleBulkDelete}
       provisionPending={bulkProvisionRunning}
@@ -646,7 +515,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       </div>
     </Card>
 
-    {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onCreated={(d: Domain)=>{ void runCloudflareBind([d], "auto"); }} />}
+    {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onCreated={(d: Domain)=>{ void cfBind.run([d], "auto"); }} />}
     {/* `detailDomain` — снимок строки на момент клика, и он НЕ обновляется от
         инвалидации: модалка показывала бы «NS status: pending» ещё долго после
         удачной смены NS, то есть ровно ту ложь, ради устранения которой заведён
@@ -666,7 +535,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       <BulkAddDialog
         onClose={()=>setSB(false)}
         registrars={registrars}
-        onCreated={(created: Domain[])=>{ void runCloudflareBind(created, "auto"); }}
+        onCreated={(created: Domain[])=>{ void cfBind.run(created, "auto"); }}
       />
     )}
 
