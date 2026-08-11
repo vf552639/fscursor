@@ -1,10 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React from "react";
 
 import { Server } from "../../api/servers";
 import { RegistrarAccount } from "../../api/registrars";
 import { CloudflareAccount } from "../../api/cloudflare";
 import DomainRow from "./DomainRow";
-import { DEFAULT_SORT, Sort, SortKey, sortDomains } from "./sortDomains";
+import { Sort, SortKey } from "./sortDomains";
 import { DomainUI } from "./types";
 
 const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap"};
@@ -13,7 +13,7 @@ const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",font
  * Заголовки живут на уровне модуля, а НЕ внутри `DomainTable`, и это не
  * стилистика. Компонент, объявленный в теле другого компонента, — новый тип на
  * каждый рендер, то есть React перемонтирует ячейки шапки при любом изменении
- * стейта таблицы. С кнопкой внутри это стоило фокуса: клик по заголовку менял
+ * стейта страницы. С кнопкой внутри это стоило фокуса: клик по заголовку менял
  * `sort`, шапка перемонтировалась, и `document.activeElement` уезжал на `body` —
  * а вторая сортировка, ради которой всё и затевалось, это ВТОРОЙ клик по тому
  * же заголовку. Клавиатурному пользователю приходилось протабливаться к нему
@@ -83,6 +83,8 @@ export default function DomainTable({
   registrars,
   cfAccounts,
   now,
+  sort,
+  onSort,
   selectedIds,
   onToggleRow,
   onToggleAll,
@@ -92,12 +94,19 @@ export default function DomainTable({
   onProvision,
   onDelete,
 }: {
-  /** Отфильтрованные строки. Порядок — забота таблицы: кроме неё, его никто не видит. */
+  /**
+   * Уже отфильтрованные и отсортированные строки. Порядок принадлежит странице
+   * (`useDomainSort`), потому что таблицу она подменяет целиком на ошибке
+   * загрузки, ожидании и пустом списке, — стейт внутри таблицы этого не
+   * переживает, и выбранная колонка молча возвращалась бы к умолчанию.
+   */
   rows: DomainUI[];
   servers: Server[];
   registrars: RegistrarAccount[];
   cfAccounts: CloudflareAccount[];
   now: number;
+  sort: Sort;
+  onSort: (k: SortKey) => void;
   selectedIds: Set<number>;
   onToggleRow: (id: number) => void;
   onToggleAll: () => void;
@@ -112,35 +121,21 @@ export default function DomainTable({
   onProvision: (d: DomainUI) => void;
   onDelete: (d: DomainUI) => void;
 }) {
-  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
-  /** Повторный клик по той же колонке переворачивает; новая колонка начинает с возрастания. */
-  const onSort = (k: SortKey) => setSort((p) => ({ key: k, dir: p.key === k && p.dir === "asc" ? "desc" : "asc" }));
-  /**
-   * Порядок применяется ПОСЛЕ фильтрации и живёт в `useMemo`: список бывает на
-   * сотни строк, а сортировка внутри рендера строки означала бы полную
-   * пересортировку на каждую из них.
-   *
-   * Фокус-режим (`ctx.domainId`) сюда не вмешивается — он всего лишь ещё одно
-   * условие фильтра страницы, поэтому сортировку не ломает: единственная
-   * оставшаяся строка отсортирована сама с собой.
-   */
-  const sorted = useMemo(() => sortDomains(rows, sort), [rows, sort]);
-
   return <table style={{width:"100%",borderCollapse:"collapse"}}>
-    <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={selectedIds.size===sorted.length&&sorted.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
+    <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={selectedIds.size===rows.length&&rows.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
       {COLUMNS.map((c)=>c.key
         ? <SortableTh key={c.label} k={c.key} label={c.label} sort={sort} onSort={onSort}/>
         : <PlainTh key={c.label}>{c.label}</PlainTh>)}
     </tr></thead>
     <tbody>
-      {sorted.length === 0 ? (
+      {rows.length === 0 ? (
         <tr>
           <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
             No domains match the current filters.
           </td>
         </tr>
       ) : null}
-      {sorted.map((d: DomainUI)=>(
+      {rows.map((d: DomainUI)=>(
         <DomainRow
           key={d.id}
           domain={d}

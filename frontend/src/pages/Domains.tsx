@@ -26,6 +26,7 @@ import { confirmAction } from "../lib/confirmDialog";
 import { useBulkProvision } from "../hooks/useBulkProvision";
 import { useCloudflareBind } from "../hooks/useCloudflareBind";
 import { useDomainFilters } from "../hooks/useDomainFilters";
+import { useDomainSort } from "../hooks/useDomainSort";
 
 export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
   onNav?: (pg: string, ctx?: any) => void;
@@ -122,6 +123,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const [assignCFId, setAssignCFId] = useState("");
   const [focusDomainId, setFocusDomainId] = useState<number | null>(null);
   const filters = useDomainFilters(domains, focusDomainId);
+  const order = useDomainSort(filters.filtered);
 
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();
@@ -304,11 +306,13 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
           />
         ) : (
         <DomainTable
-          rows={filters.filtered}
+          rows={order.sorted}
           servers={servers}
           registrars={registrars}
           cfAccounts={cfAccounts}
           now={now}
+          sort={order.sort}
+          onSort={order.onSort}
           selectedIds={sel}
           onToggleRow={toggle}
           onToggleAll={()=>setSel(sel.size===filters.filtered.length?new Set():new Set(filters.filtered.map((d: DomainUI)=>d.id)))}
