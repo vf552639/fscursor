@@ -29,13 +29,7 @@ import { useBulkProvision } from "../hooks/useBulkProvision";
 import { useCloudflareBind } from "../hooks/useCloudflareBind";
 import { useDomainFilters } from "../hooks/useDomainFilters";
 import { useDomainSort } from "../hooks/useDomainSort";
-
-/**
- * Как часто вкладка перечитывает часы. Минута — шаг, мельче которого ни одна
- * подпись на экране не отличима: и возраст проверки, и остаток срока считаются
- * сутками и часами.
- */
-const CLOCK_TICK_MS = 60_000;
+import { useNow } from "../hooks/useNow";
 
 export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
   ctx?: any;
@@ -105,21 +99,9 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   const registrarsQ = useRegistrarAccounts();
   const cfAccountsQ = useCloudflareAccounts();
 
-  // Одно «сейчас» на все ячейки вкладки — тот же приём, что на трёх остальных
-  // экранах: отдельный `Date.now()` внутри каждой функции дал бы разные
-  // «сейчас» для статуса сервера и для подписи его возраста в соседней строке.
-  //
-  // Но НЕ новое чтение на каждый рендер, и это не микрооптимизация: `now`
-  // уезжает пропсом в каждую строку, а значение, меняющееся от любого нажатия
-  // клавиши в поиске, делает мемоизацию строки невозможной по построению —
-  // двести строк перерисовывались бы на букву. Часы идут по таймеру: подписи
-  // «checked 2h ago» и «in 3 days» обязаны стареть сами, а точности мельче
-  // минуты у них нет.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
+  // Одно «сейчас» на все ячейки вкладки, и оно НЕ читается на каждый рендер:
+  // иначе мемоизация строки невозможна по построению (см. `useNow`).
+  const now = useNow();
 
   const domainsData = domainsQ.data ?? [];
   const servers = serversQ.data?.items || [];
@@ -212,9 +194,9 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
 
   // Обработчики строки — `useCallback`, и это не ритуал: они уезжают пропсами
   // в мемоизированный `DomainRow`, и новая функция на каждый рендер страницы
-  // отменяла бы мемоизацию целиком (см. `CLOCK_TICK_MS` выше про ту же беду с
-  // `now`). Все три обходятся стабильными зависимостями: `setSel` и
-  // `setProvisionTarget` — сеттеры, `mutate` react-query привязан навсегда.
+  // отменяла бы мемоизацию целиком (та же беда, что с `now` выше). Все три
+  // обходятся стабильными зависимостями: `setSel` и `setProvisionTarget` —
+  // сеттеры, `mutate` react-query привязан навсегда.
   const toggle = useCallback((id: number) => {
     setSel((p: Set<number>) => { const s = new Set<number>(p); s.has(id) ? s.delete(id) : s.add(id); return s; });
   }, []);
