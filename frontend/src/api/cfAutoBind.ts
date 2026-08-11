@@ -292,8 +292,12 @@ export function summarizeCfBind(
   const considered =
     report.bound.length + report.none.length + report.ambiguous.length + report.writeFailed.length;
   const parts = [`${report.bound.length} of ${considered} linked`];
-  // Каждая из трёх строк ниже отвечает на свой вопрос «почему не привязано», и
-  // слитые в одно число они бы на него не отвечали.
+  // Каждая из четырёх строк ниже отвечает на свой вопрос «почему не
+  // привязано», и слитые в одно число они бы на него не отвечали. «Без зоны»
+  // названо ЧИСЛОМ, а не оставлено вычитанием из «N of M»: при трёх причинах
+  // сразу читателю пришлось бы считать в уме — а он читает эту строку как раз
+  // затем, чтобы понять, надо ли что-то делать руками.
+  if (report.none.length > 0) parts.push(`${report.none.length} with no matching zone`);
   if (report.ambiguous.length > 0) {
     parts.push(`${report.ambiguous.length} matched in more than one account`);
   }

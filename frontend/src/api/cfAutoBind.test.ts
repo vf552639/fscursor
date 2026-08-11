@@ -276,7 +276,7 @@ function report(over: Partial<CfBindReport> = {}): CfBindReport {
 }
 
 describe("summarizeCfBind", () => {
-  it("называет и привязанные, и рассмотренные", () => {
+  it("называет и привязанные, и оставшиеся без зоны", () => {
     const notice = summarizeCfBind(
       report({
         bound: [{ domainId: 1, domain: "a.com", accountId: 7, zoneId: "z" }],
@@ -285,7 +285,12 @@ describe("summarizeCfBind", () => {
       "auto",
     );
 
-    expect(notice).toEqual({ kind: "info", text: "Cloudflare: 1 of 2 linked." });
+    // «Без зоны» — числом, а не вычитанием из «N of M»: причин «не привязано»
+    // три, и считать их в уме читателю нечем.
+    expect(notice).toEqual({
+      kind: "info",
+      text: "Cloudflare: 1 of 2 linked, 1 with no matching zone.",
+    });
   });
 
   it("полууспех произносит вслух и помечает как предупреждение", () => {
