@@ -121,6 +121,38 @@ function sortDomains(rows: DomainUI[], sort: Sort): DomainUI[] {
   });
 }
 
+const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap"};
+
+/**
+ * Заголовок колонки. `k` есть — заголовок сортирует, нет — просто подпись: у
+ * чекбокса и у колонки действий сортировать нечего, и кликабельный заголовок
+ * над ними обещал бы порядок, которого у кнопок не бывает.
+ *
+ * Стрелка стоит и на неактивных сортируемых заголовках (бледная «↕»): иначе то,
+ * что колонка вообще кликабельна, узнаётся только случайным попаданием курсора.
+ * `aria-sort` — на `th`, потому что о состоянии колонки скринридеры спрашивают
+ * именно ячейку заголовка, а не кнопку внутри.
+ *
+ * Живёт на уровне модуля, а НЕ внутри `Domains`, и это не стилистика. Компонент,
+ * объявленный в теле другого компонента, — новый тип на каждый рендер, то есть
+ * React перемонтирует ячейки шапки при любом изменении стейта страницы. С
+ * кнопкой внутри это стоило фокуса: клик по заголовку менял `sort`, шапка
+ * перемонтировалась, и `document.activeElement` уезжал на `body` — а вторая
+ * сортировка, ради которой всё и затевалось, это ВТОРОЙ клик по тому же
+ * заголовку. Клавиатурному пользователю приходилось протабливаться к нему
+ * заново; мышью дефект не виден вовсе. Есть тест.
+ */
+function Th({k, sort, onSort, children}: {k?: SortKey, sort: Sort, onSort: (k: SortKey) => void, children: React.ReactNode}){
+  if (!k) return <th style={TH_STYLE}>{children}</th>;
+  const active = sort.key === k;
+  return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+    <button type="button" onClick={()=>onSort(k)} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?"#2563eb":"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
+      {children}
+      <span aria-hidden="true" style={{color:active?"#2563eb":"#d1d5db"}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+    </button>
+  </th>;
+}
+
 /**
  * Текст подтверждения массового provision.
  *
@@ -431,27 +463,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const toggle=(id: number)=>{setSel((p: Set<number>)=>{const s=new Set<number>(p);s.has(id)?s.delete(id):s.add(id);return s;});};
   /** Повторный клик по той же колонке переворачивает; новая колонка начинает с возрастания. */
   const toggleSort = (k: SortKey) => setSort((p) => ({ key: k, dir: p.key === k && p.dir === "asc" ? "desc" : "asc" }));
-  const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap"};
-  /**
-   * Заголовок колонки. `k` есть — заголовок сортирует, нет — просто подпись: у
-   * чекбокса и у колонки действий сортировать нечего, и кликабельный заголовок
-   * над ними обещал бы порядок, которого у кнопок не бывает.
-   *
-   * Стрелка стоит и на неактивных сортируемых заголовках (бледная «↕»): иначе
-   * то, что колонка вообще кликабельна, узнаётся только случайным попаданием
-   * курсора. `aria-sort` — на `th`, потому что спрашивают о состоянии колонки
-   * скринридеры именно у ячейки заголовка, а не у кнопки внутри.
-   */
-  const Th=({k,children}: {k?: SortKey, children: React.ReactNode})=>{
-    if (!k) return <th style={TH_STYLE}>{children}</th>;
-    const active = sort.key === k;
-    return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
-      <button type="button" onClick={()=>toggleSort(k)} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?"#2563eb":"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
-        {children}
-        <span aria-hidden="true" style={{color:active?"#2563eb":"#d1d5db"}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
-      </button>
-    </th>;
-  };
 
   const bulkCreate = useBulkCreateDomains();
   const bulkStructured = useBulkCreateStructuredDomains();
@@ -728,7 +739,7 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         ) : (
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===sorted.length&&sorted.length>0} onChange={()=>setSel(sel.size===sorted.length?new Set():new Set(sorted.map((d: DomainUI)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {([["Domain","domain"],["Server"],["Registrar"],["Cloudflare"],["Status","status"],["Expires","expiry_date"],["SSL","ssl_expires_at"],["Added","created"],[""]] as [string, SortKey?][]).map(([h,k])=><Th key={h} k={k}>{h}</Th>)}
+            {([["Domain","domain"],["Server"],["Registrar"],["Cloudflare"],["Status","status"],["Expires","expiry_date"],["SSL","ssl_expires_at"],["Added","created"],[""]] as [string, SortKey?][]).map(([h,k])=><Th key={h} k={k} sort={sort} onSort={toggleSort}>{h}</Th>)}
           </tr></thead>
           <tbody>
             {sorted.length === 0 && domainsData.length > 0 ? (
