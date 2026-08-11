@@ -1,167 +1,26 @@
 import React, { useState, useMemo, useRef, ChangeEvent, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { Card, Btn, Sel, Modal, EmptyState, ErrorState } from "../components/ui/Primitives";
 import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
-import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
-import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, expiryTs, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
-import { domainStatusRank, sslStatusRank } from "../lib/domainStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
 import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
-import StatusBadge from "../components/StatusBadge";
 import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
 import DomainStats from "../components/domains/DomainStats";
+import DomainTable from "../components/domains/DomainTable";
+import { DEFAULT_SORT, Sort, SortKey, sortDomains } from "../components/domains/sortDomains";
 import { DomainUI, toDomainUI } from "../components/domains/types";
 import { describeQueryError } from "../lib/queryError";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
-import { OpenInDesktop } from "../components/OpenInDesktop";
-import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
 import { useAuthStore } from "../store/auth";
 
-/**
- * Заглушка для обязательного `desktopOnClick` у `OpenInDesktop` там, где сам
- * компонент отрендерен под `!isTauri()`: в вебе он отдаёт ссылку и до колбэка
- * не доходит. Именованная константа — чтобы читатель видел «сюда не попадают», а
- * не второй, конкурирующий вход в то же действие.
- */
-const NOOP_DESKTOP_ONLY_BRANCH = () => {};
-
 /** Сколько имён влезает в диалог подтверждения, не превращая его в стену текста. */
 const CONFIRM_NAMES_SHOWN = 20;
-
-/** По какой колонке сортируем. Только те, у чьих значений есть порядок. */
-type SortKey = "domain" | "status" | "expiry_date" | "ssl" | "created";
-
-interface Sort {
-  key: SortKey;
-  dir: "asc" | "desc";
-}
-
-/**
- * Порядок по умолчанию — по имени домена, по возрастанию.
- *
- * Не «сначала свежие» и не «сначала просроченные»: список из сотен доменов —
- * это в первую очередь поверхность поиска («где тут shop.example.com»), а найти
- * известное имя глазами можно только в алфавите. Порядок, в котором строки
- * приезжают с бэкенда (по id, то есть по времени заведения), пользователю не
- * значит ничего: он не помнит, каким по счёту завёл домен.
- *
- * Срочное при этом не спрятано — оно в одном клике по заголовку Expires, и цвет
- * подписи виден в любом порядке.
- */
-const DEFAULT_SORT: Sort = { key: "domain", dir: "asc" };
-
-/**
- * Сравнение двух значений, у которых бывает «не знаем» (`null`): неизвестное
- * всегда в конец, при ЛЮБОМ направлении.
- *
- * Ветки `null` стоят ДО умножения на направление — в этом всё правило и есть.
- * Одна функция на все ключи (даты, статус домена, статус сертификата) именно
- * потому, что незнание у них одно и то же: перевернув сортировку, пользователь
- * ищет либо самый горящий домен, либо самый дальний, и в обоих случаях список
- * начинался бы с тех, про кого ответа нет вовсе.
- */
-function compareUnknownLast(a: number | null, b: number | null, mul: number): number {
-  if (a === null && b === null) return 0;
-  if (a === null) return 1;
-  if (b === null) return -1;
-  return (a - b) * mul;
-}
-
-/**
- * Значение, по которому сортируется строка для ключа-даты.
- *
- * Ключей-дат ровно два, и вызывается это только из ветки, где остальные уже
- * разобраны; `created` стоит фолбэком, а не третьей веткой, потому что колонка
- * Added — единственная оставшаяся. Компилятор эту связь не держит: новый
- * `SortKey` уедет сюда молча и отсортируется по дате заведения. Разбор страницы
- * (план №4) должен заменить это `switch`'ем с проверкой `never`.
- */
-function dateOf(d: DomainUI, key: SortKey): string | null | undefined {
-  return key === "expiry_date" ? d.expiry_date : d.created;
-}
-
-/**
- * Отсортированная копия списка.
- *
- * Вынесена из тела `useMemo` целиком: правило «строки без даты — в конец при
- * ЛЮБОМ направлении» стоит того, чтобы быть видимым, а не спрятанным в
- * замыкании между фильтром и разметкой. Проверяется оно кликами по заголовкам
- * (`Domains.expiry.test.tsx`) — то есть тем самым порядком, который видит
- * пользователь, а не возвратом функции.
- *
- * Незнание (даты нет, статус незнакомый) уходит в конец при любом направлении —
- * см. `compareUnknownLast`.
- *
- * Колонка SSL сортируется ПО СТАТУСУ сертификата, а срок — лишь второй ключ.
- * Так устроена и сама ячейка: бейдж крупно, срок подписью под ним. Сортировать
- * колонку по подписи, когда заголовок называет её «SSL», значило бы упорядочить
- * список по тому, чего в заголовке нет, — угадать такое нельзя.
- */
-function sortDomains(rows: DomainUI[], sort: Sort): DomainUI[] {
-  const mul = sort.dir === "asc" ? 1 : -1;
-  return [...rows].sort((a, b) => {
-    let primary: number;
-    if (sort.key === "domain") {
-      primary = a.domain.localeCompare(b.domain) * mul;
-    } else if (sort.key === "status") {
-      primary = compareUnknownLast(domainStatusRank(a.status), domainStatusRank(b.status), mul);
-    } else if (sort.key === "ssl") {
-      primary =
-        compareUnknownLast(sslStatusRank(a.ssl_status), sslStatusRank(b.ssl_status), mul) ||
-        compareUnknownLast(expiryTs(a.ssl_expires_at), expiryTs(b.ssl_expires_at), mul);
-    } else {
-      primary = compareUnknownLast(expiryTs(dateOf(a, sort.key)), expiryTs(dateOf(b, sort.key)), mul);
-    }
-    // Равные ключи — по имени. Иначе полсотни доменов с одной датой покупки
-    // встают в порядке заведения, в котором глазами не найти ничего, и порядок
-    // этот меняется от каждой вставки строки в базу.
-    return primary !== 0 ? primary : a.domain.localeCompare(b.domain);
-  });
-}
-
-const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap"};
-
-/**
- * Заголовок колонки. `k` есть — заголовок сортирует, нет — просто подпись: у
- * чекбокса и у колонки действий сортировать нечего, и кликабельный заголовок
- * над ними обещал бы порядок, которого у кнопок не бывает.
- *
- * Стрелка стоит и на неактивных сортируемых заголовках (бледная «↕»): иначе то,
- * что колонка вообще кликабельна, узнаётся только случайным попаданием курсора.
- * `aria-sort` — на `th`, потому что о состоянии колонки скринридеры спрашивают
- * именно ячейку заголовка, а не кнопку внутри.
- *
- * `aria-label` кнопке нужен именно потому, что `aria-sort` живёт на ячейке: в
- * режиме форм (focus mode) скринридер читает только саму кнопку, и без имени
- * действия она звучала бы как «Expires, кнопка» — то есть о том, что нажатие
- * переупорядочивает список, пользователь бы не узнал. Стрелка тут не помощник:
- * она `aria-hidden`, и это правильно — вслух она читалась бы мусорным символом.
- *
- * Живёт на уровне модуля, а НЕ внутри `Domains`, и это не стилистика. Компонент,
- * объявленный в теле другого компонента, — новый тип на каждый рендер, то есть
- * React перемонтирует ячейки шапки при любом изменении стейта страницы. С
- * кнопкой внутри это стоило фокуса: клик по заголовку менял `sort`, шапка
- * перемонтировалась, и `document.activeElement` уезжал на `body` — а вторая
- * сортировка, ради которой всё и затевалось, это ВТОРОЙ клик по тому же
- * заголовку. Клавиатурному пользователю приходилось протабливаться к нему
- * заново; мышью дефект не виден вовсе. Есть тест.
- */
-function Th({k, label, sort, onSort, children}: {k?: SortKey, label?: string, sort: Sort, onSort: (k: SortKey) => void, children: React.ReactNode}){
-  if (!k) return <th style={TH_STYLE}>{children}</th>;
-  const active = sort.key === k;
-  return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
-    <button type="button" onClick={()=>onSort(k)} aria-label={`Sort by ${label ?? k}`} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?"#2563eb":"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
-      {children}
-      <span aria-hidden="true" style={{color:active?"#2563eb":"#d1d5db"}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
-    </button>
-  </th>;
-}
 
 /**
  * Текст подтверждения массового provision.
@@ -704,6 +563,12 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     }
   };
 
+  /** Удаление одного домена по ✕ строки. Спрашивает страница, а не строка: строка не знает и не должна знать, чем оно кончится. */
+  const handleDeleteDomain = async (d: DomainUI) => {
+    if (!(await confirmAction(`Delete ${d.domain}?`))) return;
+    deleteDomain.mutate(d.id);
+  };
+
   const handleBulkDelete = async () => {
     if (!(await confirmAction(`Удалить ${sel.size} доменов?`))) return;
     Promise.all(Array.from(sel).map(id => deleteDomain.mutateAsync(id)))
@@ -827,155 +692,23 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
             </div>
           </EmptyState>
         ) : (
-        <table style={{width:"100%",borderCollapse:"collapse"}}>
-          <thead><tr><th style={{padding:"10px 16px",width:36,background:"#f9fafb",borderBottom:"1px solid #e5e7eb"}}><input type="checkbox" checked={sel.size===sorted.length&&sorted.length>0} onChange={()=>setSel(sel.size===sorted.length?new Set():new Set(sorted.map((d: DomainUI)=>d.id)))} style={{cursor:"pointer"}}/></th>
-            {([["Domain","domain"],["Server"],["Registrar"],["Cloudflare"],["Status","status"],["Expires","expiry_date"],["SSL","ssl"],["Added","created"],[""]] as [string, SortKey?][]).map(([h,k])=><Th key={h} k={k} label={h} sort={sort} onSort={toggleSort}>{h}</Th>)}
-          </tr></thead>
-          <tbody>
-            {sorted.length === 0 && domainsData.length > 0 ? (
-              <tr>
-                <td colSpan={10} style={{ padding: "28px 16px", textAlign: "center", color: "#6b7280", fontSize: 13 }}>
-                  No domains match the current filters.
-                </td>
-              </tr>
-            ) : null}
-            {sorted.map((d: DomainUI)=>{
-              const srv=servers.find((s: Server)=>s.id===d.server_id); const reg=registrars.find((r: RegistrarAccount)=>r.id===d.registrar_id); const cf=cfAccounts.find((c: CloudflareAccount)=>c.id===d.cf_id);
-              // Оба срока — через один модуль и через одно «сейчас» (`now`
-              // выше): своя арифметика в ячейке разъехалась бы с соседней,
-              // причём молча.
-              const expState = expiryState(d.expiry_date, now);
-              const sslExpState = expiryState(d.ssl_expires_at, now);
-              // Четвёртый экран, где рисуется состояние сервера, — и разбор
-              // здесь был свой, до `last_check_*` не доходивший вовсе: колонку
-              // `status` монитор не трогает, поэтому подтверждённо упавшая
-              // машина стояла в списке доменов зелёной точкой. Лестница общая
-              // (`lib/serverStatus`), как на трёх остальных экранах.
-              const srvStatus = srv ? serverUiStatus(srv, now) : "";
-              const srvCheckStale = isCheckStale(srv?.last_check_at, now);
-              const isFocused = focusDomainId === d.id;
-              return <tr key={d.id} style={isFocused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!isFocused) e.currentTarget.style.background=""; }}>
-                <td style={{padding:"11px 16px"}}><input type="checkbox" checked={sel.has(d.id)} onChange={()=>toggle(d.id)} style={{cursor:"pointer"}}/></td>
-                <td style={{padding:"11px 16px"}}>
-                  <button onClick={() => setDetailDomain(domainsData.find((x) => x.id === d.id) || null)} style={{fontWeight:600,fontSize:13.5,color:"#111",background:"transparent",border:"none",padding:0,cursor:"pointer"}}>
-                    {d.domain}
-                  </button>
-                </td>
-                <td style={{padding:"11px 16px",fontSize:13}}>{srv?<>
-                  {/* Ошибка — только при подтверждённом падении: на первом
-                      промахе бэкенд уже пишет `last_check_error`, а
-                      `last_check_ok` роняет лишь на втором (тот же гейт, что на
-                      странице серверов). */}
-                  <span style={{display:"flex",alignItems:"center",gap:5}} title={srv.last_check_ok === false ? srv.last_check_error || undefined : undefined}><StatusDot status={srvStatus} size={7}/>{srv.name}</span>
-                  {/* Возраст проверки — под именем: точка без него утверждает
-                      «сейчас», даже если проверке три месяца. */}
-                  <span title={srv.last_check_at ? new Date(srv.last_check_at).toLocaleString() : undefined} style={{display:"block",fontSize:11,paddingLeft:12,color:srvCheckStale?STALE_TEXT:DIM_TEXT}}>{srv.last_check_at ? `checked ${formatAgoStale(srv.last_check_at, srvCheckStale, now)}` : "never checked"}</span>
-                </>:<span style={{color:"#9ca3af"}}>—</span>}</td>
-                <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
-                <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
-                <td style={{padding:"11px 16px"}}>
-                  <StatusBadge status={d.status} title={d.last_provision_error || undefined} />
-                  {/*
-                    Текст ошибки — строкой, а не только тултипом бейджа: тултип
-                    невидим, пока в него не попали мышью, а искать провалившийся
-                    домен глазами по списку в двести строк надо без наведения.
-                    Полный текст остаётся в `title` и в модалке домена.
-                  */}
-                  {d.last_provision_error ? (
-                    <div
-                      data-testid="provision-error"
-                      title={d.last_provision_error}
-                      style={{marginTop:4,fontSize:11.5,color:"#b91c1c",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}
-                    >
-                      {d.last_provision_error}
-                    </div>
-                  ) : null}
-                </td>
-                {/* Срок домена. Дата и подпись «сколько осталось» стоят вместе:
-                    одна дата требует считать в уме (а тут сотня строк), одна
-                    подпись — лишает возможности сверить с письмом регистратора.
-                    Незнание — прочерк и БЕЗ подписи: «—» под «—» ничего не
-                    добавляет. */}
-                <td data-testid="expiry-cell" style={{padding:"11px 16px",fontSize:12.5}}>
-                  <div style={{color:expiryTextColor(expState),fontWeight:expiryTextWeight(expState)}}>
-                    {/* И дата, и подпись под ней — из одного модуля: дату без
-                        времени он печатает в UTC, а `toLocaleDateString` по
-                        месту показа сдвигал её на день западнее UTC. */}
-                    {expState === "unknown" ? NO_VALUE : formatExpiryDate(d.expiry_date)}
-                  </div>
-                  {expState !== "unknown" ? (
-                    <div style={{fontSize:11,color:expiryTextColor(expState)}}>{formatExpiry(d.expiry_date, now)}</div>
-                  ) : null}
-                </td>
-                <td data-testid="ssl-cell" style={{padding:"11px 16px"}}>
-                  <Badge variant={d.ssl_status === "active" ? "green" : d.ssl_status === "pending" ? "yellow" : d.ssl_status === "error" ? "red" : "gray"}>
-                    {d.ssl_status === "active" ? "SSL active" : d.ssl_status === "pending" ? "SSL pending" : d.ssl_status === "error" ? "SSL error" : "— No SSL"}
-                  </Badge>
-                  {/* Второй колонки под срок сертификата нет: он про тот же
-                      предмет, что и бейдж, и в отрыве от него не читается. Строка
-                      рисуется ВСЕГДА, в том числе прочерком под «No SSL»:
-                      «активный сертификат без известного срока» и «сертификата
-                      нет» — разные вещи, но обе означают, что дату перевыпуска мы
-                      не знаем, и молчать об этом нельзя. */}
-                  <div style={{marginTop:4,fontSize:11,color:expiryTextColor(sslExpState)}}>{formatExpiry(d.ssl_expires_at, now)}</div>
-                </td>
-                <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
-                <td style={{padding:"11px 16px"}}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <RowActions
-                      actions={[
-                        { icon: "↗", title: "Open detail", onClick: () => setDetailDomain(domainsData.find((x) => x.id === d.id) || null) },
-                        ...(isTauri()
-                          ? [
-                              {
-                                icon: "⚙",
-                                // Второй клик стартовал бы вторую SSH-сессию с
-                                // create_site/create_ftp_account/certbot по тому
-                                // же домену — блокируем на время выполнения.
-                                title: isProvisioning(d.id) ? "Provisioning…" : "Provision domain",
-                                disabled: isProvisioning(d.id),
-                                onClick: () => {
-                                  if (isProvisioning(d.id)) return;
-                                  openProvisionDialog(d);
-                                },
-                              },
-                            ]
-                          : []),
-                        {
-                          icon: "✕",
-                          title: "Delete domain",
-                          variant: "danger" as const,
-                          onClick: async () => {
-                            if (!(await confirmAction(`Delete ${d.domain}?`))) return;
-                            deleteDomain.mutate(d.id);
-                          },
-                        },
-                      ]}
-                    />
-                    {!isTauri() ? (
-                      // В вебе — только ссылка в десктоп, и БЕЗ чекбокса «создать
-                      // БД»: хост `provision` у `parseDeepLinkAction` знает один
-                      // параметр `domainId`, лишний десктоп молча проглотит —
-                      // то есть галочка, поставленная в вебе, соврала бы.
-                      //
-                      // Ветка рендерится только в вебе, а `desktopOnClick`,
-                      // `disabled` и динамический `label` у `OpenInDesktop`
-                      // работают только в десктопе (там компонент отдаёт кнопку
-                      // вместо ссылки). Поэтому здесь они не «упрощены», а
-                      // недостижимы: вход в диалог один — ⚙ строки выше.
-                      <OpenInDesktop
-                        action={`provision?domainId=${d.id}`}
-                        label="Provision"
-                        size="sm"
-                        desktopOnClick={NOOP_DESKTOP_ONLY_BRANCH}
-                      />
-                    ) : null}
-                  </div>
-                </td>
-              </tr>;
-            })}
-          </tbody>
-        </table>
+        <DomainTable
+          rows={sorted}
+          servers={servers}
+          registrars={registrars}
+          cfAccounts={cfAccounts}
+          now={now}
+          sort={sort}
+          onSort={toggleSort}
+          selectedIds={sel}
+          onToggleRow={toggle}
+          onToggleAll={()=>setSel(sel.size===sorted.length?new Set():new Set(sorted.map((d: DomainUI)=>d.id)))}
+          focusDomainId={focusDomainId}
+          isProvisioning={isProvisioning}
+          onOpenDetail={(id)=>setDetailDomain(domainsData.find((x) => x.id === id) || null)}
+          onProvision={openProvisionDialog}
+          onDelete={(d)=>{ void handleDeleteDomain(d); }}
+        />
         )}
       </div>
     </Card>
