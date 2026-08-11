@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, ChangeEvent, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
+import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
 import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, expiryTs, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
@@ -10,6 +10,7 @@ import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
 import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
 import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
 import StatusBadge from "../components/StatusBadge";
+import { AddDomainModal } from "../components/domains/AddDomainModal";
 import { describeQueryError } from "../lib/queryError";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
@@ -26,23 +27,6 @@ import { useAuthStore } from "../store/auth";
  * не второй, конкурирующий вход в то же действие.
  */
 const NOOP_DESKTOP_ONLY_BRANCH = () => {};
-
-interface AddDomainModalProps {
-  onClose: () => void;
-  servers: Server[];
-  registrars: RegistrarAccount[];
-  cfAccounts: CloudflareAccount[];
-  /**
-   * Созданная строка домена — наверх, странице.
-   *
-   * Автопривязку к зоне Cloudflare запускает НЕ модалка, хотя создаёт домен
-   * именно она: модалка закрывается тем же успехом, а прогон живёт секунды и
-   * должен договорить (`api/cfAutoBind.ts`). Отдавать наверх строку, а не
-   * отчёт, — потому что решение «привязывать ли» принадлежит странице: она
-   * одинаково поступает и с одиночным созданием, и с bulk-добавлением.
-   */
-  onCreated: (domain: Domain) => void;
-}
 
 /** Сколько имён влезает в диалог подтверждения, не превращая его в стену текста. */
 const CONFIRM_NAMES_SHOWN = 20;
@@ -216,44 +200,6 @@ export function describeBulkProvision(domains: DomainUI[], ids: number[]): strin
     "SDMP will connect over SSH to each domain's server and create the site, " +
     "its FTP account and its SSL certificate. Once started, the run cannot be stopped."
   );
-}
-
-export function AddDomainModal({onClose, servers, registrars, cfAccounts, onCreated}: AddDomainModalProps){
-  const [name, setName]=useState("");
-  const [sid, setSid]=useState("");
-  const [rid, setRid]=useState("");
-  const [cfid, setCfid]=useState("");
-  const create = useCreateDomain();
-
-  const handleAdd = () => {
-    create.mutate({
-      domain_name: name,
-      server_id: sid ? Number(sid) : null,
-      registrar_id: rid ? Number(rid) : null,
-      cloudflare_account_id: cfid ? Number(cfid) : null
-    }, {
-      onSuccess: (created) => {
-        onClose();
-        // Домен уже создан — это главный результат, и он состоялся. Всё, что
-        // делает страница дальше (привязка к зоне), от него отделено: её
-        // ошибки не должны выглядеть как провал создания.
-        onCreated(created);
-      },
-    });
-  };
-
-  return <Modal title="Add Domain" onClose={onClose} width={450}>
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: ChangeEvent<HTMLInputElement>)=>setName(e.target.value)} placeholder="e.g., example.com"/></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Server</label><Sel value={sid} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setSid(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Registrar</label><Sel value={rid} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setRid(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Cloudflare Account</label><Sel value={cfid} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setCfid(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{cfAccounts.map((c: CloudflareAccount)=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel></div>
-    </div>
-    <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
-      <Btn variant="primary" onClick={handleAdd} disabled={create.isPending||!name} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{create.isPending ? "Adding..." : "Add Domain"}</Btn>
-      <Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
-    </div>
-  </Modal>;
 }
 
 export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
