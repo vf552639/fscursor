@@ -13,9 +13,18 @@ HTTP-слой исполнения во фронте не убрали и мес
 Подтверждено кодом: в `backend/app/api/routes/domains.py` объявлены только
 list, `failed-export.csv`, get/{id}, create, `bulk`, `bulk-structured`, put/{id},
 delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
-`bulk-import-errors/{token}`. Больше ничего. `apiPost` (`api/client.ts`) —
-чистый axios, не Tauri-aware, значит эти хуки бьют по HTTP всегда и всегда
-получают 404.
+`bulk-import-errors/{token}`. Больше ничего — значит эти хуки всегда получают
+404.
+
+**Поправка к аудиту (внесена по итогам фазы 4).** `task7.md` объяснял это тем,
+что `apiPost` (`api/client.ts`) — «чистый axios, не Tauri-aware». Это неверно:
+`apiGet/apiPost/apiPut/apiPatch/apiDelete` начинаются с
+`if (isTauri()) return tauriRequest(...)`, а `tauriRequest` зовёт Tauri-команду
+`api_request` (`client.ts:105–157`). Вывод от этого не меняется: `api_request`
+проксирует к тому же REST API, где этих роутов нет, — 404 одинаково в вебе и в
+десктопе. Но механизм в аудите описан неправильно, и читатель `task7.md` сделал
+бы из него ложный вывод, будто HTTP-хуки этого файла вообще не доходят до
+десктопного транспорта.
 
 Рабочая Tauri-реализация массового provision **есть** —
 `runBulkProvisionDomains` (`api/domains.ts:761`) → команда `provision_bulk`,
@@ -217,7 +226,10 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
     `EditDomainModalProps`, состоянием `editingDomain` и веткой рендера; из
     `Domains.tsx` ушли осиротевшие импорты `useUpdateDomain`,
     `useSetNameservers`, `MIN_NAMESERVERS`, `NS_DESKTOP_NOTE`, `useZoneDetails`,
-    `useZoneNameservers` (сами хуки живы — их зовёт `DomainDetailModal`).
+    `useZoneNameservers`. Сами хуки оставлены, но по разным основаниям:
+    `useSetNameservers`, `MIN_NAMESERVERS`, `NS_DESKTOP_NOTE` и
+    `useZoneNameservers` зовёт `DomainDetailModal`, `useUpdateDomain` —
+    `ServerDetail`, а `useZoneDetails` не зовёт больше никто (см. долг ниже).
     Тестов у модалки не было: открыть её было нечем.
   - Фаза 5: `npx tsc --noEmit` чист, `npm test` — 65 файлов / 630 тестов
     зелёные (то же, что до чистки: удалённое не было покрыто). Grep по
@@ -228,5 +240,25 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
     хуков и компонентов — только эти же комментарии. В
     `Domains.setns.test.tsx` поправлен комментарий, обещавший запросы кред БД и
     nginx-override: этих запросов нет с фазы 3.
+  - Поправлена посылка исходного аудита: `apiPost` НЕ «чистый axios» — в Tauri
+    он уходит в команду `api_request`. Подробности — в «Контексте» выше; та же
+    поправка вписана в запись на месте удалённых хуков (`api/domains.ts`),
+    потому что ложный механизм пережил бы план, а комментарий читают чаще.
+  - Удаление `EditDomainModal` сделало ложным чужой комментарий —
+    `api/cloudflare.ts` (у флага `isTauri()` в `useCloudflareZones`): он
+    обосновывал «не выравнивать три хука под один флаг» тем, что `Domains.tsx`
+    рисует по `useZoneDetails`/`useZoneNameservers` красное «Failed to load».
+    Такой строки во фронте больше нет ни одной. Комментарий переписан по факту:
+    у `useDnsRecords` ошибка — это объяснение для веба; у `useZoneNameservers`
+    её читает вкладка NS карточки домена, но только под `isTauri()` (в вебе
+    блок заменён одной строкой про «десктоп выполняет»), то есть флаг там
+    ничего бы не изменил.
 - Что осталось: ничего в объёме плана. Отложенное осознанно — в разделе «Явно
   откладываем» (гранулярные операции по домену и Full Setup через Tauri).
+- Долг, заведённый этой чисткой: `useZoneDetails` (`api/cloudflare.ts:205`)
+  остался БЕЗ производственных вызывающих — его единственным был удалённый
+  `EditDomainModal`, сегодня хук зовёт только `api/cloudflare.test.ts`.
+  Удалять не стали осознанно, и это отличается от десяти удалённых хуков: те
+  всегда были 404, а этот рабочий (Tauri, `cf_list_zones`) и просто лишился UI.
+  Его естественный потребитель — план №2 (обогащение read-only-обзора полями
+  зоны). Если план №2 им не воспользуется, хук надо будет удалить там же.

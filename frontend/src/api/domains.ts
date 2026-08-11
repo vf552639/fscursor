@@ -771,12 +771,16 @@ export async function runBulkProvisionDomains(
 // `useGetNginxOverride` и типы их ответов (`ProvisionResponse`, `SetNsResponse`,
 // `DomainDbCredentials`, `NginxOverridePayload`/`NginxOverrideResponse`,
 // `BulkProvisionResponse`, `BulkFullSetupPayload`/`BulkFullSetupResponse`).
-// Удалены вместе с кнопками, которые их звали: в `routes/domains.py` объявлены
-// только list, failed-export.csv, get/{id}, create, bulk, bulk-structured,
-// put/{id}, delete/{id}, bulk-assign-server, bulk-assign-cloudflare,
-// bulk-import, bulk-import-errors/{token} — ни одного из этих путей там нет,
-// а `apiPost` (`api/client.ts`) — чистый axios, не Tauri-aware, то есть каждый
-// такой хук всегда бил по HTTP и всегда получал 404.
+// Удалены вместе с кнопками, которые их звали: в
+// `backend/app/api/routes/domains.py` объявлены только list,
+// failed-export.csv, get/{id}, create, bulk, bulk-structured, put/{id},
+// delete/{id}, bulk-assign-server, bulk-assign-cloudflare, bulk-import,
+// bulk-import-errors/{token} — ни одного из этих путей там нет, поэтому каждый
+// такой хук всегда получал 404. Транспорт тут ни при чём, и «это же десктоп»
+// не спасало: `apiPost`/`apiGet` в Tauri уходят не в axios, а в команду
+// `api_request` (`api/client.ts`), но она проксирует к тому же REST API — 404
+// одинаково в вебе и в десктопе. (Исходный аудит `task7.md` объяснял это тем,
+// что `apiPost` — «чистый axios, не Tauri-aware»; это неверно, вывод — верен.)
 // Замены сегодня нет и это не недосмотр чистки: гранулярные операции по домену
 // (Create Site / Create DB / Request SSL / Refresh SSL / nginx-override) требуют
 // новых Tauri-команд и SSH-логики в десктопе (в `lib.rs` таких команд нет), а
