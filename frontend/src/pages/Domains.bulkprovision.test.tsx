@@ -364,6 +364,33 @@ describe("Domains — массовый provision: подтверждение", (
     expect(text).toContain("(+80 more)");
   });
 
+  it("двойной клик не открывает второй диалог и не рисует ложное «уже провижинится»", async () => {
+    setTauri(true);
+    let allow: (v: boolean) => void = () => {};
+    mocks.confirmAction.mockReturnValue(new Promise<boolean>((resolve) => { allow = resolve; }));
+    mocks.invokeSynced.mockResolvedValue({
+      idempotency_key: "k",
+      status: "ok",
+      items: [doneItem("1", FTP_PASSWORD_1), doneItem("2", FTP_PASSWORD_2)],
+    });
+
+    const { container } = renderPage();
+    const btn = await selectAllAndFindProvision(container);
+    // Пока грузится чанк нативного диалога, кнопка ничем не занята и выглядит
+    // неотзывчивой — по такой кликают второй раз.
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(mocks.confirmAction).toHaveBeenCalledTimes(1));
+
+    allow(true);
+
+    // Подтверждённый дважды прогон стартовал бы один раз (гейт подоменный), но
+    // второй вызов упирался бы в него и вешал красное «уже провижинится» поверх
+    // прекрасно идущего прогона — вместе с модалками паролей от него же.
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("отказ в подтверждении не запускает ничего", async () => {
     setTauri(true);
     mocks.confirmAction.mockResolvedValue(false);

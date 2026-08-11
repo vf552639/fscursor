@@ -307,9 +307,15 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
    * поведение. Стейт мёртвого компонента этот текст съедает молча, и
    * пользователь возвращается к обычной странице в уверенности, что прогон идёт.
    *
-   * Зовётся ТОЛЬКО когда страница уже размонтирована: пока она жива, у той же
-   * ошибки есть своё место — баннер над тулбаром, который не исчезнет через
-   * 2200 мс. Одно событие — одна поверхность.
+   * Зовётся, только если размонтирован ТОТ ЭКЗЕМПЛЯР страницы, который запускал
+   * прогон: пока он жив, у той же ошибки есть своё место — баннер над тулбаром,
+   * который не исчезнет через 2200 мс. Одно событие — одна поверхность.
+   *
+   * «Экземпляр», а не «экран»: уйдя со страницы и вернувшись, пользователь видит
+   * НОВЫЙ `Domains`, который про тот прогон ничего не знает (его `sel` пуст, а
+   * баннер принадлежит набору), — отказ прилетит тостом поверх живой страницы.
+   * Так и задумано: показать его в баннере нового экземпляра значило бы
+   * приписать отказ набору, который на экране уже другой.
    */
   onBulkProvisionError: (message: string) => void;
 }){
@@ -376,30 +382,38 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
       mountedRef.current = false;
     };
   }, []);
-  // Состояние provision читаем из MutationCache, а не из локального observer:
-  // операция идёт минутами (SSH + certbot) и переживает уход со страницы, а
-  // observer при размонтировании теряет с ней связь. Без этого после возврата
-  // на страницу кнопка снова активна, и второй клик открывает вторую SSH-сессию
-  // по тому же домену.
-  const provisioningIds = useMutationState({
-    filters: { mutationKey: PROVISION_DOMAIN_KEY, status: "pending" },
-    select: (m) => (m.state.variables as ProvisionDomainVars | undefined)?.domainId,
-  });
-  const isProvisioning = (id: number) => provisioningIds.includes(id);
-  // «Идёт массовый прогон» — из того же кэша и по той же причине, что и строчкой
-  // выше, а не из `useState`: страница размонтируется на любой навигации
-  // (`<main key={page}>`), и локальный флаг воскресал бы в `false` — кнопка
-  // снова живая, хотя по SSH прямо сейчас идёт сорокаминутный прогон. Второй
-  // прогон по ДРУГИМ доменам подоменный гейт при этом не остановит.
+  // Открыт ли диалог подтверждения массового прогона. Первое, что делает клик, —
+  // это `await` (загрузка чанка плагина плюс сам диалог), поэтому до ответа
+  // пользователя кнопка ничем не занята и выглядит незалипшей: второй клик по
+  // «неотзывчивой» кнопке открывал второй диалог. Подтвердив оба, пользователь
+  // получал запущенный прогон И красный баннер «уже провижинится» над ним —
+  // выполнялся набор при этом ровно один раз (подоменный гейт), врал только UI.
+  const confirmingBulkRef = useRef(false);
+  // Что провижинится прямо сейчас — из MutationCache, а не из локального
+  // observer'а или `useState`: операция идёт минутами (SSH + certbot) и
+  // переживает уход со страницы, а страница размонтируется на любой навигации
+  // (`<main key={page}>` в DesktopWorkspace). Без этого после возврата обе
+  // кнопки снова активны, и клик открывает вторую SSH-сессию по домену, по
+  // которому первая ещё идёт.
   //
-  // Признак — маркер `bulkGateClaim` в заявках гейта (см. `isBulkGateClaim`):
-  // заявки висят pending ровно столько, сколько идёт прогон, и заводит их сам
-  // `runBulkProvisionDomains`.
-  const bulkClaims = useMutationState({
+  // Одна подписка на оба вопроса: фильтр у них общий, а разные ответы даёт
+  // `select`. Две подписки с одинаковым фильтром пересчитывали бы по два снимка
+  // на каждое изменение кэша.
+  //
+  // `bulkGateClaim` — маркер заявки гейта, которую заводит сам
+  // `runBulkProvisionDomains` на каждый домен набора (см. `isBulkGateClaim`):
+  // заявки висят pending ровно столько, сколько идёт прогон. Без этого признака
+  // «идёт массовый прогон» после возврата на страницу превращалось бы в «нет», и
+  // второй прогон по ДРУГИМ доменам подоменный гейт не остановил бы вовсе.
+  const pendingProvisions = useMutationState({
     filters: { mutationKey: PROVISION_DOMAIN_KEY, status: "pending" },
-    select: (m) => isBulkGateClaim(m.state.variables),
+    select: (m) => ({
+      domainId: (m.state.variables as ProvisionDomainVars | undefined)?.domainId,
+      bulkClaim: isBulkGateClaim(m.state.variables),
+    }),
   });
-  const bulkProvisionRunning = bulkClaims.some(Boolean);
+  const isProvisioning = (id: number) => pendingProvisions.some((p) => p.domainId === id);
+  const bulkProvisionRunning = pendingProvisions.some((p) => p.bulkClaim);
   const deleteDomain = useDeleteDomain();
   // Provision в десктопе синхронен: серверного task log'а, который можно было бы
   // поллить, у него нет — поэтому ни `TaskProgressModal`, ни его multi-версии на
@@ -594,7 +608,18 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     // Домены названы ИМЕНАМИ, а не id, как в тексте ссылки: имя — это то, чем
     // пользователь их выбирал. Длинный список урезаем: диалог, который нельзя
     // прочитать, закрывают не читая.
-    if (!(await confirmAction(describeBulkProvision(domains, targets)))) return;
+    //
+    // Второй клик, пока висит диалог, — это тот же клик, а не второй запуск:
+    // спрашивать одно и то же дважды не о чем.
+    if (confirmingBulkRef.current) return;
+    confirmingBulkRef.current = true;
+    let confirmed: boolean;
+    try {
+      confirmed = await confirmAction(describeBulkProvision(domains, targets));
+    } finally {
+      confirmingBulkRef.current = false;
+    }
+    if (!confirmed) return;
     // Команда адресует домены строками.
     const ids = targets.map(String);
     try {
@@ -689,10 +714,8 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
         </Sel>
       </div>
     </Card>
-    {/* Вне тулбара намеренно: он исчезает при `selectedCount <= 0`, а набор
-        снимается и без прогона — массовым удалением и просто снятием галочек.
-        Внутри тулбара отказ пропадал бы ровно в тот момент, когда пользователь
-        разбирается, что произошло. */}
+    {/* Живёт ровно столько, сколько живёт набор, на котором случился отказ:
+        гасит его эффект по `sel` выше, а не время и не следующий рендер. */}
     {bulkProvisionError ? (
       <div role="alert" style={{marginBottom:12,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
         {bulkProvisionError}

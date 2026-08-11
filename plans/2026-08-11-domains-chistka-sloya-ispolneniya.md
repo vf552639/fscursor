@@ -169,11 +169,26 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
 
 - Реализован целиком: нет. Сделаны фазы 1–3.
   - Кнопка «Provision» тулбара идёт через `runBulkProvisionDomains` →
-    `provision_bulk`; отчёт уходит новым обязательным пропом
-    `onBulkProvisionResult` в `DesktopWorkspace`, который раскладывает его по
-    уже существующим очередям (`provisionQueue` — пароли, `bulkReportQueue` —
-    итог) общей функцией `deliverBulkProvision` — той же, что обслуживает
-    deep link. Отказ запуска показывается баннером `role="alert"` над тулбаром.
+    `provision_bulk`. Перед запуском спрашивается подтверждение
+    (`describeBulkProvision` — экспортируемая чистая функция: считает домены,
+    называет их именами, длинный список урезает после 20): один клик стартует
+    часы необратимой работы, остановить прогон нечем, а идемпотентность потом
+    пометит набор отработавшим. Второй клик, пока висит диалог, гасится ref'ом.
+  - Отчёт уходит новым обязательным пропом `onBulkProvisionResult` в
+    `DesktopWorkspace`, который раскладывает его по уже существующим очередям
+    (`provisionQueue` — пароли, `bulkReportQueue` — итог) общей функцией
+    `deliverBulkProvision` — той же, что обслуживает deep link. Выделение
+    снимается только при `status === "ok"`: у оборвавшегося прогона хвост
+    `skipped` назван поимённо ради повтора по нему.
+  - Отказ запуска показывается баннером `role="alert"` над тулбаром и гаснет
+    вместе с изменением набора, к которому относился. Если экземпляр страницы,
+    запустивший прогон, уже размонтирован, отказ уходит вторым новым
+    обязательным пропом `onBulkProvisionError` в тост воркспейса — тем же, что
+    сообщает об отказе этой же операции по `sdmp://`-ссылке.
+  - «Идёт массовый прогон» читается из `MutationCache` по маркеру
+    `bulkGateClaim` (`isBulkGateClaim` в `api/domains.ts`), а не из `useState`:
+    страница размонтируется на любой навигации, и локальный флаг воскресал бы в
+    `false`. Обе выборки из кэша (⚙ по домену и признак прогона) — одна подписка.
   - Из тулбара и страницы удалены «Refresh SSL» и «Full Setup» вместе с
     `BulkSetupWizard.tsx`, `MultiTaskProgressModal.tsx` и ветками
     `TaskProgressModal`/`MultiTaskProgressModal` (сам `TaskProgressModal`
@@ -181,10 +196,11 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
   - `DomainDetailModal` — две вкладки; `runAction`/`actionErrors` удалены как
     выродившиеся (действие осталось одно), свойство «отказ Set NS переживает
     закрытие карточки» сохранено (`setNsError` из `MutationCache`).
-  - Тесты: добавлен `pages/Domains.bulkprovision.test.tsx` (7 кейсов), из
-    `DomainDetailModal.setns.test.tsx` убраны кейсы про удалённые вкладки и
-    добавлен кейс «две вкладки вместо пяти». `npx tsc --noEmit` чист,
-    `npm test` — 65 файлов / 619 тестов зелёные.
+  - Тесты: добавлен `pages/Domains.bulkprovision.test.tsx` (17 кейсов),
+    в `DesktopWorkspace.provision.test.tsx` — сквозной «клик тулбара → очереди
+    воркспейса», из `DomainDetailModal.setns.test.tsx` убраны кейсы про
+    удалённые вкладки и добавлен кейс «две вкладки вместо пяти».
+    `npx tsc --noEmit` чист, `npm test` — 65 файлов / 630 тестов зелёные.
 - Что осталось: фаза 4 (удалить мёртвые хуки и осиротевшие типы из
   `api/domains.ts` — их определения ещё на месте, вызывающих нет) и остаток
   фазы 5 (финальные grep-проверки после фазы 4).
