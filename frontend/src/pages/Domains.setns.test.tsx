@@ -124,7 +124,9 @@ describe("карточка домена после смены NS", () => {
         return [{ id: 9, provider: "namecheap", name: "NC", api_user: null, is_active: true, created_at: "", updated_at: "" }];
       }
       if (url === "/cloudflare/accounts") return [{ id: 7, name: "CF", account_id: null, is_active: true, created_at: "", updated_at: "" }];
-      // Карточка тянет ещё креды БД и nginx-override — до них дела нет.
+      // Больше страница и карточка ничего по HTTP не запрашивают (вкладки DB /
+      // SSL / NGINX удалены вместе со своими 404). Заглушка на всякий будущий
+      // запрос: пустой объект безопаснее, чем `undefined` в `useQuery`.
       return {};
     });
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {

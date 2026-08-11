@@ -24,18 +24,18 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
 
 ## Acceptance criteria (что значит «готово»)
 
-- [ ] Ни одна кнопка вкладки Domains и её модалок не бьёт в несуществующий роут.
-- [ ] Кнопка «Provision» тулбара в десктопе идёт через Tauri `provision_bulk`
+- [x] Ни одна кнопка вкладки Domains и её модалок не бьёт в несуществующий роут.
+- [x] Кнопка «Provision» тулбара в десктопе идёт через Tauri `provision_bulk`
       (`runBulkProvisionDomains`), с тем же подоменным гейтом и с показом отчёта
       через ту же очередь показов, что у одиночного provision.
-- [ ] Пароли FTP/БД из массового отчёта не оседают нигде, кроме показа один раз
+- [x] Пароли FTP/БД из массового отчёта не оседают нигде, кроме показа один раз
       (не в `MutationCache.data`, не в localStorage, не в логах).
-- [ ] `DomainDetailModal` — ровно 2 вкладки: `overview` (read-only) и `ns`.
-- [ ] Мёртвый `EditDomainModal` и его состояние удалены целиком.
-- [ ] Хуки-фикции удалены из `api/domains.ts`; grep не находит их импортов.
-- [ ] Компоненты без вызывающих удалены (проверено grep'ом, не на глаз).
-- [ ] `cd frontend && npm test` — прогон Domains/provision-тестов зелёный.
-- [ ] `npx tsc --noEmit` во `frontend` без ошибок.
+- [x] `DomainDetailModal` — ровно 2 вкладки: `overview` (read-only) и `ns`.
+- [x] Мёртвый `EditDomainModal` и его состояние удалены целиком.
+- [x] Хуки-фикции удалены из `api/domains.ts`; grep не находит их импортов.
+- [x] Компоненты без вызывающих удалены (проверено grep'ом, не на глаз).
+- [x] `cd frontend && npm test` — прогон Domains/provision-тестов зелёный.
+- [x] `npx tsc --noEmit` во `frontend` без ошибок.
 
 ## Edge cases (продумать заранее)
 
@@ -119,7 +119,7 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
   `registrar_set_nameservers`.
 - `overview` остаётся read-only-информацией (обогащение полями — план №2).
 
-### Фаза 4 — Вычистить мёртвые хуки из `api/domains.ts`  `[ ]`
+### Фаза 4 — Вычистить мёртвые хуки из `api/domains.ts`  `[x]`
 
 Файл: `frontend/src/api/domains.ts`.
 
@@ -135,7 +135,7 @@ delete/{id}, `bulk-assign-server`, `bulk-assign-cloudflare`, `bulk-import`,
   (строки 877–883) оставить одну короткую запись: что удалено и почему замены
   сегодня нет. Не переписывать историю, а зафиксировать причину.
 
-### Фаза 5 — Тесты и верификация  `[ ]`
+### Фаза 5 — Тесты и верификация  `[x]`
 
 - Обновить/починить тесты, ссылающиеся на удалённое:
   `Domains.provision.test.tsx`, `Domains.provisionerror.test.tsx`,
@@ -167,7 +167,7 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
 
 ## Итог
 
-- Реализован целиком: нет. Сделаны фазы 1–3.
+- Реализован целиком: да (фазы 1–5, все acceptance criteria закрыты).
   - Кнопка «Provision» тулбара идёт через `runBulkProvisionDomains` →
     `provision_bulk`. Перед запуском спрашивается подтверждение
     (`describeBulkProvision` — экспортируемая чистая функция: считает домены,
@@ -201,6 +201,32 @@ Full Setup через связку assign → `cf_create_zone` → `registrar_se
     воркспейса», из `DomainDetailModal.setns.test.tsx` убраны кейсы про
     удалённые вкладки и добавлен кейс «две вкладки вместо пяти».
     `npx tsc --noEmit` чист, `npm test` — 65 файлов / 630 тестов зелёные.
-- Что осталось: фаза 4 (удалить мёртвые хуки и осиротевшие типы из
-  `api/domains.ts` — их определения ещё на месте, вызывающих нет) и остаток
-  фазы 5 (финальные grep-проверки после фазы 4).
+  - Фаза 4: из `api/domains.ts` удалены все десять хуков HTTP-исполнения и
+    семь осиротевших типов ответа. `SetNsResponse` тоже удалён — его последними
+    потребителями были ровно эти хуки (`useCreateDb`, `useRequestSsl`,
+    `useCancelSsl`, `useSetNginxOverride`); одноимённая схема на бэкенде
+    (`SetNSResponse` в `schemas/domain.py`) не тронута, JSDoc `useSetNameservers`
+    говорит именно про неё. `useUpdateDomain` оставлен — у него живой вызывающий
+    (`ServerDetail`, действие «Edit domain»), и им же будет писаться привязка к
+    зоне Cloudflare (план №3); над ним оставлена строчка, чтобы его не
+    «прибрали». На месте удалённого — одна запись в стиле соседней записи про
+    `useMarkNsSet`/`useCheckNs`: что удалено, почему это всегда был 404 и почему
+    замены сегодня нет (гранулярные операции требуют новых Tauri-команд и
+    SSH-логики — в `lib.rs` таких команд нет).
+  - Удалён недостижимый `EditDomainModal` (167 строк) вместе с
+    `EditDomainModalProps`, состоянием `editingDomain` и веткой рендера; из
+    `Domains.tsx` ушли осиротевшие импорты `useUpdateDomain`,
+    `useSetNameservers`, `MIN_NAMESERVERS`, `NS_DESKTOP_NOTE`, `useZoneDetails`,
+    `useZoneNameservers` (сами хуки живы — их зовёт `DomainDetailModal`).
+    Тестов у модалки не было: открыть её было нечем.
+  - Фаза 5: `npx tsc --noEmit` чист, `npm test` — 65 файлов / 630 тестов
+    зелёные (то же, что до чистки: удалённое не было покрыто). Grep по
+    `bulk-provision|bulk-full-setup|create-site|refresh-ssl|ssl-request|`
+    `ssl-cancel|create-db|nginx-override` во `frontend/src` даёт только
+    `sdmp://`-CTA, разбор deep link'ов, их тесты и объясняющие комментарии —
+    ни одного живого `apiPost`/`apiGet`/`apiPut`. Grep по именам удалённых
+    хуков и компонентов — только эти же комментарии. В
+    `Domains.setns.test.tsx` поправлен комментарий, обещавший запросы кред БД и
+    nginx-override: этих запросов нет с фазы 3.
+- Что осталось: ничего в объёме плана. Отложенное осознанно — в разделе «Явно
+  откладываем» (гранулярные операции по домену и Full Setup через Tauri).

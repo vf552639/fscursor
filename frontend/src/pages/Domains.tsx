@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useRef, ChangeEvent, useEffect } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { Card, Btn, Sel, Badge, Modal, StatusDot, fmtDate, Inp, RowActions, EmptyState, ErrorState, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
-import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useUpdateDomain, useSetNameservers, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, MIN_NAMESERVERS, NS_DESKTOP_NOTE, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
+import { useDomains, useBulkCreateDomains, useBulkCreateStructuredDomains, useCreateDomain, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, runBulkProvisionDomains, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers, Server } from "../api/servers";
 import { isCheckStale, serverUiStatus } from "../lib/serverStatus";
 import { useRegistrarAccounts, RegistrarAccount } from "../api/registrars";
-import { useCloudflareAccounts, useZoneDetails, useZoneNameservers, CloudflareAccount } from "../api/cloudflare";
+import { useCloudflareAccounts, CloudflareAccount } from "../api/cloudflare";
 import StatusBadge from "../components/StatusBadge";
 import { describeQueryError } from "../lib/queryError";
 import BulkActionToolbar from "../components/BulkActionToolbar";
@@ -104,174 +104,6 @@ export function AddDomainModal({onClose, servers, registrars, cfAccounts}: AddDo
   </Modal>;
 }
 
-interface EditDomainModalProps {
-  domain: DomainUI;
-  onClose: () => void;
-  servers: Server[];
-  registrars: RegistrarAccount[];
-  cfAccounts: CloudflareAccount[];
-}
-
-/**
- * ВНИМАНИЕ: эта модалка НЕДОСТИЖИМА. `setEditingDomain` нигде не вызывается со
- * значением — единственные два вхождения это её же объявление и сброс в `null`
- * при закрытии, то есть открыть её нечем. Ни одна кнопка строки таблицы её не
- * поднимает (в `RowActions` только «Open detail», «Provision» и «Delete»).
- *
- * Код внутри поддерживается в рабочем виде (иначе он не компилируется вместе с
- * остальным), но проверить руками его нельзя. Живая правка NS — во вкладке NS
- * `DomainDetailModal`. Дать модалке точку входа или удалить её — отдельное
- * решение, не эта фаза.
- */
-function EditDomainModal({ domain, onClose, servers, registrars, cfAccounts }: EditDomainModalProps) {
-  const [name, setName] = useState(domain.domain);
-  const [serverId, setServerId] = useState(domain.server_id ? String(domain.server_id) : "");
-  const [registrarId, setRegistrarId] = useState(domain.registrar_id ? String(domain.registrar_id) : "");
-  const [cfZoneId, setCfZoneId] = useState(domain.cf_zone_id || "");
-  const setNameservers = useSetNameservers();
-  const { data: nameserversData, isLoading: isNameserversLoading, isError: isNameserversError } =
-    useZoneNameservers(domain.cf_id, domain.cf_zone_id);
-  const { data: zoneDetails, isLoading: isZoneLoading, isError: isZoneError } =
-    useZoneDetails(domain.cf_id, domain.cf_zone_id);
-  const update = useUpdateDomain(domain.id);
-
-  const handleSave = () => {
-    update.mutate(
-      {
-        domain_name: name.trim(),
-        server_id: serverId ? Number(serverId) : null,
-        registrar_id: registrarId ? Number(registrarId) : null,
-        cloudflare_zone_id: cfZoneId || null,
-      },
-      { onSuccess: () => onClose() }
-    );
-  };
-
-  return <Modal title={`Edit ${domain.domain}`} onClose={onClose} width={450}>
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: ChangeEvent<HTMLInputElement>)=>setName(e.target.value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Server</label><Sel value={serverId} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{servers.map((s: Server)=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign Registrar</label><Sel value={registrarId} onChange={(e: ChangeEvent<HTMLSelectElement>)=>setRegistrarId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={cfZoneId} onChange={(e: ChangeEvent<HTMLInputElement>)=>setCfZoneId(e.target.value)} placeholder={cfAccounts.length ? "Zone ID from Cloudflare" : "No CF accounts connected"} /></div>
-      <div style={{border:"1px solid #e5e7eb", borderRadius:8, padding:12, background:"#fafafa"}}>
-        <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:8}}>Nameservers (CF zone)</div>
-        <div style={{fontSize:11.5,color:"#6b7280",marginBottom:8}}>
-          CF zone status - статус делегирования у Cloudflare. NS push - статус применения NS у регистратора.
-        </div>
-        {!domain.cf_id || !domain.cf_zone_id ? null : (
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-            <span style={{fontSize:12,color:"#6b7280"}}>CF Zone Status:</span>
-            {isZoneLoading ? (
-              <Badge variant="gray">Loading...</Badge>
-            ) : isZoneError ? (
-              <Badge variant="red">Failed to load zone status</Badge>
-            ) : (
-              <Badge
-                variant={
-                  zoneDetails?.status === "active"
-                    ? "green"
-                    : zoneDetails?.status === "pending"
-                    ? "yellow"
-                    : "gray"
-                }
-              >
-                {zoneDetails?.status === "active"
-                  ? "Active"
-                  : zoneDetails?.status === "pending"
-                  ? "Pending (NS не делегированы на CF)"
-                  : zoneDetails?.status || "Unknown"}
-              </Badge>
-            )}
-          </div>
-        )}
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-          <span style={{fontSize:12,color:"#6b7280"}}>NS push to registrar:</span>
-          <Badge variant={(domain.ns_status==="ok"?"green":domain.ns_status==="error"?"red":"yellow") as any}>
-            {domain.ns_status==="ok"?"OK":domain.ns_status==="error"?"Error":"Pending"}
-          </Badge>
-        </div>
-        <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>
-          Updated: {domain.ns_updated_at ? fmtDate(domain.ns_updated_at) : "—"}
-        </div>
-        {!domain.cf_id || !domain.cf_zone_id ? (
-          <div style={{fontSize:12.5,color:"#6b7280"}}>Nameservers - assign Cloudflare account first.</div>
-        ) : (
-          <>
-            {isNameserversLoading ? (
-              <div style={{fontSize:12.5,color:"#6b7280"}}>Loading nameservers...</div>
-            ) : isNameserversError ? (
-              <div style={{fontSize:12.5,color:"#dc2626"}}>Failed to load nameservers from Cloudflare.</div>
-            ) : (
-              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
-                {/* `null` — зоны с таким id в аккаунте нет; это не то же самое,
-                    что зона без NS, и говорить про неё «No nameservers» значит
-                    отвечать не на тот вопрос. */}
-                {nameserversData == null ? (
-                  <div style={{fontSize:12.5,color:"#dc2626"}}>Zone not found in this Cloudflare account.</div>
-                ) : nameserversData.name_servers.length > 0 ? (
-                  nameserversData.name_servers.map((ns) => (
-                    <div key={ns} style={{fontSize:12.5,fontFamily:"monospace",color:"#374151"}}>• {ns}</div>
-                  ))
-                ) : (
-                  <div style={{fontSize:12.5,color:"#6b7280"}}>No nameservers returned for this zone.</div>
-                )}
-              </div>
-            )}
-            {/* Ошибка команды раньше терялась целиком: `mutate()` без onError,
-                и отказ регистратора выглядел как «ничего не произошло». */}
-            {setNameservers.isError ? (
-              <div style={{fontSize:12.5,color:"#dc2626",marginBottom:6}}>
-                {String((setNameservers.error as any)?.message || "Set NS failed")}
-              </div>
-            ) : null}
-            {domain.registrar_id == null ? (
-              <div style={{fontSize:12.5,color:"#b45309",marginBottom:6}}>
-                Assign a registrar account to this domain first.
-              </div>
-            ) : null}
-            {/* Выключенная кнопка без объяснения — это загадка, а не запрет.
-                Каждое условие в `disabled` ниже имеет свою строчку. */}
-            {domain.registrar_id != null && (nameserversData?.name_servers.length ?? 0) < MIN_NAMESERVERS ? (
-              <div style={{fontSize:12.5,color:"#b45309",marginBottom:6}}>
-                Nothing to push: this Cloudflare zone returned fewer than {MIN_NAMESERVERS} nameservers.
-              </div>
-            ) : null}
-            {!isTauri() ? (
-              <div style={{fontSize:12.5,color:"#92400e",marginBottom:6}}>
-                Read-only here. {NS_DESKTOP_NOTE}
-              </div>
-            ) : null}
-            <Btn
-              size="sm"
-              variant="secondary"
-              onClick={() =>
-                setNameservers.mutate({
-                  domainId: domain.id,
-                  domainName: domain.domain,
-                  registrarAccountId: domain.registrar_id,
-                  nameservers: nameserversData?.name_servers ?? [],
-                })
-              }
-              disabled={
-                setNameservers.isPending ||
-                !isTauri() ||
-                domain.registrar_id == null ||
-                (nameserversData?.name_servers.length ?? 0) < MIN_NAMESERVERS
-              }
-            >
-              {setNameservers.isPending ? "Setting NS..." : "↺ Set NS"}
-            </Btn>
-          </>
-        )}
-      </div>
-    </div>
-    <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
-      <Btn variant="primary" onClick={handleSave} disabled={update.isPending||!name.trim()} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{update.isPending ? "Saving..." : "Save"}</Btn>
-      <Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
-    </div>
-  </Modal>;
-}
-
 export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError }: {
   onNav?: (pg: string, ctx?: any) => void;
   ctx?: any;
@@ -356,7 +188,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
   const [sel,setSel]=useState<Set<number>>(new Set()); 
   const [showBulk,setSB]=useState(false);
   const [showAdd,setSA]=useState(false);
-  const [editingDomain, setEditingDomain] = useState<DomainUI | null>(null);
   const [detailDomain, setDetailDomain] = useState<Domain | null>(null);
 
   const [showAssignServer, setShowAssignServer] = useState(false);
@@ -876,7 +707,6 @@ export default function Domains({ onNav, ctx, onProvisionResult, onBulkProvision
     </Card>
 
     {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />}
-    {editingDomain && <EditDomainModal domain={editingDomain} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onClose={() => setEditingDomain(null)} />}
     {/* `detailDomain` — снимок строки на момент клика, и он НЕ обновляется от
         инвалидации: модалка показывала бы «NS status: pending» ещё долго после
         удачной смены NS, то есть ровно ту ложь, ради устранения которой заведён

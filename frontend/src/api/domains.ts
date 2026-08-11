@@ -103,51 +103,6 @@ export interface DomainFilters {
   ns_status?: string;
 }
 
-export interface SetNsResponse {
-  task_id: string;
-  domain_id: number;
-}
-
-export interface ProvisionResponse {
-  task_id: string;
-  task_log_id: number;
-  domain_id: number;
-}
-
-export interface DomainDbCredentials {
-  domain_id: number;
-  db_name: string | null;
-  db_user: string | null;
-  db_password: string | null;
-}
-
-export interface NginxOverridePayload {
-  snippet: string;
-  presets: Record<string, unknown>;
-}
-
-export interface NginxOverrideResponse {
-  domain_id: number;
-  snippet: string;
-  presets: Record<string, unknown>;
-}
-
-export interface BulkProvisionResponse {
-  task_ids: string[];
-}
-
-export interface BulkFullSetupPayload {
-  domain_ids: number[];
-  server_id: number;
-  cloudflare_account_id: number;
-  registrar_id?: number | null;
-}
-
-export interface BulkFullSetupResponse {
-  task_ids: string[];
-  task_log_ids: number[];
-}
-
 export interface BulkImportError {
   row: number;
   domain: string;
@@ -205,6 +160,10 @@ export function useBulkCreateStructuredDomains() {
   });
 }
 
+// Со страницы `Domains` хук ушёл вместе с недостижимым `EditDomainModal`, но
+// чистить его нечего: живой вызывающий — карточка сервера (`ServerDetail`,
+// действие «Edit domain»), роут `PUT /domains/{id}` реальный, и им же будет
+// писаться привязка домена к зоне Cloudflare (отдельный план).
 export function useUpdateDomain(id: number) {
   return useMutation({
     mutationFn: (data: DomainUpdate) => apiPut<Domain>(`/domains/${id}`, data),
@@ -806,87 +765,25 @@ export async function runBulkProvisionDomains(
   }
 }
 
-export function useBulkProvisionDomains() {
-  return useMutation({
-    mutationFn: (domain_ids: number[]) =>
-      apiPost<BulkProvisionResponse>("/domains/bulk-provision", { domain_ids }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useBulkFullSetup() {
-  return useMutation({
-    mutationFn: (payload: BulkFullSetupPayload) =>
-      apiPost<BulkFullSetupResponse>("/domains/bulk-full-setup", payload),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useCreateSite() {
-  return useMutation({
-    mutationFn: (payload: { domainId: number; site_only?: boolean }) =>
-      apiPost<ProvisionResponse>(`/domains/${payload.domainId}/create-site`, {
-        site_only: Boolean(payload.site_only),
-      }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useCreateDb() {
-  return useMutation({
-    mutationFn: (domainId: number) =>
-      apiPost<SetNsResponse>(`/domains/${domainId}/create-db`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useDbCredentials(domainId: number | null | undefined) {
-  return useQuery({
-    queryKey: ["domains", domainId, "db-credentials"],
-    queryFn: () => apiGet<DomainDbCredentials>(`/domains/${domainId}/db-credentials`),
-    enabled: !!domainId,
-  });
-}
-
-export function useRequestSsl() {
-  return useMutation({
-    mutationFn: (domainId: number) =>
-      apiPost<SetNsResponse>(`/domains/${domainId}/ssl-request`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useCancelSsl() {
-  return useMutation({
-    mutationFn: (domainId: number) =>
-      apiPost<SetNsResponse>(`/domains/${domainId}/ssl-cancel`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useRefreshSsl() {
-  return useMutation({
-    mutationFn: (domainId: number) =>
-      apiPost(`/domains/${domainId}/refresh-ssl`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useSetNginxOverride() {
-  return useMutation({
-    mutationFn: (payload: { domainId: number; data: NginxOverridePayload }) =>
-      apiPost<SetNsResponse>(`/domains/${payload.domainId}/nginx-override`, payload.data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: domainsKeys.all }),
-  });
-}
-
-export function useGetNginxOverride(domainId: number | null | undefined) {
-  return useQuery({
-    queryKey: ["domains", domainId, "nginx-override"],
-    queryFn: () => apiGet<NginxOverrideResponse>(`/domains/${domainId}/nginx-override`),
-    enabled: !!domainId,
-  });
-}
+// Здесь же лежал HTTP-слой исполнения: `useBulkProvisionDomains`,
+// `useBulkFullSetup`, `useCreateSite`, `useCreateDb`, `useDbCredentials`,
+// `useRequestSsl`, `useCancelSsl`, `useRefreshSsl`, `useSetNginxOverride`,
+// `useGetNginxOverride` и типы их ответов (`ProvisionResponse`, `SetNsResponse`,
+// `DomainDbCredentials`, `NginxOverridePayload`/`NginxOverrideResponse`,
+// `BulkProvisionResponse`, `BulkFullSetupPayload`/`BulkFullSetupResponse`).
+// Удалены вместе с кнопками, которые их звали: в `routes/domains.py` объявлены
+// только list, failed-export.csv, get/{id}, create, bulk, bulk-structured,
+// put/{id}, delete/{id}, bulk-assign-server, bulk-assign-cloudflare,
+// bulk-import, bulk-import-errors/{token} — ни одного из этих путей там нет,
+// а `apiPost` (`api/client.ts`) — чистый axios, не Tauri-aware, то есть каждый
+// такой хук всегда бил по HTTP и всегда получал 404.
+// Замены сегодня нет и это не недосмотр чистки: гранулярные операции по домену
+// (Create Site / Create DB / Request SSL / Refresh SSL / nginx-override) требуют
+// новых Tauri-команд и SSH-логики в десктопе (в `lib.rs` таких команд нет), а
+// Full Setup — связки assign → `cf_create_zone` → `registrar_set_nameservers`.
+// Возврат каждой — отдельная фича со своим планом. Единственное, что уже
+// переехало, — массовый provision: `runBulkProvisionDomains` выше
+// (команда `provision_bulk`), его и зовёт кнопка тулбара.
 
 // `useMarkNsSet` и `useCheckNs` удалены вместе с кнопками, которые их звали:
 // роутов `POST /domains/{id}/mark-ns-set` и `/check-ns` на бэкенде нет
