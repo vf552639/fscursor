@@ -4,7 +4,11 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-li
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
-import DesktopWorkspace from "./DesktopWorkspace";
+import DesktopWorkspace, {
+  FASTPANEL_STEP_LABEL,
+  PROVISION_STEP_LABEL,
+  WARNING_STEPS,
+} from "./DesktopWorkspace";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -275,6 +279,37 @@ describe("DesktopWorkspace — владелец результатов provision
     expect(report).toContain("2 provisioned");
     expect(report).toContain("Run key: k-btn");
     expect(report).not.toContain("PW-");
+  });
+
+  it("о невыполненной ссылке говорит предупреждением, а не галочкой", async () => {
+    renderWorkspace([{ id: 1, name: "a.com" }]);
+    await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
+    const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
+
+    // Ссылку приложение НЕ выполнило: такого хоста нет в `parseDeepLinkAction`.
+    // Зелёная галочка ровно здесь означала бы «сделано».
+    handler(["sdmp://unknown-thing?id=1"]);
+
+    const toast = await screen.findByRole("alert");
+    expect(toast.textContent).toContain("nothing was run");
+    expect(toast.textContent).toContain("⚠");
+    expect(toast.textContent).not.toContain("✓");
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  // Полууспехи приходят и шагами прогресса, и каналом аудита, но тон им выбирает
+  // один и тот же `showToastAs` — здесь сторожим ВХОД в него: забытая строчка в
+  // `WARNING_STEPS` ничего не ломает, она просто выдаёт полууспех за успех.
+  it("каждый шаг «сделано, но…» отнесён к предупреждениям", () => {
+    const labels = { ...FASTPANEL_STEP_LABEL, ...PROVISION_STEP_LABEL };
+    const halfSuccess = Object.entries(labels).filter(([, text]) => text.includes(", but "));
+    expect(halfSuccess.length).toBeGreaterThan(0);
+    for (const [step] of halfSuccess) {
+      expect(WARNING_STEPS.has(step), `${step} должен быть предупреждением`).toBe(true);
+    }
+    // И встречная сторона: ход дела предупреждением не объявлен.
+    expect(WARNING_STEPS.has("ssh_connect")).toBe(false);
+    expect(WARNING_STEPS.has("ftp_exists")).toBe(false);
   });
 
   it("об отказе прогона говорит тостом неудачи, а не зелёной галочкой", async () => {

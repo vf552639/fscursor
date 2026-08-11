@@ -99,14 +99,50 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
 };
 
 /**
- * Тон тоста. `error` — про неудачу, `info` — про ход дела.
+ * Тон тоста. `info` — про ход дела, `warn` — про полууспех, `error` — про отказ.
  *
  * Разделение не косметическое: тост — единственная поверхность для отказа
  * массового прогона, чью страницу пользователь уже покинул (см.
  * `onBulkProvisionError` в `Domains`), и с общей зелёной галочкой он произносил
  * бы «✓ keychain is locked».
+ *
+ * `warn` — отдельный тон, а не «почти error», и это тот случай, когда обе
+ * крайности врут в разные стороны. «Zone created, but the result could not be
+ * saved on the server» под зелёной галочкой утверждает, что всё в порядке, —
+ * тогда как сервер о созданной зоне не знает и следующая проверка
+ * идемпотентности решит неверно. Под красным крестом та же строчка читается как
+ * «зону создать не удалось», и пользователь пойдёт создавать её второй раз.
  */
-type ToastKind = "info" | "error";
+type ToastKind = "info" | "warn" | "error";
+
+/**
+ * Шаги, которые сообщают о ПОЛУУСПЕХЕ: действие состоялось, а что-то вокруг
+ * него — нет. Ключи общие для обоих каналов (`fastpanel:progress` и
+ * `provision:progress`): имена шагов там совпадают, потому что совпадает смысл.
+ *
+ * Три семьи, и каждая — не «всё хорошо»:
+ * `*_failed` — сделано, но след потерян (строчка аудита, запись результата на
+ * сервере); `creds_unparsed` — панель стоит, а пароль от неё прочитать не
+ * вышло; `ssl_skipped_*` и `firewall_warning` — часть работы не сделана вовсе
+ * или, скорее всего, не сделается. `bulk_failed` — обрыв прогона на домене;
+ * итог принесёт отчёт, но зелёная галочка тут утверждала бы обратное.
+ *
+ * Всё остальное (подключение по SSH, «аккаунт уже есть, оставляем») — ход дела,
+ * и ему зелёная галочка не врёт.
+ *
+ * Экспортируется ради теста, по той же причине, что и сами карты шагов: забытая
+ * здесь строчка не ломает ничего видимого — она просто выдаёт полууспех за
+ * успех, и заметить это можно только глазами.
+ */
+export const WARNING_STEPS = new Set([
+  "audit_failed",
+  "writeback_failed",
+  "creds_unparsed",
+  "bulk_failed",
+  "firewall_warning",
+  "ssl_skipped_dns",
+  "ssl_skipped_no_email",
+]);
 
 const TWEAK_DEFAULTS = {
   accentColor: "#2563eb",
@@ -205,6 +241,11 @@ export default function DesktopWorkspace() {
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
   const showToast = (message: string) => showToastAs("info", message);
+  /** Полууспех: действие состоялось, а его след/часть — нет (см. `ToastKind`). */
+  const showWarning = (message: string) => showToastAs("warn", message);
+  /** Шаг прогресса своим тоном: половина этих строк — не «всё хорошо». */
+  const showStep = (step: string, label: string) =>
+    showToastAs(WARNING_STEPS.has(step) ? "warn" : "info", label);
   /**
    * Тост о неудаче. Отдельный от `showToast` не ради красоты: с зелёной галочкой
    * во главе тот же виджет произносил «✓ keychain is locked» и «✓ Provisioning
@@ -242,7 +283,10 @@ export default function DesktopWorkspace() {
       const runDeepLink = async (url: string) => {
         try {
           const res = await handleSdmpDeepLinkInTauri(url, userId);
-          if (!res.handled) showToast(`Deep link: ${url}`);
+          // Не «✓»: ссылку приложение НЕ выполнило — либо её хост никому не
+          // соответствует, либо сессия не открыта. Галочка ровно здесь и
+          // означала бы «сделано».
+          if (!res.handled) showWarning(`Deep link ignored — nothing was run: ${url}`);
           else if (res.cancelled) showToast("Deep link cancelled — nothing was run");
           else if (res.fastpanel) fpQueue.push(res.fastpanel);
           else if (res.provision) provisionQueue.push(res.provision);
@@ -300,7 +344,7 @@ export default function DesktopWorkspace() {
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ step: string; server_id: string }>("fastpanel:progress", (event) => {
         const label = FASTPANEL_STEP_LABEL[event.payload.step];
-        if (label) showToast(label);
+        if (label) showStep(event.payload.step, label);
       });
     })();
     return () => {
@@ -316,7 +360,7 @@ export default function DesktopWorkspace() {
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ step: string; domain_id: string }>("provision:progress", (event) => {
         const label = PROVISION_STEP_LABEL[event.payload.step];
-        if (label) showToast(label);
+        if (label) showStep(event.payload.step, label);
       });
     })();
     return () => {
@@ -341,9 +385,12 @@ export default function DesktopWorkspace() {
         const label = AUDIT_ACTION_LABEL[event.payload.action];
         if (!label) return;
         if (event.payload.step === "audit_failed") {
-          showToast(`${label}, but the audit entry was not recorded`);
+          showWarning(`${label}, but the audit entry was not recorded`);
         } else if (event.payload.step === "writeback_failed") {
-          showToast(`${label}, but the result could not be saved on the server`);
+          // Самый дорогой из полууспехов: действие у провайдера состоялось, а
+          // сервер о нём не знает — значит следующая проверка идемпотентности
+          // решит неверно.
+          showWarning(`${label}, but the result could not be saved on the server`);
         }
       });
     })();
@@ -776,12 +823,13 @@ export default function DesktopWorkspace() {
         <div
           // `alert` только для отказа: он перебивает чтение экрана, и делать это
           // ради «Provision: connecting over SSH…» незачем.
-          role={toast.kind === "error" ? "alert" : "status"}
+          role={toast.kind === "info" ? "status" : "alert"}
           style={{
             position: "fixed",
             bottom: 24,
             right: 24,
-            background: toast.kind === "error" ? "#7f1d1d" : "#111",
+            background:
+              toast.kind === "error" ? "#7f1d1d" : toast.kind === "warn" ? "#78350f" : "#111",
             color: "#fff",
             padding: "10px 18px",
             borderRadius: 8,
@@ -791,7 +839,7 @@ export default function DesktopWorkspace() {
             animation: "slideIn 0.2s ease",
           }}
         >
-          {toast.kind === "error" ? "✕" : "✓"} {toast.message}
+          {toast.kind === "error" ? "✕" : toast.kind === "warn" ? "⚠" : "✓"} {toast.message}
         </div>
       )}
 
