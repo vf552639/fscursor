@@ -168,6 +168,12 @@ pub struct DomainWriteBack {
     pub db_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db_user: Option<String>,
+    /// Зона домена в Cloudflare. Пишется десктопом после того, как зона заведена
+    /// (или найдена уже заведённой): по этой колонке фронт решает, есть ли домену
+    /// что показывать в разделе Cloudflare и чем пушить NS, а серверный путь её
+    /// заполнить не может — зоны он не видит (zero-knowledge).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloudflare_zone_id: Option<String>,
     /// Итог смены NS у регистратора: `ok` | `error`. В отличие от `ssl_status`,
     /// enum'а на бэкенде под это НЕТ — колонка голый `String(32)`, и словарь
     /// задаёт фронт (бейдж «NS push to registrar»). Значения — в

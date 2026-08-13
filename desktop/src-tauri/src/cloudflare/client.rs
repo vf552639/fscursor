@@ -352,7 +352,22 @@ pub async fn purge_cache(token: &str, zone_id: &str) -> Result<(), CloudflareErr
     Ok(())
 }
 
+/// Завести зону — или вернуть уже заведённую. `bool` в ответе: `true` — зону
+/// создал этот вызов, `false` — она была раньше.
+///
+/// Флаг существует не для красоты отчёта: за `true` вызывающий пишет строчку
+/// `cf.zone.create` в audit log, и на переиспользованной зоне она врала бы
+/// истории.
 pub async fn create_zone(
+    token: &str,
+    zone_name: &str,
+    cf_account_id: Option<&str>,
+) -> Result<(Zone, bool), CloudflareError> {
+    create_zone_with_base(CF_API, token, zone_name, cf_account_id).await
+}
+
+async fn create_zone_with_base(
+    api_base: &str,
     token: &str,
     zone_name: &str,
     cf_account_id: Option<&str>,
@@ -361,7 +376,7 @@ pub async fn create_zone(
     if let Some(aid) = cf_account_id.filter(|s| !s.is_empty()) {
         body["account"] = serde_json::json!({ "id": aid });
     }
-    match call(token, Method::POST, "/zones", None, Some(body)).await {
+    match call_with_base(api_base, token, Method::POST, "/zones", None, Some(body)).await {
         Ok(data) => {
             let z: Zone = serde_json::from_value(
                 data.get("result").cloned().unwrap_or(serde_json::json!({})),
@@ -375,7 +390,7 @@ pub async fn create_zone(
                 || low.contains("duplicate")
                 || low.contains("already been added")
             {
-                if let Some(z) = get_zone_by_name(token, zone_name).await? {
+                if let Some(z) = get_zone_by_name_with_base(api_base, token, zone_name).await? {
                     return Ok((z, false));
                 }
             }
@@ -385,7 +400,11 @@ pub async fn create_zone(
     }
 }
 
-async fn get_zone_by_name(token: &str, zone_name: &str) -> Result<Option<Zone>, CloudflareError> {
+async fn get_zone_by_name_with_base(
+    api_base: &str,
+    token: &str,
+    zone_name: &str,
+) -> Result<Option<Zone>, CloudflareError> {
     let name = zone_name.trim();
     if name.is_empty() {
         return Ok(None);
@@ -395,7 +414,7 @@ async fn get_zone_by_name(token: &str, zone_name: &str) -> Result<Option<Zone>, 
         ("per_page".into(), "50".into()),
         ("page".into(), "1".into()),
     ];
-    let data = call(token, Method::GET, "/zones", Some(params), None).await?;
+    let data = call_with_base(api_base, token, Method::GET, "/zones", Some(params), None).await?;
     let rows: Vec<Zone> = serde_json::from_value(
         data.get("result")
             .cloned()
@@ -536,6 +555,133 @@ mod tests {
         let base = format!("{}/client/v4", srv.uri());
         let zones = list_zones_with_base(&base, "t").await.unwrap();
         assert_eq!(zones.len(), 1);
+    }
+
+    /// Ответ Cloudflare на попытку завести зону, которая в аккаунте уже есть.
+    /// Код 1061 — его собственный; HTTP при этом 400.
+    fn zone_already_exists() -> ResponseTemplate {
+        ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "success": false,
+            "errors": [{"code": 1061, "message": "zone already exists"}],
+            "result": null
+        }))
+    }
+
+    #[tokio::test]
+    async fn create_zone_reports_a_fresh_zone_as_created() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/client/v4/zones"))
+            // Аккаунт обязан доехать в теле: без него Cloudflare заводит зону в
+            // аккаунте по умолчанию — то есть не в том, что выбрал пользователь.
+            .and(body_partial_json(
+                serde_json::json!({"name": "example.com", "account": {"id": "acc-1"}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": {"id": "z1", "name": "example.com", "status": "pending",
+                           "name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]}
+            })))
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let (zone, created) = create_zone_with_base(&base, "t", " example.com ", Some("acc-1"))
+            .await
+            .unwrap();
+        assert!(created, "новую зону обязаны назвать созданной: за этот флаг пишется аудит");
+        assert_eq!(zone.id, "z1");
+        assert_eq!(zone.name_servers.unwrap().len(), 2);
+    }
+
+    /// Повтор full-setup по тому же домену обязан переиспользовать зону, а не
+    /// уронить прогон: Cloudflare отвечает 1061, и зона ищется по имени.
+    #[tokio::test]
+    async fn create_zone_reuses_an_existing_zone_instead_of_failing() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/client/v4/zones"))
+            .respond_with(zone_already_exists())
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones"))
+            .and(query_param("name", "example.com"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                // Cloudflare фильтрует по имени сам, но ответ может содержать и
+                // соседние зоны: берём ту, у которой имя совпало.
+                "result": [
+                    {"id": "z-other", "name": "other.com"},
+                    {"id": "z1", "name": "Example.COM", "status": "active",
+                     "name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]}
+                ]
+            })))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let (zone, created) = create_zone_with_base(&base, "t", "example.com", Some("acc-1"))
+            .await
+            .unwrap();
+        assert!(!created, "зона была раньше — это не создание");
+        assert_eq!(zone.id, "z1");
+    }
+
+    /// Зона занята вне видимости токена (чужой аккаунт Cloudflare): поиск по
+    /// имени ничего не находит, и отказ обязан дойти до пользователя как отказ.
+    /// Тихое «переиспользовали» тут было бы худшим из исходов — домен считался
+    /// бы настроенным без единой зоны.
+    #[tokio::test]
+    async fn create_zone_surfaces_the_refusal_when_the_zone_is_not_ours() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/client/v4/zones"))
+            .respond_with(zone_already_exists())
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": []
+            })))
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let err = create_zone_with_base(&base, "t", "example.com", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CloudflareError::Api(m) if m.contains("1061")), "{err}");
+    }
+
+    /// Отказ не про существующую зону (нет прав у токена) поиском по имени не
+    /// лечится, и лишнего запроса за ним быть не должно — `.expect(0)`.
+    #[tokio::test]
+    async fn create_zone_does_not_search_after_an_unrelated_refusal() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/client/v4/zones"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "success": false,
+                "errors": [{"code": 9109, "message": "Unauthorized to access requested resource"}]
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let err = create_zone_with_base(&base, "t", "example.com", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CloudflareError::Api(m) if m.contains("9109")), "{err}");
     }
 
     #[tokio::test]

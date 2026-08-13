@@ -147,6 +147,49 @@ pub async fn cf_list_dns_records(
         .map_err(|e| CommandError::Api(e.to_string()))
 }
 
+/// Действие аудита создания зоны. Оно же — ключ в `AUDIT_ACTION_LABEL` на
+/// фронте («Zone created»), поэтому по нему же шлётся событие о непрошедшем
+/// write-back'е `cloudflare_zone_id` (`commands::full_setup`).
+pub(crate) const AUDIT_ACTION_ZONE_CREATE: &str = "cf.zone.create";
+
+/// Завести зону домена в аккаунте — или взять уже заведённую — и записать
+/// создание в audit log.
+///
+/// Отдельно от команды, потому что у неё два вызывающих с разными нуждами:
+/// фронту (`cf_create_zone`) нужна зона, а full-setup'у — ещё и ответ на
+/// вопрос, создал ли её ЭТОТ прогон (в отчёте «зона создана» и «зона уже была»
+/// — разные новости). Токен при этом остаётся внутри модуля: наружу уезжает
+/// только зона.
+pub(crate) async fn ensure_zone(
+    app: &AppHandle,
+    api: &ApiClient,
+    user_id: &str,
+    handle: &State<'_, SyncHandle>,
+    account_id: &str,
+    zone_name: &str,
+) -> Result<(Zone, bool), CommandError> {
+    let ctx = cf_ctx(api, user_id, handle, account_id).await?;
+    let (zone, created) = client::create_zone(&ctx.token, zone_name, ctx.cf_account_id.as_deref())
+        .await
+        .map_err(|e| CommandError::Api(e.to_string()))?;
+    if created {
+        // Зона в Cloudflare уже создана. `?` здесь отрапортовал бы неудачу об
+        // удавшейся работе, а повтор упёрся бы в «zone already exists» —
+        // best-effort, не превращать обратно в `?` (см. `audit_best_effort`).
+        audit_best_effort(
+            app,
+            api,
+            AUDIT_ACTION_ZONE_CREATE,
+            "cloudflare_zone",
+            &zone.id,
+            ctx.device_id,
+            Some(serde_json::json!({ "name": zone.name })),
+        )
+        .await;
+    }
+    Ok((zone, created))
+}
+
 #[tauri::command]
 pub async fn cf_create_zone(
     app: AppHandle,
@@ -156,26 +199,9 @@ pub async fn cf_create_zone(
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<Zone, CommandError> {
-    let ctx = cf_ctx(&api, &user_id, &handle, &account_id).await?;
-    let (zone, created) = client::create_zone(&ctx.token, &zone_name, ctx.cf_account_id.as_deref())
+    ensure_zone(&app, &api, &user_id, &handle, &account_id, &zone_name)
         .await
-        .map_err(|e| CommandError::Api(e.to_string()))?;
-    if created {
-        // Зона в Cloudflare уже создана. `?` здесь отрапортовал бы неудачу об
-        // удавшейся работе, а повтор упёрся бы в «zone already exists» —
-        // best-effort, не превращать обратно в `?` (см. `audit_best_effort`).
-        audit_best_effort(
-            &app,
-            &api,
-            "cf.zone.create",
-            "cloudflare_zone",
-            &zone.id,
-            ctx.device_id,
-            Some(serde_json::json!({ "name": zone.name })),
-        )
-        .await;
-    }
-    Ok(zone)
+        .map(|(zone, _)| zone)
 }
 
 #[tauri::command]

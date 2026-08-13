@@ -909,6 +909,8 @@ fn domain_write_back_body(
             .db
             .as_ref()
             .and_then(|d| fit_or_omit(id, "db_user", d.db_user(), MAX_DB_USER)),
+        // Зону провижининг не заводит: её пишет `domain_full_setup`.
+        cloudflare_zone_id: None,
         // Провижининг NS не трогает: их ставит `registrar_set_nameservers`.
         ns_status: None,
         last_provision_error: Some(None),

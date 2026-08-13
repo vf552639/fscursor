@@ -64,6 +64,7 @@ pub fn run() {
             commands::registrars::registrar_get_domains,
             commands::registrars::registrar_get_nameservers,
             commands::registrars::registrar_set_nameservers,
+            commands::full_setup::domain_full_setup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
