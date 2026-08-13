@@ -127,10 +127,22 @@ Notes:
   - The ladder is deliberately asymmetric: a confirmed outage is never declared stale (`error` on an old timestamp means "there was a problem and there is no newer data"), while a positive answer expires after `CHECK_STALE_MS`. What makes that honest is that the check's age is printed next to the status on every screen.
   - A fresh metrics snapshot deliberately does **not** feed the ladder: `active` means exactly "the background check got an answer" — one signal, one meaning, one rhythm.
 - **ServerDetail** domains table reads `GET /api/domains?server_id=` as a **JSON array** (same contract as the Domains page). *(The **Sync Domains** action described here is historical — the endpoint is gone, see § FastPanel domains sync flow.)*
-- **Domains UI** now includes:
-  - `DomainDetailModal` (Overview / DB / SSL / Nginx / NS),
-  - expanded bulk actions (`Refresh SSL`, `Check NS`, `Mark NS Set`, `Full Setup`),
-  - `BulkSetupWizard` and multi-task progress viewer for full setup runs.
+- **Domains UI** (переписан ветвью `feat/domains-cloudflare-match`, 2026-08-13):
+  - `DomainDetailModal` — **один экран без вкладок**. Прежние пять (Overview / DB / SSL /
+    Nginx / NS) исчезли: DB/SSL/Nginx удалены при развороте на zero-knowledge, NS слита в
+    Overview, чтобы аккаунт Cloudflare, зона и делегирование читались вместе. Карточка
+    состоит из `DomainCloudflareField` (селект аккаунта + дорезолв `cloudflare_zone_id`) и
+    `DomainNsPanel` (nameservers зоны, бейдж делегирования, «Set NS at registrar»).
+  - Bulk-действия: `Assign Server`, `Assign CF`, `Синхронизировать выделенные`,
+    `Full setup`, `Provision`, `Delete`. **(Gone:** `Refresh SSL`, `Check NS`,
+    `Mark NS Set` — роутов под них нет, кнопки удалены в спринте 3.**)**
+  - Прогоны отчитываются баннером `RunNoticeBanner` (привязка и full setup) — с гейтом
+    «один прогон за раз» в `MutationCache` (`api/runGate.ts`), переживающим уход со страницы.
+  - **(Gone:** `BulkSetupWizard` и multi-task progress viewer — в репозитории их нет.**)**
+  - Правила вынесены чистыми модулями: `lib/cfZoneMatch.ts` (матч домена с зоной),
+    `lib/nsDelegation.ts` (лестница делегирования, семь причин `unknown`),
+    `lib/registrarCaps.ts` (какие провайдеры умеют NS-API — зеркалит десктоп),
+    `lib/fullSetupPlan.ts` (план прогона и дизейбл тумблеров).
 - Notifications UX:
   - Dedicated `Notifications` page
   - Read/unread actions
@@ -144,7 +156,14 @@ Notes:
   - System config now uses `/settings/config` API
   - *(historical)* SSL email pool management UI (`/api/ssl-emails`) under the **SSL Pool** tab — the router and the `ssl_email_pool` table were dropped (migration `013_drop_ssl_email_pool`); System tab includes quick toggles for webhook/Telegram/auto temp-mail and a **Test delivery** action
 
-## Desktop (Tauri) — scaffolding
+## Desktop (Tauri)
+
+> ⚠️ Заголовок раздела был «scaffolding», а список ниже — про заготовки. Это давно неверно:
+> в десктопе ~30 Tauri-команд, включая исполнение по SSH, работу с Cloudflare, регистраторами
+> и write-back в бэкенд. Ветка `feat/domains-cloudflare-match` добавила две:
+> `registrar_get_nameservers` (NS домена у регистратора — поимённо, а не листингом аккаунта)
+> и `domain_full_setup` (зона Cloudflare + write-back `cloudflare_zone_id` + по флагу NS;
+> отчёт по шагам, `Err` означает «работа не начиналась»).
 - **Location:** `desktop/` (npm shell + `desktop/src-tauri/` Rust project).
 - **UI loading:** `tauri.conf.json` runs `npm run dev` from repo-root **`frontend/`** in dev and points `frontendDist` at **`../../frontend/dist`** for release builds.
 - **Capabilities:** `desktop/src-tauri/capabilities/default.json` grants `core:default` and `shell:default` for the window labeled `main`.
