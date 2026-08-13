@@ -2,6 +2,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import select, update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.validators import is_valid_domain, normalize_domain
@@ -62,28 +63,74 @@ async def get_by_name(db: AsyncSession, name: str, user_id: UUID) -> Optional[Do
     ).scalar_one_or_none()
 
 
-async def _get_existing_domain_names(
-    db: AsyncSession, user_id: UUID, names: list[str]
-) -> set[str]:
+async def _get_existing_domain_names(db: AsyncSession, names: list[str]) -> set[str]:
+    """Занятые имена — по ВСЕЙ таблице, а не по доменам этого пользователя.
+
+    `domains.domain_name` уникален глобально (модель, миграция `001_initial`),
+    поэтому сужение по `user_id` здесь было не безопасностью, а слепотой:
+    имя, заведённое другим пользователем, пролетало мимо предпроверки прямо в
+    `IntegrityError` на общем коммите — и валился ВЕСЬ пакет, включая уже
+    подготовленные строки. Пропуск такого имени (`skipped` / «Duplicate or
+    exists») говорит ровно то же, что и глобальный UNIQUE: имя занято. Кем —
+    не говорит.
+    """
     if not names:
         return set()
     result = await db.execute(
-        select(Domain.domain_name).where(
-            Domain.domain_name.in_(names), Domain.user_id == user_id
-        )
+        select(Domain.domain_name).where(Domain.domain_name.in_(names))
     )
     return set(result.scalars().all())
+
+
+class DomainNameTaken(Exception):
+    """Имя домена уже занято.
+
+    `existing_id` — id СВОЕЙ строки, если имя занято ею; `None`, если строка
+    чужая. Разделение нужно маршруту: своему домену можно назвать id (он и так
+    виден в списке), чужому — нельзя ничего, кроме факта занятости, который
+    глобальный UNIQUE и без того делает наблюдаемым.
+    """
+
+    def __init__(self, existing_id: Optional[int] = None) -> None:
+        super().__init__("domain name is taken")
+        self.existing_id = existing_id
 
 
 async def create(db: AsyncSession, data: DomainCreate, user_id: UUID) -> Domain:
     payload = data.model_dump()
     payload["domain_name"] = _normalize(payload["domain_name"])
+    mine = await get_by_name(db, payload["domain_name"], user_id)
+    if mine is not None:
+        raise DomainNameTaken(existing_id=mine.id)
+
     domain = Domain(**payload, user_id=user_id)
     await touch_entity_sync(db, user_id, domain)
     db.add(domain)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Сюда приходит и чужой домен (UNIQUE глобальный, а предпроверка выше
+        # видит только свои), и гонка двух вкладок. Без этого перехвата мастер
+        # «Add Domain» отвечал 500 на самом обычном сценарии — «ввёл домен,
+        # который уже заведён».
+        await db.rollback()
+        if _is_unique_violation(exc):
+            raise DomainNameTaken() from exc
+        # Прочие нарушения целостности (например, `registrar_id` на
+        # несуществующую строку) — не про имя, и выдавать их за конфликт имени
+        # значило бы врать. Поведение прежнее, отдельный долг.
+        raise
     await db.refresh(domain)
     return domain
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """Нарушение UNIQUE, а не любая целостность.
+
+    Разбор по `sqlstate` драйвера (`23505`), а не по тексту сообщения: текст
+    зависит от локали сервера БД, код — нет.
+    """
+    return getattr(exc.orig, "sqlstate", None) == "23505"
 
 
 async def update(
@@ -129,7 +176,7 @@ async def bulk_create(
 
     created: list[Domain] = []
     skipped: list[str] = []
-    existing_names = await _get_existing_domain_names(db, user_id, names)
+    existing_names = await _get_existing_domain_names(db, names)
     for name in names:
         if not is_valid_domain(name):
             skipped.append(name)
@@ -169,7 +216,7 @@ async def bulk_create_structured(
     created: list[Domain] = []
     skipped: list[str] = []
     normalized_names = [_normalize(item.domain_name) for item in items]
-    existing_names = await _get_existing_domain_names(db, user_id, normalized_names)
+    existing_names = await _get_existing_domain_names(db, normalized_names)
 
     for item in items:
         name = _normalize(item.domain_name)
@@ -253,9 +300,11 @@ async def bulk_full_setup(
     состояния, UPDATE и аудит обязаны быть одной транзакцией.
 
     Идемпотентность здесь конструкцией, а не журналом ключей. Повторный вызов
-    с теми же аргументами не пишет НИЧЕГО: строки, уже стоящие в целевом
-    состоянии, из UPDATE выпадают, поэтому не двигается ни `sync_version`, ни
-    `updated_at`, а ответ выходит тот же. Журнал ключей (как у `provision_bulk`)
+    с теми же аргументами не трогает НИ ОДНОГО домена: строки, уже стоящие в
+    целевом состоянии, из UPDATE выпадают, поэтому не двигается ни
+    `sync_version`, ни `updated_at`, а ответ выходит тот же. (Запись в аудит
+    маршрут при этом делает и на повторе — так и надо: аудит фиксирует
+    попытку, а не изменение строки.) Журнал ключей (как у `provision_bulk`)
     здесь и не нужен: там ключ сторожит долгую внешнюю работу по SSH, здесь —
     присваивание трёх колонок, повтор которого по определению даёт то же
     состояние.

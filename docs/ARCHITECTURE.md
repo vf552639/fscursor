@@ -56,6 +56,13 @@ Notes:
     1. assign server/cloudflare/registrar,
     2. create/link Cloudflare zone,
     3. apply nameservers via registrar task.
+    - *(historical — и путь, и семантика.)* Роут `bulk-full-setup` вместе со своей
+      Celery-задачей удалён при развороте на zero-knowledge (коммит `5192372`). С
+      2026-08-13 есть `POST /api/domains/full-setup`, и он делает ТОЛЬКО шаг 1:
+      проставляет `server_id`/`cloudflare_account_id`/`registrar_id` пачке доменов одной
+      транзакцией и возвращает `id` + имя каждого домена. Шаги 2–3 (зона Cloudflare, NS у
+      регистратора) выполняет десктоп — токенов у сервера нет. Ни задач, ни `task_logs`
+      этот роут не создаёт.
   - Task logs are created per domain for progress UI and SSE stream consumers.
 - **Task streaming:**
   - `GET /api/tasks/{id}/stream` provides SSE updates with incremental `log_text` and task status.

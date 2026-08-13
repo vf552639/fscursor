@@ -1,7 +1,9 @@
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.validators import DOMAIN_NAME_MAX_LEN, is_valid_domain, normalize_domain
 
 
 class DomainBase(BaseModel):
@@ -16,7 +18,33 @@ class DomainBase(BaseModel):
 
 
 class DomainCreate(DomainBase):
-    pass
+    @field_validator("domain_name")
+    @classmethod
+    def _checked_domain_name(cls, value: str) -> str:
+        """Имя домена — проверенное и уже нормализованное.
+
+        До этой проверки `POST /domains` принимал что угодно: `is_valid_domain`
+        звался только в массовых путях, и «не домен вовсе» заводился со
+        статусом 201. Одиночный вход мастера full-setup идёт ровно сюда, а
+        дальше имя уходит в десктоп как имя будущей зоны Cloudflare — то есть
+        мусор всплывал бы у CF API, на шаге, где его никто не ждёт, и ПОСЛЕ
+        того как связки уже записаны.
+
+        Валидатор стоит на `DomainCreate`, а не на общей `DomainBase`:
+        `DomainResponse` наследует ту же базу и читает строки, заведённые до
+        этой проверки, — правило на базе сделало бы их нечитаемыми (500 на
+        `GET /domains`).
+
+        Значение присланной строки в текст ошибки НЕ вставляется: 422 отдаёт
+        `input` отдельным полем, и обработчик в `app/main.py` умеет его снять,
+        а из текста — не может.
+        """
+        normalized = normalize_domain(value)
+        if not is_valid_domain(normalized):
+            raise ValueError("not a valid domain name")
+        if len(normalized) > DOMAIN_NAME_MAX_LEN:
+            raise ValueError(f"domain name is longer than {DOMAIN_NAME_MAX_LEN} characters")
+        return normalized
 
 
 class DomainUpdate(BaseModel):

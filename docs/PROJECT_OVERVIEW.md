@@ -36,6 +36,10 @@ SDMP is an internal panel for centralized management of servers and domains with
      - `POST /api/domains/{id}/refresh-ssl`,
      - `GET/POST /api/domains/{id}/nginx-override`,
      - `POST /api/domains/bulk-full-setup`.
+     - `bulk-full-setup` удалён при развороте на zero-knowledge (коммит `5192372`).
+       Живой роут с 2026-08-13 — `POST /api/domains/full-setup`, и он только
+       проставляет связки (сервер, Cloudflare-аккаунт, регистратор) пачке доменов;
+       зону и NS выполняет десктоп.
      - `mark-ns-set` и `check-ns` здесь были перечислены ошибочно: таких роутов
        в `api/routes/domains.py` нет и не было. Кнопки, которые их звали, удалены
        (спринт 3, фаза 5); смену NS выполняет десктоп командой

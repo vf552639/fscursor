@@ -131,7 +131,13 @@ export default function BulkActionToolbar({
           кнопки вели в никуда в обеих средах. Перевести их на Tauri сегодня
           нечем: SSL — это отдельная SSH-операция без своей команды, а Full Setup
           — связка assign → `cf_create_zone` → `registrar_set_nameservers`. И то
-          и другое — функция со своим планом, а не проброс кнопки. */}
+          и другое — функция со своим планом, а не проброс кнопки.
+          ⚠️ Не спутать пути: с 2026-08-13 на бэкенде есть `POST
+          /domains/full-setup` — но он делает только шаг assign, а зону и NS
+          выполняет десктоп. Кнопка вернётся вместе с командой
+          `domain_full_setup` (план `2026-08-13-domains-full-setup.md`, фазы
+          2–3), и звать она будет именно `full-setup`, а не
+          `bulk-full-setup`. */}
       <OpenInDesktop
         action={`bulk-provision${q}`}
         label="Provision"

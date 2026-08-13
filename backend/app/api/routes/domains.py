@@ -125,7 +125,38 @@ async def create_domain(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainResponse:
-    domain = await domain_service.create(db, data, user.id)
+    """Завести домен. Он же — одиночный вход мастера full-setup.
+
+    Мастер сначала создаёт домен здесь, потом идёт с полученным `id` в
+    `POST /domains/full-setup`. Поэтому «уже заведён» — не экзотика, а обычный
+    ход событий, и отвечать на него 500 нельзя.
+
+    `domains.domain_name` уникален ГЛОБАЛЬНО, а не в пределах пользователя
+    (модель, миграция `001_initial`), поэтому занятым имя может оказаться и
+    чужой строкой. Обе ветки отвечают 409 — и вот почему одинаково по коду,
+    но по-разному по тексту:
+
+    * Факт «имя занято» скрыть отсюда нельзя в принципе: его делает
+      наблюдаемым сам глобальный UNIQUE, и сегодняшний 500 сообщал ровно тот
+      же бит — только вдобавок выглядел поломкой и тащил имя домена в текст
+      ошибки драйвера. Закрывается это не формулировкой, а уникальностью по
+      паре (user_id, domain_name), то есть миграцией — записано долгом.
+    * Своей строке можно назвать всё: она и так видна пользователю в списке.
+      Чужой — только «занято»: ни владельца, ни id, ни намёка. Разница в
+      тексте нового бита не выдаёт (свои домены пользователь и без нас знает),
+      зато первый случай перестаёт быть тупиком.
+
+    Id уже заведённого своего домена в ответе не возвращается намеренно: у
+    мастера список доменов уже есть на руках, и находить в нём строку по имени
+    дешевле, чем разбирать id из текста ошибки.
+    """
+    try:
+        domain = await domain_service.create(db, data, user.id)
+    except domain_service.DomainNameTaken as taken:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "domain already exists" if taken.existing_id else "domain name is already taken",
+        ) from taken
     await audit_service.log(
         db,
         user_id=user.id,
@@ -248,6 +279,13 @@ async def bulk_assign_server(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkAssignResponse:
+    # Владение целью — до записи. Без этой проверки свои домены привязывались
+    # к чужому серверу по угаданному id: FK такую строку принимает, а экран
+    # потом показывает связку с сущностью, которой у пользователя нет.
+    # `None` — легальное «отвязать», проверять нечего.
+    if data.server_id is not None:
+        if await server_service.get_by_id(db, data.server_id, user.id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
     updated = await domain_service.bulk_assign_server(
         db, user.id, data.domain_ids, data.server_id
     )
@@ -275,6 +313,10 @@ async def bulk_assign_cloudflare(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkAssignResponse:
+    # См. `bulk_assign_server` выше: та же проверка и по той же причине.
+    if data.cloudflare_account_id is not None:
+        if await cloudflare_service.get_account(db, data.cloudflare_account_id, user.id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Cloudflare account not found")
     updated = await domain_service.bulk_assign_cloudflare(
         db, user.id, data.domain_ids, data.cloudflare_account_id
     )

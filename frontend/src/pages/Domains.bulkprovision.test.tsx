@@ -528,6 +528,9 @@ describe("Domains — массовый provision: веб", () => {
       // `POST /domains/{id}/refresh-ssl` и `/domains/bulk-full-setup` на бэкенде
       // не существуют, а `sdmp://refresh-ssl` и `sdmp://bulk-full-setup` не
       // разбирает parseDeepLinkAction — обе кнопки вели в никуда в обеих средах.
+      // Появившийся `POST /domains/full-setup` (другой путь!) этого не меняет:
+      // он проставляет связки, а зону и NS выполняет десктопная команда,
+      // которой пока нет. Кнопка вернётся вместе с ней.
       expect(screen.queryByText("Refresh SSL")).toBeNull();
       expect(screen.queryByText("Full Setup")).toBeNull();
       expect(container.querySelectorAll('a[href^="sdmp://refresh-ssl"]').length).toBe(0);
