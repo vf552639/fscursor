@@ -48,6 +48,7 @@ BULK_AUDIT_ACTIONS = [
     "domain.bulk_import",
     "domain.bulk_assign_server",
     "domain.bulk_assign_cloudflare",
+    "domain.full_setup",
     "server.bulk_import",
 ]
 

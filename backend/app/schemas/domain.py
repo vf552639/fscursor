@@ -153,15 +153,45 @@ class BulkProvisionResponse(BaseModel):
 
 
 class BulkFullSetupRequest(BaseModel):
-    domain_ids: list[int]
+    # `extra="forbid"` — то же правило, что у схем записи в `server.py` /
+    # `cloudflare.py` / `registrar.py`: незнакомое поле в теле обязано дать 422,
+    # а не молча пропасть. Здесь оно ещё и держит границу zero-knowledge —
+    # тело full-setup описывает ТОЛЬКО связки, и попытка дослать сюда токен
+    # Cloudflare (шаг зоны живёт в десктопе) отобьётся как `extra_forbidden`,
+    # а не уедет на сервер.
+    model_config = ConfigDict(extra="forbid")
+
+    # Пустая пачка — это дефект вызывающего, а не «ноль обновлённых»: экран
+    # зовёт full-setup по выделению, и выделение не бывает пустым.
+    domain_ids: list[int] = Field(min_length=1)
     server_id: int
     cloudflare_account_id: int
+    # `None` означает «не трогать регистратора», а НЕ «отвязать»: в мастере
+    # поле необязательное, и у существующих доменов регистратор обычно уже
+    # проставлен импортом. Отвязка делается через `PUT /domains/{id}`.
     registrar_id: Optional[int] = None
 
 
+class FullSetupDomain(BaseModel):
+    """Домен, доведённый бэкендом до состояния «связки проставлены».
+
+    Ровно то, что нужно десктопу для следующего шага: `id` — адрес write-back
+    `cloudflare_zone_id`, `domain_name` — имя будущей зоны.
+    """
+
+    id: int
+    domain_name: str
+
+
 class BulkFullSetupResponse(BaseModel):
-    task_ids: list[str]
-    task_log_ids: list[int]
+    # Не `task_ids`/`task_log_ids`, как было объявлено в мёртвой версии этой
+    # схемы: бэкенд после переезда на zero-knowledge не запускает по full-setup
+    # ни одной задачи — зону заводит десктоп, у которого есть токен. Отдавать
+    # id несуществующих задач значило бы описывать несуществующий контракт.
+    domains: list[FullSetupDomain]
+    # id из запроса, которых у этого пользователя нет (удалён в другой вкладке,
+    # чужой). Строки отчёта, а не исключение: см. `bulk_full_setup`.
+    skipped_ids: list[int]
 
 
 class DomainBulkImportError(BaseModel):

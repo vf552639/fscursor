@@ -15,6 +15,8 @@ from app.core.constants import DomainStatus
 from app.core.database import get_db
 from app.models.domain import Domain
 from app.schemas.domain import (
+    BulkFullSetupRequest,
+    BulkFullSetupResponse,
     DomainBulkAssignCloudflare,
     DomainBulkAssignResponse,
     DomainBulkAssignServer,
@@ -26,7 +28,12 @@ from app.schemas.domain import (
     DomainResponse,
     DomainUpdate,
 )
-from app.services import domain_service
+from app.services import (
+    cloudflare_service,
+    domain_service,
+    registrar_service,
+    server_service,
+)
 from app.services.bulk_import_service import get_errors_csv, process_bulk_import
 
 router = APIRouter(prefix="/domains", tags=["domains"])
@@ -289,6 +296,61 @@ async def bulk_assign_cloudflare(
     )
     await db.commit()
     return DomainBulkAssignResponse(updated=updated)
+
+
+@router.post("/full-setup", response_model=BulkFullSetupResponse)
+async def full_setup(
+    data: BulkFullSetupRequest,
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> BulkFullSetupResponse:
+    """Связки пачке доменов: сервер + аккаунт Cloudflare (+ регистратор).
+
+    Половина full-setup, которой не нужен токен. Вторую половину — завести
+    зону, записать `cloudflare_zone_id`, по флагу прописать NS — делает
+    десктоп: ключи Cloudflare и регистратора сервер не видит и видеть не
+    должен. Поэтому здесь нет ни одного исходящего вызова, а ответ — это
+    входные данные для десктопа (`id` + имя домена), а не id задач.
+
+    Владение всеми тремя привязками проверяется до записи: иначе домены
+    уехали бы на чужой сервер по угаданному id, а экран показал бы связку с
+    сущностью, которой у пользователя нет. Соседние `bulk-assign-*` этой
+    проверки не делают — это их долг, а не образец.
+    """
+    if await server_service.get_by_id(db, data.server_id, user.id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    if await cloudflare_service.get_account(db, data.cloudflare_account_id, user.id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cloudflare account not found")
+    if data.registrar_id is not None:
+        if await registrar_service.get_account(db, data.registrar_id, user.id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Registrar account not found")
+
+    domains, skipped = await domain_service.bulk_full_setup(
+        db,
+        user.id,
+        data.domain_ids,
+        server_id=data.server_id,
+        cloudflare_account_id=data.cloudflare_account_id,
+        registrar_id=data.registrar_id,
+    )
+    # Счётчики, а не перечни: full-setup ходит по сотням доменов, и списку id
+    # в JSONB аудита не место (та же дисциплина, что у bulk-assign выше).
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.full_setup",
+        target_type="domain",
+        metadata={
+            "server_id": data.server_id,
+            "cloudflare_account_id": data.cloudflare_account_id,
+            "registrar_id": data.registrar_id,
+            "domains_requested": len(data.domain_ids),
+            "domains_linked": len(domains),
+            "domains_skipped": len(skipped),
+        },
+    )
+    await db.commit()
+    return BulkFullSetupResponse(domains=domains, skipped_ids=skipped)
 
 
 @router.post("/bulk-import", response_model=DomainBulkImportResponse)
