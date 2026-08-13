@@ -119,6 +119,21 @@ describe("planFromForm", () => {
     expect(plan?.pushNs).toBe(false);
   });
 
+  // `Number("x")` — это `NaN`, а `NaN` проходит проверку `== null`, которой
+  // страница решает, запускать ли пачку, и уезжает в тело запроса как `null`
+  // (так его сериализует `JSON.stringify`) — то есть 422 на всю пачку без
+  // единого слова о причине.
+  it("нечисловой id — это «не выбрано», а не NaN в теле запроса", () => {
+    const plan = planFromForm(
+      form({ serverId: "x", cloudflareAccountId: "7", registrarId: "y", createZone: true }),
+      { desktop: true, registrarProvider: "hostiq" },
+    );
+    expect(plan?.serverId).toBeNull();
+    expect(plan?.registrarId).toBeNull();
+    expect(planFromForm(form({ cloudflareAccountId: "nope" }), { desktop: true, registrarProvider: null }))
+      .toBeNull();
+  });
+
   it("сервер необязателен: мастер заводит домен и без него", () => {
     expect(planFromForm(form({ cloudflareAccountId: "7" }), { desktop: true, registrarProvider: null })?.serverId)
       .toBeNull();

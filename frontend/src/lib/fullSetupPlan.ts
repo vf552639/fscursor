@@ -111,6 +111,23 @@ export function nsToggleRule(params: {
 }
 
 /**
+ * Значение `<select>` → id. `null` — не выбрано ИЛИ выбрано нечисловое.
+ *
+ * Одна воронка на все три поля, потому что дальше по пути их различают только
+ * по `== null`: и отказ запуска в `Domains.tsx`, и решение «идти ли к
+ * регистратору». Голый `Number("")` даёт `0`, `Number("x")` — `NaN`, и NaN
+ * проверку на `null` проходит, а в теле запроса становится `null`
+ * (`JSON.stringify`) — то есть 422 на всю пачку без единого слова о причине.
+ * Сегодня из `<select>` такое не приходит; воронка стоит затем, чтобы это
+ * оставалось правдой и после первого поля, набираемого руками.
+ */
+function numericId(raw: string): number | null {
+  if (!raw) return null;
+  const id = Number(raw);
+  return Number.isFinite(id) ? id : null;
+}
+
+/**
  * Форма → план прогона. `null` — исполнять нечего: аккаунт Cloudflare не
  * выбран, а без него не сделать ни связку, ни зону.
  *
@@ -121,9 +138,9 @@ export function planFromForm(
   form: FullSetupForm,
   ctx: { desktop: boolean; registrarProvider: string | null },
 ): FullSetupPlan | null {
-  const cloudflareAccountId = Number(form.cloudflareAccountId);
-  if (!form.cloudflareAccountId || !Number.isFinite(cloudflareAccountId)) return null;
-  const registrarId = form.registrarId ? Number(form.registrarId) : null;
+  const cloudflareAccountId = numericId(form.cloudflareAccountId);
+  if (cloudflareAccountId == null) return null;
+  const registrarId = numericId(form.registrarId);
   const createZone = form.createZone && zoneToggleRule(ctx.desktop, form.cloudflareAccountId).enabled;
   const pushNs =
     form.pushNs &&
@@ -134,7 +151,7 @@ export function planFromForm(
       registrarProvider: ctx.registrarProvider,
     }).enabled;
   return {
-    serverId: form.serverId ? Number(form.serverId) : null,
+    serverId: numericId(form.serverId),
     cloudflareAccountId,
     registrarId,
     createZone,

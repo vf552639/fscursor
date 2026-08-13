@@ -2,6 +2,7 @@ import React, { useState, ChangeEvent } from "react";
 
 import FullSetupFields from "./FullSetupFields";
 import { Btn, Modal, Inp } from "../ui/Primitives";
+import { clip, errorText } from "../../api/cfAutoBind";
 import { useCreateDomain, Domain } from "../../api/domains";
 import { Server } from "../../api/servers";
 import { RegistrarAccount } from "../../api/registrars";
@@ -87,6 +88,20 @@ export function AddDomainModal({onClose, servers, registrars, cfAccounts, domain
         desktop={desktop}
       />
     </div>
+    {/* Отказ создания — единственная поверхность, на которой о нём вообще можно
+        сказать: связки уезжают этим же запросом, второго вызова по замыслу нет,
+        а глобального перехватчика ошибок мутаций в проекте не заведено. Молчание
+        здесь — это открытая модалка с кнопкой, вернувшейся из «Adding…», и
+        никакого ответа на вопрос «почему домен не завёлся».
+        Отвечает на него сервер и отвечает по существу: 409 на уже заведённое имя
+        (своё названо прямо, чужое — общей фразой), 422 на «https://example.com»,
+        404 на сервер, удалённый в соседней вкладке. Обрезка — та же, что у всех
+        чужих текстов на вкладке (`clip`). */}
+    {create.isError ? (
+      <div role="alert" style={{marginTop:14,padding:"8px 10px",borderRadius:8,fontSize:12.5,background:"#fee2e2",color:"#991b1b"}}>
+        Не удалось создать домен: {clip(errorText(create.error))}
+      </div>
+    ) : null}
     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
       {/* Подпись кнопки следует за тумблерами: пока их не тронули, действие ровно
           то же, что и раньше, — «Add Domain». Кнопка при этом жива в любом

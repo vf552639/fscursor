@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import Domains from "./Domains";
+import { ApiError } from "../api/client";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -316,7 +317,12 @@ describe("Domains — мастер «Add Domain»", () => {
         pushNs: true,
       }),
     );
-    expect((await screen.findByRole("status")).textContent).toContain("1 NS pushed");
+    const notice = (await screen.findByRole("status")).textContent ?? "";
+    expect(notice).toContain("1 NS pushed");
+    // Про связки мастер молчит: их проставил `POST /domains`, а не этот прогон,
+    // и «1 of 1 linked» приписывало бы ему связку с сервером, которого могло и
+    // не быть выбрано.
+    expect(notice).not.toContain("linked");
   });
 
   it("без тумблера зоны ведёт себя как прежний «Add Domain»", async () => {
@@ -330,6 +336,30 @@ describe("Domains — мастер «Add Domain»", () => {
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
     // Зону не просили — команду не звали; шаг привязки по имени остался прежним.
     expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+  });
+
+  // Связки уезжают этим единственным запросом, второго вызова по замыслу нет —
+  // и глобального перехватчика ошибок мутаций в проекте не заведено. Молчание
+  // здесь означало бы открытую модалку с кнопкой, вернувшейся из «Adding…», и
+  // ни одного слова о том, почему домен не завёлся.
+  it("отказ создания домена доходит до экрана", async () => {
+    for (const [status, detail] of [
+      [409, "domain already exists"],
+      [422, "domain_name: value is not a valid domain name"],
+    ] as const) {
+      mocks.apiPost.mockRejectedValue(new ApiError(status, detail));
+
+      renderPage();
+      await screen.findByText("a.com");
+      await addDomain("bad.com");
+      fireEvent.click(screen.getByRole("button", { name: "Add Domain" }));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain(detail);
+      // Модалка осталась открытой: домена нет, и вводить его заново незачем.
+      expect(screen.getByPlaceholderText("e.g., example.com")).toBeTruthy();
+      cleanup();
+    }
   });
 
   it("отказ команды не выдаёт создание домена за неудачу", async () => {

@@ -108,12 +108,13 @@ export type FullSetupReport =
     }
   | {
       outcome: "ran";
-      /** Сколько доменов просили настроить. */
-      requested: number;
-      /** Сколько получили связки. */
-      linked: number;
-      /** Сколько бэкенд не нашёл. */
-      skipped: number;
+      /**
+       * Что вышло со связками. `null` — этот прогон их не проставлял: мастер
+       * передаёт связки полями создания домена, и рапортовать «1 of 1 linked»
+       * значило бы записать себе чужую работу. Хуже того — при пустых полях
+       * формы отчёт хвалился бы связками, которых нет вовсе.
+       */
+      links: { requested: number; linked: number; skipped: number } | null;
       /**
        * Что стало с шагами выполнения. «Не просили» и «нечем» — разные новости,
        * и ни одна из них не «сделано».
@@ -264,9 +265,11 @@ export async function bulkFullSetup(
   }
   return {
     outcome: "ran",
-    requested: domainIds.length,
-    linked: linked.domains.length,
-    skipped: linked.skipped_ids.length,
+    links: {
+      requested: domainIds.length,
+      linked: linked.domains.length,
+      skipped: linked.skipped_ids.length,
+    },
     ...(await stepsOrReason(linked.domains, plan)),
   };
 }
@@ -284,9 +287,8 @@ export async function newDomainFullSetup(
 ): Promise<FullSetupReport> {
   return {
     outcome: "ran",
-    requested: 1,
-    linked: 1,
-    skipped: 0,
+    // Связок этот прогон не проставлял — см. `links` в `FullSetupReport`.
+    links: null,
     ...(await stepsOrReason([target], plan)),
   };
 }
@@ -389,18 +391,22 @@ export function summarizeFullSetup(report: FullSetupReport): FullSetupNotice {
       text: `Full setup: ${report.requested} domain(s) — nothing was changed, ${clip(report.error)}`,
     };
   }
-  if (report.linked === 0) {
+  if (report.links && report.links.linked === 0) {
     // Связок не досталось никому: настраивать нечего, и «0 of N linked» здесь
     // читалось бы как поломка счётчика.
     return {
       kind: "warn",
-      text: `Full setup: none of the ${report.requested} selected domain(s) were found — nothing was changed.`,
+      text: `Full setup: none of the ${report.links.requested} selected domain(s) were found — nothing was changed.`,
     };
   }
 
   const counts = countSteps(report.items);
-  const parts = [`${report.linked} of ${report.requested} linked`];
-  if (report.skipped > 0) parts.push(`${report.skipped} not found`);
+  const parts: string[] = [];
+  // Счётчик связок — только у прогона, который их проставлял (см. `links`).
+  if (report.links) {
+    parts.push(`${report.links.linked} of ${report.links.requested} linked`);
+    if (report.links.skipped > 0) parts.push(`${report.links.skipped} not found`);
+  }
   if (counts.zoneCreated > 0) parts.push(`${counts.zoneCreated} zone(s) created`);
   if (counts.zoneExisted > 0) parts.push(`${counts.zoneExisted} zone(s) already existed`);
   if (counts.zoneFailed > 0) parts.push(`${counts.zoneFailed} zone(s) failed`);
@@ -409,35 +415,47 @@ export function summarizeFullSetup(report: FullSetupReport): FullSetupNotice {
   for (const [reason, n] of counts.nsSkipped) {
     parts.push(`${n} NS skipped (${NS_SKIP_TEXT[reason]})`);
   }
-  let text = `Full setup: ${parts.join(", ")}.`;
+
+  // Предложениями, а не одной строкой: счётчиков может не быть вовсе (мастер,
+  // у которого прогон не дошёл ни до одного шага), и тогда первым идёт
+  // объяснение — оно в этом случае и есть весь отчёт.
+  const sentences: string[] = [];
+  if (parts.length > 0) sentences.push(`${parts.join(", ")}.`);
 
   if (report.steps === "not-requested") {
-    text += " Zones and nameservers were not part of this run.";
+    sentences.push("Zones and nameservers were not part of this run.");
   } else if (report.steps === "not-desktop") {
-    text += ` ${desktopOnly("Creating zones and setting nameservers")}`;
+    sentences.push(desktopOnly("Creating zones and setting nameservers"));
   } else if (report.steps === "no-session") {
-    text += " Not signed in, so no zone was created — sign in again and repeat.";
+    sentences.push("Not signed in, so no zone was created — sign in again and repeat.");
+  } else if (report.steps === "nothing-to-run") {
+    // Своя фраза, а не молчание: иначе баннер состоял бы из одних счётчиков
+    // связок и не отвечал на вопрос, почему шагов не было.
+    sentences.push("No domain reached the setup steps.");
   }
 
   // Отдельным предложением, а не числом в общей строке: на сотне доменов эта
   // новость — единственная, ради которой отчёт стоит читать. Зона в Cloudflare
   // есть, SDMP о ней не знает, и починит это следующий прогон, а не человек.
   if (counts.notSaved > 0) {
-    text +=
-      ` ${counts.notSaved} zone(s) exist in Cloudflare but are not recorded in SDMP` +
-      " — run full setup again to record them.";
+    sentences.push(
+      `${counts.notSaved} zone(s) exist in Cloudflare but are not recorded in SDMP` +
+        " — run full setup again to record them.",
+    );
   }
 
   if (report.aborted) {
-    text +=
-      ` The run stopped on ${report.aborted.domain}: ${clip(report.aborted.error)}.` +
-      ` ${report.aborted.notSetUp} domain(s) were not set up.`;
+    sentences.push(
+      `The run stopped on ${report.aborted.domain}: ${clip(report.aborted.error)}.` +
+        ` ${report.aborted.notSetUp} domain(s) were not set up.`,
+    );
   } else if (counts.firstFailure) {
-    text += ` First failure — ${counts.firstFailure.domain}: ${clip(counts.firstFailure.error)}`;
+    sentences.push(`First failure — ${counts.firstFailure.domain}: ${clip(counts.firstFailure.error)}`);
   }
 
+  const text = `Full setup: ${sentences.join(" ")}`;
   const allDone =
-    report.skipped === 0 &&
+    (report.links === null || report.links.skipped === 0) &&
     counts.zoneFailed === 0 &&
     counts.nsFailed === 0 &&
     counts.notSaved === 0 &&

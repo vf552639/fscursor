@@ -4,6 +4,7 @@ import {
   FullSetupDesktopResult,
   FullSetupReport,
   bulkFullSetup,
+  newDomainFullSetup,
   summarizeFullSetup,
 } from "./fullSetup";
 import { queryClient } from "./queryClient";
@@ -61,9 +62,7 @@ function okResult(id: number, patch: Partial<FullSetupDesktopResult> = {}): Full
 function ranReport(patch: Partial<Extract<FullSetupReport, { outcome: "ran" }>> = {}): FullSetupReport {
   return {
     outcome: "ran",
-    requested: 1,
-    linked: 1,
-    skipped: 0,
+    links: { requested: 1, linked: 1, skipped: 0 },
     steps: "ran",
     items: [{ domain: "a.com", result: okResult(1) }],
     aborted: null,
@@ -124,7 +123,11 @@ describe("bulkFullSetup — прогон по пачке", () => {
         pushNs: true,
       },
     ]);
-    expect(report).toMatchObject({ outcome: "ran", linked: 2, skipped: 1, steps: "ran" });
+    expect(report).toMatchObject({
+      outcome: "ran",
+      links: { requested: 3, linked: 2, skipped: 1 },
+      steps: "ran",
+    });
   });
 
   it("невыбранный регистратор не уезжает полем вовсе", async () => {
@@ -173,12 +176,27 @@ describe("bulkFullSetup — прогон по пачке", () => {
   });
 });
 
+describe("newDomainFullSetup — мастер", () => {
+  it("шаги по одному домену, связок не касается", async () => {
+    mocks.invokeIfTauri.mockResolvedValue(okResult(9));
+
+    const report = await newDomainFullSetup({ id: 9, domain_name: "new.com" }, PLAN);
+
+    // Связки уехали вместе с созданием домена: за ними в `full-setup` не ходим.
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+    // `links: null` — не косметика отчёта: с константой «1 of 1 linked» мастер,
+    // у которого в форме выбран только аккаунт Cloudflare, хвалился бы связкой
+    // с сервером и регистратором, которых нет.
+    expect(report).toMatchObject({ outcome: "ran", links: null, steps: "ran" });
+    expect(summarizeFullSetup(report).text).not.toContain("linked");
+  });
+});
+
 describe("summarizeFullSetup — что читает пользователь", () => {
   it("всё сделано — тон спокойный и числа названы", () => {
     const notice = summarizeFullSetup(
       ranReport({
-        requested: 2,
-        linked: 2,
+        links: { requested: 2, linked: 2, skipped: 0 },
         items: [
           { domain: "a.com", result: okResult(1) },
           { domain: "b.com", result: okResult(2, { zone: { status: "existed", zone_id: "z2", name_servers: ["a.ns"] } }) },
@@ -251,9 +269,24 @@ describe("summarizeFullSetup — что читает пользователь", 
     expect(notice.text).toContain("First failure — a.com: 1061 zone already exists");
   });
 
+  // Связки мастер проставляет полями создания домена, а не этим прогоном.
+  // Счётчик «1 of 1 linked» приписывал бы ему чужую работу — и хвалился бы ею
+  // даже тогда, когда в форме не выбрано ни сервера, ни регистратора.
+  it("мастер не отчитывается о связках, которых не проставлял", () => {
+    const notice = summarizeFullSetup(ranReport({ links: null }));
+    expect(notice.text).not.toContain("linked");
+    expect(notice).toEqual({ kind: "info", text: "Full setup: 1 zone(s) created, 1 NS pushed." });
+  });
+
+  it("прогон, не дошедший ни до одного шага, объясняет почему", () => {
+    const notice = summarizeFullSetup(ranReport({ links: null, steps: "nothing-to-run", items: [] }));
+    expect(notice.kind).toBe("warn");
+    expect(notice.text).toBe("Full setup: No domain reached the setup steps.");
+  });
+
   it("прогон, ничего не связавший, не рапортует успехом", () => {
     const notice = summarizeFullSetup(
-      ranReport({ requested: 3, linked: 0, skipped: 3, steps: "nothing-to-run", items: [] }),
+      ranReport({ links: { requested: 3, linked: 0, skipped: 3 }, steps: "nothing-to-run", items: [] }),
     );
     expect(notice.kind).toBe("warn");
     expect(notice.text).toContain("none of the 3 selected domain(s) were found");
