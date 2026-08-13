@@ -9,7 +9,7 @@ import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, formatExpiry,
 import { isTauri } from "../../lib/runtime";
 import { OpenInDesktop } from "../OpenInDesktop";
 import DomainStatusBadge from "./DomainStatusBadge";
-import { DomainUI } from "./types";
+import { DomainUI, RowCfHint } from "./types";
 
 /**
  * Заглушка для обязательного `desktopOnClick` у `OpenInDesktop` там, где сам
@@ -19,12 +19,35 @@ import { DomainUI } from "./types";
  */
 const NOOP_DESKTOP_ONLY_BRANCH = () => {};
 
+/**
+ * Тон подсказки живого матча: темнее прочерка (`DIM_TEXT`, «данных нет»), но
+ * светлее сохранённого имени аккаунта (`#111`, «так записано в базе»). Между
+ * ними — потому что подсказка и есть третье состояние: данные есть, но они не
+ * факт.
+ */
+const CF_HINT_TEXT = "#6b7280";
+
+/**
+ * Чем подсказка отличается от привязки — словами, а не только начертанием:
+ * курсив говорит «это другое», но не говорит, что именно и что с этим делать.
+ */
+const CF_HINT_TITLE = "Совпало с зоной Cloudflare — в базе не сохранено. Нажми Синхронизировать";
+
 export interface DomainRowProps {
   domain: DomainUI;
   /** Сервер, регистратор и аккаунт CF строки — уже найденные: искать их на каждую из сотен строк заново незачем. */
   server?: Server;
   registrar?: RegistrarAccount;
   cfAccount?: CloudflareAccount;
+  /**
+   * Что про домен знает живой список зон Cloudflare, если в базе привязки нет.
+   *
+   * Приезжает готовой подсказкой из одной мемо-карты страницы
+   * (`useDomainZoneMatches`), а не считается здесь: сопоставление — это индекс по
+   * зонам всех аккаунтов, и на строку его класть нельзя ни по цене, ни по
+   * ссылочной стабильности (см. `memo` ниже).
+   */
+  cfHint?: RowCfHint;
   /**
    * Одно «сейчас» на весь рендер таблицы — тот же приём, что на трёх остальных
    * экранах: свой `Date.now()` в каждой ячейке дал бы разные «сейчас» для
@@ -68,6 +91,7 @@ function DomainRow({
   server: srv,
   registrar: reg,
   cfAccount: cf,
+  cfHint,
   now,
   selected,
   onToggleSelected,
@@ -87,6 +111,10 @@ function DomainRow({
   // Лестница общая (`lib/serverStatus`), как на трёх остальных экранах.
   const srvStatus = srv ? serverUiStatus(srv, now) : "";
   const srvCheckStale = isCheckStale(srv?.last_check_at, now);
+  // Подсказка — только там, где записанного аккаунта нет: сохранённый выбор
+  // живой список зон перебивать не вправе. Неоднозначное совпадение сюда не
+  // доходит намеренно — см. `RowCfHint`.
+  const cfHintAccount = !cf && cfHint?.outcome === "matched" ? cfHint.account : null;
   return <tr style={focused ? { background: "#eff4ff" } : undefined} onMouseEnter={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!focused) e.currentTarget.style.background="#fafbfc"; }} onMouseLeave={(e: React.MouseEvent<HTMLTableRowElement>)=>{ if (!focused) e.currentTarget.style.background=""; }}>
     <td style={{padding:"11px 16px"}}><input type="checkbox" checked={selected} onChange={()=>onToggleSelected(d.id)} style={{cursor:"pointer"}}/></td>
     <td style={{padding:"11px 16px"}}>
@@ -105,7 +133,17 @@ function DomainRow({
       <span title={srv.last_check_at ? new Date(srv.last_check_at).toLocaleString() : undefined} style={{display:"block",fontSize:11,paddingLeft:12,color:srvCheckStale?STALE_TEXT:DIM_TEXT}}>{srv.last_check_at ? `checked ${formatAgoStale(srv.last_check_at, srvCheckStale, now)}` : "never checked"}</span>
     </>:<span style={{color:"#9ca3af"}}>—</span>}</td>
     <td style={{padding:"11px 16px",fontSize:13,color:reg?"#111":"#9ca3af"}}>{reg?.provider||"—"}</td>
-    <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":"#9ca3af"}}>{cf?.name||"—"}</td>
+    {/* Три состояния, и все три различимы глазом: записанный аккаунт — обычным
+        текстом; аккаунт, о котором известно только из живого списка зон, —
+        курсивом и приглушённо; прочерк — когда не известно ничего. Слив
+        средний случай с прочерком, колонка сообщала бы «Cloudflare нет» о
+        домене, чья зона заведена и работает; слив его с первым — обещала бы
+        привязку, которой в базе нет и по которой нечего пушить регистратору. */}
+    <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":cfHintAccount?CF_HINT_TEXT:"#9ca3af"}}>
+      {cf ? cf.name : cfHintAccount
+        ? <span title={CF_HINT_TITLE} style={{fontStyle:"italic"}}>{cfHintAccount.name}</span>
+        : "—"}
+    </td>
     <td style={{padding:"11px 16px"}}>
       <DomainStatusBadge status={d.status} title={d.last_provision_error || undefined} />
       {/*

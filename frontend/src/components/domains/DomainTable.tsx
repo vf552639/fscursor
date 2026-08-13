@@ -5,7 +5,7 @@ import { RegistrarAccount } from "../../api/registrars";
 import { CloudflareAccount } from "../../api/cloudflare";
 import DomainRow from "./DomainRow";
 import { Sort, SortKey } from "./sortDomains";
-import { DomainUI } from "./types";
+import { DomainUI, RowCfHint } from "./types";
 
 const TH_STYLE: React.CSSProperties = {padding:"10px 16px",textAlign:"left",fontSize:11.5,fontWeight:600,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.4px",background:"#f9fafb",borderBottom:"1px solid #e5e7eb",whiteSpace:"nowrap"};
 
@@ -80,6 +80,7 @@ export default function DomainTable({
   servers,
   registrars,
   cfAccounts,
+  zoneHints,
   now,
   sort,
   onSort,
@@ -102,6 +103,12 @@ export default function DomainTable({
   servers: Server[];
   registrars: RegistrarAccount[];
   cfAccounts: CloudflareAccount[];
+  /**
+   * Подсказки живого матча по id домена (`useDomainZoneMatches`). Готовой картой,
+   * а не списком зон: сопоставление — один прогон на всю таблицу, и его нельзя
+   * ни повторять на строку, ни пересобирать на рендер (строки мемоизированы).
+   */
+  zoneHints: ReadonlyMap<number, RowCfHint>;
   now: number;
   sort: Sort;
   onSort: (k: SortKey) => void;
@@ -140,6 +147,7 @@ export default function DomainTable({
           server={servers.find((s: Server)=>s.id===d.server_id)}
           registrar={registrars.find((r: RegistrarAccount)=>r.id===d.registrar_id)}
           cfAccount={cfAccounts.find((c: CloudflareAccount)=>c.id===d.cf_id)}
+          cfHint={zoneHints.get(d.id)}
           now={now}
           selected={selectedIds.has(d.id)}
           onToggleSelected={onToggleRow}

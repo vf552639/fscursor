@@ -12,6 +12,7 @@ import DomainStats from "../components/domains/DomainStats";
 import DomainTable from "../components/domains/DomainTable";
 import BulkProvisionErrorBanner from "../components/domains/BulkProvisionErrorBanner";
 import CloudflareBindBanner from "../components/domains/CloudflareBindBanner";
+import CloudflareUnreadBanner from "../components/domains/CloudflareUnreadBanner";
 import DomainsLoading from "../components/domains/DomainsLoading";
 import DomainsHeader from "../components/domains/DomainsHeader";
 import DomainsLoadError from "../components/domains/DomainsLoadError";
@@ -29,6 +30,7 @@ import { useBulkProvision } from "../hooks/useBulkProvision";
 import { useCloudflareBind } from "../hooks/useCloudflareBind";
 import { useDomainFilters } from "../hooks/useDomainFilters";
 import { useDomainSort } from "../hooks/useDomainSort";
+import { useDomainZoneMatches } from "../hooks/useDomainZoneMatches";
 import { useNow } from "../hooks/useNow";
 
 export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
@@ -109,6 +111,12 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   const cfAccounts = cfAccountsQ.data || [];
 
   const domains = useMemo((): DomainUI[] => domainsData.map(toDomainUI), [domainsData]);
+
+  // Живой матч по зонам Cloudflare — подсказкой в колонке. Считается по строкам
+  // ответа API, а не по `domains`: правило сопоставления смотрит на
+  // `cloudflare_account_id` и `domain_name`, то есть на тот же словарь, которым
+  // пользуется прогон привязки (`lib/cfZoneMatch`).
+  const zoneMatches = useDomainZoneMatches(domainsData);
 
   const [sel,setSel]=useState<Set<number>>(new Set()); 
   const [showBulk,setSB]=useState(false);
@@ -271,6 +279,9 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     {cfBind.notice ? (
       <CloudflareBindBanner notice={cfBind.notice} onDismiss={cfBind.dismiss} />
     ) : null}
+    {zoneMatches.unreadAccounts.length > 0 ? (
+      <CloudflareUnreadBanner accounts={zoneMatches.unreadAccounts} />
+    ) : null}
     <BulkActionToolbar
       selectedCount={sel.size}
       selectedDomainIds={Array.from(sel)}
@@ -311,6 +322,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
           servers={servers}
           registrars={registrars}
           cfAccounts={cfAccounts}
+          zoneHints={zoneMatches.hints}
           now={now}
           sort={order.sort}
           onSort={order.onSort}
