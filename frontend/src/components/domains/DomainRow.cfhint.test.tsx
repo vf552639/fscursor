@@ -36,11 +36,8 @@ const ACCOUNT: CloudflareAccount = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
-/** Ячейки строки по порядку: чекбокс, домен, сервер, регистратор, Cloudflare. */
-const CF_CELL = 4;
-
 function renderRow(props: { domain?: DomainUI; cfAccount?: CloudflareAccount; cfHint?: RowCfHint }) {
-  const { container } = render(
+  render(
     <table>
       <tbody>
         <DomainRow
@@ -59,7 +56,10 @@ function renderRow(props: { domain?: DomainUI; cfAccount?: CloudflareAccount; cf
       </tbody>
     </table>,
   );
-  return container.querySelectorAll("td")[CF_CELL];
+  // По testid, а не по порядковому номеру ячейки: вставка колонки левее сдвинула
+  // бы индекс молча, и половина тестов проверяла бы соседнюю колонку, продолжая
+  // проходить. Тот же приём, что у ячеек срока и SSL.
+  return screen.getByTestId("cf-cell");
 }
 
 afterEach(cleanup);

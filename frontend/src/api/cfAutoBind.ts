@@ -96,7 +96,7 @@ function emptyReport(status: CfBindReport["status"], skipped = 0): CfBindReport 
 }
 
 /** Текст ошибки в том виде, в каком его можно показать. */
-function errorText(e: unknown): string {
+export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
@@ -108,10 +108,15 @@ function errorText(e: unknown): string {
  * тосте — 2200 мс на экран текста, из которого не прочитать ни числа привязок,
  * ни того, что часть аккаунтов не опрошена, то есть ровно то, ради чего
  * сообщение и показывается.
+ *
+ * Обе функции экспортируются ради второго места, где показывается ТА ЖЕ чужая
+ * ошибка, — баннера непрочитанных аккаунтов над таблицей доменов
+ * (`CloudflareUnreadBanner`). Своя обрезка там означала бы два разных предела на
+ * один и тот же текст, приезжающий из одного и того же `client::list_zones`.
  */
 const ERROR_CHARS_SHOWN = 120;
 
-function clip(text: string): string {
+export function clip(text: string): string {
   return text.length > ERROR_CHARS_SHOWN ? `${text.slice(0, ERROR_CHARS_SHOWN)}…` : text;
 }
 

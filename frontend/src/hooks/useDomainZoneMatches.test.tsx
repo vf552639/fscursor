@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
+import { cloudflareKeys } from "../api/cloudflare";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 import { MatchableDomain } from "../lib/cfZoneMatch";
@@ -89,7 +90,13 @@ function Harness({ domains }: { domains: MatchableDomain[] }) {
           .map(([id, h]) => `${id}:${h.outcome === "matched" ? h.account.name : "ambiguous"}`)
           .join(",")}
       </div>
-      <div data-testid="unread">{matches.unreadAccounts.map((a) => a.name).join(",")}</div>
+      {/* Вместе с именем — причина отказа: без неё «не прочитан» нечем
+          отработать, а тест не увидел бы её потери. */}
+      <div data-testid="unread">
+        {matches.unreadAccounts
+          .map((a) => `${a.account.name}:${a.error instanceof Error ? a.error.message : ""}`)
+          .join(",")}
+      </div>
     </div>
   );
 }
@@ -202,7 +209,30 @@ describe("useDomainZoneMatches", () => {
 
     // Живой аккаунт продолжает подсказывать: истёкший токен на одном из двух не
     // должен отменять матч по остальным.
-    await waitFor(() => expect(unread()).toBe("broken"));
+    await waitFor(() => expect(unread()).toBe("broken:Invalid API Token"));
+    expect(hints()).toBe("1:main");
+  });
+
+  it("аккаунт, чьи зоны протухли вместе с токеном, назван — хотя прочитанное раньше ещё подсказывает", async () => {
+    setTauri(true);
+    accountsAre([account(7, "main")]);
+    zonesAre({ "7": [{ id: "zone-a", name: "a.com" }] });
+
+    renderHook([domain(1, "a.com")]);
+    await waitFor(() => expect(hints()).toBe("1:main"));
+
+    // Токен отозвали посреди сессии: провалившийся перезапрос оставляет
+    // прочитанные раньше зоны И ставит ошибку — состояние, в котором аккаунт
+    // легко потерять, разведя данные и отказ через `else`.
+    mocks.invokeSynced.mockRejectedValue(new Error("Invalid API Token"));
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: cloudflareKeys.zones(7) });
+    });
+
+    // Устаревший список зон вернее прочерка, поэтому подсказка остаётся. Но
+    // зоны, заведённой после отзыва токена, в нём нет — и промолчав, экран снова
+    // выдал бы «—» за знание. Ровно этот дефект функция и чинит.
+    await waitFor(() => expect(unread()).toBe("main:Invalid API Token"));
     expect(hints()).toBe("1:main");
   });
 

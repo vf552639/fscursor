@@ -41,8 +41,24 @@ export interface DomainZoneMatches {
    * лежать та самая зона, и без этой оговорки «—» в строке читалось бы как
    * «Cloudflare нет». Та же оговорка есть в отчёте прогона привязки
    * (`summarizeCfBind`) — и по той же причине.
+   *
+   * Сюда же попадает аккаунт, чей ПЕРЕЗАПРОС провалился поверх прочитанных
+   * раньше зон: подсказки по нему остаются (устаревший список вернее прочерка),
+   * но зоны, заведённой после поломки, в нём уже не будет.
    */
-  unreadAccounts: CloudflareAccount[];
+  unreadAccounts: UnreadCloudflareAccount[];
+}
+
+/** Аккаунт, чьи зоны прочитать не удалось, и причина отказа. */
+export interface UnreadCloudflareAccount {
+  account: CloudflareAccount;
+  /**
+   * Ошибка запроса зон как она пришла. Она здесь потому, что «не прочитан» без
+   * причины нечем отработать: истёкший токен чинят в настройках, а оборвавшуюся
+   * сеть — повтором, и это разные действия. Показывающий её обязан обрезать
+   * текст (`clip`): в пределе это тело ответа Cloudflare.
+   */
+  error: unknown;
 }
 
 /** Одна пустая карта на все случаи «подсказывать нечем»: ссылка обязана быть стабильной. */
@@ -60,15 +76,20 @@ function buildMatches(
   results: ReadonlyArray<ZonesResult>,
 ): DomainZoneMatches {
   const zonesByAccount: AccountZones[] = [];
-  const unreadAccounts: CloudflareAccount[] = [];
+  const unreadAccounts: UnreadCloudflareAccount[] = [];
   accounts.forEach((account, i) => {
     const result = results[i];
-    // Состояний три, а не два. Аккаунт, чьи зоны ещё грузятся, не попадает
-    // никуда: ждущий запрос — это не сломанный токен, и объявлять его
-    // непрочитанным значило бы показывать баннер о поломке при каждом открытии
-    // вкладки.
+    // Аккаунт, чьи зоны ещё грузятся, не попадает никуда: ждущий запрос — это
+    // не сломанный токен, и объявлять его непрочитанным значило бы показывать
+    // поломку при каждом открытии вкладки.
     if (result?.data) zonesByAccount.push({ accountId: account.id, zones: result.data });
-    else if (result?.error) unreadAccounts.push(account);
+    // Отдельным `if`, а не `else`: данные и ошибка бывают ОДНОВРЕМЕННО —
+    // провалившийся фоновый перезапрос (отозвали токен) оставляет прочитанные
+    // раньше зоны и ставит ошибку. Подсказывать по ним можно, они всё ещё
+    // вернее прочерка; молчать о том, что список устарел, — нельзя: зоны,
+    // заведённой после отзыва токена, в нём нет, и её домен снова получил бы
+    // «—», выданное за знание.
+    if (result?.error) unreadAccounts.push({ account, error: result.error });
   });
   if (zonesByAccount.length === 0) return { hints: NO_HINTS, unreadAccounts };
 
@@ -119,6 +140,15 @@ export function useDomainZoneMatches(domains: ReadonlyArray<MatchableDomain>): D
     [accountsData],
   );
 
+  // Аккаунты читаются ПАРАЛЛЕЛЬНО, тогда как прогон привязки (`readZones` в
+  // `api/cfAutoBind.ts`) ходит по ним последовательно, и это не расхождение по
+  // недосмотру. Там очередь — способ не устраивать чужому API десяток
+  // параллельных серий пагинации ради фоновой работы, которой никто не ждёт
+  // глазами. Здесь ждут: это отрисовка открытой вкладки, и последовательное
+  // чтение растянуло бы заполнение колонки на десятки секунд. Цена разовая —
+  // запрос на аккаунт за `staleTime`, и та же запись кэша достаётся потом и
+  // прогону привязки, и странице Cloudflare, то есть общее число походов в
+  // Cloudflare от этого не растёт.
   const zoneQueries = useQueries({
     queries: accounts.map((a) => ({
       // Тот же запрос, что у страницы Cloudflare и у прогона привязки: одна
@@ -129,6 +159,12 @@ export function useDomainZoneMatches(domains: ReadonlyArray<MatchableDomain>): D
     })),
   });
 
+  // Ячейка ОДНА, и это допущение: два конкурентных рендера с разными
+  // зависимостями выбивали бы друг друга из неё, пересчитывая карту каждый раз,
+  // — то есть мемоизация строк умерла бы, а тест на число рендеров этого не
+  // увидел бы. Сегодня их нет: страница ничего не заворачивает в
+  // `startTransition`/`useDeferredValue`. Появится — здесь нужен кэш на
+  // несколько записей, а не подпорка в вызывающем.
   const cache = useRef<{ deps: unknown[]; value: DomainZoneMatches } | null>(null);
   const deps: unknown[] = [domains, accounts];
   for (const q of zoneQueries) deps.push(q.data, q.error);

@@ -1,27 +1,50 @@
 import React from "react";
 
-import { CloudflareAccount } from "../../api/cloudflare";
+import { clip, errorText } from "../../api/cfAutoBind";
+import { UnreadCloudflareAccount } from "../../hooks/useDomainZoneMatches";
 
 /**
  * Аккаунты Cloudflare, чьи зоны прочитать не удалось, — строкой над таблицей.
  *
  * Существует ради честности прочерка: подсказка в колонке Cloudflare берётся из
- * живых зон, и аккаунт со сломанным токеном в сопоставлении не участвует. Без
- * этой строки «—» у домена, чья зона лежит именно там, читалось бы как
- * «Cloudflare нет» — то есть отсутствие измерения нарисовалось бы знанием.
+ * живых зон, и аккаунт, зоны которого не прочитались, в сопоставлении либо не
+ * участвует вовсе, либо участвует устаревшим списком. Без этой строки «—» у
+ * домена, чья зона лежит именно там, читалось бы как «Cloudflare нет» — то есть
+ * отсутствие измерения нарисовалось бы знанием.
+ *
+ * Причина отказа — в `title` имени аккаунта, а не в самой строке: «не прочитан»
+ * без причины нечем отработать (истёкший токен чинят в настройках, оборвавшуюся
+ * сеть — повтором), но текст ошибки в пределе занимает экран, и разворачивать
+ * его над таблицей значит закрывать ей место. Обрезка — общая с отчётом прогона
+ * привязки (`clip`): текст у них один и тот же.
  *
  * Тон намеренно тихий (`status`, а не `alert`, серым, без ✕): это не событие, а
  * состояние — оно исчезнет само, когда токен починят, и перебивать им чтение
  * списка не за что. Событийный отчёт о привязке рядом громче и со своим
  * крестиком — у него другой предмет (`CloudflareBindBanner`).
  */
-export default function CloudflareUnreadBanner({ accounts }: { accounts: CloudflareAccount[] }) {
+export default function CloudflareUnreadBanner({ accounts }: { accounts: UnreadCloudflareAccount[] }) {
   return (
     <div
       role="status"
       style={{marginBottom:12,padding:"8px 12px",borderRadius:8,fontSize:12.5,background:"#f9fafb",color:"#6b7280",border:"1px solid #e5e7eb"}}
     >
-      Cloudflare: {accounts.length} account(s) could not be read ({accounts.map((a) => a.name).join(", ")}) — matches from them are not shown.
+      Cloudflare: {accounts.length} account(s) could not be read (
+      {accounts.map((a, i) => (
+        <React.Fragment key={a.account.id}>
+          {i > 0 ? ", " : null}
+          {/* Пунктир — единственное, чем строка сообщает, что причина вообще
+              где-то есть: тултип, о котором не догадались, не существует. */}
+          <span title={clip(errorText(a.error))} style={{textDecoration:"underline dotted"}}>
+            {a.account.name}
+          </span>
+        </React.Fragment>
+      ))}
+      {/* «Могут быть» — потому что бывает и то и другое: аккаунт, не прочитанный
+          ни разу, не даёт подсказок вовсе, а прочитанный до поломки токена
+          продолжает подсказывать по устаревшему списку зон. Утверждать одно из
+          двух значило бы соврать в половине случаев. */}
+      ) — matches from them may be missing or out of date.
     </div>
   );
 }

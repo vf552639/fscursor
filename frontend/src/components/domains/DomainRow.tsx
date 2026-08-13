@@ -139,7 +139,7 @@ function DomainRow({
         средний случай с прочерком, колонка сообщала бы «Cloudflare нет» о
         домене, чья зона заведена и работает; слив его с первым — обещала бы
         привязку, которой в базе нет и по которой нечего пушить регистратору. */}
-    <td style={{padding:"11px 16px",fontSize:13,color:cf?"#111":cfHintAccount?CF_HINT_TEXT:"#9ca3af"}}>
+    <td data-testid="cf-cell" style={{padding:"11px 16px",fontSize:13,color:cf?"#111":cfHintAccount?CF_HINT_TEXT:DIM_TEXT}}>
       {cf ? cf.name : cfHintAccount
         ? <span title={CF_HINT_TITLE} style={{fontStyle:"italic"}}>{cfHintAccount.name}</span>
         : "—"}
