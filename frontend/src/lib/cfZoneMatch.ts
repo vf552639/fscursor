@@ -117,6 +117,42 @@ export function normalizeZoneName(name: string): string {
 }
 
 /**
+ * Что нашлось по имени домена в зонах ОДНОГО аккаунта.
+ *
+ * Отдельный исход `ambiguous` есть и здесь, хотя две одноимённые зоны в одном
+ * аккаунте — редкость: выбрать `zoneId` наугад значит записать домену чужую
+ * зону, а по ней потом пушатся NS регистратору (см. разбор в шапке модуля).
+ */
+export type ZoneByName =
+  | { outcome: "matched"; zoneId: string }
+  | { outcome: "ambiguous"; zoneIds: string[] }
+  | { outcome: "none" };
+
+/**
+ * Найти зону домена среди зон одного аккаунта — тот самый «дорезолв», который
+ * `matchDomainsToZones` объявляет ОТДЕЛЬНЫМ правилом и потому не делает
+ * (см. `skipped`): аккаунт уже выбран пользователем, искать надо только в нём, и
+ * межаккаунтной неоднозначности здесь не бывает по построению.
+ *
+ * Живёт рядом с `matchDomainsToZones` не ради соседства, а ради общей
+ * нормализации имени: разъехавшись, два правила показали бы в строке таблицы
+ * совпадение, которого карточка домена не находит (или наоборот).
+ */
+export function resolveZoneByName(
+  domainName: string,
+  zones: ReadonlyArray<{ id: string; name: string }>,
+): ZoneByName {
+  const key = normalizeZoneName(domainName);
+  // Пустое имя не совпадает ни с чем — иначе с ним совпала бы зона с пустым
+  // именем, то есть мусор из ответа API привязался бы к мусору в базе.
+  if (!key) return { outcome: "none" };
+  const hits = zones.filter((z) => normalizeZoneName(z.name) === key);
+  if (hits.length === 0) return { outcome: "none" };
+  if (hits.length > 1) return { outcome: "ambiguous", zoneIds: hits.map((z) => z.id) };
+  return { outcome: "matched", zoneId: hits[0].id };
+}
+
+/**
  * Сопоставить домены зонам. Чистая функция: ни сети, ни React, ни времени.
  *
  * Совпадение ТОЧНОЕ по имени. Поддомен (`shop.example.com` при зоне

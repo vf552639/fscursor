@@ -4,6 +4,7 @@ import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
+import { registrarsKeys } from "./registrars";
 import { useAuthStore } from "../store/auth";
 
 export interface Domain {
@@ -322,6 +323,14 @@ export function useSetNameservers() {
       // вызывающего. Оставлено как парная инвалидация — в тот день, когда
       // карточка станет отдельным запросом, забыть её здесь будет дороже.
       queryClient.invalidateQueries({ queryKey: domainsKeys.detail(vars.domainId) });
+      // Список доменов регистратора — то, по чему карточка сверяет настоящие NS
+      // с NS зоны (бейдж делегирования). Мы только что поменяли именно его
+      // содержимое, и без сброса бейдж ещё долго показывал бы «MISMATCH» на
+      // удавшейся смене. Тоже на ОБОИХ исходах: отказ регистратора мог
+      // примениться частично.
+      if (vars.registrarAccountId != null) {
+        queryClient.invalidateQueries({ queryKey: registrarsKeys.domains(vars.registrarAccountId) });
+      }
     },
   });
 }
