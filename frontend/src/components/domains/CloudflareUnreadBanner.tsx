@@ -21,7 +21,7 @@ import { UnreadCloudflareAccount } from "../../hooks/useDomainZoneMatches";
  * Тон намеренно тихий (`status`, а не `alert`, серым, без ✕): это не событие, а
  * состояние — оно исчезнет само, когда токен починят, и перебивать им чтение
  * списка не за что. Событийный отчёт о привязке рядом громче и со своим
- * крестиком — у него другой предмет (`CloudflareBindBanner`).
+ * крестиком — у него другой предмет (`RunNoticeBanner`).
  */
 export default function CloudflareUnreadBanner({ accounts }: { accounts: UnreadCloudflareAccount[] }) {
   return (

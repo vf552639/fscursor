@@ -6,12 +6,13 @@ import { useServers } from "../api/servers";
 import { useRegistrarAccounts } from "../api/registrars";
 import { useCloudflareAccounts } from "../api/cloudflare";
 import { CfBindNotice } from "../api/cfAutoBind";
+import { FullSetupNotice } from "../api/fullSetup";
 import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
 import DomainStats from "../components/domains/DomainStats";
 import DomainTable from "../components/domains/DomainTable";
 import BulkProvisionErrorBanner from "../components/domains/BulkProvisionErrorBanner";
-import CloudflareBindBanner from "../components/domains/CloudflareBindBanner";
+import RunNoticeBanner from "../components/domains/RunNoticeBanner";
 import CloudflareUnreadBanner from "../components/domains/CloudflareUnreadBanner";
 import DomainsLoading from "../components/domains/DomainsLoading";
 import DomainsHeader from "../components/domains/DomainsHeader";
@@ -20,20 +21,24 @@ import DomainsEmptyState from "../components/domains/DomainsEmptyState";
 import AssignCloudflareDialog from "../components/domains/AssignCloudflareDialog";
 import AssignServerDialog from "../components/domains/AssignServerDialog";
 import BulkAddDialog from "../components/domains/BulkAddDialog";
+import FullSetupDialog from "../components/domains/FullSetupDialog";
 import ProvisionDialog from "../components/domains/ProvisionDialog";
 import { DomainUI, toDomainUI } from "../components/domains/types";
 import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
 import { confirmAction } from "../lib/confirmDialog";
+import { EMPTY_FULL_SETUP_FORM, planFromForm } from "../lib/fullSetupPlan";
+import { isTauri } from "../lib/runtime";
 import { useBulkProvision } from "../hooks/useBulkProvision";
 import { useCloudflareBind } from "../hooks/useCloudflareBind";
+import { useFullSetup } from "../hooks/useFullSetup";
 import { useDomainFilters } from "../hooks/useDomainFilters";
 import { useDomainSort } from "../hooks/useDomainSort";
 import { useDomainZoneMatches } from "../hooks/useDomainZoneMatches";
 import { useNow } from "../hooks/useNow";
 
-export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice }: {
+export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult, onBulkProvisionError, onCloudflareBindNotice, onFullSetupNotice }: {
   ctx?: any;
   /**
    * Куда отдать результат provision. Показывает его модалка показа-один-раз,
@@ -95,6 +100,22 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
    * не нужно.
    */
   onCloudflareBindNotice: (notice: CfBindNotice) => void;
+  /**
+   * Куда отдать итог полной настройки, если баннера страницы больше нет.
+   *
+   * Обязательный по той же причине, что и `onCloudflareBindNotice`, только цена
+   * выше: прогон по сотне доменов идёт минутами (зона в Cloudflare плюс смена
+   * делегирования на каждый), уйти со страницы за это время — обычное дело, а в
+   * отчёте лежит новость, которой больше нигде нет: сколько зон заведено в
+   * Cloudflare, но не записано в SDMP. Забытый проп означал бы, что след
+   * операции, менявшей чужие сервисы, стирается уходом на соседнюю вкладку.
+   *
+   * Отдельный проп, а не общий с привязкой: тексты у них разные, а получатель
+   * один — воркспейс разбирает `kind` и показывает тост. Слить их значило бы
+   * назвать полную настройку привязкой в первой же строке, которую увидит
+   * читающий код.
+   */
+  onFullSetupNotice: (notice: FullSetupNotice) => void;
 }){
   const domainsQ = useDomains();
   const serversQ = useServers();
@@ -125,6 +146,19 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
 
   const [showAssignServer, setShowAssignServer] = useState(false);
   const [showAssignCF, setShowAssignCF] = useState(false);
+  const [showFullSetup, setShowFullSetup] = useState(false);
+  /**
+   * Выбор в диалоге полной настройки — здесь, а не в диалоге, по той же
+   * причине, что и выбор сервера ниже: закрытие диалога его не теряет. Здесь
+   * причина сильнее — выбрано пять вещей сразу.
+   *
+   * «Создать зону» включено по умолчанию, в отличие от мастера «Add Domain»:
+   * кнопка называется «Full setup», и прогон без этого шага делает ровно то же,
+   * что уже делают соседние «Assign Server» и «Assign CF». NS оставлены
+   * выключенными — смена делегирования уводит живой трафик, и просить её надо
+   * явно.
+   */
+  const [fullSetupForm, setFullSetupForm] = useState({ ...EMPTY_FULL_SETUP_FORM, createZone: true });
   // Выбор в диалогах назначения гасит только удачное назначение — закрытие
   // диалога его сохраняет, поэтому он и живёт здесь. Промахнуться мимо Cancel
   // легко, а выбор сделан в списке из сотни машин.
@@ -178,6 +212,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   const [provisionTarget, setProvisionTarget] = useState<DomainUI | null>(null);
   const [showFileImport, setShowFileImport] = useState(false);
   const cfBind = useCloudflareBind(onCloudflareBindNotice);
+  const fullSetup = useFullSetup(onFullSetupNotice);
   const bulkProvision = useBulkProvision({
     domains,
     selected: sel,
@@ -223,6 +258,28 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       { domain_ids: Array.from(sel), cloudflare_account_id: Number(cfAccountId) },
       { onSuccess: () => { setShowAssignCF(false); setSel(new Set()); setAssignCFId(""); } }
     );
+  };
+
+  /**
+   * Полная настройка выделенных: связки бэкендом, зона и NS — десктопом.
+   *
+   * Диалог закрывается сразу: прогон идёт минутами, отчитывается баннером над
+   * таблицей, и открытая модалка закрывала бы собой ровно то, ради чего его
+   * запускали. Выделение при этом НЕ снимается — как у синхрона с Cloudflare и
+   * по той же причине: типичный исход частичный (зона не завелась, NS отбиты
+   * регистратором), доработка идёт по тому же набору, а повтор безопасен —
+   * связки идемпотентны, вторая зона на то же имя не заводится.
+   */
+  const handleFullSetup = () => {
+    const registrarProvider =
+      registrars.find((r) => String(r.id) === fullSetupForm.registrarId)?.provider ?? null;
+    const plan = planFromForm(fullSetupForm, { desktop: isTauri(), registrarProvider });
+    // Кнопка диалога без сервера и аккаунта Cloudflare не нажимается, но
+    // решение «исполним ли план» принимает не разметка: `null` здесь значит,
+    // что запросу нечем заполнить обязательные поля.
+    if (!plan || plan.serverId == null) return;
+    setShowFullSetup(false);
+    void fullSetup.runBulk(Array.from(sel), { ...plan, serverId: plan.serverId });
   };
 
   const handleProvision = (target: DomainUI, withDb: boolean) => {
@@ -289,7 +346,21 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     <DomainFilters {...filters.controls} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />
     {bulkProvision.error ? <BulkProvisionErrorBanner message={bulkProvision.error} /> : null}
     {cfBind.notice ? (
-      <CloudflareBindBanner notice={cfBind.notice} onDismiss={cfBind.dismiss} />
+      <RunNoticeBanner
+        notice={cfBind.notice}
+        dismissLabel="Dismiss Cloudflare match result"
+        onDismiss={cfBind.dismiss}
+      />
+    ) : null}
+    {/* Баннеров может стоять два сразу, и это не дубль: привязка отвечает на
+        «чьи это зоны», полная настройка — на «что мы с доменами сделали».
+        Гасятся они порознь, поэтому и крестики названы по-разному. */}
+    {fullSetup.notice ? (
+      <RunNoticeBanner
+        notice={fullSetup.notice}
+        dismissLabel="Dismiss full setup result"
+        onDismiss={fullSetup.dismiss}
+      />
     ) : null}
     {zoneMatches.unreadAccounts.length > 0 ? (
       <CloudflareUnreadBanner accounts={zoneMatches.unreadAccounts} />
@@ -316,6 +387,8 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
         void cfBind.run(domainsData.filter((d) => sel.has(d.id)), "manual");
       }}
       syncPending={cfBind.pending}
+      onFullSetup={() => setShowFullSetup(true)}
+      fullSetupPending={fullSetup.pending}
       onProvision={() => { void bulkProvision.run(); }}
       onDelete={handleBulkDelete}
       provisionPending={bulkProvisionRunning}
@@ -351,7 +424,14 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       </div>
     </Card>
 
-    {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} onCreated={(d: Domain)=>{ void cfBind.run([d], "auto"); }} />}
+    {/* Зону просили — идёт полная настройка; не просили — прежняя автопривязка
+        по имени. Одно вместо другого, а не одно за другим: домен с уже
+        выбранным аккаунтом привязка всё равно пропускает, а зону в этом случае
+        заводит full setup. */}
+    {showAdd && <AddDomainModal onClose={()=>setSA(false)} servers={servers} registrars={registrars} cfAccounts={cfAccounts} domains={domainsData} onCreated={(d: Domain, plan)=>{
+      if (plan?.createZone) void fullSetup.runForNewDomain({ id: d.id, domain_name: d.domain_name }, plan);
+      else void cfBind.run([d], "auto");
+    }} />}
     {/* `detailDomain` — снимок строки на момент клика, и он НЕ обновляется от
         инвалидации: модалка показывала бы «NS status: pending» ещё долго после
         удачной смены NS, то есть ровно ту ложь, ради устранения которой заведён
@@ -395,6 +475,23 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
         pending={bulkAssignCF.isPending}
         onAssign={handleAssignCF}
         onClose={() => setShowAssignCF(false)}
+      />
+    )}
+    {showFullSetup && (
+      <FullSetupDialog
+        selectedCount={sel.size}
+        servers={servers}
+        registrars={registrars}
+        cfAccounts={cfAccounts}
+        // Строки из ответа API: нагрузку считаем по всем доменам, а не по
+        // видимым — фильтр показа к тому, сколько доменов сидит на сервере,
+        // отношения не имеет.
+        domains={domainsData}
+        value={fullSetupForm}
+        onChange={setFullSetupForm}
+        pending={fullSetup.pending}
+        onRun={handleFullSetup}
+        onClose={() => setShowFullSetup(false)}
       />
     )}
     {showFileImport && (

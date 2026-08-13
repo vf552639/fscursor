@@ -791,6 +791,12 @@ export default function DesktopWorkspace() {
             onCloudflareBindNotice={(n) =>
               n.kind === "warn" ? showWarning(n.text) : showToast(n.text)
             }
+            // Итог полной настройки — тем же тостом и по той же причине: пока
+            // страница жива, он живёт её баннером, а сюда доезжает только то,
+            // что осталось без баннера.
+            onFullSetupNotice={(n) =>
+              n.kind === "warn" ? showWarning(n.text) : showToast(n.text)
+            }
           />
         )}
         {page === "cloudflare" && <Cloudflare onNav={nav} />}

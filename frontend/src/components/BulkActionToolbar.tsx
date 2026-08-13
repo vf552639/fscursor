@@ -15,9 +15,11 @@ export default function BulkActionToolbar({
   onAssignServer,
   onAssignCF,
   onSyncCloudflare,
+  onFullSetup,
   onProvision,
   onDelete,
   syncPending,
+  fullSetupPending,
   provisionPending,
 }: {
   selectedCount: number;
@@ -31,6 +33,11 @@ export default function BulkActionToolbar({
    * — это кнопка, которая молчит, а такую от сломанной не отличить.
    */
   onSyncCloudflare: () => void;
+  /**
+   * Открыть диалог полной настройки выделенных. Обязателен по той же причине,
+   * что и `onSyncCloudflare`: кнопка без обработчика неотличима от сломанной.
+   */
+  onFullSetup: () => void;
   onProvision: () => void;
   onDelete: () => void;
   /**
@@ -43,6 +50,15 @@ export default function BulkActionToolbar({
    * остановит молча, и это неотличимо от сломанной кнопки.
    */
   syncPending: boolean;
+  /**
+   * Идёт ли полная настройка. Гасит ТОЛЬКО свою кнопку — как `provisionPending`
+   * и по той же причине: соседние действия к чужому прогону отношения не имеют.
+   *
+   * Обязателен, в отличие от `provisionPending`: у полной настройки нет второго
+   * барьера вроде модалки подтверждения, и забытый признак означал бы живую
+   * кнопку на весь прогон — клик по ней гейт остановит молча.
+   */
+  fullSetupPending: boolean;
   /**
    * Идёт ли массовый provision. Гасит ТОЛЬКО свою кнопку.
    *
@@ -91,9 +107,9 @@ export default function BulkActionToolbar({
           прогона (`api/cfAutoBind.ts`, «ТОЛЬКО десктоп»).
           CTA «открыть в десктопе» под него потребовал бы нового хоста в
           `parseDeepLinkAction` (`lib/deepLink.ts`), а хост, которого там нет, —
-          это ссылка в никуда: ровно те кнопки, которые на этой ветке только что
-          удалены («Set NS», «Refresh SSL», «Full Setup»). Поэтому в вебе кнопки
-          просто нет.
+          это ссылка в никуда: ровно те кнопки, которые на этой ветке удалены
+          («Set NS», «Refresh SSL»). Поэтому в вебе кнопки просто нет — так же,
+          как у «Full setup» ниже.
 
           Подпись — тот же глагол, что у кнопки в шапке вкладки (`CF_SYNC_VERB`,
           он же в подсказке строки), и разнится только областью. Действие за
@@ -124,20 +140,30 @@ export default function BulkActionToolbar({
           бэкенде не существует. Массовый вариант был вдобавок хуже одиночного —
           `Promise.all(ids.map(mutateAsync))` без `catch` давал на 50 доменах 50
           штук 404 и unhandled rejection. */}
-      {/* «Refresh SSL» и «Full Setup» удалены по той же причине, что и «Set NS»
-          выше: роутов `POST /domains/{id}/refresh-ssl` и
-          `/domains/bulk-full-setup` на бэкенде нет, а `sdmp://refresh-ssl` и
-          `sdmp://bulk-full-setup` не разбирает `parseDeepLinkAction` — обе
-          кнопки вели в никуда в обеих средах. Перевести их на Tauri сегодня
-          нечем: SSL — это отдельная SSH-операция без своей команды, а Full Setup
-          — связка assign → `cf_create_zone` → `registrar_set_nameservers`. И то
-          и другое — функция со своим планом, а не проброс кнопки.
-          ⚠️ Не спутать пути: с 2026-08-13 на бэкенде есть `POST
-          /domains/full-setup` — но он делает только шаг assign, а зону и NS
-          выполняет десктоп. Кнопка вернётся вместе с командой
-          `domain_full_setup` (план `2026-08-13-domains-full-setup.md`, фазы
-          2–3), и звать она будет именно `full-setup`, а не
-          `bulk-full-setup`. */}
+      {/* «Refresh SSL» удалён по той же причине, что и «Set NS» выше: роута
+          `POST /domains/{id}/refresh-ssl` на бэкенде нет, а `sdmp://refresh-ssl`
+          не разбирает `parseDeepLinkAction` — кнопка вела в никуда в обеих
+          средах. Перевести её на Tauri сегодня нечем: SSL — это отдельная
+          SSH-операция без своей команды. Функция со своим планом, а не проброс
+          кнопки.
+
+          «Full setup» ниже — вернувшаяся, а не та же самая: прежняя звала
+          несуществующий `POST /domains/bulk-full-setup`. Теперь связки делает
+          `POST /domains/full-setup`, а зону и NS — команда `domain_full_setup`
+          в десктопе. Отсюда и десктоп-онли: в вебе выполнять шаги нечем, а
+          CTA «открыть в десктопе» потребовал бы хоста в `parseDeepLinkAction`,
+          которого там нет, — то есть ссылки в никуда (см. синхрон выше). */}
+      {isTauri() ? (
+        <Btn
+          variant="secondary"
+          size="sm"
+          onClick={onFullSetup}
+          disabled={fullSetupPending}
+          title="Связать выделенные домены с сервером и аккаунтом Cloudflare, завести зону и (по выбору) прописать NS"
+        >
+          {fullSetupPending ? "Настройка…" : "Full setup"}
+        </Btn>
+      ) : null}
       <OpenInDesktop
         action={`bulk-provision${q}`}
         label="Provision"

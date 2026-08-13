@@ -160,7 +160,7 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} onCloudflareBindNotice={() => {}} />
+      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} onCloudflareBindNotice={() => {}} onFullSetupNotice={() => {}} />
     </QueryClientProvider>,
   );
 }

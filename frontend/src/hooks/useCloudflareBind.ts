@@ -1,7 +1,6 @@
 import { useState, useRef } from "react";
-import { useMutationState } from "@tanstack/react-query";
 
-import { queryClient } from "../api/queryClient";
+import { runExclusive, useRunPending } from "../api/runGate";
 import { Domain } from "../api/domains";
 import { autoBindDomainsToCloudflare, summarizeCfBind, summarizeCfBindFailure, CfBindNotice } from "../api/cfAutoBind";
 import { useLiveOrAway } from "./useLiveOrAway";
@@ -15,14 +14,11 @@ import { useLiveOrAway } from "./useLiveOrAway";
 export type CfBindMode = "auto" | "manual";
 
 /**
- * Заявка «идёт привязка ПО КНОПКЕ» в `MutationCache`.
+ * Ключ заявки «идёт привязка ПО КНОПКЕ» в `MutationCache`. Сам приём — общий,
+ * он же держит гейт полной настройки (`api/runGate.ts`); здесь остаётся только
+ * ключ и решение, кого им гасить.
  *
- * Ключ, а не поле стейта, и это ровно та же причина, по которой признак
- * массового provision берётся из кэша мутаций: прогон живёт дольше страницы, а
- * страница размонтируется на любой навигации. Пока гейт лежал в `useRef`/
- * `useState` экземпляра, уход со страницы посреди прогона и возврат давали
- * НОВЫЙ экземпляр с живой кнопкой — второй клик запускал второй проход поверх
- * первого. Записи привязки идемпотентны, поэтому порчи данных не было, но
+ * Записи привязки идемпотентны, поэтому второй проход не портил данные — но
  * пользователь получал два отчёта на одно действие и не мог понять, какой из
  * них про что.
  *
@@ -88,9 +84,7 @@ export function useCloudflareBind(onAway: (notice: CfBindNotice) => void): Cloud
    * `CF_BIND_KEY`. Кнопка гаснет и после возврата на страницу, пока прогон,
    * запущенный прошлым экземпляром, ещё идёт.
    */
-  const pending = useMutationState({
-    filters: { mutationKey: CF_BIND_KEY, status: "pending" },
-  }).length > 0;
+  const pending = useRunPending(CF_BIND_KEY);
 
   /**
    * Куда положить итог привязки: в баннер страницы, а если он недоступен —
@@ -183,41 +177,18 @@ export function useCloudflareBind(onAway: (notice: CfBindNotice) => void): Cloud
    * делят одной записью кэша (`fetchQuery` схлопывает одинаковые запросы), а
    * `PUT` привязки идемпотентен.
    *
-   * Гейт спрашивает КЭШ, а не отрендеренный `pending`, и обе причины настоящие:
-   * `pending` доезжает только к следующему рендеру (два клика успевают
-   * случиться в одном — и тогда зоны читались бы дважды, а `PUT`'ы уходили бы
-   * парами), а кэш вдобавок помнит прогон, запущенный ПРОШЛЫМ экземпляром
-   * страницы. Заявка встаёт в `pending` синхронно внутри `execute`, до первого
-   * `await`, поэтому второй клик в том же такте её уже видит.
+   * Два клика в одном такте гейт останавливает потому, что спрашивает КЭШ, а не
+   * отрендеренный `pending` (см. `runExclusive`): иначе зоны читались бы
+   * дважды, а `PUT`'ы уходили бы парами. Бросить внутри `bind` может только
+   * сама доставка — `onAway` чужой проп, — и отказ там гейту уже не вредит:
+   * заявка снята в любом исходе.
    */
   const run = async (rows: Domain[], mode: CfBindMode) => {
     if (mode !== "manual") {
       await bind(rows, mode);
       return;
     }
-    const running = queryClient.getMutationCache().find({
-      mutationKey: CF_BIND_KEY,
-      status: "pending",
-    });
-    if (running) return;
-    await queryClient
-      .getMutationCache()
-      .build(queryClient, {
-        mutationKey: CF_BIND_KEY,
-        // Зоны Cloudflare читает Tauri-команда, а не webview: `navigator.onLine`
-        // про эту сеть ничего не знает. С дефолтным `networkMode: "online"`
-        // react-query на «оффлайне» браузера не запустил бы `mutationFn` вовсе,
-        // а заявка осталась бы висеть — кнопка погасла бы навсегда.
-        networkMode: "always" as const,
-        mutationFn: () => bind(rows, mode),
-      })
-      // `execute` отклоняет промис, если `mutationFn` бросил, а все три входа
-      // зовут `run` через `void` — то есть отказ стал бы unhandled rejection.
-      // Бросить внутри `bind` может только сама доставка: `onAway` — чужой
-      // проп, и он же единственная поверхность, куда об этом можно было бы
-      // сказать. Гейт при этом уже своё отработал: заявка снята в любом исходе.
-      .execute(undefined)
-      .catch(() => {});
+    await runExclusive(CF_BIND_KEY, () => bind(rows, mode));
   };
 
   return { notice, dismiss, pending, run };

@@ -108,6 +108,7 @@ function renderPage(rows = [domainRow(1, "a.com")]) {
         onBulkProvisionResult={vi.fn()}
         onBulkProvisionError={vi.fn()}
         onCloudflareBindNotice={onNotice}
+        onFullSetupNotice={vi.fn()}
       />
     </QueryClientProvider>,
   );
@@ -385,6 +386,7 @@ describe("Domains — кнопка «Синхронизировать выдел
           onBulkProvisionResult={vi.fn()}
           onBulkProvisionError={vi.fn()}
           onCloudflareBindNotice={onNotice}
+          onFullSetupNotice={vi.fn()}
         />
       </QueryClientProvider>,
     );

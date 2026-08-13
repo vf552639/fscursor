@@ -127,8 +127,13 @@ export function clip(text: string): string {
  * Порядок важен: отчёт читается рядом со списком доменов, а конкурентные
  * `push` расставили бы строки в порядке ответов сервера — то есть по-разному
  * от прогона к прогону.
+ *
+ * Экспортируется ради второго прогона по пачке доменов — полной настройки
+ * (`api/fullSetup.ts`). Предел у неё СВОЙ и меньше (см. `SETUP_CONCURRENCY`):
+ * общая здесь только раздача задач, а сколько чужого API выдержит — вопрос к
+ * тому, что за этими задачами стоит.
  */
-async function mapWithLimit<T, R>(
+export async function mapWithLimit<T, R>(
   items: ReadonlyArray<T>,
   limit: number,
   worker: (item: T) => Promise<R>,

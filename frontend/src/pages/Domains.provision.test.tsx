@@ -107,7 +107,7 @@ function renderPage(onProvisionResult: (r: any) => void = vi.fn()) {
   // клиентом утверждения про кэш мутаций были бы зелены вхолостую.
   const ui = (
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={onProvisionResult} onBulkProvisionResult={vi.fn()} onBulkProvisionError={vi.fn()} onCloudflareBindNotice={vi.fn()} />
+      <Domains onProvisionResult={onProvisionResult} onBulkProvisionResult={vi.fn()} onBulkProvisionError={vi.fn()} onCloudflareBindNotice={vi.fn()} onFullSetupNotice={vi.fn()} />
     </QueryClientProvider>
   );
   // `remount` — уход со страницы и возврат: тот же клиент, новый `Domains`.
@@ -127,7 +127,7 @@ function Workspace({ rows }: { rows: Array<{ id: number; name: string }> }) {
   const queue = useShowOnceQueue<ProvisionOutcome>();
   return (
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={queue.push} onBulkProvisionResult={vi.fn()} onBulkProvisionError={vi.fn()} onCloudflareBindNotice={vi.fn()} />
+      <Domains onProvisionResult={queue.push} onBulkProvisionResult={vi.fn()} onBulkProvisionError={vi.fn()} onCloudflareBindNotice={vi.fn()} onFullSetupNotice={vi.fn()} />
       {queue.current && (
         <ProvisionResultModal
           domain={queue.current.domain}
