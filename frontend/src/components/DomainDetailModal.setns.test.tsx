@@ -557,6 +557,7 @@ describe("мёртвые NS-действия удалены", () => {
           onAssignServer={() => {}}
           onAssignCF={() => {}}
           onSyncCloudflare={() => {}}
+          syncPending={false}
           onProvision={() => {}}
           onDelete={() => {}}
         />
@@ -583,6 +584,7 @@ describe("массовый Set NS", () => {
           onAssignServer={() => {}}
           onAssignCF={() => {}}
           onSyncCloudflare={() => {}}
+          syncPending={false}
           onProvision={() => {}}
           onDelete={() => {}}
         />

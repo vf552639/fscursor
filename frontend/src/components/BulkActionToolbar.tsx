@@ -35,8 +35,13 @@ export default function BulkActionToolbar({
   /**
    * Идёт ли прогон привязки. Гасит ТОЛЬКО кнопку синхрона (здесь и в шапке
    * вкладки — прогон у них общий), но не соседей — см. `provisionPending`.
+   *
+   * Обязателен, в отличие от `provisionPending`: тот гасит кнопку, у которой
+   * своя защита от второго клика видна пользователю (модалка запуска), а
+   * забытый здесь означал бы живую кнопку на весь прогон — клик по ней гейт
+   * остановит молча, и это неотличимо от сломанной кнопки.
    */
-  syncPending?: boolean;
+  syncPending: boolean;
   /**
    * Идёт ли массовый provision. Гасит ТОЛЬКО свою кнопку.
    *
@@ -80,9 +85,9 @@ export default function BulkActionToolbar({
         label="Assign CF"
         desktopOnClick={onAssignCF}
       />
-      {/* Не `OpenInDesktop`, и это выбор, а не пропущенная унификация: зоны
-          Cloudflare в базе не лежат вовсе — их вживую читает Tauri-команда
-          `cf_list_zones`, — поэтому в вебе действие невозможно даже теоретически.
+      {/* Не `OpenInDesktop`, и это выбор, а не пропущенная унификация: в вебе
+          действие невозможно даже теоретически — почему, разобрано у самого
+          прогона (`api/cfAutoBind.ts`, «ТОЛЬКО десктоп»).
           CTA «открыть в десктопе» под него потребовал бы нового хоста в
           `parseDeepLinkAction` (`lib/deepLink.ts`), а хост, которого там нет, —
           это ссылка в никуда: ровно те кнопки, которые на этой ветке только что
@@ -100,7 +105,7 @@ export default function BulkActionToolbar({
           variant="secondary"
           size="sm"
           onClick={onSyncCloudflare}
-          disabled={Boolean(syncPending)}
+          disabled={syncPending}
         >
           {syncPending ? "Синхронизация…" : "Синхронизировать выделенные"}
         </Btn>

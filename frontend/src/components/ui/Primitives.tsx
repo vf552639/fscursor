@@ -164,7 +164,11 @@ export function CBo({children, style}: {children: React.ReactNode, style?: React
   return <div style={{padding:20,...style}}>{children}</div>;
 }
 
-export function Btn({children, variant="secondary", size="md", onClick, style, disabled}: any){
+// `title` — потому что подпись кнопки коротка по построению (она стоит в ряду
+// таких же), а сказать иногда надо ещё и границы действия: что именно оно
+// делает и чего НЕ делает. Без него такое объяснение уезжает в обёртку-`span`
+// мимо общих стилей либо не появляется вовсе.
+export function Btn({children, variant="secondary", size="md", onClick, style, disabled, title}: any){
   const sz: any={sm:{fontSize:12,padding:"6px 11px"},md:{fontSize:13,padding:"8px 15px"},lg:{fontSize:14,padding:"10px 20px"}};
   const va: any={
     primary:{background:"#2563eb",color:"#fff",border:"none"},
@@ -172,7 +176,7 @@ export function Btn({children, variant="secondary", size="md", onClick, style, d
     danger:{background:"#fef2f2",color:"#dc2626",border:"1px solid #fecaca"},
     ghost:{background:"transparent",color:"#6b7280",border:"none"}
   };
-  return <button onClick={onClick} disabled={disabled}
+  return <button onClick={onClick} disabled={disabled} title={title}
     style={{display:"inline-flex",alignItems:"center",gap:6,borderRadius:8,fontFamily:"'Inter',sans-serif",fontWeight:500,cursor:disabled?"not-allowed":"pointer",transition:"all 0.15s",opacity:disabled?0.5:1,...sz[size],...va[variant],...style}}
     onMouseEnter={e=>{if(!disabled)e.currentTarget.style.filter="brightness(0.93)";}}
     onMouseLeave={e=>{e.currentTarget.style.filter="none";}}

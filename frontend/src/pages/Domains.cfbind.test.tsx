@@ -263,11 +263,11 @@ describe("Domains — автопривязка в вебе", () => {
 
     const { container } = renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
+    // Ни в шапке, ни в тулбаре — и без CTA «открыть в десктопе»: хоста под
+    // синхрон в `parseDeepLinkAction` нет, а ссылка в неразбираемый хост — это
+    // тот же 404, который мы только что убрали.
     expect(syncAllBtn()).toBeNull();
     expect(await selectAll(container)).toBeNull();
-    // И ссылки в десктоп тоже: хоста под неё в `parseDeepLinkAction` нет, а
-    // ссылка в неразбираемый хост — это тот же 404, который мы только что убрали.
-    expect(container.querySelectorAll('a[href^="sdmp://match-cf"]').length).toBe(0);
   });
 });
 
@@ -281,6 +281,9 @@ describe("Domains — кнопка «Синхронизировать с Cloudfl
 
     renderPage([domainRow(1, "a.com"), domainRow(2, "b.com")]);
     await screen.findByText("a.com");
+    // Границы действия названы: глагол «синхронизировать» обещает больше, чем
+    // делается, и единственное место, где обещание сужено, — этот `title`.
+    expect(syncAllBtn()!.title).toContain("уже привязанное не трогает");
     // Ни одной галочки не поставлено: подсказка живого матча стоит в строках
     // сама, и человеку, который её прочитал, выделять нечего.
     fireEvent.click(syncAllBtn()!);
@@ -309,21 +312,25 @@ describe("Domains — кнопка «Синхронизировать с Cloudfl
     }));
   });
 
-  it("второй клик не запускает второй проход", async () => {
+  it("гасит на время прогона и себя, и кнопку по выделенным", async () => {
     setTauri(true);
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
-    renderPage([domainRow(1, "a.com")]);
+    const { container } = renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
     const btn = syncAllBtn()!;
     fireEvent.click(btn);
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
-    // Гейт «один прогон за раз» у обеих кнопок общий (`useCloudflareBind`):
-    // область у них разная, а прогон один — и второй поверх первого не встаёт.
+    // Выделяем строки уже во время прогона: тулбар появляется впервые и обязан
+    // появиться погасшим. Действие у двух кнопок одно, и живая вторая означала
+    // бы, что она делает что-то своё — а она пошла бы вторым проходом по тем же
+    // зонам (гейт его остановит, но молча, см. `useCloudflareBind`).
+    fireEvent.click(container.querySelector('thead input[type="checkbox"]') as HTMLInputElement);
+    const busy = screen.getAllByRole("button", { name: /Синхронизация…/ }) as HTMLButtonElement[];
+    expect(busy.length).toBe(2);
+    expect(busy.every((b) => b.disabled)).toBe(true);
     expect(btn.disabled).toBe(true);
-    fireEvent.click(btn);
-    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -391,21 +398,26 @@ describe("Domains — кнопка «Синхронизировать выдел
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });
 
-  it("второй клик не запускает второй проход", async () => {
+  it("гасит на время прогона и себя, и кнопку синхрона в шапке", async () => {
     setTauri(true);
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
     const { container } = renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
+    // Ссылку на кнопку шапки берём ДО прогона: во время него у неё другая
+    // подпись, и найти её по прежней уже нельзя.
+    const headerBtn = syncAllBtn()!;
     const btn = (await selectAll(container))!;
     fireEvent.click(btn);
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
-    // Кнопка гаснет на время прогона, но полагаться только на неё нельзя:
-    // между двумя кликами в одном тике перерисовки не будет.
+    // Гаснут обе: прогон один на два входа. Сам гейт «один прогон за раз»
+    // проверяется там, где живёт (`useCloudflareBind.test.tsx`) — по погасшей
+    // кнопке кликом его не проверить, у disabled-кнопки обработчик не зовётся
+    // вовсе, и тест был бы зелёным и без гейта.
     expect(btn.disabled).toBe(true);
-    fireEvent.click(btn);
-    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+    expect(headerBtn.disabled).toBe(true);
+    expect(headerBtn.textContent).toContain("Синхронизация…");
   });
 
   it("не проглатывает автопривязку домена, заведённого во время прогона", async () => {
