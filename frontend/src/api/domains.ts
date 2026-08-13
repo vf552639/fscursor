@@ -325,15 +325,12 @@ export function useSetNameservers() {
       queryClient.invalidateQueries({ queryKey: domainsKeys.detail(vars.domainId) });
       // NS этого домена у регистратора — то, по чему карточка сверяет
       // делегирование. Мы только что поменяли ровно их, и без сброса бейдж ещё
-      // минуту (`staleTime`) показывал бы «MISMATCH» на удавшейся смене.
-      // Списком доменов аккаунта — по той же причине: у Hostiq он несёт те же
-      // nameservers, и после смены он тоже устарел. Оба сброса на ОБОИХ
-      // исходах: отказ регистратора мог примениться частично.
+      // минуту (`staleTime`) показывал бы «MISMATCH» на удавшейся смене. На
+      // ОБОИХ исходах: отказ регистратора мог примениться частично.
       if (vars.registrarAccountId != null) {
         queryClient.invalidateQueries({
           queryKey: registrarsKeys.nameservers(vars.registrarAccountId, vars.domainName),
         });
-        queryClient.invalidateQueries({ queryKey: registrarsKeys.domains(vars.registrarAccountId) });
       }
     },
   });

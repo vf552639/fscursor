@@ -65,13 +65,6 @@ export interface RegistrarTestResult {
   message: string;
 }
 
-export interface RegistrarDomain {
-  domain: string | null;
-  expiry_date: string | null;
-  status: string | null;
-  nameservers: string[];
-}
-
 function requireUserId(): string {
   const userId = useAuthStore.getState().userId;
   if (!userId) throw new Error("Desktop: unlock session (user id missing)");
@@ -80,8 +73,10 @@ function requireUserId(): string {
 
 export const registrarsKeys = {
   accounts: ["registrars", "accounts"] as const,
-  domains: (accountId: number) => ["registrars", accountId, "domains"] as const,
-  /** Ключ на ДОМЕН: соседний `domains` — это выкачка аккаунта, а тут один вопрос про один домен. */
+  /**
+   * Ключ на ДОМЕН, а не на аккаунт: спрашиваем мы про один домен
+   * (`registrar_get_nameservers`), и запись кэша обязана совпадать с вопросом.
+   */
   nameservers: (accountId: number, domain: string) =>
     ["registrars", accountId, "nameservers", domain] as const,
 };
@@ -136,25 +131,10 @@ export function useTestRegistrarConnection() {
   });
 }
 
-export function useRegistrarDomains(accountId: number | null | undefined) {
-  return useQuery({
-    queryKey: accountId ? registrarsKeys.domains(accountId) : ["registrars", "domains", "disabled"],
-    queryFn: async () => {
-      requireDesktop("Reading domains from a registrar");
-      const userId = requireUserId();
-      return invokeSynced<RegistrarDomain[]>("registrar_get_domains", {
-        userId,
-        accountId: String(accountId),
-      });
-    },
-    enabled: !!accountId,
-  });
-}
-
 /**
  * Настоящие nameservers ОДНОГО домена — как их видит его регистратор.
  *
- * Отдельный запрос, а не поле из `useRegistrarDomains`, и это не оптимизация.
+ * Поимённый запрос, а не строка из листинга аккаунта, и это не оптимизация.
  * Листинг у Namecheap nameservers не отдаёт вовсе, а у обоих провайдеров он
  * непагинирован — то есть отсутствие домена в ответе означает «страница
  * кончилась» ничуть не реже, чем «домена в аккаунте нет», и сказать по нему

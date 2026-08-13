@@ -30,6 +30,18 @@ pub trait RegistrarService: Send + Sync {
     async fn get_nameservers(&self, domain: &str) -> Result<Vec<String>, RegistrarError>;
 }
 
+/// Имя nameserver'а в сравнимом виде: без пробелов по краям, без завершающей
+/// точки, в нижнем регистре.
+///
+/// Один нормализатор на всех провайдеров — по той же причине, по которой фронт
+/// держит один `normalizeZoneName` на весь UI: списки от двух регистраторов
+/// сравниваются с одним и тем же списком зоны Cloudflare, и разъехавшиеся
+/// правила дали бы «расходится» на верном делегировании. Пока это выражение
+/// стояло инлайном в каждом клиенте, оно уже было двумя копиями.
+pub fn normalize_ns(raw: &str) -> String {
+    raw.trim().trim_end_matches('.').to_lowercase()
+}
+
 pub fn make_service(
     provider: &str,
     api_key: &str,

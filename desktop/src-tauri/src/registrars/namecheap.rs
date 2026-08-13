@@ -4,28 +4,68 @@ use async_trait::async_trait;
 use reqwest::Client;
 use roxmltree::Document;
 
-use super::{DomainInfo, RegistrarError, RegistrarService};
+use super::{normalize_ns, DomainInfo, RegistrarError, RegistrarService};
 
 const NAMECHEAP_API: &str = "https://api.namecheap.com/xml.response";
+
+/// Чем заменяется ключ в любом тексте, который уезжает наружу.
+const REDACTED: &str = "***";
 
 pub struct NamecheapService {
     api_key: String,
     api_user: String,
     client_ip: String,
+    /// Адрес API. Поле, а не константа, ради теста на утечку ключа: проверять
+    /// её надо на НАСТОЯЩЕЙ ошибке транспорта, а получить её без сети нельзя.
+    base_url: String,
     http: Client,
 }
 
 impl NamecheapService {
     pub fn new(api_key: &str, api_user: &str, client_ip: &str) -> Self {
+        Self::with_base_url(api_key, api_user, client_ip, NAMECHEAP_API)
+    }
+
+    fn with_base_url(api_key: &str, api_user: &str, client_ip: &str, base_url: &str) -> Self {
         Self {
             api_key: api_key.to_string(),
             api_user: api_user.to_string(),
             client_ip: client_ip.to_string(),
+            base_url: base_url.to_string(),
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest"),
         }
+    }
+
+    /// Вычистить ключ из текста, который увидит человек.
+    ///
+    /// Namecheap принимает `ApiKey` ПАРАМЕТРОМ URL (см. `base_params`), поэтому
+    /// любая строка, куда мог попасть адрес запроса, — это потенциальный слив
+    /// секрета: `Display` у `reqwest::Error` дописывает `for url (…)`
+    /// безусловно, а страница ошибки от прокси или WAF (в отличие от XML самого
+    /// Namecheap) вполне может отэхоить request URI в теле ответа. Первый путь
+    /// закрыт `without_url()` ниже, второй закрывается только так.
+    ///
+    /// Пустой ключ не вычищаем: замена пустой подстроки изрешетила бы текст
+    /// маркерами, а секрета в этом случае и нет.
+    fn scrub(&self, text: String) -> String {
+        if self.api_key.is_empty() {
+            return text;
+        }
+        text.replace(&self.api_key, REDACTED)
+    }
+
+    /// Ошибка транспорта без адреса запроса.
+    ///
+    /// `without_url()` у reqwest существует ровно для этого случая («useful if
+    /// you need to remove sensitive information from the URL»), и вызывать его
+    /// обязаны ОБА пути — и `send`, и чтение тела: таймаут в 30 секунд, обрыв
+    /// Wi-Fi, сбой DNS и TLS через корпоративный прокси — это не «если», а
+    /// «когда», а текст ошибки доезжает до экрана карточки домена.
+    fn transport_err(&self, e: reqwest::Error) -> RegistrarError {
+        RegistrarError::Api(self.scrub(e.without_url().to_string()))
     }
 
     fn base_params<'a>(
@@ -46,28 +86,29 @@ impl NamecheapService {
         params.extend_from_slice(extra);
         let resp = self
             .http
-            .get(NAMECHEAP_API)
+            .get(&self.base_url)
             .query(&params)
             .send()
             .await
-            .map_err(|e| RegistrarError::Api(e.to_string()))?;
+            .map_err(|e| self.transport_err(e))?;
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| RegistrarError::Api(e.to_string()))?;
+        let text = resp.text().await.map_err(|e| self.transport_err(e))?;
+        // Тело ответа уезжает в текст ошибки целиком (в нём и лежит объяснение
+        // от Namecheap), поэтому через `scrub` проходят ОБЕ ветки: XML самого
+        // Namecheap ключа не эхоит, а вот HTML-страница прокси или WAF с
+        // «Request: GET …?ApiKey=…» — обычное дело, и попадает она ровно сюда.
         if status.as_u16() >= 400 {
-            return Err(RegistrarError::Api(format!(
+            return Err(RegistrarError::Api(self.scrub(format!(
                 "Namecheap HTTP {}: {}",
                 status, text
-            )));
+            ))));
         }
         if !namecheap_status_ok(&text) {
             let err = namecheap_errors(&text);
-            return Err(RegistrarError::Api(format!(
+            return Err(RegistrarError::Api(self.scrub(format!(
                 "Namecheap error: {}",
                 err.unwrap_or_else(|| text.clone())
-            )));
+            ))));
         }
         Ok(text)
     }
@@ -188,14 +229,6 @@ impl RegistrarService for NamecheapService {
     }
 }
 
-/// Привести имя nameserver'а к сравнимому виду — так же, как это делает Hostiq
-/// (`hostiq.rs`) и фронт (`normalizeZoneName`): без пробелов, без завершающей
-/// точки, в нижнем регистре. Разные ответы на один вопрос от двух провайдеров
-/// превратились бы в «расходится» на верном делегировании.
-fn normalize_ns(raw: &str) -> String {
-    raw.trim().trim_end_matches('.').to_lowercase()
-}
-
 /// Разбор ответа `namecheap.domains.dns.getList`.
 ///
 /// Отдельной чистой функцией, потому что проверить её можно без сети — а
@@ -204,30 +237,37 @@ fn normalize_ns(raw: &str) -> String {
 /// молчаливое «NS у домена нет».
 fn parse_dns_get_list(xml: &str) -> Result<Vec<String>, RegistrarError> {
     let doc = Document::parse(xml).map_err(|e| RegistrarError::Api(e.to_string()))?;
-    let mut out: Vec<String> = Vec::new();
+    let mut children: Vec<String> = Vec::new();
+    let mut from_attribute: Vec<String> = Vec::new();
     for n in doc.descendants() {
         match strip_ns(n.tag_name().name()) {
             "Nameserver" => {
                 if let Some(ns) = n.text().map(normalize_ns) {
                     if !ns.is_empty() {
-                        out.push(ns);
+                        children.push(ns);
                     }
                 }
             }
             "DomainDNSGetListResult" => {
                 if let Some(raw) = n.attribute("Nameservers") {
-                    out.extend(
-                        raw.split(',')
-                            .map(normalize_ns)
-                            .filter(|s| !s.is_empty()),
-                    );
+                    from_attribute
+                        .extend(raw.split(',').map(normalize_ns).filter(|s| !s.is_empty()));
                 }
             }
             _ => {}
         }
     }
-    out.dedup();
-    Ok(out)
+    // Формы РАВНОЗНАЧНЫ, а не дополняют друг друга: приди они обе (ответ через
+    // прокси, который дописал атрибут к настоящему дереву), сложенные вместе они
+    // дали бы каждый сервер дважды. Дедупликацией это не лечится — `Vec::dedup`
+    // снимает только СОСЕДНИЕ повторы, а тут списки идут подряд целиком
+    // (`[a,b,a,b]`), и повторы получаются несоседними. Поэтому не «склеить и
+    // почистить», а выбрать: дети — основная форма, атрибут — запасная.
+    Ok(if children.is_empty() {
+        from_attribute
+    } else {
+        children
+    })
 }
 
 fn command_response_ok(xml: &str) -> bool {
@@ -249,6 +289,74 @@ mod tests {
     fn status_ok_detection() {
         let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"></ApiResponse>"#;
         assert!(namecheap_status_ok(xml));
+    }
+
+    const SECRET: &str = "SUPER-SECRET-API-KEY";
+
+    /// Ключ Namecheap едет ПАРАМЕТРОМ URL, а текст ошибки этого клиента
+    /// доезжает до экрана: карточка домена показывает его рядом с бейджем
+    /// делегирования (`DomainNsPanel`), и он же уходит в любой лог, скриншот и
+    /// баг-репорт.
+    ///
+    /// Проверяется на настоящем отказе транспорта (закрытый порт на localhost),
+    /// потому что сливает секрет именно `Display` у `reqwest::Error`: он
+    /// БЕЗУСЛОВНО дописывает « for url (…)» со всей query string. Ни собрать
+    /// такую ошибку руками, ни поймать её на моке нельзя — только сходив в сеть.
+    #[tokio::test]
+    async fn transport_failure_does_not_leak_api_key() {
+        // Порт 1 на localhost закрыт: соединение отваливается сразу, без
+        // ожидания таймаута.
+        let svc = NamecheapService::with_base_url(
+            SECRET,
+            "user1",
+            "1.2.3.4",
+            "http://127.0.0.1:1/xml.response",
+        );
+        let err = svc
+            .call("namecheap.domains.dns.getList", &[("SLD", "example"), ("TLD", "com")])
+            .await
+            .expect_err("закрытый порт обязан дать ошибку");
+        let text = err.to_string();
+
+        assert!(
+            !text.contains(SECRET),
+            "ключ уехал в текст ошибки: {text}"
+        );
+        // И сам адрес тоже: query string целиком — это и ApiUser, и ClientIp.
+        assert!(
+            !text.contains("ApiKey"),
+            "в тексте ошибки остался адрес запроса: {text}"
+        );
+        // Диагностическая ценность при этом сохранена — иначе «почистили»
+        // означало бы «выбросили».
+        assert!(
+            text.contains("error sending request"),
+            "из ошибки пропала её причина: {text}"
+        );
+    }
+
+    /// Тело ответа уезжает в текст ошибки целиком, а страница от прокси или WAF
+    /// вполне может отэхоить request URI — с ключом внутри.
+    #[test]
+    fn response_body_is_scrubbed_of_the_key() {
+        let svc = NamecheapService::new(SECRET, "user1", "1.2.3.4");
+        let proxy_page =
+            format!("<html>403 Forbidden. Request: GET /xml.response?ApiKey={SECRET}&Command=x</html>");
+
+        let scrubbed = svc.scrub(format!("Namecheap HTTP 403 Forbidden: {proxy_page}"));
+
+        assert!(!scrubbed.contains(SECRET), "ключ остался в теле: {scrubbed}");
+        assert!(scrubbed.contains(REDACTED));
+        assert!(scrubbed.contains("403 Forbidden"), "объяснение потеряно");
+    }
+
+    /// Пустой ключ (аккаунт без секрета) не должен превращать текст в решето из
+    /// маркеров: `String::replace` по пустой подстроке вставляет её между всеми
+    /// символами.
+    #[test]
+    fn empty_key_does_not_shred_the_text() {
+        let svc = NamecheapService::new("", "user1", "1.2.3.4");
+        assert_eq!(svc.scrub("Namecheap error: nope".into()), "Namecheap error: nope");
     }
 
     /// Ответ `namecheap.domains.dns.getList` в том виде, в каком его отдаёт
@@ -294,6 +402,23 @@ mod tests {
           <Nameserver>dns2.registrar-servers.com</Nameserver>
         </DomainDNSGetListResult></CommandResponse></ApiResponse>"#;
         assert_eq!(parse_dns_get_list(xml).unwrap().len(), 2);
+    }
+
+    /// Обе формы в одном ответе — то, что докстринг разбора объявляет
+    /// возможным (прокси дописал атрибут к настоящему дереву). Список серверов
+    /// от этого удваиваться не должен: `Vec::dedup` тут бессилен, потому что
+    /// повторы получаются НЕсоседними (`[a,b,a,b]`).
+    #[test]
+    fn dns_get_list_does_not_double_count_mixed_form() {
+        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
+        <DomainDNSGetListResult Domain="example.com" Nameservers="ada.ns.cloudflare.com,bob.ns.cloudflare.com">
+          <Nameserver>ada.ns.cloudflare.com</Nameserver>
+          <Nameserver>bob.ns.cloudflare.com</Nameserver>
+        </DomainDNSGetListResult></CommandResponse></ApiResponse>"#;
+        assert_eq!(
+            parse_dns_get_list(xml).unwrap(),
+            vec!["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]
+        );
     }
 
     #[test]

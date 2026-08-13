@@ -3,7 +3,7 @@
  * по образцу `lib/domainStatus.ts` и `lib/cfZoneMatch.ts`.
  *
  * Знание здесь не своё, а зеркало десктопа: и чтение доменов
- * (`registrar_get_domains`), и запись nameservers (`registrar_set_nameservers`)
+ * (`registrar_get_nameservers`), и запись (`registrar_set_nameservers`)
  * идут через `make_service` (`desktop/src-tauri/src/registrars/mod.rs`), а он
  * знает ровно двух провайдеров и на любом третьем отвечает
  * `unknown provider: …` — ещё до всякой сети. Фронт, который этого списка не

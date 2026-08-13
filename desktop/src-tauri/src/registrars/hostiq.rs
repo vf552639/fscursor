@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
 
-use super::{DomainInfo, RegistrarError, RegistrarService};
+use super::{normalize_ns, DomainInfo, RegistrarError, RegistrarService};
 
 const HOSTIQ_API: &str = "https://hostiq.ua/api";
 
@@ -150,7 +150,7 @@ impl RegistrarService for HostiqService {
         Ok(arr
             .iter()
             .filter_map(|v| v.as_str())
-            .map(|s| s.trim().trim_end_matches('.').to_lowercase())
+            .map(normalize_ns)
             .filter(|s| !s.is_empty())
             .collect())
     }
