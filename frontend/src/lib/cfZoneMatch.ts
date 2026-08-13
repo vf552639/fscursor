@@ -100,6 +100,22 @@ export type ZoneMatch =
   | { outcome: "skipped"; domainId: number; domain: string };
 
 /**
+ * DNS-имя без пробелов по краям и без завершающей точки. Регистр НЕ трогает.
+ *
+ * Отдельно от `normalizeZoneName` ради одного вызывающего, которому регистр
+ * важен: список nameservers, уезжающий регистратору (`normalizeNameservers` в
+ * `api/domains.ts`), отдаёт то, что набрал пользователь, а схлопывает дубли по
+ * общему правилу. Пока правило было двумя выражениями, вторая копия про точку
+ * не знала — и `ns1.x.com.` с `ns1.x.com` уезжали регистратору как два
+ * сервера.
+ *
+ * Точка срезается ПОСЛЕ `trim`, иначе `"example.com. "` осталось бы с точкой.
+ */
+export function trimDnsName(name: string): string {
+  return name.trim().replace(/\.+$/, "");
+}
+
+/**
  * Имя в сравнимом виде: без пробелов по краям, без завершающей точки, в нижнем
  * регистре.
  *
@@ -109,11 +125,12 @@ export type ZoneMatch =
  * FQDN (`example.com.`), и она приезжает из копипасты зонных файлов. Пробелы —
  * из тех же копипаст.
  *
- * Порядок операций важен ровно в одном месте: точка срезается ПОСЛЕ `trim`,
- * иначе `"example.com. "` осталось бы с точкой.
+ * То же правило на своей стороне держит десктоп (`normalize_ns` в
+ * `registrars/mod.rs`): списки NS сравниваются по обе стороны границы, и
+ * разъехавшись, они дали бы «расходится» на верном делегировании.
  */
 export function normalizeZoneName(name: string): string {
-  return name.trim().toLowerCase().replace(/\.+$/, "");
+  return trimDnsName(name).toLowerCase();
 }
 
 /**

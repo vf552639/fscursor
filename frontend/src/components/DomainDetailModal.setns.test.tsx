@@ -321,6 +321,13 @@ describe("Set NS — десктоп выполняет", () => {
     fireEvent.click(btn);
     expect(setNsCalls().length).toBe(0);
 
+    // Та же опечатка другой формой: копипаста из зонного файла даёт FQDN с
+    // завершающей точкой. Для бейджа делегирования `ns1.hoster.net.` и
+    // `ns1.hoster.net` — один сервер; будь они двумя для отправки, порог
+    // прошёл бы и регистратор получил бы дубль.
+    fireEvent.change(nsField(), { target: { value: "ns1.hoster.net.\nns1.hoster.net" } });
+    await waitFor(() => expect(btn.disabled).toBe(true));
+
     fireEvent.change(nsField(), { target: { value: "NS1.hoster.net\nns1.hoster.net\nns2.hoster.net" } });
     await waitFor(() => expect(btn.disabled).toBe(false));
     fireEvent.click(btn);

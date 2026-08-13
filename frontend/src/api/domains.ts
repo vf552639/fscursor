@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
+import { trimDnsName } from "../lib/cfZoneMatch";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
@@ -212,16 +213,32 @@ export const NS_DESKTOP_NOTE = desktopOnly("Setting nameservers");
 export const MIN_NAMESERVERS = 2;
 
 /**
- * Нормализация списка перед отправкой: убрать пустое, схлопнуть регистр и
- * повторы. Дубль (`ns1.x` дважды — обычная опечатка при ручном вводе) Namecheap
- * отбивает ошибкой, а отбитая попытка теперь пишет на сервер `ns_status: error`
- * — то есть опечатка портила бы состояние домена.
+ * Нормализация списка перед отправкой: убрать пустое, срезать завершающую
+ * точку, схлопнуть регистр и повторы. Дубль (`ns1.x` дважды — обычная опечатка
+ * при ручном вводе) Namecheap отбивает ошибкой, а отбитая попытка пишет на
+ * сервер `ns_status: error` — то есть опечатка портила бы состояние домена.
+ *
+ * Дубли считаются ОБЩИМ правилом (`trimDnsName` + регистр), тем же, которым
+ * сверяется делегирование (`lib/nsDelegation`, `lib/cfZoneMatch`) и которым
+ * читает ответы регистратора десктоп (`normalize_ns` в `registrars/mod.rs`).
+ * Пока правило про точку жило только на стороне сверки, `ns1.cf.com.` из
+ * копипасты зонного файла и `ns1.cf.com` были ОДНИМ сервером для бейджа и ДВУМЯ
+ * для отправки: порог `MIN_NAMESERVERS` проходил, а регистратор получал дубль
+ * — то есть ровно ту опечатку, от которой эта функция и заведена.
+ *
+ * Своя функция, а не общий `normalizeNsList` из `lib/nsDelegation`, ровно из-за
+ * регистра: тот сравнивает и потому приводит имена к нижнему, а этот ОТПРАВЛЯЕТ
+ * и отдаёт то, что набрал пользователь (схлопывая повтор, а не «починив» ввод —
+ * на это есть тест в `DomainDetailModal.setns.test.tsx`). Точка — другое дело:
+ * её десктоп в отправляемом списке не срезает (`set_nameservers` шлёт как
+ * есть), а в прочитанном обратно — срезает, и оставленная здесь она означала бы
+ * FQDN, отправленный в одной форме и сверяемый в другой.
  */
 export function normalizeNameservers(input: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of input) {
-    const ns = raw.trim();
+    const ns = trimDnsName(raw);
     if (!ns) continue;
     const key = ns.toLowerCase();
     if (seen.has(key)) continue;
