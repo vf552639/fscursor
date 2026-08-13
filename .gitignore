@@ -32,3 +32,6 @@ desktop/dist/
 
 # Celery beat runtime state — не должен коммититься
 backend/celerybeat-schedule
+
+# Visual brainstorming companion (superpowers)
+.superpowers/
