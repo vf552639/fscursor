@@ -44,6 +44,62 @@ router = APIRouter(prefix="/domains", tags=["domains"])
 MAX_LOGGED_FILENAME = 255
 
 
+async def _ensure_links_owned(
+    db: AsyncSession,
+    user: User,
+    *,
+    server_id: Optional[int] = None,
+    cloudflare_account_id: Optional[int] = None,
+    registrar_id: Optional[int] = None,
+) -> None:
+    """Все три связки домена принадлежат этому пользователю — или 404.
+
+    Проверка нужна каждому пути записи связок, потому что FK принимает чужую
+    строку молча: домены уезжали к чужому серверу по угаданному id, а экран
+    показывал связку с сущностью, которой у пользователя нет. Второй эффект
+    важнее косметики: несуществующий id иначе доходил до драйвера и возвращался
+    нарушением FK, то есть 500 на самом обычном вводе из мастера.
+
+    `None` — легальное «не трогать» / «отвязать», проверять там нечего.
+    """
+    if server_id is not None:
+        if await server_service.get_by_id(db, server_id, user.id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    if cloudflare_account_id is not None:
+        if await cloudflare_service.get_account(db, cloudflare_account_id, user.id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Cloudflare account not found")
+    if registrar_id is not None:
+        if await registrar_service.get_account(db, registrar_id, user.id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Registrar account not found")
+
+
+def _name_conflict(taken: domain_service.DomainNameTaken) -> HTTPException:
+    """409 на занятое имя домена — с телом, которое не рассказывает про чужое.
+
+    `domains.domain_name` уникален ГЛОБАЛЬНО, а не в пределах пользователя
+    (модель, миграция `001_initial`), поэтому занятым имя бывает и чужой
+    строкой. Обе ветки отвечают 409, но текстом — по-разному:
+
+    * Факт «имя занято» скрыть отсюда нельзя в принципе: его делает
+      наблюдаемым сам глобальный UNIQUE, и прежний 500 сообщал ровно тот же
+      бит — только вдобавок выглядел поломкой и тащил имя домена в текст
+      ошибки драйвера. Закрывается это не формулировкой, а уникальностью по
+      паре (user_id, domain_name), то есть миграцией — записано долгом.
+    * Своей строке можно назвать всё: она и так видна пользователю в списке.
+      Чужой — только «занято»: ни владельца, ни id, ни намёка. Разница в
+      тексте нового бита не выдаёт (свои домены пользователь знает и без нас),
+      зато первый случай перестаёт быть тупиком.
+
+    Id уже заведённого своего домена в тело не кладётся намеренно: у мастера
+    список доменов уже есть на руках, и находить в нём строку по имени дешевле,
+    чем разбирать id из текста ошибки.
+    """
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        "domain already exists" if taken.existing_id else "domain name is already taken",
+    )
+
+
 @router.get("", response_model=list[DomainResponse])
 async def list_domains(
     server_id: Optional[int] = Query(None),
@@ -129,34 +185,20 @@ async def create_domain(
 
     Мастер сначала создаёт домен здесь, потом идёт с полученным `id` в
     `POST /domains/full-setup`. Поэтому «уже заведён» — не экзотика, а обычный
-    ход событий, и отвечать на него 500 нельзя.
-
-    `domains.domain_name` уникален ГЛОБАЛЬНО, а не в пределах пользователя
-    (модель, миграция `001_initial`), поэтому занятым имя может оказаться и
-    чужой строкой. Обе ветки отвечают 409 — и вот почему одинаково по коду,
-    но по-разному по тексту:
-
-    * Факт «имя занято» скрыть отсюда нельзя в принципе: его делает
-      наблюдаемым сам глобальный UNIQUE, и сегодняшний 500 сообщал ровно тот
-      же бит — только вдобавок выглядел поломкой и тащил имя домена в текст
-      ошибки драйвера. Закрывается это не формулировкой, а уникальностью по
-      паре (user_id, domain_name), то есть миграцией — записано долгом.
-    * Своей строке можно назвать всё: она и так видна пользователю в списке.
-      Чужой — только «занято»: ни владельца, ни id, ни намёка. Разница в
-      тексте нового бита не выдаёт (свои домены пользователь и без нас знает),
-      зато первый случай перестаёт быть тупиком.
-
-    Id уже заведённого своего домена в ответе не возвращается намеренно: у
-    мастера список доменов уже есть на руках, и находить в нём строку по имени
-    дешевле, чем разбирать id из текста ошибки.
+    ход событий, и отвечать на него 500 нельзя: разбор отказа — в
+    `_name_conflict`.
     """
+    await _ensure_links_owned(
+        db,
+        user,
+        server_id=data.server_id,
+        cloudflare_account_id=data.cloudflare_account_id,
+        registrar_id=data.registrar_id,
+    )
     try:
         domain = await domain_service.create(db, data, user.id)
     except domain_service.DomainNameTaken as taken:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "domain already exists" if taken.existing_id else "domain name is already taken",
-        ) from taken
+        raise _name_conflict(taken) from taken
     await audit_service.log(
         db,
         user_id=user.id,
@@ -240,7 +282,23 @@ async def update_domain(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainResponse:
-    domain = await domain_service.update(db, domain_id, data, user.id)
+    """Правка домена — тот же путь записи имени и связок, что и заведение.
+
+    Поэтому здесь те же два отказа, что у `create_domain`: чужая связка — 404,
+    занятое имя — 409 (переименование в имя, которое уже кем-то занято,
+    отвечало 500 из `IntegrityError`). Разбор текстов конфликта — там же.
+    """
+    await _ensure_links_owned(
+        db,
+        user,
+        server_id=data.server_id,
+        cloudflare_account_id=data.cloudflare_account_id,
+        registrar_id=data.registrar_id,
+    )
+    try:
+        domain = await domain_service.update(db, domain_id, data, user.id)
+    except domain_service.DomainNameTaken as taken:
+        raise _name_conflict(taken) from taken
     if not domain:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Domain not found")
     await audit_service.log(
@@ -279,13 +337,7 @@ async def bulk_assign_server(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkAssignResponse:
-    # Владение целью — до записи. Без этой проверки свои домены привязывались
-    # к чужому серверу по угаданному id: FK такую строку принимает, а экран
-    # потом показывает связку с сущностью, которой у пользователя нет.
-    # `None` — легальное «отвязать», проверять нечего.
-    if data.server_id is not None:
-        if await server_service.get_by_id(db, data.server_id, user.id) is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+    await _ensure_links_owned(db, user, server_id=data.server_id)
     updated = await domain_service.bulk_assign_server(
         db, user.id, data.domain_ids, data.server_id
     )
@@ -313,10 +365,7 @@ async def bulk_assign_cloudflare(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkAssignResponse:
-    # См. `bulk_assign_server` выше: та же проверка и по той же причине.
-    if data.cloudflare_account_id is not None:
-        if await cloudflare_service.get_account(db, data.cloudflare_account_id, user.id) is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Cloudflare account not found")
+    await _ensure_links_owned(db, user, cloudflare_account_id=data.cloudflare_account_id)
     updated = await domain_service.bulk_assign_cloudflare(
         db, user.id, data.domain_ids, data.cloudflare_account_id
     )
@@ -354,19 +403,16 @@ async def full_setup(
     должен. Поэтому здесь нет ни одного исходящего вызова, а ответ — это
     входные данные для десктопа (`id` + имя домена), а не id задач.
 
-    Владение всеми тремя привязками проверяется до записи: иначе домены
-    уехали бы на чужой сервер по угаданному id, а экран показал бы связку с
-    сущностью, которой у пользователя нет. Соседние `bulk-assign-*` этой
-    проверки не делают — это их долг, а не образец.
+    Владение всеми тремя привязками проверяется до записи — общим для всех
+    путей записи связок `_ensure_links_owned`.
     """
-    if await server_service.get_by_id(db, data.server_id, user.id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
-    if await cloudflare_service.get_account(db, data.cloudflare_account_id, user.id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cloudflare account not found")
-    if data.registrar_id is not None:
-        if await registrar_service.get_account(db, data.registrar_id, user.id) is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Registrar account not found")
-
+    await _ensure_links_owned(
+        db,
+        user,
+        server_id=data.server_id,
+        cloudflare_account_id=data.cloudflare_account_id,
+        registrar_id=data.registrar_id,
+    )
     domains, skipped = await domain_service.bulk_full_setup(
         db,
         user.id,

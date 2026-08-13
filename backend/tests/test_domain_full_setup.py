@@ -5,112 +5,32 @@
 не «ответ 200», а состояние в БД, идемпотентность повтора и то, что чужая
 сущность в связку не попадает.
 
-База тестов общая с dev-окружением, поэтому пользователи теста убираются в
-teardown, а домены/серверы уезжают за ними по FK CASCADE.
+Заготовка (регистрация, уборка, заведение сервера/аккаунтов) — общая, в
+`conftest.py`.
 """
 
-import asyncio
-import base64
-import uuid
-from datetime import datetime, timezone
-
 import pytest
+from conftest import (
+    create_cf_account,
+    create_registrar,
+    create_server,
+    domain_name,
+    register_and_login,
+)
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete as sa_delete
-from sqlalchemy import select, update
+from sqlalchemy import select
 
-from app.auth.models import User
 from app.core.database import AsyncSessionLocal
 from app.main import app
 from app.models.domain import Domain
 
-_REGISTERED_EMAILS: list[str] = []
-
-
-@pytest.fixture(autouse=True)
-def _purge_users_registered_by_this_test():
-    _REGISTERED_EMAILS.clear()
-    yield
-    emails = list(_REGISTERED_EMAILS)
-    _REGISTERED_EMAILS.clear()
-    if emails:
-        asyncio.run(_purge_users(emails))
-
-
-async def _purge_users(emails: list[str]) -> None:
-    async with AsyncSessionLocal() as s:
-        await s.execute(sa_delete(User).where(User.email.in_(emails)))
-        await s.commit()
-
-
-def b64(b: bytes) -> str:
-    return base64.b64encode(b).decode()
-
-
-async def _register_and_login(c: AsyncClient, prefix: str, key: bytes = b"\x01" * 32) -> str:
-    email = f"{prefix}-{uuid.uuid4().hex[:8]}@example.com"
-    _REGISTERED_EMAILS.append(email)
-    r = await c.post(
-        "/api/auth/register",
-        json={
-            "email": email,
-            "salt_b64": b64(b"\x00" * 16),
-            "auth_key_b64": b64(key),
-            "recovery_blob_b64": b64(b"\x02" * 96),
-            "recovery_auth_key_b64": b64(b"\x03" * 32),
-        },
-    )
-    assert r.status_code in (201, 409), r.text
-    async with AsyncSessionLocal() as s:
-        await s.execute(
-            update(User)
-            .where(User.email == email)
-            .values(email_confirmed_at=datetime.now(timezone.utc), email_confirm_token_hash=None)
-        )
-        await s.commit()
-    r = await c.post("/api/auth/login/finish", json={"email": email, "auth_key_b64": b64(key)})
-    assert r.status_code == 200, r.text
-    return email
-
-
-async def _login(c: AsyncClient, email: str, key: bytes = b"\x01" * 32) -> None:
-    r = await c.post("/api/auth/login/finish", json={"email": email, "auth_key_b64": b64(key)})
-    assert r.status_code == 200, r.text
-
-
-async def _create_server(c: AsyncClient) -> int:
-    r = await c.post(
-        "/api/servers",
-        json={
-            "name": f"srv-{uuid.uuid4().hex[:6]}",
-            "ip_address": f"203.0.113.{uuid.uuid4().int % 200 + 10}",
-        },
-    )
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
-async def _create_cf_account(c: AsyncClient) -> int:
-    r = await c.post("/api/cloudflare/accounts", json={"name": f"cf-{uuid.uuid4().hex[:6]}"})
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
-async def _create_registrar(c: AsyncClient) -> int:
-    r = await c.post(
-        "/api/registrars/accounts",
-        json={"provider": "hostiq", "name": f"reg-{uuid.uuid4().hex[:6]}"},
-    )
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
+pytestmark = pytest.mark.usefixtures("purge_test_users")
 
 
 async def _create_domains(c: AsyncClient, count: int) -> list[int]:
     ids: list[int] = []
     for _ in range(count):
-        r = await c.post(
-            "/api/domains", json={"domain_name": f"{uuid.uuid4().hex[:10]}.example.com"}
-        )
+        r = await c.post("/api/domains", json={"domain_name": domain_name()})
         assert r.status_code == 201, r.text
         ids.append(r.json()["id"])
     return ids
@@ -138,10 +58,10 @@ async def _stored(domain_ids: list[int]) -> dict[int, dict]:
 @pytest.mark.asyncio
 async def test_links_are_persisted_and_response_feeds_the_desktop():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-ok")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
-        reg_id = await _create_registrar(c)
+        await register_and_login(c, "fs-ok")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
+        reg_id = await create_registrar(c)
         domain_ids = await _create_domains(c, 3)
 
         r = await c.post(
@@ -180,9 +100,9 @@ async def test_repeat_with_the_same_arguments_writes_nothing():
     неизменность после повтора означает, что второй прогон в БД не полез.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-idem")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
+        await register_and_login(c, "fs-idem")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
         domain_ids = await _create_domains(c, 2)
         payload = {
             "domain_ids": domain_ids,
@@ -210,13 +130,13 @@ async def test_missing_and_foreign_ids_are_report_rows_not_a_refusal():
     обязан оказаться связанным. Иначе «остальное прошло» доказывал бы себя сам.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-stranger", key=b"\x99" * 32)
+        await register_and_login(c, "fs-stranger", key=b"\x99" * 32)
         stranger_domain = (await _create_domains(c, 1))[0]
         await c.post("/api/auth/logout")
 
-        await _register_and_login(c, "fs-partial")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
+        await register_and_login(c, "fs-partial")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
         mine = await _create_domains(c, 2)
         deleted = mine.pop()
         assert (await c.delete(f"/api/domains/{deleted}")).status_code == 204
@@ -249,14 +169,15 @@ async def test_foreign_server_is_refused_and_nothing_is_written():
     маршрут.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-owner", key=b"\x99" * 32)
-        foreign_server = await _create_server(c)
-        foreign_cf = await _create_cf_account(c)
+        await register_and_login(c, "fs-owner", key=b"\x99" * 32)
+        foreign_server = await create_server(c)
+        foreign_cf = await create_cf_account(c)
+        foreign_registrar = await create_registrar(c)
         await c.post("/api/auth/logout")
 
-        await _register_and_login(c, "fs-thief")
-        my_server = await _create_server(c)
-        my_cf = await _create_cf_account(c)
+        await register_and_login(c, "fs-thief")
+        my_server = await create_server(c)
+        my_cf = await create_cf_account(c)
         domain_ids = await _create_domains(c, 1)
 
         r = await c.post(
@@ -277,9 +198,22 @@ async def test_foreign_server_is_refused_and_nothing_is_written():
             },
         )
         assert r.status_code == 404, r.text
+        # Третья связка — необязательная, и именно поэтому её проверку легко
+        # потерять: она стоит под `if`, которого у двух других нет.
+        r = await c.post(
+            "/api/domains/full-setup",
+            json={
+                "domain_ids": domain_ids,
+                "server_id": my_server,
+                "cloudflare_account_id": my_cf,
+                "registrar_id": foreign_registrar,
+            },
+        )
+        assert r.status_code == 404, r.text
         stored = await _stored(domain_ids)
         assert stored[domain_ids[0]]["server_id"] is None
         assert stored[domain_ids[0]]["cloudflare_account_id"] is None
+        assert stored[domain_ids[0]]["registrar_id"] is None
 
         r = await c.post(
             "/api/domains/full-setup",
@@ -303,10 +237,10 @@ async def test_registrar_omitted_does_not_wipe_the_existing_one():
     действие без этого поля не должно его стирать.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-reg")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
-        reg_id = await _create_registrar(c)
+        await register_and_login(c, "fs-reg")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
+        reg_id = await create_registrar(c)
         domain_ids = await _create_domains(c, 1)
         r = await c.put(f"/api/domains/{domain_ids[0]}", json={"registrar_id": reg_id})
         assert r.status_code == 200, r.text
@@ -337,9 +271,9 @@ async def test_registrar_omitted_does_not_wipe_the_existing_one():
 )
 async def test_bad_body_is_a_refusal_not_silence(body: dict, expected_loc: list):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-422")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
+        await register_and_login(c, "fs-422")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
         domain_ids = await _create_domains(c, 1)
 
         r = await c.post(
@@ -360,9 +294,9 @@ async def test_bad_body_is_a_refusal_not_silence(body: dict, expected_loc: list)
 @pytest.mark.asyncio
 async def test_audit_records_counters_not_id_lists():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "fs-audit")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
+        await register_and_login(c, "fs-audit")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
         domain_ids = await _create_domains(c, 2)
 
         r = await c.post(

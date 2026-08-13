@@ -1,4 +1,4 @@
-"""Гарды `POST /api/domains` и массовых привязок: отказ вместо 500 и вместо тишины.
+"""Гарды `POST /api/domains` и `PUT /api/domains/{id}`: отказ вместо 500 и тишины.
 
 Одиночный вход мастера full-setup — это существующий `POST /api/domains`
 (мастер создаёт домен, а потом идёт с его `id` в `/domains/full-setup`).
@@ -11,97 +11,30 @@ Cloudflare.
 чужую строку — этот случай проверяется отдельно, вместе с тем, что ответ не
 рассказывает про владельца.
 
-Здесь же — владение целью массовых привязок: `bulk-assign-server` и
-`bulk-assign-cloudflare` принимали чужой id молча.
+Здесь же — владение связками: чужой (или несуществующий) `server_id` /
+`cloudflare_account_id` / `registrar_id` не должен ни записываться, ни
+доезжать до драйвера нарушением FK.
 
-База тестов общая с dev-окружением, поэтому пользователи теста убираются в
-teardown, а домены/серверы уезжают за ними по FK CASCADE.
+Заготовка (регистрация, уборка, заведение сервера/аккаунтов) — общая, в
+`conftest.py`.
 """
 
-import asyncio
-import base64
-import uuid
-from datetime import datetime, timezone
-
 import pytest
+from conftest import (
+    create_cf_account,
+    create_registrar,
+    create_server,
+    domain_name,
+    register_and_login,
+)
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 
-from app.auth.models import User
 from app.core.database import AsyncSessionLocal
 from app.main import app
 from app.models.domain import Domain
 
-_REGISTERED_EMAILS: list[str] = []
-
-
-@pytest.fixture(autouse=True)
-def _purge_users_registered_by_this_test():
-    _REGISTERED_EMAILS.clear()
-    yield
-    emails = list(_REGISTERED_EMAILS)
-    _REGISTERED_EMAILS.clear()
-    if emails:
-        asyncio.run(_purge_users(emails))
-
-
-async def _purge_users(emails: list[str]) -> None:
-    async with AsyncSessionLocal() as s:
-        await s.execute(sa_delete(User).where(User.email.in_(emails)))
-        await s.commit()
-
-
-def b64(b: bytes) -> str:
-    return base64.b64encode(b).decode()
-
-
-async def _register_and_login(c: AsyncClient, prefix: str, key: bytes = b"\x01" * 32) -> str:
-    email = f"{prefix}-{uuid.uuid4().hex[:8]}@example.com"
-    _REGISTERED_EMAILS.append(email)
-    r = await c.post(
-        "/api/auth/register",
-        json={
-            "email": email,
-            "salt_b64": b64(b"\x00" * 16),
-            "auth_key_b64": b64(key),
-            "recovery_blob_b64": b64(b"\x02" * 96),
-            "recovery_auth_key_b64": b64(b"\x03" * 32),
-        },
-    )
-    assert r.status_code in (201, 409), r.text
-    async with AsyncSessionLocal() as s:
-        await s.execute(
-            update(User)
-            .where(User.email == email)
-            .values(email_confirmed_at=datetime.now(timezone.utc), email_confirm_token_hash=None)
-        )
-        await s.commit()
-    r = await c.post("/api/auth/login/finish", json={"email": email, "auth_key_b64": b64(key)})
-    assert r.status_code == 200, r.text
-    return email
-
-
-def _name() -> str:
-    return f"{uuid.uuid4().hex[:10]}.example.com"
-
-
-async def _create_server(c: AsyncClient) -> int:
-    r = await c.post(
-        "/api/servers",
-        json={
-            "name": f"srv-{uuid.uuid4().hex[:6]}",
-            "ip_address": f"203.0.113.{uuid.uuid4().int % 200 + 10}",
-        },
-    )
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
-async def _create_cf_account(c: AsyncClient) -> int:
-    r = await c.post("/api/cloudflare/accounts", json={"name": f"cf-{uuid.uuid4().hex[:6]}"})
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
+pytestmark = pytest.mark.usefixtures("purge_test_users")
 
 
 async def _rows_named(name: str) -> int:
@@ -130,9 +63,9 @@ async def test_creating_my_own_domain_twice_is_409_not_500():
     сессия должна оставаться рабочей. Без `rollback()` в сервисе следующий же
     запрос в том же соединении падал бы уже не по своей вине.
     """
-    name = _name()
+    name = domain_name()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "dup-own")
+        await register_and_login(c, "dup-own")
         r = await c.post("/api/domains", json={"domain_name": name})
         assert r.status_code == 201, r.text
 
@@ -141,7 +74,7 @@ async def test_creating_my_own_domain_twice_is_409_not_500():
         assert r.json()["detail"] == "domain already exists"
         assert await _rows_named(name) == 1
 
-        r = await c.post("/api/domains", json={"domain_name": _name()})
+        r = await c.post("/api/domains", json={"domain_name": domain_name()})
         assert r.status_code == 201, f"после конфликта сессия сломана: {r.text}"
 
 
@@ -154,14 +87,14 @@ async def test_domain_taken_by_another_user_is_409_that_names_no_owner():
     вдобавок выглядел поломкой. Закрывается это уникальностью по паре
     (user_id, domain_name), то есть миграцией, — записано долгом.
     """
-    name = _name()
+    name = domain_name()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        owner_email = await _register_and_login(c, "dup-owner")
+        owner_email = await register_and_login(c, "dup-owner")
         r = await c.post("/api/domains", json={"domain_name": name})
         assert r.status_code == 201, r.text
         await c.post("/api/auth/logout")
 
-        await _register_and_login(c, "dup-other", key=b"\x99" * 32)
+        await register_and_login(c, "dup-other", key=b"\x99" * 32)
         r = await c.post("/api/domains", json={"domain_name": name})
         assert r.status_code == 409, r.text
         detail = r.json()["detail"]
@@ -172,7 +105,7 @@ async def test_domain_taken_by_another_user_is_409_that_names_no_owner():
         assert await _rows_named(name) == 1
         assert (await c.get("/api/domains")).json() == []
 
-        r = await c.post("/api/domains", json={"domain_name": _name()})
+        r = await c.post("/api/domains", json={"domain_name": domain_name()})
         assert r.status_code == 201, f"после конфликта сессия сломана: {r.text}"
 
 
@@ -192,7 +125,7 @@ async def test_domain_taken_by_another_user_is_409_that_names_no_owner():
 )
 async def test_a_name_that_is_not_a_domain_is_422_and_nothing_is_created(bad_name: str):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "bad-name")
+        await register_and_login(c, "bad-name")
         r = await c.post("/api/domains", json={"domain_name": bad_name})
         assert r.status_code == 422, r.text
         assert [e["loc"] for e in r.json()["detail"]] == [["body", "domain_name"]], r.text
@@ -202,9 +135,9 @@ async def test_a_name_that_is_not_a_domain_is_422_and_nothing_is_created(bad_nam
 @pytest.mark.asyncio
 async def test_the_name_is_normalized_before_it_is_checked_and_stored():
     """Нормализация идёт до проверки формы, иначе `Example.COM.` был бы 422."""
-    core = _name()
+    core = domain_name()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "norm")
+        await register_and_login(c, "norm")
         r = await c.post("/api/domains", json={"domain_name": f"  {core.upper()}.  "})
         assert r.status_code == 201, r.text
         assert r.json()["domain_name"] == core
@@ -218,11 +151,11 @@ async def test_the_single_entrance_of_the_wizard_goes_through():
     Ровно та последовательность, которую делает мастер «Add Domain».
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "wizard")
-        server_id = await _create_server(c)
-        cf_id = await _create_cf_account(c)
+        await register_and_login(c, "wizard")
+        server_id = await create_server(c)
+        cf_id = await create_cf_account(c)
 
-        r = await c.post("/api/domains", json={"domain_name": _name()})
+        r = await c.post("/api/domains", json={"domain_name": domain_name()})
         assert r.status_code == 201, r.text
         domain_id = r.json()["id"]
 
@@ -247,14 +180,14 @@ async def test_bulk_create_skips_a_name_taken_by_another_user():
     чужое имя пролетало мимо неё в `IntegrityError` на общем коммите — и
     терялись ВСЕ строки пачки, а клиент получал 500.
     """
-    taken = _name()
-    fresh = _name()
+    taken = domain_name()
+    fresh = domain_name()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "bulk-owner")
+        await register_and_login(c, "bulk-owner")
         assert (await c.post("/api/domains", json={"domain_name": taken})).status_code == 201
         await c.post("/api/auth/logout")
 
-        await _register_and_login(c, "bulk-other", key=b"\x99" * 32)
+        await register_and_login(c, "bulk-other", key=b"\x99" * 32)
         r = await c.post("/api/domains/bulk", json={"domains_text": f"{taken}\n{fresh}"})
         assert r.status_code == 201, r.text
         body = r.json()
@@ -271,15 +204,15 @@ async def test_bulk_assign_refuses_a_foreign_server_and_a_foreign_cf_account():
     аккаунтом обязаны дать 200 и связать домен, иначе отказ ничего не доказывает.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        await _register_and_login(c, "assign-owner", key=b"\x99" * 32)
-        foreign_server = await _create_server(c)
-        foreign_cf = await _create_cf_account(c)
+        await register_and_login(c, "assign-owner", key=b"\x99" * 32)
+        foreign_server = await create_server(c)
+        foreign_cf = await create_cf_account(c)
         await c.post("/api/auth/logout")
 
-        await _register_and_login(c, "assign-other")
-        my_server = await _create_server(c)
-        my_cf = await _create_cf_account(c)
-        r = await c.post("/api/domains", json={"domain_name": _name()})
+        await register_and_login(c, "assign-other")
+        my_server = await create_server(c)
+        my_cf = await create_cf_account(c)
+        r = await c.post("/api/domains", json={"domain_name": domain_name()})
         assert r.status_code == 201, r.text
         domain_id = r.json()["id"]
 
@@ -314,3 +247,112 @@ async def test_bulk_assign_refuses_a_foreign_server_and_a_foreign_cf_account():
         )
         assert r.status_code == 200, r.text
         assert (await _links(domain_id))[0] is None
+
+
+@pytest.mark.asyncio
+async def test_creating_a_domain_refuses_a_link_that_is_not_mine():
+    """Чужая связка — 404, и несуществующая тоже: не 500 из нарушения FK.
+
+    До проверки владения `POST /domains {"registrar_id": <нет такого>}` доезжал
+    до драйвера и возвращался нарушением FK, то есть 500 на обычном вводе из
+    мастера. А чужой существующий id принимался молча — 201 и строка, ссылающаяся
+    на чужой сервер.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "link-owner", key=b"\x99" * 32)
+        foreign_server = await create_server(c)
+        foreign_registrar = await create_registrar(c)
+        await c.post("/api/auth/logout")
+
+        await register_and_login(c, "link-other")
+        my_server = await create_server(c)
+        my_registrar = await create_registrar(c)
+
+        for body in (
+            {"server_id": foreign_server},
+            {"registrar_id": foreign_registrar},
+            {"registrar_id": 2_000_000_000},
+            {"cloudflare_account_id": 2_000_000_000},
+        ):
+            r = await c.post("/api/domains", json={"domain_name": domain_name(), **body})
+            assert r.status_code == 404, f"{body}: {r.text}"
+        assert (await c.get("/api/domains")).json() == []
+
+        r = await c.post(
+            "/api/domains",
+            json={
+                "domain_name": domain_name(),
+                "server_id": my_server,
+                "registrar_id": my_registrar,
+            },
+        )
+        assert r.status_code == 201, (
+            f"тот же POST не работает и со своими связками — 404 выше ничего "
+            f"не доказывает: {r.text}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_updating_a_domain_holds_the_same_two_rules():
+    """`PUT` — тот же путь записи имени и связок, и отказы у него те же.
+
+    Переименование в занятое имя отвечало 500 из `IntegrityError`, мусорное имя
+    проходило со статусом 200, чужая связка записывалась молча.
+    """
+    taken = domain_name()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "put-owner", key=b"\x99" * 32)
+        assert (await c.post("/api/domains", json={"domain_name": taken})).status_code == 201
+        foreign_server = await create_server(c)
+        await c.post("/api/auth/logout")
+
+        await register_and_login(c, "put-other")
+        mine = domain_name()
+        r = await c.post("/api/domains", json={"domain_name": mine})
+        assert r.status_code == 201, r.text
+        domain_id = r.json()["id"]
+        second = domain_name()
+        r = await c.post("/api/domains", json={"domain_name": second})
+        assert r.status_code == 201, r.text
+
+        # Переименование в чужое имя и в своё же второе — оба конфликт, но
+        # текстом различаются ровно так же, как на заведении.
+        r = await c.put(f"/api/domains/{domain_id}", json={"domain_name": taken})
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"] == "domain name is already taken"
+        r = await c.put(f"/api/domains/{domain_id}", json={"domain_name": second})
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"] == "domain already exists"
+
+        r = await c.put(f"/api/domains/{domain_id}", json={"domain_name": "не домен вовсе"})
+        assert r.status_code == 422, r.text
+        assert [e["loc"] for e in r.json()["detail"]] == [["body", "domain_name"]], r.text
+
+        r = await c.put(f"/api/domains/{domain_id}", json={"server_id": foreign_server})
+        assert r.status_code == 404, r.text
+        assert (await _links(domain_id))[0] is None
+
+        # Своё же текущее имя — не конфликт, а no-op: 409 на нём был бы дефектом.
+        r = await c.put(f"/api/domains/{domain_id}", json={"domain_name": mine.upper()})
+        assert r.status_code == 200, r.text
+        assert r.json()["domain_name"] == mine
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_skips_a_name_too_long_for_the_column():
+    """Слишком длинное имя — `skipped`, а не потеря всей пачки.
+
+    Форму такое имя проходит (`DOMAIN_REGEX` не ограничивает число меток), в
+    `String(255)` не влезает. Пока длину проверял только одиночный путь, годные
+    строки пачки уже стояли в `db.add`, и общий коммит падал `DataError` — 500 и
+    ни одного заведённого домена.
+    """
+    too_long = "aaa." * 70 + "com"
+    good = domain_name()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "bulk-long")
+        r = await c.post("/api/domains/bulk", json={"domains_text": f"{too_long}\n{good}"})
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert [d["domain_name"] for d in body["created"]] == [good]
+        assert body["skipped"] == [too_long]

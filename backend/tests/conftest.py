@@ -104,3 +104,137 @@ def published_tasks(monkeypatch) -> list[PublishedTask]:
     monkeypatch.setattr(Task, "apply_async", _record_apply_async)
     monkeypatch.setattr(Celery, "send_task", _record_send_task)
     return published
+
+
+# --- Общая заготовка тестов, работающих с живым API -------------------------
+#
+# `_register_and_login` + уборка за собой + заведение сервера/CF-аккаунта/
+# регистратора дословно повторялись в каждом новом файле. Здесь они лежат
+# один раз; файл подключает их строкой
+# `pytestmark = pytest.mark.usefixtures("purge_test_users")`.
+#
+# Уборка обязательна: база тестов общая с dev-окружением, а `domains.domain_name`
+# уникален глобально — брошенные строки мешают не только глазам.
+
+_REGISTERED_EMAILS: list[str] = []
+
+
+def b64(b: bytes) -> str:
+    import base64
+
+    return base64.b64encode(b).decode()
+
+
+@pytest.fixture
+def purge_test_users():
+    """Убрать пользователей, заведённых `register_and_login` в этом тесте.
+
+    Серверы, домены и аккаунты уезжают за пользователем по FK CASCADE, поэтому
+    отдельной уборки им не нужно. Живёт в teardown, а не в `finally` у каждого
+    случая: упавший ассерт обрывает тест на середине.
+
+    Не `autouse`: реестр наполняет только `register_and_login`, и молча
+    включать уборку всему набору (где есть свои схемы уборки) — лишнее.
+    """
+    import asyncio
+
+    _REGISTERED_EMAILS.clear()
+    yield
+    emails = list(_REGISTERED_EMAILS)
+    _REGISTERED_EMAILS.clear()
+    if emails:
+        asyncio.run(_purge_users(emails))
+
+
+async def _purge_users(emails: list[str]) -> None:
+    from sqlalchemy import delete as sa_delete
+
+    from app.auth.models import User
+    from app.core.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as s:
+        await s.execute(sa_delete(User).where(User.email.in_(emails)))
+        await s.commit()
+
+
+async def register_and_login(client, prefix: str, key: bytes = b"\x01" * 32) -> str:
+    """Завести подтверждённого пользователя и войти им. Возвращает e-mail.
+
+    Регистрация обязана дать ровно 201: e-mail содержит `uuid4`, поэтому 409
+    означает не «уже есть», а поломку — и продолжать тест после него значило бы
+    работать под чужим паролем и падать позже и невнятнее.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update
+
+    from app.auth.models import User
+    from app.core.database import AsyncSessionLocal
+
+    email = f"{prefix}-{uuid.uuid4().hex[:8]}@example.com"
+    _REGISTERED_EMAILS.append(email)
+    r = await client.post(
+        "/api/auth/register",
+        json={
+            "email": email,
+            "salt_b64": b64(b"\x00" * 16),
+            "auth_key_b64": b64(key),
+            "recovery_blob_b64": b64(b"\x02" * 96),
+            "recovery_auth_key_b64": b64(b"\x03" * 32),
+        },
+    )
+    assert r.status_code == 201, r.text
+    async with AsyncSessionLocal() as s:
+        await s.execute(
+            update(User)
+            .where(User.email == email)
+            .values(email_confirmed_at=datetime.now(timezone.utc), email_confirm_token_hash=None)
+        )
+        await s.commit()
+    r = await client.post(
+        "/api/auth/login/finish", json={"email": email, "auth_key_b64": b64(key)}
+    )
+    assert r.status_code == 200, r.text
+    return email
+
+
+def domain_name() -> str:
+    import uuid
+
+    return f"{uuid.uuid4().hex[:10]}.example.com"
+
+
+async def create_server(client) -> int:
+    import uuid
+
+    r = await client.post(
+        "/api/servers",
+        json={
+            "name": f"srv-{uuid.uuid4().hex[:6]}",
+            "ip_address": f"203.0.113.{uuid.uuid4().int % 200 + 10}",
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def create_cf_account(client) -> int:
+    import uuid
+
+    r = await client.post(
+        "/api/cloudflare/accounts", json={"name": f"cf-{uuid.uuid4().hex[:6]}"}
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def create_registrar(client, provider: str = "hostiq") -> int:
+    import uuid
+
+    r = await client.post(
+        "/api/registrars/accounts",
+        json={"provider": provider, "name": f"reg-{uuid.uuid4().hex[:6]}"},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]

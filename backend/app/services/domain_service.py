@@ -106,22 +106,33 @@ async def create(db: AsyncSession, data: DomainCreate, user_id: UUID) -> Domain:
     domain = Domain(**payload, user_id=user_id)
     await touch_entity_sync(db, user_id, domain)
     db.add(domain)
+    await _commit_unique_name(db)
+    await db.refresh(domain)
+    return domain
+
+
+async def _commit_unique_name(db: AsyncSession) -> None:
+    """Коммит записи имени: конфликт — `DomainNameTaken`, а не 500.
+
+    Сюда приходит и чужой домен (UNIQUE глобальный, а предпроверки у
+    вызывающих — свои), и гонка двух вкладок. Без этого перехвата и заведение,
+    и переименование отвечали 500 на самом обычном сценарии — «домен уже
+    заведён».
+    """
     try:
         await db.commit()
     except IntegrityError as exc:
-        # Сюда приходит и чужой домен (UNIQUE глобальный, а предпроверка выше
-        # видит только свои), и гонка двух вкладок. Без этого перехвата мастер
-        # «Add Domain» отвечал 500 на самом обычном сценарии — «ввёл домен,
-        # который уже заведён».
         await db.rollback()
         if _is_unique_violation(exc):
+            # `existing_id` здесь неизвестен, и на своей же строке (гонка двух
+            # вкладок одного пользователя) текст выйдет как у чужой —
+            # «занято» вместо «уже заведено». Идти за id ещё одним запросом
+            # ради текста в гонке, которая длится миллисекунды, дороже, чем
+            # эта неточность.
             raise DomainNameTaken() from exc
-        # Прочие нарушения целостности (например, `registrar_id` на
-        # несуществующую строку) — не про имя, и выдавать их за конфликт имени
-        # значило бы врать. Поведение прежнее, отдельный долг.
+        # Прочие нарушения целостности (FK на несуществующую строку и т.п.) —
+        # не про имя, и выдавать их за конфликт имени значило бы врать.
         raise
-    await db.refresh(domain)
-    return domain
 
 
 def _is_unique_violation(exc: IntegrityError) -> bool:
@@ -140,12 +151,24 @@ async def update(
     if not domain:
         return None
     patch = data.model_dump(exclude_unset=True)
-    if "domain_name" in patch and patch["domain_name"]:
+    if patch.get("domain_name"):
         patch["domain_name"] = _normalize(patch["domain_name"])
+        # Переименование в занятое имя — тот же конфликт, что и заведение.
+        # Сравнение с `domain_id` обязательно: `PUT` с текущим именем — не
+        # конфликт, а обычный no-op, и 409 на нём был бы дефектом.
+        mine = await get_by_name(db, patch["domain_name"], user_id)
+        if mine is not None and mine.id != domain_id:
+            raise DomainNameTaken(existing_id=mine.id)
+    # Версия синхронизации — ДО правки полей, и это не косметика порядка.
+    # `bump_version` внутри делает SELECT, а любой запрос по грязной сессии
+    # запускает autoflush: с новым именем, уже проставленным в объект, конфликт
+    # вылетал бы из `touch_entity_sync`, то есть мимо `_commit_unique_name`, и
+    # переименование в занятое имя снова отвечало бы 500. Правило простое: между
+    # правкой имени и коммитом запросов нет.
+    await touch_entity_sync(db, user_id, domain)
     for k, v in patch.items():
         setattr(domain, k, v)
-    await touch_entity_sync(db, user_id, domain)
-    await db.commit()
+    await _commit_unique_name(db)
     await db.refresh(domain)
     return domain
 
@@ -309,6 +332,13 @@ async def bulk_full_setup(
     присваивание трёх колонок, повтор которого по определению даёт то же
     состояние.
 
+    Речь именно о ПОВТОРЕ — тех же аргументах. Два одновременных прогона с
+    РАЗНЫМИ связками по одному домену этим не упорядочиваются: побеждает
+    последний UPDATE, а «связано» будет сказано обоим. Журнал ключей такого
+    тоже не ловит (ключи-то разные); ловит блокировка строки, и заводить её
+    здесь незачем — конкурирующий прогон означает, что человек в двух окнах
+    сам выбрал разные цели.
+
     Отсутствующий (или чужой) id — строка отчёта, а не отказ всей пачки. Пачка
     приходит из выделения на экране, и домен, удалённый в другой вкладке между
     открытием списка и нажатием кнопки, — обычная гонка, а не повод не связать
@@ -326,15 +356,12 @@ async def bulk_full_setup(
     if registrar_id is not None:
         values["registrar_id"] = registrar_id
 
+    # Колонки состояния берутся из ключей `values`, а не перечисляются рядом:
+    # ниже по ним же идёт сравнение через `getattr`, и разъехавшись, эти два
+    # списка дали бы `AttributeError` на ровном месте.
     rows = (
         await db.execute(
-            select(
-                Domain.id,
-                Domain.domain_name,
-                Domain.server_id,
-                Domain.cloudflare_account_id,
-                Domain.registrar_id,
-            )
+            select(Domain.id, Domain.domain_name, *(getattr(Domain, k) for k in values))
             .where(Domain.id.in_(domain_ids), Domain.user_id == user_id)
             .order_by(Domain.id)
         )
