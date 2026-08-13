@@ -121,11 +121,16 @@ async function addDomain(name: string) {
   fireEvent.click(screen.getByRole("button", { name: "Add Domain" }));
 }
 
-/** Выделить все строки и вернуть кнопку привязки (в вебе её нет). */
+/** Выделить все строки и вернуть кнопку привязки по выделенным (в вебе её нет). */
 async function selectAll(container: HTMLElement) {
   const all = container.querySelector('thead input[type="checkbox"]') as HTMLInputElement;
   fireEvent.click(all);
-  return screen.queryByRole("button", { name: /Match Cloudflare zones/ }) as HTMLButtonElement | null;
+  return screen.queryByRole("button", { name: /Синхронизировать выделенные/ }) as HTMLButtonElement | null;
+}
+
+/** Кнопка синхрона по всему списку — та, что в шапке вкладки и видна всегда. */
+function syncAllBtn() {
+  return screen.queryByRole("button", { name: /Синхронизировать с Cloudflare/ }) as HTMLButtonElement | null;
 }
 
 beforeEach(() => {
@@ -253,11 +258,12 @@ describe("Domains — автопривязка в вебе", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("кнопки привязки в вебе нет вовсе", async () => {
+  it("кнопок привязки в вебе нет вовсе", async () => {
     setTauri(false);
 
     const { container } = renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
+    expect(syncAllBtn()).toBeNull();
     expect(await selectAll(container)).toBeNull();
     // И ссылки в десктоп тоже: хоста под неё в `parseDeepLinkAction` нет, а
     // ссылка в неразбираемый хост — это тот же 404, который мы только что убрали.
@@ -265,7 +271,63 @@ describe("Domains — автопривязка в вебе", () => {
   });
 });
 
-describe("Domains — кнопка «Match Cloudflare zones»", () => {
+describe("Domains — кнопка «Синхронизировать с Cloudflare» (весь список)", () => {
+  it("привязывает весь список, ничего не выделяя", async () => {
+    setTauri(true);
+    zonesAre([
+      { id: "zone-a", name: "a.com" },
+      { id: "zone-b", name: "b.com" },
+    ]);
+
+    renderPage([domainRow(1, "a.com"), domainRow(2, "b.com")]);
+    await screen.findByText("a.com");
+    // Ни одной галочки не поставлено: подсказка живого матча стоит в строках
+    // сама, и человеку, который её прочитал, выделять нечего.
+    fireEvent.click(syncAllBtn()!);
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(2));
+    expect(mocks.apiPut.mock.calls.map((c: any[]) => c[0])).toEqual(["/domains/1", "/domains/2"]);
+    expect((await screen.findByRole("status")).textContent).toContain("2 of 2 linked");
+  });
+
+  it("берёт и строки, спрятанные поиском", async () => {
+    setTauri(true);
+    zonesAre([{ id: "zone-b", name: "b.com" }]);
+
+    renderPage([domainRow(1, "a.com"), domainRow(2, "b.com")]);
+    await screen.findByText("a.com");
+    fireEvent.change(screen.getByPlaceholderText("Search domains…"), { target: { value: "a.com" } });
+    expect(screen.queryByText("b.com")).toBeNull();
+    fireEvent.click(syncAllBtn()!);
+
+    // Синхрон приводит базу в соответствие с Cloudflare, а не «делает что-то с
+    // показанным»: результат, зависящий от набранной строки поиска, — это
+    // домен, оставшийся непривязанным по причине, о которой никто не сказал.
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledWith("/domains/2", {
+      cloudflare_account_id: 7,
+      cloudflare_zone_id: "zone-b",
+    }));
+  });
+
+  it("второй клик не запускает второй проход", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    renderPage([domainRow(1, "a.com")]);
+    await screen.findByText("a.com");
+    const btn = syncAllBtn()!;
+    fireEvent.click(btn);
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // Гейт «один прогон за раз» у обеих кнопок общий (`useCloudflareBind`):
+    // область у них разная, а прогон один — и второй поверх первого не встаёт.
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Domains — кнопка «Синхронизировать выделенные»", () => {
   it("привязывает выделенные и отчитывается числами", async () => {
     setTauri(true);
     zonesAre([{ id: "zone-a", name: "a.com" }]);

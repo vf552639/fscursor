@@ -13,10 +13,10 @@ export default function BulkActionToolbar({
   selectedDomainIds = [],
   onAssignServer,
   onAssignCF,
-  onMatchCFZones,
+  onSyncCloudflare,
   onProvision,
   onDelete,
-  matchCFZonesPending,
+  syncPending,
   provisionPending,
 }: {
   selectedCount: number;
@@ -29,11 +29,14 @@ export default function BulkActionToolbar({
    * Обязателен, хотя кнопка рисуется только в десктопе: кнопка без обработчика
    * — это кнопка, которая молчит, а такую от сломанной не отличить.
    */
-  onMatchCFZones: () => void;
+  onSyncCloudflare: () => void;
   onProvision: () => void;
   onDelete: () => void;
-  /** Идёт ли прогон привязки. Гасит ТОЛЬКО свою кнопку — см. `provisionPending`. */
-  matchCFZonesPending?: boolean;
+  /**
+   * Идёт ли прогон привязки. Гасит ТОЛЬКО кнопку синхрона (здесь и в шапке
+   * вкладки — прогон у них общий), но не соседей — см. `provisionPending`.
+   */
+  syncPending?: boolean;
   /**
    * Идёт ли массовый provision. Гасит ТОЛЬКО свою кнопку.
    *
@@ -84,15 +87,22 @@ export default function BulkActionToolbar({
           `parseDeepLinkAction` (`lib/deepLink.ts`), а хост, которого там нет, —
           это ссылка в никуда: ровно те кнопки, которые на этой ветке только что
           удалены («Set NS», «Refresh SSL», «Full Setup»). Поэтому в вебе кнопки
-          просто нет. */}
+          просто нет.
+
+          Подпись — тот же глагол, что у кнопки в шапке вкладки, и разнится
+          только областью. Действие за обеими одно (`useCloudflareBind`), а
+          подсказка живого матча в строке зовёт его одним словом
+          («Нажми Синхронизировать»): два разных имени на одно действие
+          означали бы, что прочитавший подсказку ищет на экране слово, которого
+          там два — и ни одно не совпадает. */}
       {isTauri() ? (
         <Btn
           variant="secondary"
           size="sm"
-          onClick={onMatchCFZones}
-          disabled={Boolean(matchCFZonesPending)}
+          onClick={onSyncCloudflare}
+          disabled={Boolean(syncPending)}
         >
-          {matchCFZonesPending ? "Matching…" : "Match Cloudflare zones"}
+          {syncPending ? "Синхронизация…" : "Синхронизировать выделенные"}
         </Btn>
       ) : null}
       {/* Массового «Set NS» здесь намеренно нет: `POST /domains/bulk-set-ns` на

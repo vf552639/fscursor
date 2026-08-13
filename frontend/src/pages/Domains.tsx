@@ -269,6 +269,18 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   return <>
     <DomainsHeader
       total={domains.length}
+      // Весь список — включая строки, спрятанные фильтром, и это выбор.
+      // Действие приводит базу в соответствие с Cloudflare, а не «делает
+      // что-то с показанным»: домен, скрытый поиском, привязан не хуже
+      // видимого, и оставить его непривязанным значило бы, что результат
+      // синхрона зависит от набранной строки поиска. Кому нужна область
+      // поуже, у того есть кнопка по выделенным. Перезаписи это не грозит:
+      // домены с уже проставленным аккаунтом прогон пропускает.
+      //
+      // Строки из ответа API, а не `DomainUI`, — по той же причине, что у
+      // тулбара ниже.
+      onSyncCloudflare={() => { void cfBind.run(domainsData, "manual"); }}
+      syncPending={cfBind.pending}
       onFileImport={()=>setShowFileImport(true)}
       onBulkAdd={()=>setSB(true)}
       onAddDomain={()=>setSA(true)}
@@ -300,10 +312,10 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       // пользователь сейчас создаст. Всё это — работа ПО ТОМУ ЖЕ набору, и
       // снятое выделение заставило бы разыскивать те же строки заново в списке
       // на двести строк. Повтор безопасен: уже привязанное прогон пропускает.
-      onMatchCFZones={() => {
+      onSyncCloudflare={() => {
         void cfBind.run(domainsData.filter((d) => sel.has(d.id)), "manual");
       }}
-      matchCFZonesPending={cfBind.pending}
+      syncPending={cfBind.pending}
       onProvision={() => { void bulkProvision.run(); }}
       onDelete={handleBulkDelete}
       provisionPending={bulkProvisionRunning}
