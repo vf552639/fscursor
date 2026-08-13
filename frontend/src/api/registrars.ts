@@ -81,6 +81,9 @@ function requireUserId(): string {
 export const registrarsKeys = {
   accounts: ["registrars", "accounts"] as const,
   domains: (accountId: number) => ["registrars", accountId, "domains"] as const,
+  /** Ключ на ДОМЕН: соседний `domains` — это выкачка аккаунта, а тут один вопрос про один домен. */
+  nameservers: (accountId: number, domain: string) =>
+    ["registrars", accountId, "nameservers", domain] as const,
 };
 
 export function useRegistrarAccounts() {
@@ -145,5 +148,45 @@ export function useRegistrarDomains(accountId: number | null | undefined) {
       });
     },
     enabled: !!accountId,
+  });
+}
+
+/**
+ * Настоящие nameservers ОДНОГО домена — как их видит его регистратор.
+ *
+ * Отдельный запрос, а не поле из `useRegistrarDomains`, и это не оптимизация.
+ * Листинг у Namecheap nameservers не отдаёт вовсе, а у обоих провайдеров он
+ * непагинирован — то есть отсутствие домена в ответе означает «страница
+ * кончилась» ничуть не реже, чем «домена в аккаунте нет», и сказать по нему
+ * что-либо о делегировании нельзя. Здесь ответ однозначен: либо список, либо
+ * ошибка регистратора с её текстом.
+ *
+ * `staleTime` — как у зон Cloudflare (`zonesQuery`) и по той же причине: это
+ * поход в чужой API с лимитами (Namecheap считает запросы поминутно), а
+ * меняются NS домена либо нашей же кнопкой (она гасит этот ключ в
+ * `useSetNameservers`), либо руками в панели регистратора — то есть редко.
+ * Дефолтные 10 секунд означали бы полный опрос на каждое переоткрытие
+ * карточки.
+ */
+export function useRegistrarNameservers(
+  accountId: number | null | undefined,
+  domain: string | null | undefined,
+) {
+  return useQuery({
+    queryKey:
+      accountId && domain
+        ? registrarsKeys.nameservers(accountId, domain)
+        : ["registrars", "nameservers", "disabled"],
+    queryFn: async () => {
+      requireDesktop("Reading nameservers from a registrar");
+      const userId = requireUserId();
+      return invokeSynced<string[]>("registrar_get_nameservers", {
+        userId,
+        accountId: String(accountId),
+        domain,
+      });
+    },
+    enabled: !!accountId && !!domain,
+    staleTime: 60_000,
   });
 }

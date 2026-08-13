@@ -2,8 +2,7 @@ import React, { useMemo } from "react";
 
 import { Domain } from "../api/domains";
 import { Zone, useCloudflareZones } from "../api/cloudflare";
-import { RegistrarDomain, useRegistrarAccounts, useRegistrarDomains } from "../api/registrars";
-import { normalizeZoneName } from "../lib/cfZoneMatch";
+import { useRegistrarAccounts, useRegistrarNameservers } from "../api/registrars";
 import { NO_VALUE, expiryState, expiryTextColor, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
 import { nsDelegation } from "../lib/nsDelegation";
 import { registrarSupportsNsApi } from "../lib/registrarCaps";
@@ -91,9 +90,9 @@ export default function DomainDetailModal({
    * Зоны аккаунта Cloudflare — одно чтение на всю карточку, и от него зависят
    * три её ответа: nameservers зоны (подстановка в поле), статус зоны
    * (подтвердил ли Cloudflare делегирование) и поиск зоны по ИМЕНИ (дорезолв в
-   * `DomainCloudflareField`). Отдельные `useZoneNameservers`/`useZoneDetails` —
-   * это `select`-ы над этой же записью кэша, то есть три имени для одного
-   * чтения; здесь нужен сам список.
+   * `DomainCloudflareField`). Хуки-`select`-ы поверх той же записи кэша
+   * (`useZoneDetails`) отвечают на один вопрос каждый — три из них были бы
+   * тремя именами для одного чтения; здесь нужен сам список.
    *
    * Цена — поход в Cloudflare на открытие карточки, и она осознанная: без NS
    * зоны и её статуса на этом экране нечего показывать вовсе. Запись кэша общая
@@ -122,31 +121,31 @@ export default function DomainDetailModal({
   const registrarProvider = registrarAccountsQ.data?.find((a) => a.id === domain.registrar_id)?.provider;
 
   /**
-   * Настоящие NS домена — у регистратора. Читаются только когда ответ на что-то
-   * влияет: в десктопе (в вебе команда обречена), у провайдера с NS-API (иначе
-   * `make_service` откажет ещё до сети) и при известных NS зоны (без эталона
-   * сверка всё равно даст «не знаем», а поход в чужой API стоит запроса на
-   * каждое открытие карточки).
+   * Настоящие NS домена — у регистратора, поимённым запросом про ЭТОТ домен
+   * (`registrar_get_nameservers`), а не строкой из листинга аккаунта: листинг у
+   * Namecheap nameservers не отдаёт вовсе, а у обоих провайдеров он
+   * непагинирован — по нему «домена нет» и «страница кончилась» неразличимы.
+   *
+   * Читаем только когда ответ на что-то влияет: в десктопе (в вебе команда
+   * обречена), у провайдера с NS-API (иначе `make_service` откажет ещё до сети)
+   * и при известных NS зоны — без эталона сверка всё равно даст «не знаем», а
+   * платить за неё пришлось бы запросом в чужой API на каждое открытие карточки.
    */
   const canReadRegistrarNs =
     isTauri() && registrarSupportsNsApi(registrarProvider) && zoneNameservers.length > 0;
-  const registrarDomainsQ = useRegistrarDomains(canReadRegistrarNs ? domain.registrar_id : null);
-  /** `null` — домена нет в списке аккаунта; `undefined` — список не прочитан. */
-  const registrarNameservers: string[] | null | undefined = useMemo(() => {
-    const list: RegistrarDomain[] | undefined = registrarDomainsQ.data;
-    if (!list) return undefined;
-    // Имя сравниваем ТЕМ ЖЕ правилом, что и имена зон: регистраторы отдают его
-    // как придётся (регистр, завершающая точка).
-    const key = normalizeZoneName(domain.domain_name);
-    const row = list.find((d) => normalizeZoneName(d.domain ?? "") === key);
-    return row ? row.nameservers : null;
-  }, [registrarDomainsQ.data, domain.domain_name]);
+  const registrarNsQ = useRegistrarNameservers(
+    canReadRegistrarNs ? domain.registrar_id : null,
+    domain.domain_name,
+  );
 
   const delegation = nsDelegation({
-    zone: zone ? { nameservers: zone.name_servers ?? [], status: zone.status } : zone,
+    domainName: domain.domain_name,
+    zone: zone
+      ? { name: zone.name, nameservers: zone.name_servers ?? [], status: zone.status }
+      : zone,
     registrarAccountId: domain.registrar_id,
     registrarProvider,
-    registrarNameservers,
+    registrarNameservers: registrarNsQ.data,
   });
 
   return (
@@ -207,6 +206,7 @@ export default function DomainDetailModal({
         zonesError={zonesQ.error}
         delegation={delegation}
         registrarProvider={registrarProvider}
+        registrarNsError={registrarNsQ.error}
       />
     </Modal>
   );

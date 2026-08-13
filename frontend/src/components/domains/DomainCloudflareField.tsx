@@ -3,7 +3,7 @@ import React, { ChangeEvent, useEffect, useMemo, useRef } from "react";
 import { CloudflareAccount, Zone, useCloudflareAccounts } from "../../api/cloudflare";
 import { clip, errorText } from "../../api/cfAutoBind";
 import { Domain, useUpdateDomain } from "../../api/domains";
-import { resolveZoneByName } from "../../lib/cfZoneMatch";
+import { normalizeZoneName, resolveZoneByName } from "../../lib/cfZoneMatch";
 import { isTauri } from "../../lib/runtime";
 import { Sel } from "../ui/Primitives";
 
@@ -68,9 +68,18 @@ export default function DomainCloudflareField({
   );
 
   /**
-   * Ключ уже сделанной попытки записи. Без него отказ `PUT` (сеть, 500)
-   * возвращал бы нас в то же состояние «аккаунт есть, зоны нет» — то есть
-   * карточка долбила бы бэкенд в цикле, пока открыта.
+   * Ключ уже сделанной попытки записи — защита от ПОВТОРНОЙ записи той же зоны,
+   * а не от бесконечного цикла: цикла тут нет и без него, потому что эффект
+   * зависит от `resolve`, а тот пересчитывается только при смене аккаунта,
+   * зоны, имени домена или самого массива зон (ни отказ `PUT`, ни лишний
+   * рендер их не трогают).
+   *
+   * Узкий случай, ради которого ключ и стоит: `cf_list_zones` перечитался и
+   * вернул ИЗМЕНЁННЫЙ список (создали зону на странице Cloudflare, истёк
+   * `staleTime`, прошла инвалидация). Ссылка на массив новая → `resolve` новый
+   * → эффект срабатывает второй раз, и без ключа в бэкенд уходит второй,
+   * идентичный `PUT` — по домену, зона которого уже записана. При долгом
+   * ответе сервера таких повторов может быть и больше одного.
    *
    * В ключе есть и аккаунт: смена аккаунта — это новое, разрешённое основание
    * попробовать снова.
@@ -189,7 +198,16 @@ function ZoneNote({
     return note(WARN_TEXT, "The zone is not resolved: zones of this account could not be read.");
   }
   if (zoneId) {
-    if (zone) return note(NOTE_TEXT, `Zone: ${zone.name} · ${zone.status ?? "unknown status"}`);
+    if (zone) {
+      // Имя зоны сверяется с именем домена, потому что «зона есть, статус
+      // active» само по себе ещё не про ЭТОТ домен: наследие ручной правки
+      // `cloudflare_zone_id` выглядело бы здоровой привязкой (см. ту же
+      // проверку в `lib/nsDelegation`, причина `zone-name-mismatch`).
+      if (normalizeZoneName(zone.name) !== normalizeZoneName(domainName)) {
+        return note(WARN_TEXT, `Zone ${zone.name} is not this domain's zone — rebind or fix it in Cloudflare.`);
+      }
+      return note(NOTE_TEXT, `Zone: ${zone.name} · ${zone.status ?? "unknown status"}`);
+    }
     // Зоны прочитаны, а сохранённой среди них нет: привязка указывает в
     // пустоту (обычно — зону удалили или id остался от другого аккаунта).
     if (zones) {

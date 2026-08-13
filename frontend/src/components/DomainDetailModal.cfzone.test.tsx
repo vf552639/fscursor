@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-libra
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainDetailModal from "./DomainDetailModal";
+import { cloudflareKeys } from "../api/cloudflare";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
 
@@ -93,11 +94,14 @@ function mockAccounts(provider: string | null = "namecheap") {
   });
 }
 
-/** Ответы двух чужих API: зоны Cloudflare и домены регистратора. */
-function mockReads(reads: { zones?: any[]; registrarDomains?: any[] } = {}) {
+/** Ответы двух чужих API: зоны Cloudflare и nameservers домена у регистратора. */
+function mockReads(reads: { zones?: any[]; registrarNs?: string[]; registrarNsError?: Error } = {}) {
   mocks.invokeSynced.mockImplementation(async (cmd: string) => {
     if (cmd === "cf_list_zones") return reads.zones ?? [zone()];
-    if (cmd === "registrar_get_domains") return reads.registrarDomains ?? [];
+    if (cmd === "registrar_get_nameservers") {
+      if (reads.registrarNsError) throw reads.registrarNsError;
+      return reads.registrarNs ?? [];
+    }
     return true;
   });
 }
@@ -216,14 +220,23 @@ describe("дорезолв зоны", () => {
     await waitFor(() => expect(domainWrites()).toEqual([{ cloudflare_zone_id: "zone-a" }]));
   });
 
-  it("не пишет ничего дважды, даже если строка домена не обновилась", async () => {
+  it("перечитанный список зон не приводит ко второй записи той же зоны", async () => {
     setTauri(true);
     show(domain({ cloudflare_zone_id: null }));
-
     await waitFor(() => expect(domainWrites().length).toBe(1));
-    // Ответ `PUT` строку домена в этом тесте не меняет (её присылает страница),
-    // то есть условие «аккаунт есть, зоны нет» остаётся истинным. Без ключа уже
-    // сделанной попытки карточка долбила бы бэкенд, пока открыта.
+
+    // Зоны перечитываются сами: истёк `staleTime`, прошла инвалидация после
+    // создания зоны на странице Cloudflare. Список при этом ИЗМЕНИЛСЯ (иначе
+    // react-query отдаёт прежнюю ссылку — `structuralSharing`, — и пересчитывать
+    // нечего), а наша зона в нём осталась той же: матч пересчитывается, эффект
+    // дорезолва срабатывает второй раз, и без ключа уже сделанной попытки в
+    // бэкенд уходит второй, идентичный `PUT` по домену, зона которого записана.
+    await act(async () => {
+      queryClient.setQueryData(cloudflareKeys.zones(CF_MAIN), [
+        zone(),
+        zone({ id: "zone-new", name: "just-created.com" }),
+      ]);
+    });
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     expect(domainWrites().length).toBe(1);
   });
@@ -304,7 +317,7 @@ describe("поле NS не переживает смену зоны втихую
   function zonesOnlyInMain() {
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
       if (cmd === "cf_list_zones") return String(args.accountId) === String(CF_MAIN) ? [zone()] : [];
-      if (cmd === "registrar_get_domains") return [];
+      if (cmd === "registrar_get_nameservers") return [];
       return true;
     });
   }
@@ -336,6 +349,27 @@ describe("поле NS не переживает смену зоны втихую
     expect(screen.getByText(/Nothing to push/)).toBeTruthy();
   });
 
+  it("правленое подставленное после смены аккаунта помечено, а не оставлено молча", async () => {
+    setTauri(true);
+    zonesOnlyInMain();
+    const { rerender } = show();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+
+    // Правка подставленного (опечатка, третий сервер) отключает зеркало зоны —
+    // значит, после смены аккаунта в поле остаются NS ЧУЖОГО аккаунта, а
+    // ссылки «Restore from Cloudflare» рядом уже нет: сравнивать не с чем.
+    fireEvent.change(nsField(), {
+      target: { value: "ada.ns.cloudflare.com\nbob.ns.cloudflare.com\nns3.hoster.net" },
+    });
+    fireEvent.change(cfSelect(), { target: { value: String(CF_SPARE) } });
+    pageSends(rerender, domain({ cloudflare_account_id: CF_SPARE, cloudflare_zone_id: null }));
+
+    // Стирать чужой рукой набранное нельзя, а молчать — тем более: кнопка
+    // живая, и клик отправит эти NS регистратору.
+    expect(await screen.findByText(/no longer bound to/)).toBeTruthy();
+    expect(nsButton().disabled).toBe(false);
+  });
+
   it("набранное руками смену аккаунта переживает", async () => {
     setTauri(true);
     zonesOnlyInMain();
@@ -353,25 +387,53 @@ describe("поле NS не переживает смену зоны втихую
     await act(async () => {});
     expect(nsField().value).toBe("ns1.hoster.net\nns2.hoster.net");
     expect(nsButton().disabled).toBe(false);
+    // И предупреждения про чужую зону тут нет: этот текст пришёл не из зоны, а
+    // из головы пользователя — «эти NS от зоны, к которой домен не привязан»
+    // было бы про них неправдой.
+    expect(screen.queryByText(/no longer bound to/)).toBeNull();
   });
 });
 
 describe("делегирование — три состояния и «не знаем»", () => {
-  it("делегировано, когда NS у регистратора те же и Cloudflare подтвердил", async () => {
+  it("делегировано у Namecheap — по ответу про ЭТОТ домен, а не по листингу", async () => {
     setTauri(true);
-    mockReads({ registrarDomains: [{ domain: "EXAMPLE.com.", nameservers: [...CF_NS].reverse() }] });
+    // Аккаунт по умолчанию — namecheap, и это здесь главное: его листинг
+    // (`namecheap.domains.getList`) nameservers не отдаёт вовсе, поэтому
+    // сверка по листингу у Namecheap не могла дать ничего, кроме серого
+    // «не знаем». Спрашиваем поимённо — и зелёное состояние достижимо.
+    mockReads({ registrarNs: [...CF_NS].reverse() });
     show();
 
     // Регистр, точка на конце и порядок серверов — не расхождение.
     await waitFor(() => expect(delegationBadge().textContent).toBe("DELEGATED"));
+    expect(invoked("registrar_get_nameservers")[0][1]).toEqual({
+      userId: "user-1",
+      // Аккаунт РЕГИСТРАТОРА и ИМЯ домена — то, что ждёт команда.
+      accountId: String(REGISTRAR),
+      domain: "example.com",
+    });
+    // Выкачки аккаунта при этом не происходит.
+    expect(invoked("registrar_get_domains")).toEqual([]);
+  });
+
+  it("зона с другим именем не считается делегированием", async () => {
+    setTauri(true);
+    // Наследие ручной правки: `zone_id` указывает на зону соседнего домена.
+    // NS у Cloudflare одни на весь аккаунт, а статус зоны `active`, — то есть
+    // всё «сходится», и без сверки имени бейдж был бы зелёным про домен,
+    // зоны которого в Cloudflare нет.
+    mockReads({ zones: [zone({ name: "other.com" })], registrarNs: CF_NS });
+    show();
+
+    expect(await screen.findByText(/different name than this domain/)).toBeTruthy();
+    expect(delegationBadge().textContent).toBe("UNKNOWN");
+    // И там, где это чинится, сказано тоже.
+    expect(screen.getByText(/Zone other.com is not this domain's zone/)).toBeTruthy();
   });
 
   it("pending, пока Cloudflare не подтвердил зону", async () => {
     setTauri(true);
-    mockReads({
-      zones: [zone({ status: "pending" })],
-      registrarDomains: [{ domain: "example.com", nameservers: CF_NS }],
-    });
+    mockReads({ zones: [zone({ status: "pending" })], registrarNs: CF_NS });
     show();
 
     await waitFor(() => expect(delegationBadge().textContent).toBe("PENDING"));
@@ -380,9 +442,7 @@ describe("делегирование — три состояния и «не з�
 
   it("расходится — и показывает, что на что менять", async () => {
     setTauri(true);
-    mockReads({
-      registrarDomains: [{ domain: "example.com", nameservers: ["ns1.hoster.net", "ns2.hoster.net"] }],
-    });
+    mockReads({ registrarNs: ["ns1.hoster.net", "ns2.hoster.net"] });
     show();
 
     await waitFor(() => expect(delegationBadge().textContent).toBe("MISMATCH"));
@@ -390,14 +450,16 @@ describe("делегирование — три состояния и «не з�
     expect(screen.getByText(/zone: ada.ns.cloudflare.com, bob.ns.cloudflare.com/)).toBeTruthy();
   });
 
-  it("домена нет у регистратора — это «не знаем», а не «делегировано»", async () => {
+  it("отказ регистратора — это «не знаем», и причина названа его же словами", async () => {
     setTauri(true);
-    mockReads({ registrarDomains: [{ domain: "other.com", nameservers: CF_NS }] });
+    mockReads({ registrarNsError: new Error("Namecheap error: Domain not found") });
     show();
 
     // Самая опасная ошибка этой карточки: сверка не состоялась, расхождений «не
-    // нашлось», и зелёный бейдж объявил бы домен рабочим.
-    expect(await screen.findByText(/not in the list of its registrar account/)).toBeTruthy();
+    // нашлось», и зелёный бейдж объявил бы домен рабочим. Причина при этом
+    // берётся у регистратора, а не выдумывается: раньше на этом месте стояло
+    // «домена нет в аккаунте», хотя знать этого было неоткуда.
+    expect(await screen.findByText(/Domain not found/)).toBeTruthy();
     expect(delegationBadge().textContent).toBe("UNKNOWN");
   });
 
@@ -415,9 +477,9 @@ describe("делегирование — три состояния и «не з�
     // А у кнопки — что с этим делать.
     expect(screen.getByText(/set the nameservers in the registrar's own panel/)).toBeTruthy();
     expect((screen.getByText(/Set NS at registrar/).closest("button") as HTMLButtonElement).disabled).toBe(true);
-    // И в чужой API за списком доменов не ходим: ответа там всё равно нет.
+    // И в чужой API не ходим: ответа там всё равно нет.
     await act(async () => {});
-    expect(invoked("registrar_get_domains")).toEqual([]);
+    expect(invoked("registrar_get_nameservers")).toEqual([]);
   });
 
   it("без зоны регистратора не спрашивает вовсе", async () => {
@@ -429,7 +491,7 @@ describe("делегирование — три состояния и «не з�
     // Сверять не с чем, а поход в API регистратора стоил бы запроса на каждое
     // открытие карточки.
     await act(async () => {});
-    expect(invoked("registrar_get_domains")).toEqual([]);
+    expect(invoked("registrar_get_nameservers")).toEqual([]);
     expect(invoked("cf_list_zones")).toEqual([]);
   });
 });

@@ -145,7 +145,7 @@ describe("карточка домена после смены NS", () => {
       if (cmd === "cf_list_zones") return [ZONE];
       // Сверку делегирования этот сценарий не проверяет, но карточка её ведёт:
       // без явного ответа команда ушла бы в общий `mutate` и вернула не список.
-      if (cmd === "registrar_get_domains") return [];
+      if (cmd === "registrar_get_nameservers") return [];
       if (cmd === "registrar_set_nameservers") {
         // Write-back внутри команды — то, из-за чего сервер начинает отвечать
         // `ok`. Здесь он ровно этим и моделируется.

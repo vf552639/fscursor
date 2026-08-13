@@ -100,7 +100,7 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-function mockInvoke(reads: { zones?: any[]; zonesError?: Error; registrarDomains?: any[] } = {}) {
+function mockInvoke(reads: { zones?: any[]; zonesError?: Error; registrarNs?: string[] } = {}) {
   mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
     if (cmd === "cf_list_zones") {
       if (reads.zonesError) throw reads.zonesError;
@@ -109,7 +109,7 @@ function mockInvoke(reads: { zones?: any[]; zonesError?: Error; registrarDomains
     // Карточка сверяет NS зоны с настоящими NS у регистратора; чтение — тоже
     // Tauri-команда, и держать его в `mutate` нельзя: там мокаются ответы
     // смены NS.
-    if (cmd === "registrar_get_domains") return reads.registrarDomains ?? [];
+    if (cmd === "registrar_get_nameservers") return reads.registrarNs ?? [];
     return mocks.mutate(cmd, args);
   });
 }
@@ -223,7 +223,7 @@ describe("Set NS — десктоп выполняет", () => {
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) =>
       cmd === "cf_list_zones"
         ? zonesPromise
-        : cmd === "registrar_get_domains"
+        : cmd === "registrar_get_nameservers"
           ? []
           : mocks.mutate(cmd, args)
     );
@@ -522,10 +522,11 @@ describe("Set NS — веб только смотрит", () => {
     // Ровно та же фраза, что бросает хук: обе живут в `NS_DESKTOP_NOTE`.
     expect(screen.getAllByText(new RegExp(NS_DESKTOP_NOTE)).length).toBeGreaterThan(0);
 
-    // Вне десктопа `useZoneNameservers` обречён по построению, и его отказ —
-    // это правило продукта, а не поломка. Показывать его как «Could not
-    // prefill» значит выдавать норму за сбой; «добавьте NS выше» и вовсе
-    // предлагает то, чего на вебе не сделать. Одна причина — одна строка.
+    // Вне десктопа зоны не читаются вовсе (`useCloudflareZones` выключен
+    // флагом): их отсутствие здесь — правило продукта, а не поломка.
+    // Показывать его как «Could not prefill» значит выдавать норму за сбой;
+    // «добавьте NS выше» и вовсе предлагает то, чего на вебе не сделать.
+    // Одна причина — одна строка.
     await waitFor(() => expect(mocks.invokeSynced).not.toHaveBeenCalled());
     expect(screen.queryByText(/Could not prefill/)).toBeNull();
     expect(screen.queryByText(/Nothing to push/)).toBeNull();

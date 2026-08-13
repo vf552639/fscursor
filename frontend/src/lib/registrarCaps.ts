@@ -42,3 +42,20 @@ const NS_API_PROVIDERS: readonly string[] = ["hostiq", "namecheap"];
 export function registrarSupportsNsApi(provider: string | null | undefined): boolean {
   return provider != null && NS_API_PROVIDERS.includes(provider.toLowerCase());
 }
+
+/**
+ * Знаем ли мы провайдера аккаунта вообще — то есть прочитан ли сам аккаунт.
+ *
+ * Это ДРУГОЙ вопрос, чем `registrarSupportsNsApi`, и путать их нельзя: «список
+ * аккаунтов ещё летит» лечится ожиданием, а «у провайдера нет NS-API» — походом
+ * в панель регистратора. Обе фразы показываются на одном экране (бейдж
+ * делегирования и подпись под кнопкой), поэтому правило одно на двоих:
+ * разъехавшись, они сказали бы про один аккаунт разное.
+ *
+ * Строка из пробелов считается ЗАПОЛНЕННОЙ намеренно: это мусор в колонке, а не
+ * отсутствие ответа, и десктоп на неё отвечает `unknown provider` — то есть
+ * правда про неё «нет NS-API», а не «не прочитано».
+ */
+export function registrarProviderKnown(provider: string | null | undefined): boolean {
+  return provider != null && provider !== "";
+}

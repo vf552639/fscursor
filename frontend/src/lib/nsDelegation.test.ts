@@ -15,7 +15,8 @@ const CF_NS = ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"];
 /** Всё известно и всё сходится — от этого набора отклоняются остальные кейсы. */
 function input(over: Record<string, unknown> = {}) {
   return {
-    zone: { nameservers: CF_NS, status: "active" },
+    domainName: "example.com",
+    zone: { name: "example.com", nameservers: CF_NS, status: "active" },
     registrarAccountId: 9,
     registrarProvider: "namecheap",
     registrarNameservers: CF_NS,
@@ -54,15 +55,15 @@ describe("nsDelegation — делегировано", () => {
 
 describe("nsDelegation — pending", () => {
   it("NS уже те, а Cloudflare ещё не подтвердил", () => {
-    const d = nsDelegation(input({ zone: { nameservers: CF_NS, status: "pending" } }));
+    const d = nsDelegation(input({ zone: { name: "example.com", nameservers: CF_NS, status: "pending" } }));
     expect(d).toEqual({ state: "pending", nameservers: CF_NS, zoneStatus: "pending" });
   });
 
   it("незнакомый статус зоны не даёт зелёного", () => {
     // `moved`, `deactivated`, отсутствующий статус — всё это «не подтверждено».
     // Зелёный бейдж здесь обещал бы работающий домен.
-    expect(nsDelegation(input({ zone: { nameservers: CF_NS, status: "moved" } })).state).toBe("pending");
-    expect(nsDelegation(input({ zone: { nameservers: CF_NS, status: null } })).state).toBe("pending");
+    expect(nsDelegation(input({ zone: { name: "example.com", nameservers: CF_NS, status: "moved" } })).state).toBe("pending");
+    expect(nsDelegation(input({ zone: { name: "example.com", nameservers: CF_NS, status: null } })).state).toBe("pending");
   });
 });
 
@@ -93,7 +94,7 @@ describe("nsDelegation — расходится", () => {
     // свежее. Утверждать «делегировано» поверх ответа регистратора нельзя.
     const d = nsDelegation({
       ...input(),
-      zone: { nameservers: CF_NS, status: "active" },
+      zone: { name: "example.com", nameservers: CF_NS, status: "active" },
       registrarNameservers: ["ns1.hoster.net", "ns2.hoster.net"],
     });
     expect(d.state).toBe("mismatch");
@@ -110,7 +111,7 @@ describe("nsDelegation — незнание отдельным состояни�
   });
 
   it("зона без единого nameserver — не «нет делегирования», а «не знаем»", () => {
-    expect(reason(nsDelegation(input({ zone: { nameservers: [], status: "active" } })))).toBe(
+    expect(reason(nsDelegation(input({ zone: { name: "example.com", nameservers: [], status: "active" } })))).toBe(
       "zone-nameservers-unknown",
     );
   });
@@ -132,13 +133,24 @@ describe("nsDelegation — незнание отдельным состояни�
     );
   });
 
-  it("домена нет в списке этого аккаунта регистратора", () => {
-    // Обычно значит, что домену назначен НЕ ТОТ аккаунт, — это чинится, и
-    // молчаливый прочерк тут скрыл бы поправимую ошибку.
-    expect(reason(nsDelegation(input({ registrarNameservers: null })))).toBe("domain-not-at-registrar");
+  it("привязка указывает на зону с другим именем", () => {
+    // Самая коварная из причин: nameservers Cloudflare выдаёт ОДНИ И ТЕ ЖЕ на
+    // весь аккаунт, поэтому чужая зона сходится по ним с настоящими NS домена,
+    // а её статус вполне может быть `active`. Без сверки имени карточка
+    // показала бы зелёное «делегировано, Cloudflare подтвердил» про домен,
+    // зоны которого в Cloudflare нет вовсе.
+    const d = nsDelegation(input({ zone: { name: "other.com", nameservers: CF_NS, status: "active" } }));
+    expect(d.state).not.toBe("delegated");
+    expect(reason(d)).toBe("zone-name-mismatch");
   });
 
-  it("список доменов регистратора не прочитан", () => {
+  it("имя зоны сверяется тем же правилом, что и матч зон", () => {
+    // Регистр и завершающая точка — не «другое имя».
+    const d = nsDelegation(input({ zone: { name: "Example.COM.", nameservers: CF_NS, status: "active" } }));
+    expect(d.state).toBe("delegated");
+  });
+
+  it("NS у регистратора не прочитаны", () => {
     expect(reason(nsDelegation(input({ registrarNameservers: undefined })))).toBe(
       "registrar-nameservers-unknown",
     );

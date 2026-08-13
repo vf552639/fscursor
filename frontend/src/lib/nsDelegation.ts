@@ -16,7 +16,7 @@
  */
 
 import { normalizeZoneName } from "./cfZoneMatch";
-import { registrarSupportsNsApi } from "./registrarCaps";
+import { registrarProviderKnown, registrarSupportsNsApi } from "./registrarCaps";
 
 /**
  * Статус зоны, которым Cloudflare подтверждает делегирование. Остальные его
@@ -29,15 +29,23 @@ const ZONE_ACTIVE = "active";
 export type NsUnknownReason =
   /** Домен не привязан к живой зоне Cloudflare (нет аккаунта/зоны или зоны нет в аккаунте). */
   | "no-zone"
+  /**
+   * Привязка указывает на зону С ДРУГИМ ИМЕНЕМ.
+   *
+   * Отдельная причина, потому что молча это состояние выглядит здоровым:
+   * nameservers Cloudflare выдаёт одни и те же на весь аккаунт, поэтому у
+   * чужой зоны они совпадут с настоящими NS домена, а её статус вполне может
+   * быть `active` — и бейдж сказал бы «делегировано, Cloudflare подтвердил»
+   * про домен, зоны которого в Cloudflare нет вовсе.
+   */
+  | "zone-name-mismatch"
   /** Зона есть, а её nameservers не прочитаны — или зона не назвала ни одного. */
   | "zone-nameservers-unknown"
   /** Аккаунт регистратора домену не назначен: сверять не с чем. */
   | "no-registrar"
   /** У провайдера нет NS-API (см. `registrarSupportsNsApi`): спросить регистратора нечем. */
   | "registrar-no-api"
-  /** Аккаунт регистратора отвечает, но этого домена в его списке нет. */
-  | "domain-not-at-registrar"
-  /** NS у регистратора не прочитаны — или регистратор не назвал ни одного. */
+  /** NS у регистратора не прочитаны (отказ API) — или регистратор не назвал ни одного. */
   | "registrar-nameservers-unknown";
 
 /**
@@ -57,12 +65,16 @@ export type NsDelegation =
 
 /** Зона Cloudflare в том виде, в каком её знает это правило. */
 export interface ZoneNameservers {
+  /** Имя зоны — сверяется с именем домена, см. `zone-name-mismatch`. */
+  name: string;
   nameservers: readonly string[];
   /** `Zone.status` (`api/cloudflare.ts`): подтвердил ли Cloudflare делегирование. */
   status: string | null;
 }
 
 export interface NsDelegationInput {
+  /** Имя домена — то, чему обязана соответствовать зона. */
+  domainName: string;
   /**
    * Зона домена. `null` — домен к живой зоне не привязан (нет аккаунта, нет
    * `cloudflare_zone_id` или сохранённой зоны в аккаунте не оказалось);
@@ -78,10 +90,17 @@ export interface NsDelegationInput {
   /** `provider` этого аккаунта. `null`/`undefined` — список аккаунтов ещё не прочитан. */
   registrarProvider: string | null | undefined;
   /**
-   * NS домена у регистратора. `null` — домена нет в списке аккаунта;
-   * `undefined` — список не прочитан.
+   * NS домена у регистратора — ответ на вопрос ПРО ЭТОТ ДОМЕН
+   * (`useRegistrarNameservers`), а не строка из листинга аккаунта.
+   *
+   * `undefined` — не прочитаны (запрос ещё летит или регистратор ответил
+   * отказом). Отдельного «домена в аккаунте нет» здесь нет намеренно:
+   * непагинированный листинг такого утверждения не позволял — отсутствие
+   * строки в нём значило «страница кончилась» ничуть не реже, — а поимённый
+   * запрос отвечает либо списком, либо ошибкой регистратора, и её текст
+   * показывается как есть.
    */
-  registrarNameservers: readonly string[] | null | undefined;
+  registrarNameservers: readonly string[] | undefined;
 }
 
 /**
@@ -141,6 +160,13 @@ export function nsDelegation(input: NsDelegationInput): NsDelegation {
   const { zone } = input;
   if (zone === null) return { state: "unknown", reason: "no-zone" };
   if (zone === undefined) return { state: "unknown", reason: "zone-nameservers-unknown" };
+  // Имя зоны сверяется ДО nameservers, и это не педантизм: набор NS у
+  // Cloudflare один на аккаунт, поэтому чужая зона сойдётся по ним с настоящими
+  // NS домена и выдаст зелёное «делегировано» на домен, зоны которого в
+  // Cloudflare нет. Правило сравнения — общее с матчем зон (`normalizeZoneName`).
+  if (normalizeZoneName(zone.name) !== normalizeZoneName(input.domainName)) {
+    return { state: "unknown", reason: "zone-name-mismatch" };
+  }
   const expected = normalizeNsList(zone.nameservers);
   // Зона без единого NS — это не «зона без делегирования», а зона, про NS
   // которой мы ничего не узнали: сравнивать не с чем.
@@ -149,17 +175,14 @@ export function nsDelegation(input: NsDelegationInput): NsDelegation {
   if (input.registrarAccountId == null) return { state: "unknown", reason: "no-registrar" };
   // Провайдера ещё не знаем (список аккаунтов не прочитан) — это «не прочитано»,
   // а НЕ «у провайдера нет API»: вторая фраза обвиняла бы регистратора в том,
-  // чего мы про него не выяснили. Пустота проверяется без `trim` намеренно:
-  // строка из пробелов — это ЗАПОЛНЕННОЕ поле с мусором, и десктоп ответит на
-  // неё `unknown provider`, то есть честный ответ про неё — `registrar-no-api`.
-  if (input.registrarProvider == null || input.registrarProvider === "") {
+  // чего мы про него не выяснили. Предикат общий с панелью (`registrarCaps`):
+  // разъехавшись, бейдж и подпись под кнопкой сказали бы про один аккаунт
+  // разное.
+  if (!registrarProviderKnown(input.registrarProvider)) {
     return { state: "unknown", reason: "registrar-nameservers-unknown" };
   }
   if (!registrarSupportsNsApi(input.registrarProvider)) {
     return { state: "unknown", reason: "registrar-no-api" };
-  }
-  if (input.registrarNameservers === null) {
-    return { state: "unknown", reason: "domain-not-at-registrar" };
   }
   if (input.registrarNameservers === undefined) {
     return { state: "unknown", reason: "registrar-nameservers-unknown" };

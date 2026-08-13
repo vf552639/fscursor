@@ -164,25 +164,70 @@ impl RegistrarService for NamecheapService {
         Ok(true)
     }
 
+    /// Какие nameservers сейчас стоят у домена.
+    ///
+    /// Команда — `namecheap.domains.dns.getList`, и это ИМЕННО она: элемент
+    /// `DomainDNSGetListResult`, который разбирается ниже, есть только в её
+    /// ответе. `domains.getInfo` отдаёт другое дерево (`DomainGetInfoResult` с
+    /// `DnsDetails`), так что разбор по нему не находил ничего и отдавал пустой
+    /// список — «у домена нет NS» вместо ответа.
+    ///
+    /// Namecheap перечисляет серверы ДЕТЬМИ `<Nameserver>`; атрибут
+    /// `Nameservers` со списком через запятую разбирается тоже — он встречается
+    /// у прокси и в старых ответах, и стоит он дешевле, чем ещё один способ
+    /// получить пустоту.
     async fn get_nameservers(&self, domain: &str) -> Result<Vec<String>, RegistrarError> {
         let (sld, tld) = split_domain(domain)?;
         let xml = self
-            .call("namecheap.domains.getInfo", &[("SLD", sld), ("TLD", tld)])
+            .call(
+                "namecheap.domains.dns.getList",
+                &[("SLD", sld), ("TLD", tld)],
+            )
             .await?;
-        let doc = Document::parse(&xml).map_err(|e| RegistrarError::Api(e.to_string()))?;
-        for n in doc.descendants() {
-            if strip_ns(n.tag_name().name()) == "DomainDNSGetListResult" {
-                if let Some(raw) = n.attribute("Nameservers") {
-                    return Ok(raw
-                        .split(',')
-                        .map(|s| s.trim().trim_end_matches('.').to_lowercase())
-                        .filter(|s| !s.is_empty())
-                        .collect());
+        parse_dns_get_list(&xml)
+    }
+}
+
+/// Привести имя nameserver'а к сравнимому виду — так же, как это делает Hostiq
+/// (`hostiq.rs`) и фронт (`normalizeZoneName`): без пробелов, без завершающей
+/// точки, в нижнем регистре. Разные ответы на один вопрос от двух провайдеров
+/// превратились бы в «расходится» на верном делегировании.
+fn normalize_ns(raw: &str) -> String {
+    raw.trim().trim_end_matches('.').to_lowercase()
+}
+
+/// Разбор ответа `namecheap.domains.dns.getList`.
+///
+/// Отдельной чистой функцией, потому что проверить её можно без сети — а
+/// именно разбор тут и ломается: у Namecheap ответы отличаются по форме от
+/// команды к команде, и промах даёт не ошибку, а пустой список, то есть
+/// молчаливое «NS у домена нет».
+fn parse_dns_get_list(xml: &str) -> Result<Vec<String>, RegistrarError> {
+    let doc = Document::parse(xml).map_err(|e| RegistrarError::Api(e.to_string()))?;
+    let mut out: Vec<String> = Vec::new();
+    for n in doc.descendants() {
+        match strip_ns(n.tag_name().name()) {
+            "Nameserver" => {
+                if let Some(ns) = n.text().map(normalize_ns) {
+                    if !ns.is_empty() {
+                        out.push(ns);
+                    }
                 }
             }
+            "DomainDNSGetListResult" => {
+                if let Some(raw) = n.attribute("Nameservers") {
+                    out.extend(
+                        raw.split(',')
+                            .map(normalize_ns)
+                            .filter(|s| !s.is_empty()),
+                    );
+                }
+            }
+            _ => {}
         }
-        Ok(vec![])
     }
+    out.dedup();
+    Ok(out)
 }
 
 fn command_response_ok(xml: &str) -> bool {
@@ -204,5 +249,57 @@ mod tests {
     fn status_ok_detection() {
         let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"></ApiResponse>"#;
         assert!(namecheap_status_ok(xml));
+    }
+
+    /// Ответ `namecheap.domains.dns.getList` в том виде, в каком его отдаёт
+    /// Namecheap: пространство имён, серверы — дочерними элементами.
+    #[test]
+    fn dns_get_list_reads_nameserver_elements() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<ApiResponse Status="OK" xmlns="http://api.namecheap.com/xml.response">
+  <CommandResponse Type="namecheap.domains.dns.getList">
+    <DomainDNSGetListResult Domain="example.com" IsUsingOurDNS="false">
+      <Nameserver>ADA.ns.cloudflare.com.</Nameserver>
+      <Nameserver> bob.ns.cloudflare.com </Nameserver>
+    </DomainDNSGetListResult>
+  </CommandResponse>
+</ApiResponse>"#;
+        // Регистр и завершающая точка схлопнуты здесь же: сравнивать наборы
+        // будет фронт, и приводить их к одному виду должны оба конца.
+        assert_eq!(
+            parse_dns_get_list(xml).unwrap(),
+            vec!["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]
+        );
+    }
+
+    #[test]
+    fn dns_get_list_reads_comma_attribute_form() {
+        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
+        <DomainDNSGetListResult Domain="example.com" Nameservers="ns1.hoster.net, ns2.hoster.net"/>
+        </CommandResponse></ApiResponse>"#;
+        assert_eq!(
+            parse_dns_get_list(xml).unwrap(),
+            vec!["ns1.hoster.net", "ns2.hoster.net"]
+        );
+    }
+
+    /// Домен на дефолтных NS Namecheap — это НЕ «нет ответа»: список приходит,
+    /// просто он не наш. Пустым его отдавать нельзя, иначе фронт объявит
+    /// делегирование неизвестным вместо расхождения.
+    #[test]
+    fn dns_get_list_returns_default_namecheap_servers() {
+        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
+        <DomainDNSGetListResult Domain="example.com" IsUsingOurDNS="true">
+          <Nameserver>dns1.registrar-servers.com</Nameserver>
+          <Nameserver>dns2.registrar-servers.com</Nameserver>
+        </DomainDNSGetListResult></CommandResponse></ApiResponse>"#;
+        assert_eq!(parse_dns_get_list(xml).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dns_get_list_survives_empty_result() {
+        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
+        <DomainDNSGetListResult Domain="example.com"/></CommandResponse></ApiResponse>"#;
+        assert!(parse_dns_get_list(xml).unwrap().is_empty());
     }
 }

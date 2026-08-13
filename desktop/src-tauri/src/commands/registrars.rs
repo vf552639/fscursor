@@ -114,6 +114,40 @@ pub async fn registrar_get_domains(
         .map_err(|e| CommandError::Api(e.to_string()))
 }
 
+/// Какие nameservers стоят у ОДНОГО домена по данным его регистратора.
+///
+/// Отдельная команда, а не поле в `registrar_get_domains`, по трём причинам, и
+/// каждая из них — про правду, а не про удобство.
+///
+/// Первая: листинг их не знает. `namecheap.domains.getList` nameservers не
+/// отдаёт вовсе (`namecheap.rs` кладёт туда пустой вектор), так что «сверка с
+/// регистратором» по листингу у половины провайдеров не работала бы никогда.
+///
+/// Вторая: листинг — одна непагинированная страница (`PageSize=100` у
+/// Namecheap, `GET /domains` у Hostiq). На аккаунте в 250 доменов отсутствие
+/// строки означает не «домена тут нет», а «страница кончилась», и вызывающий
+/// не может отличить одно от другого. Спрашивая про конкретный домен, мы
+/// получаем либо ответ, либо ошибку регистратора — оба однозначны.
+///
+/// Третья: цена. Карточке домена нужен один домен, а не выкачка аккаунта.
+///
+/// Аудита тут нет намеренно: audit_log пишут действия, которые что-то меняют
+/// (`registrar.ns_set`), а это чтение — как `registrar_get_domains` и
+/// `registrar_test_connection` рядом.
+#[tauri::command]
+pub async fn registrar_get_nameservers(
+    user_id: String,
+    account_id: String,
+    domain: String,
+    handle: State<'_, SyncHandle>,
+    api: State<'_, ApiClient>,
+) -> Result<Vec<String>, CommandError> {
+    let (svc, _) = reg_service(&api, &user_id, &handle, &account_id).await?;
+    svc.get_nameservers(&domain)
+        .await
+        .map_err(|e| CommandError::Api(e.to_string()))
+}
+
 /// Словарь `domains.ns_status`. Enum'а под него на бэкенде НЕТ: колонка —
 /// голый `String(32)` (`models/domain.py`), и ни один серверный путь в неё не
 /// пишет. Не искать `NsStatus` в `core/constants.py` — там есть `DomainStatus`

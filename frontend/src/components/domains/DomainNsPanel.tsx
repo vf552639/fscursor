@@ -12,7 +12,7 @@ import {
   useSetNameservers,
 } from "../../api/domains";
 import { NsDelegation, nsDelegationVariant } from "../../lib/nsDelegation";
-import { registrarSupportsNsApi } from "../../lib/registrarCaps";
+import { registrarProviderKnown, registrarSupportsNsApi } from "../../lib/registrarCaps";
 import { isTauri } from "../../lib/runtime";
 import { Badge, Btn } from "../ui/Primitives";
 
@@ -25,6 +25,20 @@ const WARN_TEXT = "#b45309";
  */
 function parseNameservers(text: string): string[] {
   return text.split(/[\s,]+/).filter(Boolean);
+}
+
+/** Откуда пришёл текст поля: зона со своим списком либо ниоткуда (набрано руками). */
+function zoneSourceOf(
+  zoneId: string | null,
+  nameservers: string[],
+): { zoneId: string; nameservers: string[] } | null {
+  return zoneId && nameservers.length > 0 ? { zoneId, nameservers } : null;
+}
+
+/** Осталось ли в поле хоть одно имя из подставленного списка. Регистр не в счёт. */
+function keepsAnyOf(current: string[], fromZone: string[]): boolean {
+  const source = new Set(fromZone.map((ns) => ns.toLowerCase()));
+  return current.some((ns) => source.has(ns.toLowerCase()));
 }
 
 /** Один и тот же список NS? Регистр и порядок записи в поле роли не играют. */
@@ -46,6 +60,13 @@ export interface DomainNsPanelProps {
   delegation: NsDelegation;
   /** `provider` аккаунта регистратора; `undefined` — аккаунт ещё не прочитан. */
   registrarProvider: string | null | undefined;
+  /**
+   * Отказ чтения NS у регистратора. Нужен рядом с бейджем: «не знаем» без
+   * причины — это сообщение о том, что мы чего-то не сделали, а текст
+   * регистратора («Domain not found», «API key is invalid») говорит, что
+   * именно чинить.
+   */
+  registrarNsError: unknown;
 }
 
 /**
@@ -65,6 +86,7 @@ export default function DomainNsPanel({
   zonesError,
   delegation,
   registrarProvider,
+  registrarNsError,
 }: DomainNsPanelProps) {
   const setNs = useSetNameservers();
 
@@ -96,6 +118,16 @@ export default function DomainNsPanel({
    * стирали бы уже их.
    */
   const [nsEdited, setNsEdited] = useState(false);
+  /**
+   * Откуда в поле взялись nameservers: зона и ЕЁ СПИСОК на момент подстановки
+   * (`null` — текст набран руками).
+   *
+   * Список хранится вместе с id, потому что вопрос ниже звучит не «была ли
+   * подстановка», а «осталось ли в поле хоть что-то от той зоны». Пользователь,
+   * заменивший подставленное целиком, набрал свой текст — предупреждать его про
+   * чужую зону значило бы приписывать его NS чужому происхождению.
+   */
+  const [zoneSource, setZoneSource] = useState<{ zoneId: string; nameservers: string[] } | null>(null);
   // Нормализуем ТУТ же, а не только внутри хука: кнопка гасится по числу NS, и
   // без схлопывания дублей «ns1 + NS1» выглядели бы как два — кнопка живая,
   // мутация падает. Гейт и отправка обязаны считать одинаково; в хуке
@@ -121,17 +153,45 @@ export default function DomainNsPanel({
   React.useEffect(() => {
     if (nsEdited) return;
     setNsText(zoneNameservers.join("\n"));
-  }, [zoneNameservers, nsEdited]);
+    setZoneSource(zoneSourceOf(domain.cloudflare_zone_id, zoneNameservers));
+  }, [zoneNameservers, nsEdited, domain.cloudflare_zone_id]);
 
   // Провайдера ещё не знаем — это не «нет API»: пуш гасим (иначе десктоп
   // ответит `unknown provider`), но обвиняем в этом не регистратора, а
-  // непрочитанный список аккаунтов. См. строки объяснений ниже.
-  const providerKnown = registrarProvider != null && registrarProvider !== "";
+  // непрочитанный список аккаунтов. Оба предиката — из `lib/registrarCaps`, те
+  // же самые, по которым судит бейдж делегирования: своя копия правила здесь
+  // означала бы, что подпись под кнопкой и бейдж над ней говорят про один
+  // аккаунт разное.
+  const providerKnown = registrarProviderKnown(registrarProvider);
   const nsApi = registrarSupportsNsApi(registrarProvider);
+
+  /**
+   * Поле держит nameservers зоны, к которой домен больше не привязан.
+   *
+   * Достижимо ровно одним путём: пользователь ПРАВИЛ подставленное (опечатка,
+   * третий сервер) — от этого зеркало зоны отключается, — а потом сменил
+   * аккаунт Cloudflare. Ссылки «Restore from Cloudflare» рядом в этот момент
+   * нет (сравнивать не с чем), кнопка живая, и один клик отправил бы
+   * регистратору nameservers аккаунта, от которого только что отказались.
+   * Стирать набранное руками нельзя — это его текст; сказать обязаны.
+   *
+   * Набранное с нуля под это условие не попадает: у такого текста `zoneSource`
+   * пуст, и ручной ввод для домена без зоны CF (задокументированная
+   * возможность) молчит, как и раньше.
+   */
+  const nsFromDetachedZone =
+    nsEdited &&
+    zoneSource != null &&
+    zoneSource.zoneId !== domain.cloudflare_zone_id &&
+    keepsAnyOf(nameservers, zoneSource.nameservers);
 
   return (
     <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10, marginTop: 18, borderTop: "1px solid #f3f4f6", paddingTop: 14 }}>
-      <NsDelegationLine delegation={delegation} registrarProvider={registrarProvider} />
+      <NsDelegationLine
+        delegation={delegation}
+        registrarProvider={registrarProvider}
+        registrarNsError={registrarNsError}
+      />
       <div style={{ display: "grid", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
@@ -147,7 +207,11 @@ export default function DomainNsPanel({
           {zoneNameservers.length > 0 && !sameNameservers(nameservers, zoneNameservers) ? (
             <button
               type="button"
-              onClick={() => { setNsEdited(true); setNsText(zoneNameservers.join("\n")); }}
+              onClick={() => {
+                setNsEdited(true);
+                setNsText(zoneNameservers.join("\n"));
+                setZoneSource(zoneSourceOf(domain.cloudflare_zone_id, zoneNameservers));
+              }}
               style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11.5, color: "#2563eb", textDecoration: "underline" }}
             >
               ↺ Restore from Cloudflare
@@ -197,6 +261,13 @@ export default function DomainNsPanel({
             {domain.registrar_id != null && nameservers.length < MIN_NAMESERVERS ? (
               <div style={{ fontSize: 12, color: WARN_TEXT }}>
                 Nothing to push: enter at least {MIN_NAMESERVERS} distinct nameservers above.
+              </div>
+            ) : null}
+            {/* Единственная строка тут, которая не про выключенную кнопку, а
+                про включённую: она предупреждает о том, что уедет по клику. */}
+            {nsFromDetachedZone ? (
+              <div style={{ fontSize: 12, color: WARN_TEXT }}>
+                These nameservers came from a Cloudflare zone this domain is no longer bound to — check them before pushing.
               </div>
             ) : null}
           </>
@@ -255,9 +326,11 @@ export default function DomainNsPanel({
 function NsDelegationLine({
   delegation,
   registrarProvider,
+  registrarNsError,
 }: {
   delegation: NsDelegation;
   registrarProvider: string | null | undefined;
+  registrarNsError: unknown;
 }) {
   const label =
     delegation.state === "delegated"
@@ -274,6 +347,14 @@ function NsDelegationLine({
         <Badge variant={nsDelegationVariant(delegation.state)}>{label}</Badge>
         <span style={{ fontSize: 12, color: "#6b7280" }}>
           {delegationText(delegation, registrarProvider)}
+          {/* Отказ регистратора приписывается к причине, а не заменяет её:
+              «не знаем» отвечает на вопрос пользователя, а текст ошибки
+              («Domain not found», «API key is invalid») говорит, что чинить. */}
+          {delegation.state === "unknown" &&
+          delegation.reason === "registrar-nameservers-unknown" &&
+          registrarNsError
+            ? ` ${clip(errorText(registrarNsError))}`
+            : null}
         </span>
       </div>
       {delegation.state === "mismatch" ? (
@@ -302,6 +383,10 @@ function delegationText(d: NsDelegation, provider: string | null | undefined): s
   switch (d.reason) {
     case "no-zone":
       return "This domain is not bound to a live Cloudflare zone, so there is nothing to compare.";
+    case "zone-name-mismatch":
+      // Единственная причина, которая без проверки выглядела бы здоровьем: NS
+      // у Cloudflare одни на весь аккаунт, поэтому чужая зона сошлась бы по ним.
+      return "The saved Cloudflare zone has a different name than this domain — rebind it above.";
     case "zone-nameservers-unknown":
       return "The nameservers of the Cloudflare zone are not known here.";
     case "no-registrar":
@@ -310,8 +395,6 @@ function delegationText(d: NsDelegation, provider: string | null | undefined): s
       // Про то же ограничение сказано и янтарной строкой у кнопки, но там —
       // что делать (открыть панель регистратора), а здесь — почему сверки нет.
       return `The real nameservers cannot be read: «${provider}» has no nameserver API in SDMP.`;
-    case "domain-not-at-registrar":
-      return "This domain is not in the list of its registrar account — the wrong account may be assigned.";
     case "registrar-nameservers-unknown":
       return "The nameservers at the registrar are not known here.";
   }
