@@ -5,6 +5,7 @@ import { Server } from "../../api/servers";
 import { RegistrarAccount } from "../../api/registrars";
 import { CloudflareAccount } from "../../api/cloudflare";
 import { isCheckStale, serverUiStatus } from "../../lib/serverStatus";
+import { CF_HINT_TITLE } from "../../lib/cfZoneMatch";
 import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, formatExpiry, formatExpiryDate } from "../../lib/domainExpiry";
 import { isTauri } from "../../lib/runtime";
 import { OpenInDesktop } from "../OpenInDesktop";
@@ -26,12 +27,6 @@ const NOOP_DESKTOP_ONLY_BRANCH = () => {};
  * факт.
  */
 const CF_HINT_TEXT = "#6b7280";
-
-/**
- * Чем подсказка отличается от привязки — словами, а не только начертанием:
- * курсив говорит «это другое», но не говорит, что именно и что с этим делать.
- */
-const CF_HINT_TITLE = "Совпало с зоной Cloudflare — в базе не сохранено. Нажми Синхронизировать";
 
 export interface DomainRowProps {
   domain: DomainUI;
@@ -138,7 +133,12 @@ function DomainRow({
         курсивом и приглушённо; прочерк — когда не известно ничего. Слив
         средний случай с прочерком, колонка сообщала бы «Cloudflare нет» о
         домене, чья зона заведена и работает; слив его с первым — обещала бы
-        привязку, которой в базе нет и по которой нечего пушить регистратору. */}
+        привязку, которой в базе нет и по которой нечего пушить регистратору.
+
+        У подсказки вдобавок `title`: курсив говорит «это другое», но не
+        говорит, что именно и что с этим делать. Текст приезжает оттуда же,
+        откуда подпись обеих кнопок синхрона (`lib/cfZoneMatch`), — он зовёт
+        нажать кнопку по имени, и разъехаться с ней ему негде. */}
     <td data-testid="cf-cell" style={{padding:"11px 16px",fontSize:13,color:cf?"#111":cfHintAccount?CF_HINT_TEXT:DIM_TEXT}}>
       {cf ? cf.name : cfHintAccount
         ? <span title={CF_HINT_TITLE} style={{fontStyle:"italic"}}>{cfHintAccount.name}</span>

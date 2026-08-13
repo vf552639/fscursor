@@ -408,6 +408,10 @@ describe("Domains — кнопка «Синхронизировать выдел
     // подпись, и найти её по прежней уже нельзя.
     const headerBtn = syncAllBtn()!;
     const btn = (await selectAll(container))!;
+    // Границы действия обе кнопки объясняют одними и теми же словами: текст у
+    // них общий (`CF_SYNC_TITLE`), и разъехаться копиям негде.
+    expect(btn.title).toBe(headerBtn.title);
+    expect(btn.title).toContain("уже привязанное не трогает");
     fireEvent.click(btn);
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 

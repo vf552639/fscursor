@@ -2,6 +2,7 @@ import React from "react";
 
 import { OpenInDesktop } from "./OpenInDesktop";
 import { Btn } from "./ui/Primitives";
+import { CF_SYNC_TITLE, CF_SYNC_VERB } from "../lib/cfZoneMatch";
 import { isTauri } from "../lib/runtime";
 
 function idsQuery(ids: number[]): string {
@@ -94,10 +95,9 @@ export default function BulkActionToolbar({
           удалены («Set NS», «Refresh SSL», «Full Setup»). Поэтому в вебе кнопки
           просто нет.
 
-          Подпись — тот же глагол, что у кнопки в шапке вкладки, и разнится
-          только областью. Действие за обеими одно (`useCloudflareBind`), а
-          подсказка живого матча в строке зовёт его одним словом
-          («Нажми Синхронизировать»): два разных имени на одно действие
+          Подпись — тот же глагол, что у кнопки в шапке вкладки (`CF_SYNC_VERB`,
+          он же в подсказке строки), и разнится только областью. Действие за
+          обеими одно (`useCloudflareBind`): два разных имени на одно действие
           означали бы, что прочитавший подсказку ищет на экране слово, которого
           там два — и ни одно не совпадает. */}
       {isTauri() ? (
@@ -106,8 +106,9 @@ export default function BulkActionToolbar({
           size="sm"
           onClick={onSyncCloudflare}
           disabled={syncPending}
+          title={CF_SYNC_TITLE}
         >
-          {syncPending ? "Синхронизация…" : "Синхронизировать выделенные"}
+          {syncPending ? "Синхронизация…" : `${CF_SYNC_VERB} выделенные`}
         </Btn>
       ) : null}
       {/* Массового «Set NS» здесь намеренно нет: `POST /domains/bulk-set-ns` на
