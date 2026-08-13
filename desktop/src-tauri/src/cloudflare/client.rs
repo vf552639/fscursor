@@ -87,10 +87,23 @@ pub async fn verify_token(token: &str) -> Result<bool, CloudflareError> {
     Ok(ok)
 }
 
+/// Аккаунт, которому принадлежит зона. Cloudflare кладёт его в каждую строку
+/// `/zones`; читаем только `id` — большего для проверки «та ли это зона» не надо.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZoneAccount {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Zone {
     pub id: String,
     pub name: String,
+    /// Аккаунт зоны — единственный способ отличить «наша зона» от «зона с тем
+    /// же именем в соседнем аккаунте того же токена». Токен со скоупом
+    /// «All accounts» видит их все.
+    #[serde(default)]
+    pub account: Option<ZoneAccount>,
     #[serde(default)]
     pub name_servers: Option<Vec<String>>,
     /// Статус делегирования у Cloudflare (`active`/`pending`/`moved`). Приходит
@@ -390,7 +403,18 @@ async fn create_zone_with_base(
                 || low.contains("duplicate")
                 || low.contains("already been added")
             {
-                if let Some(z) = get_zone_by_name_with_base(api_base, token, zone_name).await? {
+                // Поиск ОБЯЗАН быть сужен тем же аккаунтом, в который мы
+                // просились: токен со скоупом «All accounts» видит зоны всех
+                // аккаунтов пользователя, и зона с этим именем в соседнем
+                // аккаунте — не «наша, уже заведённая», а чужая. Найдя её, мы
+                // отдали бы вызывающему её id: он уехал бы в
+                // `domains.cloudflare_zone_id`, а следом её же nameservers — в
+                // регистратора, то есть делегирование домена ушло бы в аккаунт,
+                // о котором никто не просил. Не найдя — отдаём исходный отказ
+                // 1061, и человек решает сам.
+                if let Some(z) =
+                    get_zone_by_name_with_base(api_base, token, zone_name, cf_account_id).await?
+                {
                     return Ok((z, false));
                 }
             }
@@ -400,20 +424,33 @@ async fn create_zone_with_base(
     }
 }
 
+/// Зона по имени — в пределах ОДНОГО аккаунта, если он назван.
+///
+/// Сужение делается дважды, и это не перестраховка ради симметрии: фильтр
+/// `account.id` в запросе — то, что мешает Cloudflare прислать чужую зону, а
+/// сверка `account.id` в ответе — то, что мешает нам её принять, если фильтр
+/// однажды перестанет работать (у CF это query-параметр, а не часть пути).
+/// Зона, про аккаунт которой ответ молчит, при названном аккаунте считается
+/// неподтверждённой: незнание в сторону «наша» не округляем.
 async fn get_zone_by_name_with_base(
     api_base: &str,
     token: &str,
     zone_name: &str,
+    cf_account_id: Option<&str>,
 ) -> Result<Option<Zone>, CloudflareError> {
     let name = zone_name.trim();
     if name.is_empty() {
         return Ok(None);
     }
-    let params = vec![
+    let account = cf_account_id.filter(|s| !s.is_empty());
+    let mut params = vec![
         ("name".into(), name.to_string()),
         ("per_page".into(), "50".into()),
         ("page".into(), "1".into()),
     ];
+    if let Some(aid) = account {
+        params.push(("account.id".into(), aid.to_string()));
+    }
     let data = call_with_base(api_base, token, Method::GET, "/zones", Some(params), None).await?;
     let rows: Vec<Zone> = serde_json::from_value(
         data.get("result")
@@ -423,7 +460,19 @@ async fn get_zone_by_name_with_base(
     .unwrap_or_default();
     Ok(rows
         .into_iter()
-        .find(|z| z.name.trim().to_lowercase() == name.to_lowercase()))
+        .find(|z| z.name.trim().to_lowercase() == name.to_lowercase() && in_account(z, account)))
+}
+
+/// Принадлежит ли зона названному аккаунту. Аккаунт не назван — вопроса нет
+/// (токен видит один аккаунт, сужать нечем).
+fn in_account(zone: &Zone, cf_account_id: Option<&str>) -> bool {
+    let Some(aid) = cf_account_id else {
+        return true;
+    };
+    zone.account
+        .as_ref()
+        .and_then(|a| a.id.as_deref())
+        .is_some_and(|id| id == aid)
 }
 
 pub async fn get_nameservers(token: &str, zone_id: &str) -> Result<Vec<String>, CloudflareError> {
@@ -607,13 +656,19 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/client/v4/zones"))
             .and(query_param("name", "example.com"))
+            // Фильтр по аккаунту обязан уехать в запрос: без него Cloudflare
+            // ответил бы и зонами соседних аккаунтов того же токена, и мы
+            // приняли бы чужую за свою. Не совпал матчер — mock не подойдёт,
+            // и тест увидит отказ вместо переиспользования.
+            .and(query_param("account.id", "acc-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "success": true,
                 // Cloudflare фильтрует по имени сам, но ответ может содержать и
                 // соседние зоны: берём ту, у которой имя совпало.
                 "result": [
-                    {"id": "z-other", "name": "other.com"},
+                    {"id": "z-other", "name": "other.com", "account": {"id": "acc-1"}},
                     {"id": "z1", "name": "Example.COM", "status": "active",
+                     "account": {"id": "acc-1"},
                      "name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]}
                 ]
             })))
@@ -652,6 +707,47 @@ mod tests {
 
         let base = format!("{}/client/v4", srv.uri());
         let err = create_zone_with_base(&base, "t", "example.com", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CloudflareError::Api(m) if m.contains("1061")), "{err}");
+    }
+
+    /// Худший из возможных исходов, и он же самый правдоподобный: токен со
+    /// скоупом «All accounts» видит несколько аккаунтов, а домен уже заведён
+    /// зоной в соседнем. Приняв её за «уже заведённую нами», команда записала
+    /// бы домену ЧУЖОЙ `cloudflare_zone_id`, а следом отдала бы регистратору
+    /// nameservers чужой зоны — делегирование ушло бы в аккаунт, о котором
+    /// пользователь не просил. Второе лицо той же ошибки: повтор с намерением
+    /// ПЕРЕНЕСТИ домен в другой аккаунт отрапортовал бы успех, не сделав
+    /// переноса.
+    ///
+    /// Мок отвечает так, будто фильтр `account.id` не сработал: проверяется
+    /// вторая линия обороны — сверка аккаунта в ответе.
+    #[tokio::test]
+    async fn create_zone_refuses_a_zone_from_another_account() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/client/v4/zones"))
+            .respond_with(zone_already_exists())
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": [
+                    {"id": "z-foreign", "name": "example.com", "account": {"id": "acc-B"},
+                     "name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]},
+                    // Ответ без аккаунта вовсе — тоже не подтверждение: при
+                    // названном аккаунте незнание в сторону «наша» не округляем.
+                    {"id": "z-nameless", "name": "example.com"}
+                ]
+            })))
+            .mount(&srv)
+            .await;
+
+        let base = format!("{}/client/v4", srv.uri());
+        let err = create_zone_with_base(&base, "t", "example.com", Some("acc-A"))
             .await
             .unwrap_err();
         assert!(matches!(&err, CloudflareError::Api(m) if m.contains("1061")), "{err}");

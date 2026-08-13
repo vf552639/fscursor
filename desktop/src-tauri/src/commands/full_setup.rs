@@ -12,14 +12,26 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+use zeroize::Zeroize;
 
 use crate::commands::auth::CommandError;
 use crate::commands::cloudflare::{ensure_zone, AUDIT_ACTION_ZONE_CREATE};
-use crate::commands::creds::AUDIT_PROGRESS_EVENT;
+use crate::commands::creds::{cache_path, AUDIT_PROGRESS_EVENT};
 use crate::commands::registrars::{registrar_provider, registrar_set_nameservers};
 use crate::commands::sync_cmd::SyncHandle;
+use crate::keychain;
 use crate::registrars::supports_ns_api;
 use crate::sync::http::{ApiClient, DomainWriteBack};
+
+/// Ключ действия для события о непрошедшем write-back'е ПЕРЕИСПОЛЬЗОВАННОЙ
+/// зоны. Пара к `AUDIT_ACTION_ZONE_CREATE`, и разведены они не из педантизма:
+/// слушатель на фронте склеивает текст из `AUDIT_ACTION_LABEL` в утвердительном
+/// прошедшем времени, поэтому с ключом «create» пользователь прочитал бы «Zone
+/// created…» про зону, которую этот же отчёт специально не назвал созданной —
+/// ровно на том вопросе, ради которого отчёт и читают («не завёл ли я второй
+/// домен в Cloudflare»). Своей строчки в audit log у этого ключа нет: связку
+/// домена с зоной пишет бэкенд (`PUT /domains/{id}`), а не десктоп.
+const AUDIT_ACTION_ZONE_LINK: &str = "cf.zone.link";
 
 /// Что стало с зоной домена в Cloudflare.
 ///
@@ -52,6 +64,15 @@ impl ZoneStep {
         }
     }
 
+    /// Ключ действия для тоста о непрошедшем write-back'е — см.
+    /// `AUDIT_ACTION_ZONE_LINK`.
+    fn writeback_action(&self) -> &'static str {
+        match self {
+            ZoneStep::Created { .. } => AUDIT_ACTION_ZONE_CREATE,
+            ZoneStep::Existed { .. } | ZoneStep::Failed { .. } => AUDIT_ACTION_ZONE_LINK,
+        }
+    }
+
     fn name_servers(&self) -> &[String] {
         match self {
             ZoneStep::Created { name_servers, .. } | ZoneStep::Existed { name_servers, .. } => {
@@ -80,7 +101,7 @@ pub enum NsSkipReason {
 }
 
 /// Что стало с делегированием у регистратора.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum NsStep {
     Pushed { nameservers: Vec<String> },
@@ -164,13 +185,51 @@ fn ns_plan<'a>(
     }
 }
 
-/// Прописать NS у регистратора — если он это умеет.
+/// Ответ регистратора «команду принял, а менять не стал». Константа, потому что
+/// это текст на экране пользователя, а не деталь реализации.
+const NS_NOT_APPLIED: &str = "the registrar did not apply the nameserver change";
+
+/// Идти ли к регистратору, зная его провайдера. `None` — идти.
 ///
-/// Проверка провайдера здесь, а не во фронте: тумблер во фронте — про UX, а
-/// правду о том, что десктоп умеет, знает только десктоп (`make_service`).
-/// Пойди мы к регистратору без проверки, пользователь получил бы в отчёте
-/// красное «unknown provider: godaddy» — то есть предложение чинить то, что
-/// чинится только руками в панели регистратора.
+/// Отдельной чистой функцией по образцу `ns_outcome_plan` в
+/// `commands::registrars`: за живым вызовом стоят `State` и keychain, то есть
+/// иначе гейт не покрыть вовсе — его можно было бы снять, и все тесты остались
+/// бы зелёными. А цена в том, что «нет API» и «сломалось» — разные новости:
+/// первая не лечится повтором, вторая лечится.
+///
+/// Проверка живёт в десктопе, а не только во фронте: тумблер там — про UX, а
+/// правду о том, что десктоп умеет, знает `make_service`. Пойди мы к
+/// регистратору без неё, в отчёте стояло бы красное «unknown provider:
+/// godaddy» — предложение чинить то, что чинится только руками в панели.
+fn ns_gate_by_provider(provider: &Result<String, CommandError>) -> Option<NsStep> {
+    match provider {
+        Err(e) => Some(NsStep::Failed {
+            error: e.to_string(),
+        }),
+        Ok(p) if !supports_ns_api(p) => Some(NsStep::Skipped {
+            reason: NsSkipReason::RegistrarNoNsApi,
+        }),
+        Ok(_) => None,
+    }
+}
+
+/// Итог обращения к регистратору — в строку отчёта.
+fn ns_step_of(outcome: Result<bool, CommandError>, nameservers: Vec<String>) -> NsStep {
+    match outcome {
+        Ok(true) => NsStep::Pushed { nameservers },
+        // Сегодня недостижимо (обе реализации отвечают `Ok(true)` или ошибкой),
+        // но семантика у `Ok(false)` та же «не применил», и зелёным он быть не
+        // может: `ns_status` этот же случай уже записал как `error`.
+        Ok(false) => NsStep::Failed {
+            error: NS_NOT_APPLIED.into(),
+        },
+        Err(e) => NsStep::Failed {
+            error: e.to_string(),
+        },
+    }
+}
+
+/// Прописать NS у регистратора — если он это умеет.
 #[allow(clippy::too_many_arguments)]
 async fn push_nameservers(
     app: &AppHandle,
@@ -182,25 +241,15 @@ async fn push_nameservers(
     domain_name: &str,
     nameservers: Vec<String>,
 ) -> NsStep {
-    match registrar_provider(user_id, handle, account_id) {
-        Err(e) => {
-            return NsStep::Failed {
-                error: e.to_string(),
-            }
-        }
-        Ok(provider) if !supports_ns_api(&provider) => {
-            return NsStep::Skipped {
-                reason: NsSkipReason::RegistrarNoNsApi,
-            }
-        }
-        Ok(_) => {}
+    if let Some(step) = ns_gate_by_provider(&registrar_provider(user_id, handle, account_id)) {
+        return step;
     }
 
     // Зовём соседнюю команду целиком, а не трейт регистратора: вместе со сменой
     // NS она пишет `ns_status` в строку домена и строчку `registrar.ns_set` в
     // audit log. Повторив здесь только вызов трейта, full-setup оставлял бы
     // домен с вечным `pending` на бейдже делегирования.
-    match registrar_set_nameservers(
+    let outcome = registrar_set_nameservers(
         app.clone(),
         user_id.to_string(),
         account_id.to_string(),
@@ -210,22 +259,12 @@ async fn push_nameservers(
         handle.clone(),
         api.clone(),
     )
-    .await
-    {
-        Ok(true) => NsStep::Pushed { nameservers },
-        // Сегодня недостижимо (обе реализации отвечают `Ok(true)` или ошибкой),
-        // но семантика у `Ok(false)` та же «не применил», и зелёным он быть не
-        // может: `ns_status` этот же случай уже записал как `error`.
-        Ok(false) => NsStep::Failed {
-            error: "the registrar did not apply the nameserver change".into(),
-        },
-        Err(e) => NsStep::Failed {
-            error: e.to_string(),
-        },
-    }
+    .await;
+    ns_step_of(outcome, nameservers)
 }
 
-/// Записать `cloudflare_zone_id` в строку домена. Возвращает, получилось ли.
+/// Записать `cloudflare_zone_id` в строку домена. Возвращает, получилось ли;
+/// `None` — зоны нет, писать было нечего.
 ///
 /// Best-effort по той же причине, что и аудит: зона в Cloudflare к этому моменту
 /// уже есть, откату не подлежит, и `?` здесь превратил бы её создание в
@@ -236,30 +275,50 @@ async fn save_zone_id(
     api: &ApiClient,
     domain_id: &str,
     domain_name: &str,
-    zone_id: &str,
-) -> bool {
+    zone: &ZoneStep,
+) -> Option<bool> {
+    let zone_id = zone.zone_id()?;
     if let Err(e) = api
         .domain_write_back(domain_id, &zone_write_back_body(zone_id))
         .await
     {
         tracing::warn!(target: "full_setup", "write-back of cloudflare_zone_id failed: {e}");
-        // Слушатель на той стороне склеивает текст из `AUDIT_ACTION_LABEL`:
-        // «Zone created, but the result could not be saved on the server». На
-        // переиспользованной зоне первая половина неточна, зато вторая — та,
-        // ради которой событие и шлётся: сервер о зоне не знает, и следующая
-        // проверка идемпотентности решит неверно.
+        // Слушатель на той стороне склеивает текст из `AUDIT_ACTION_LABEL` в
+        // утвердительном прошедшем времени, поэтому ключ действия зависит от
+        // того, создавали мы зону или взяли готовую (`writeback_action`).
         let _ = app.emit(
             AUDIT_PROGRESS_EVENT,
             serde_json::json!({
                 "step": "writeback_failed",
-                "action": AUDIT_ACTION_ZONE_CREATE,
+                "action": zone.writeback_action(),
                 "target_type": "domain",
                 "target_id": domain_name,
             }),
         );
-        return false;
+        return Some(false);
     }
-    true
+    Some(true)
+}
+
+/// Есть ли десктопу чем работать вообще.
+///
+/// Условия здесь не про домен, а про машину: запертый сейф и неинициализированная
+/// синхронизация одинаковы для всех ста доменов пачки. Отдав их отчётом, мы дали
+/// бы фронту сто одинаковых красных строк, неотличимых от отказа Cloudflare по
+/// конкретному домену, и сто попыток открыть keychain вместо одного громкого
+/// «сейф заперт». Поэтому — `Err`, до единого сетевого запроса и до любых
+/// изменений: у вызывающего это единственный однозначный сигнал «останови
+/// прогон» (отличать `Failed`-строки по префиксу `keychain: ` он не обязан —
+/// это формат `thiserror`, а не контракт).
+fn preflight(user_id: &str, handle: &State<'_, SyncHandle>) -> Result<(), CommandError> {
+    cache_path(handle)?;
+    let mut key = keychain::load_master_key(user_id)
+        .map_err(|e| CommandError::Keychain(e.to_string()))?
+        .ok_or_else(|| CommandError::Keychain("locked".into()))?;
+    // Ключ нужен был только как ответ на «сейф открыт?»: работать им будут
+    // шаги, каждый со своей копией.
+    key.zeroize();
+    Ok(())
 }
 
 /// Завести домен в Cloudflare и (по флагу) прописать его NS у регистратора.
@@ -269,8 +328,11 @@ async fn save_zone_id(
 /// синхронизации его строки в кэше нет вовсе. `domain_id` — адресат write-back'а,
 /// одно из другого не выводится, поэтому приходят оба.
 ///
-/// `Err` возвращается только на бессмысленном вводе: всё, что случилось с
-/// провайдерами, — это отчёт (см. `FullSetupOut`).
+/// `Err` означает ровно одно: работа НЕ начиналась и повторять её по этому
+/// домену бессмысленно, пока не починено общее — бессмысленный ввод либо
+/// условие уровня машины (`preflight`). Всё, что случилось с провайдерами, —
+/// это отчёт (см. `FullSetupOut`). Для пачки это и есть граница: `Err` —
+/// «останови прогон», `Ok` — «строка отчёта, иди дальше».
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn domain_full_setup(
@@ -291,6 +353,7 @@ pub async fn domain_full_setup(
     if cloudflare_account_id.trim().is_empty() {
         return Err(CommandError::Api("cloudflare account id is empty".into()));
     }
+    preflight(&user_id, &handle)?;
 
     let zone = match ensure_zone(
         &app,
@@ -310,6 +373,11 @@ pub async fn domain_full_setup(
             zone_id: zone.id,
             name_servers: zone.name_servers.unwrap_or_default(),
         },
+        // Сейф успели запереть между `preflight` и этим вызовом (или его
+        // перезаперли из другого окна): условие снова общее для всей пачки, и
+        // строкой отчёта оно быть не должно — гнать за ним ещё девяносто девять
+        // доменов незачем.
+        Err(e @ CommandError::Keychain(_)) => return Err(e),
         Err(e) => ZoneStep::Failed {
             error: e.to_string(),
         },
@@ -318,10 +386,7 @@ pub async fn domain_full_setup(
     // Write-back раньше NS — как в провижининге: шаг NS уходит в сеть надолго,
     // а идентификатор зоны на сервере нужен независимо от того, чем он там
     // кончится.
-    let zone_saved = match zone.zone_id() {
-        Some(zone_id) => Some(save_zone_id(&app, &api, &domain_id, domain_name, zone_id).await),
-        None => None,
-    };
+    let zone_saved = save_zone_id(&app, &api, &domain_id, domain_name, &zone).await;
 
     let ns = match ns_plan(push_ns, registrar_account_id.as_deref(), &zone) {
         NsPlan::Skip(reason) => NsStep::Skipped { reason },
@@ -400,16 +465,47 @@ mod tests {
         );
     }
 
+    fn zone_failed() -> ZoneStep {
+        ZoneStep::Failed {
+            error: "cloudflare api: [{\"code\":1061}]".into(),
+        }
+    }
+
     #[test]
     fn ns_is_skipped_when_the_zone_step_failed() {
         // Частичный успех наоборот: зона не вышла, и шаг NS не «провалился», а
         // не выполнялся — иначе отчёт показал бы две красных строки об одной
         // неудаче.
-        let failed = ZoneStep::Failed {
-            error: "cloudflare api: [{\"code\":1061}]".into(),
-        };
         assert_eq!(
-            ns_plan(true, Some("7"), &failed),
+            ns_plan(true, Some("7"), &zone_failed()),
+            NsPlan::Skip(NsSkipReason::ZoneUnavailable)
+        );
+    }
+
+    /// Причин пропуска несколько, и верны они бывают одновременно — тогда
+    /// названа должна быть первая по порядку, иначе пользователь чинит не то.
+    /// Порядок держится ЭТИМ тестом: комментарий рядом с функцией переставить
+    /// проверки не мешает.
+    #[test]
+    fn ns_skip_reasons_are_ranked_and_the_first_true_one_wins() {
+        // Не так вообще всё: тумблер выключен, регистратора нет, зоны нет.
+        // Названо решение пользователя — остальное он и не просил.
+        assert_eq!(
+            ns_plan(false, None, &zone_failed()),
+            NsPlan::Skip(NsSkipReason::NotRequested)
+        );
+        // Тумблер включён; регистратора нет И зоны нет. Регистратор ближе к
+        // тому, что пользователь настраивает сам, — и он же нужен даже с
+        // удавшейся зоной.
+        assert_eq!(
+            ns_plan(true, None, &zone_failed()),
+            NsPlan::Skip(NsSkipReason::NoRegistrarAccount)
+        );
+        // Регистратор есть; зоны нет — а раз нет зоны, то нет и её NS.
+        // «Зона не вышла» объясняет пропуск, «у зоны нет NS» — врёт про зону,
+        // которой не существует.
+        assert_eq!(
+            ns_plan(true, Some("7"), &zone_failed()),
             NsPlan::Skip(NsSkipReason::ZoneUnavailable)
         );
     }
@@ -437,6 +533,84 @@ mod tests {
                     "bob.ns.cloudflare.com".into()
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn provider_without_ns_api_is_a_skip_and_not_a_failure() {
+        // «Нет API» повтором не лечится, а красная строка предлагала бы чинить
+        // то, что чинится только руками в панели регистратора.
+        assert_eq!(
+            ns_gate_by_provider(&Ok("godaddy".into())),
+            Some(NsStep::Skipped {
+                reason: NsSkipReason::RegistrarNoNsApi
+            })
+        );
+        // Регистр — единственное, что схлопывается (как в `make_service`).
+        assert_eq!(ns_gate_by_provider(&Ok("Namecheap".into())), None);
+        assert_eq!(ns_gate_by_provider(&Ok("hostiq".into())), None);
+    }
+
+    #[test]
+    fn unreadable_registrar_account_is_a_failure_and_not_a_skip() {
+        // Обратная сторона: аккаунт есть, но прочитать его не вышло — это сбой,
+        // и повтор (после синхронизации) его как раз лечит. Пропуском он
+        // выглядел бы как принятое решение не менять NS.
+        assert_eq!(
+            ns_gate_by_provider(&Err(CommandError::Api(
+                "registrar account not in local cache".into()
+            ))),
+            Some(NsStep::Failed {
+                error: "api: registrar account not in local cache".into()
+            })
+        );
+    }
+
+    #[test]
+    fn ns_outcome_becomes_a_report_line() {
+        let ns = || vec!["ada.ns.cloudflare.com".into()];
+        assert_eq!(
+            ns_step_of(Ok(true), ns()),
+            NsStep::Pushed { nameservers: ns() }
+        );
+        // Отказ регистратора уезжает текстом как есть: он уже вычищен от
+        // секретов на своей стороне (`namecheap::scrub`).
+        assert_eq!(
+            ns_step_of(
+                Err(CommandError::Api(
+                    "Namecheap error: Invalid nameserver".into()
+                )),
+                ns()
+            ),
+            NsStep::Failed {
+                error: "api: Namecheap error: Invalid nameserver".into()
+            }
+        );
+        // `Ok(false)` сегодня недостижим, но зелёным он быть не может: тот же
+        // случай `ns_status` уже записал как `error`.
+        assert_eq!(
+            ns_step_of(Ok(false), ns()),
+            NsStep::Failed {
+                error: NS_NOT_APPLIED.into()
+            }
+        );
+    }
+
+    /// Тост о непрошедшем write-back'е произносится в утвердительном прошедшем
+    /// времени, поэтому ключ действия обязан следовать за тем, что команда
+    /// сказала в отчёте: «Zone created» про переиспользованную зону — ровно та
+    /// неточность, из-за которой пользователь пойдёт искать второй домен в
+    /// Cloudflare.
+    #[test]
+    fn writeback_toast_speaks_of_creation_only_when_the_zone_was_created() {
+        assert_eq!(zone_ok().writeback_action(), "cf.zone.create");
+        assert_eq!(
+            ZoneStep::Existed {
+                zone_id: "z1".into(),
+                name_servers: vec![],
+            }
+            .writeback_action(),
+            "cf.zone.link"
         );
     }
 

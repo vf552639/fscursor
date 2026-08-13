@@ -91,6 +91,12 @@ export const PROVISION_STEP_LABEL: Record<string, string> = {
  */
 export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "cf.zone.create": "Zone created",
+  // Пара к `cf.zone.create`, и разведены они ровно из-за утвердительного
+  // прошедшего времени: full setup, взявший УЖЕ заведённую зону, шлёт этот
+  // ключ, потому что «Zone created» противоречило бы его же отчёту — а отчёт
+  // читают на вопрос «не завёл ли я второй домен в Cloudflare». Строчки в audit
+  // log за этим действием нет: связку домена с зоной пишет бэкенд.
+  "cf.zone.link": "Zone linked",
   "cf.dns.create": "DNS record created",
   "cf.dns.update": "DNS record updated",
   "cf.dns.delete": "DNS record deleted",
