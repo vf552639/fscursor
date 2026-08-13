@@ -39,22 +39,34 @@ impl NamecheapService {
         }
     }
 
-    /// Вычистить ключ из текста, который увидит человек.
+    /// Вычистить секреты из текста, который увидит человек.
     ///
     /// Namecheap принимает `ApiKey` ПАРАМЕТРОМ URL (см. `base_params`), поэтому
     /// любая строка, куда мог попасть адрес запроса, — это потенциальный слив
     /// секрета: `Display` у `reqwest::Error` дописывает `for url (…)`
     /// безусловно, а страница ошибки от прокси или WAF (в отличие от XML самого
     /// Namecheap) вполне может отэхоить request URI в теле ответа. Первый путь
-    /// закрыт `without_url()` ниже, второй закрывается только так.
+    /// закрыт `without_url()` ниже, второй — тем, что тело наружу вообще не
+    /// уезжает (`failure_text`); эта чистка стоит третьей и страхует оба.
     ///
-    /// Пустой ключ не вычищаем: замена пустой подстроки изрешетила бы текст
+    /// `client_ip` вычищается наравне с ключом, и это не перестраховка: у
+    /// Namecheap им едет whitelisted IP, который продукт хранит ЗАШИФРОВАННЫМ
+    /// блобом (`api_secret_blob_id`) и расшифровывает на клиенте той же
+    /// машинерией, что и сам ключ. Раз на хранении он признан секретом, на
+    /// показе он им тоже остаётся — иначе классификация продукта расходится
+    /// сама с собой. `api_user` не вычищается сознательно: это логин, он не
+    /// шифруется и без него текст ошибки нечем соотнести с аккаунтом.
+    ///
+    /// Пустые значения пропускаем: замена пустой подстроки изрешетила бы текст
     /// маркерами, а секрета в этом случае и нет.
     fn scrub(&self, text: String) -> String {
-        if self.api_key.is_empty() {
-            return text;
+        let mut out = text;
+        for secret in [self.api_key.as_str(), self.client_ip.as_str()] {
+            if !secret.is_empty() {
+                out = out.replace(secret, REDACTED);
+            }
         }
-        text.replace(&self.api_key, REDACTED)
+        out
     }
 
     /// Ошибка транспорта без адреса запроса.
@@ -93,22 +105,16 @@ impl NamecheapService {
             .map_err(|e| self.transport_err(e))?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| self.transport_err(e))?;
-        // Тело ответа уезжает в текст ошибки целиком (в нём и лежит объяснение
-        // от Namecheap), поэтому через `scrub` проходят ОБЕ ветки: XML самого
-        // Namecheap ключа не эхоит, а вот HTML-страница прокси или WAF с
-        // «Request: GET …?ApiKey=…» — обычное дело, и попадает она ровно сюда.
-        if status.as_u16() >= 400 {
-            return Err(RegistrarError::Api(self.scrub(format!(
-                "Namecheap HTTP {}: {}",
-                status, text
-            ))));
-        }
-        if !namecheap_status_ok(&text) {
-            let err = namecheap_errors(&text);
-            return Err(RegistrarError::Api(self.scrub(format!(
-                "Namecheap error: {}",
-                err.unwrap_or_else(|| text.clone())
-            ))));
+        // Два разных признака неудачи с одним исходом: HTTP-код (ответил не
+        // Namecheap — прокси, WAF, капча) и `Status="ERROR"` в его собственном
+        // XML (Namecheap ответил отказом, и код у него при этом 200). Ветки
+        // сведены в одну намеренно: пока их было две, они формировали текст
+        // порознь, и `scrub` можно было уронить в одной, не заметив.
+        //
+        // Наружу уезжает РАЗОБРАННАЯ ошибка, а не тело ответа (`failure_text`);
+        // `scrub` поверх неё — страховка, а не единственная защита.
+        if status.as_u16() >= 400 || !namecheap_status_ok(&text) {
+            return Err(RegistrarError::Api(self.scrub(failure_text(status, &text))));
         }
         Ok(text)
     }
@@ -127,6 +133,27 @@ fn namecheap_status_ok(xml: &str) -> bool {
         .and_then(|n| n.attribute("Status"))
         .map(|s| s.eq_ignore_ascii_case("ok"))
         .unwrap_or(false)
+}
+
+/// Как назвать неудачный ответ.
+///
+/// Тело сюда НЕ попадает, и это главная защита, а не придирка к формату.
+/// Ветка «тело как есть» срабатывала ровно тогда, когда `namecheap_errors`
+/// ничего не нашёл, — то есть когда ответ пришёл не от Namecheap: страница
+/// прокси, WAF или капчи. Пользователю её текст (`<html><head><title>403…`) не
+/// говорит ничего, а секрет в ней как раз бывает: такие страницы охотно эхоят
+/// request URI, в котором у Namecheap лежит `ApiKey`. Показывать нечего —
+/// значит и показывать не будем; `scrub` остаётся страховкой на случай, если
+/// секрет просочится в разобранный текст (денилист по значению всегда неполон:
+/// перенос строки внутри ключа в HTML, частичное вхождение, экранирование).
+///
+/// Разобранная ошибка Namecheap при этом сохраняется целиком: она и есть ответ
+/// на вопрос «почему не вышло» («API Key is invalid», «IP is not whitelisted»).
+fn failure_text(status: reqwest::StatusCode, xml: &str) -> String {
+    match namecheap_errors(xml) {
+        Some(err) => format!("Namecheap error: {err}"),
+        None => format!("Namecheap returned an unrecognised response (HTTP {status})"),
+    }
 }
 
 fn namecheap_errors(xml: &str) -> Option<String> {
@@ -284,6 +311,8 @@ fn command_response_ok(xml: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn status_ok_detection() {
@@ -335,19 +364,98 @@ mod tests {
         );
     }
 
-    /// Тело ответа уезжает в текст ошибки целиком, а страница от прокси или WAF
-    /// вполне может отэхоить request URI — с ключом внутри.
+    /// Ошибка, разобранная из ответа Namecheap, проходит через `scrub` — и
+    /// проверяется это ЧЕРЕЗ `call()`, а не вызовом `scrub` напрямую.
+    ///
+    /// Разница принципиальная: сам по себе `scrub` может быть безупречен и при
+    /// этом не быть позван. Текст `<Error>` — единственное чужое содержимое,
+    /// которое мы показываем намеренно (в нём и лежит «почему не вышло»), так
+    /// что структурной заменой его не закрыть: если API отэхоит в нём параметр
+    /// запроса, между ключом и экраном останется только эта чистка.
+    #[tokio::test]
+    async fn parsed_error_from_call_is_scrubbed() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xml.response"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"<?xml version="1.0"?><ApiResponse Status="ERROR"><Errors>
+                <Error Number="2011102">Invalid request: ApiKey={SECRET} is not valid</Error>
+                </Errors></ApiResponse>"#
+            )))
+            .mount(&srv)
+            .await;
+        let svc = NamecheapService::with_base_url(
+            SECRET,
+            "user1",
+            "1.2.3.4",
+            &format!("{}/xml.response", srv.uri()),
+        );
+
+        let err = svc
+            .call("namecheap.domains.dns.getList", &[])
+            .await
+            .expect_err("Status=ERROR обязан стать ошибкой");
+        let text = err.to_string();
+
+        assert!(!text.contains(SECRET), "ключ уехал в текст ошибки: {text}");
+        assert!(text.contains(REDACTED), "чистка не сработала: {text}");
+        // Причина при этом сохранена: вычистили секрет, а не сообщение.
+        assert!(text.contains("2011102") || text.contains("is not valid"), "объяснение потеряно: {text}");
+    }
+
+    /// Страница прокси/WAF наружу не уезжает вовсе — ни с секретом, ни без.
+    #[tokio::test]
+    async fn proxy_page_body_never_reaches_the_message() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xml.response"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(format!(
+                "<html><head><title>403</title></head><body>Request: GET /xml.response?ApiKey={SECRET}</body></html>"
+            )))
+            .mount(&srv)
+            .await;
+        let svc = NamecheapService::with_base_url(
+            SECRET,
+            "user1",
+            "1.2.3.4",
+            &format!("{}/xml.response", srv.uri()),
+        );
+
+        let text = svc
+            .call("namecheap.domains.dns.getList", &[])
+            .await
+            .expect_err("403 обязан стать ошибкой")
+            .to_string();
+
+        assert!(!text.contains(SECRET), "ключ уехал в текст ошибки: {text}");
+        // Именно НЕ показываем тело: пользователю оно не говорит ничего, а
+        // носителем секрета бывает именно оно.
+        assert!(!text.contains("<html>"), "тело чужой страницы уехало наружу: {text}");
+        assert!(text.contains("403"), "статус потерян: {text}");
+    }
+
+    /// `client_ip` у Namecheap — это whitelisted IP, который продукт хранит
+    /// зашифрованным блобом (`api_secret_blob_id`). Раз он секрет на хранении,
+    /// он секрет и на показе.
     #[test]
-    fn response_body_is_scrubbed_of_the_key() {
-        let svc = NamecheapService::new(SECRET, "user1", "1.2.3.4");
-        let proxy_page =
-            format!("<html>403 Forbidden. Request: GET /xml.response?ApiKey={SECRET}&Command=x</html>");
+    fn scrub_hides_the_whitelisted_ip_too() {
+        let svc = NamecheapService::new(SECRET, "user1", "203.0.113.7");
+        let scrubbed = svc.scrub("Namecheap error: 203.0.113.7 is not whitelisted".into());
+        assert!(!scrubbed.contains("203.0.113.7"), "IP остался: {scrubbed}");
+        assert!(scrubbed.contains("is not whitelisted"), "объяснение потеряно");
+    }
 
-        let scrubbed = svc.scrub(format!("Namecheap HTTP 403 Forbidden: {proxy_page}"));
+    #[test]
+    fn failure_text_keeps_namecheap_errors_and_drops_foreign_bodies() {
+        let status = reqwest::StatusCode::FORBIDDEN;
+        let xml = r#"<ApiResponse Status="ERROR"><Errors><Error Number="1011102">API Key is invalid</Error></Errors></ApiResponse>"#;
+        assert_eq!(failure_text(status, xml), "Namecheap error: API Key is invalid");
 
-        assert!(!scrubbed.contains(SECRET), "ключ остался в теле: {scrubbed}");
-        assert!(scrubbed.contains(REDACTED));
-        assert!(scrubbed.contains("403 Forbidden"), "объяснение потеряно");
+        let html = "<html><body>blocked</body></html>";
+        assert_eq!(
+            failure_text(status, html),
+            "Namecheap returned an unrecognised response (HTTP 403 Forbidden)"
+        );
     }
 
     /// Пустой ключ (аккаунт без секрета) не должен превращать текст в решето из
