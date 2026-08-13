@@ -3,14 +3,14 @@ import { renderHook, waitFor, cleanup } from "@testing-library/react";
 import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { useCloudflareZones, useZoneDetails, useZoneNameservers } from "./cloudflare";
+import { useCloudflareZones, useZoneDetails } from "./cloudflare";
 import { useAuthStore } from "../store/auth";
 
 /**
- * `useCloudflareZones`, `useZoneDetails` и `useZoneNameservers` — это три
- * `select` над ОДНОЙ записью кэша `cf_list_zones`. Абстракция дешёвая, но
- * неочевидная: сломать её можно, разведя queryKey, и никакой тест страницы
- * этого не заметит — счёт вызовов команды виден только здесь.
+ * `useCloudflareZones` и `useZoneDetails` — это два `select` над ОДНОЙ записью
+ * кэша `cf_list_zones`. Абстракция дешёвая, но неочевидная: сломать её можно,
+ * разведя queryKey, и никакой тест страницы этого не заметит — счёт вызовов
+ * команды виден только здесь.
  */
 
 const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn() }));
@@ -55,13 +55,12 @@ describe("api/cloudflare — зоны на одном запросе", () => {
     useAuthStore.getState().clear();
   });
 
-  it("три хука на одну зону дают ровно один cf_list_zones", async () => {
+  it("два хука на одну зону дают ровно один cf_list_zones", async () => {
     const { wrapper } = wrapperWithClient();
     const { result } = renderHook(
       () => ({
         list: useCloudflareZones(5),
         zone: useZoneDetails(5, "zone-a"),
-        ns: useZoneNameservers(5, "zone-a"),
       }),
       { wrapper }
     );
@@ -80,7 +79,6 @@ describe("api/cloudflare — зоны на одном запросе", () => {
       () => ({
         first: useZoneDetails(5, "zone-a"),
         second: useZoneDetails(5, "zone-b"),
-        ns: useZoneNameservers(5, "zone-b"),
       }),
       { wrapper }
     );
@@ -89,24 +87,22 @@ describe("api/cloudflare — зоны на одном запросе", () => {
     expect(result.current.first.data?.name).toBe("example.com");
     expect(result.current.second.data?.name).toBe("second.com");
     expect(result.current.second.data?.status).toBe("pending");
-    // `name_servers: null` — это зона без NS, а не отсутствующая зона.
-    expect(result.current.ns.data).toEqual({ zone_id: "zone-b", name_servers: [] });
+    // `name_servers: null` — это зона без NS, а не отсутствующая зона: сама
+    // зона нашлась, и потребитель обязан различать эти два ответа.
+    expect(result.current.second.data?.name_servers).toBeNull();
   });
 
   it("для чужого zone_id отдаёт null, а не выдуманный пустой ответ", async () => {
     const { wrapper } = wrapperWithClient();
     const { result } = renderHook(
-      () => ({
-        zone: useZoneDetails(5, "zone-of-another-account"),
-        ns: useZoneNameservers(5, "zone-of-another-account"),
-      }),
+      () => useZoneDetails(5, "zone-of-another-account"),
       { wrapper }
     );
 
-    await waitFor(() => expect(result.current.zone.isSuccess).toBe(true));
-    expect(result.current.zone.data).toBeNull();
-    // Пустой массив тут читался бы как «у зоны нет NS» — ответ не на тот вопрос.
-    expect(result.current.ns.data).toBeNull();
+    // Пустой объект зоны тут читался бы как «зона есть, в ней ничего нет» —
+    // ответ не на тот вопрос.
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeNull();
   });
 
   it("вне десктопа список зон не запрашивается вовсе", async () => {

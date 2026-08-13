@@ -149,8 +149,10 @@ export function nsDelegation(input: NsDelegationInput): NsDelegation {
   if (input.registrarAccountId == null) return { state: "unknown", reason: "no-registrar" };
   // Провайдера ещё не знаем (список аккаунтов не прочитан) — это «не прочитано»,
   // а НЕ «у провайдера нет API»: вторая фраза обвиняла бы регистратора в том,
-  // чего мы про него не выяснили.
-  if (input.registrarProvider == null || input.registrarProvider.trim() === "") {
+  // чего мы про него не выяснили. Пустота проверяется без `trim` намеренно:
+  // строка из пробелов — это ЗАПОЛНЕННОЕ поле с мусором, и десктоп ответит на
+  // неё `unknown provider`, то есть честный ответ про неё — `registrar-no-api`.
+  if (input.registrarProvider == null || input.registrarProvider === "") {
     return { state: "unknown", reason: "registrar-nameservers-unknown" };
   }
   if (!registrarSupportsNsApi(input.registrarProvider)) {

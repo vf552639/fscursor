@@ -62,7 +62,7 @@ describe("matchDomainsToZones", () => {
 
     const [m] = matchDomainsToZones([domain(1, "example.com")], [ACCOUNT_7, other]);
 
-    // Угадав аккаунт, продукт записал бы домену чужой zone_id, а вкладка NS
+    // Угадав аккаунт, продукт записал бы домену чужой zone_id, а карточка
     // потом отдала бы регистратору nameservers чужой зоны.
     expect(m).toEqual({
       outcome: "ambiguous",
@@ -104,7 +104,7 @@ describe("matchDomainsToZones", () => {
     const [m] = matchDomainsToZones([domain(1, "shop.example.com")], [ACCOUNT_7]);
 
     // Зафиксированное решение, а не недосмотр: `cloudflare_zone_id` читается
-    // фронтом как «зона ЭТОГО домена», и вкладка NS пушит регистратору её
+    // фронтом как «зона ЭТОГО домена», и карточка пушит регистратору её
     // nameservers. Привязка к родителю заставила бы этот путь врать.
     expect(m.outcome).toBe("none");
   });

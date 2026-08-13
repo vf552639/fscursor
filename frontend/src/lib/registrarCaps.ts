@@ -26,10 +26,12 @@ const NS_API_PROVIDERS: readonly string[] = ["hostiq", "namecheap"];
 /**
  * Умеет ли этот провайдер менять NS через API.
  *
- * Регистр и пробелы схлопываются, потому что так делает и сам десктоп
- * (`provider.to_lowercase()` в `make_service`): значение приезжает строкой из
- * колонки `registrar_accounts.provider`, и «Namecheap» из чужого импорта
- * отличается от «namecheap» только здесь.
+ * Схлопывается РОВНО регистр — ровно то, что схлопывает `make_service`
+ * (`provider.to_lowercase()`), и ни символом больше. «Namecheap» из чужого
+ * импорта десктоп понимает, а `" namecheap "` — нет: пробелы он не срезает, и
+ * признай мы такую строку рабочей, кнопка «Set NS» осталась бы живой ради
+ * гарантированного `unknown provider`. Зеркало обязано быть точным в обе
+ * стороны, иначе оно не зеркало.
  *
  * Аргумент — `string`, а не `RegistrarProvider`: провайдер в модели объявлен как
  * `RegistrarProvider | string` (в базе лежит произвольная строка), и сужение
@@ -38,5 +40,5 @@ const NS_API_PROVIDERS: readonly string[] = ["hostiq", "namecheap"];
  * незнание в сторону работоспособности не округляем.
  */
 export function registrarSupportsNsApi(provider: string | null | undefined): boolean {
-  return provider != null && NS_API_PROVIDERS.includes(provider.trim().toLowerCase());
+  return provider != null && NS_API_PROVIDERS.includes(provider.toLowerCase());
 }

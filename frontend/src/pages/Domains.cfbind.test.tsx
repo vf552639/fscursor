@@ -391,7 +391,7 @@ describe("Domains — кнопка «Синхронизировать выдел
     await screen.findByText("a.com");
     fireEvent.click((await selectAll(container))!);
 
-    // Угадав аккаунт, продукт увёл бы домен в чужую зону — а вкладка NS потом
+    // Угадав аккаунт, продукт увёл бы домен в чужую зону — а карточка потом
     // прописала бы регистратору её nameservers.
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("1 matched in more than one account");

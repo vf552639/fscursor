@@ -153,8 +153,7 @@ async function mapWithLimit<T, R>(
  * бы в сотню полных вычиток.
  *
  * Через `fetchQuery`, а не прямым `invokeSynced`: так прогон делит запись кэша
- * (и её `staleTime` в 60с) со страницей Cloudflare и с вкладкой NS карточки
- * домена. Прогон, запущенный сразу после просмотра зон, не ходит в Cloudflare
+ * (и её `staleTime` в 60с) со страницей Cloudflare и с карточкой домена. Прогон, запущенный сразу после просмотра зон, не ходит в Cloudflare
  * повторно, а зона, только что созданная `useCreateZone`, видна ему сразу —
  * та инвалидирует ровно эту запись.
  *
@@ -267,7 +266,7 @@ export async function autoBindDomainsToCloudflare(
     try {
       // `PUT /domains/{id}`, а не `bulk-assign-cloudflare`: тот роут знает
       // только `account_id`, а без `zone_id` привязка не даёт главного —
-      // вкладке NS по-прежнему нечего пушить регистратору.
+      // карточке домена по-прежнему нечего пушить регистратору.
       await apiPut<Domain>(`/domains/${m.domainId}`, {
         cloudflare_account_id: m.accountId,
         cloudflare_zone_id: m.zoneId,

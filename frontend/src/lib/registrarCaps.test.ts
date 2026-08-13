@@ -16,11 +16,20 @@ describe("registrarSupportsNsApi", () => {
     expect(registrarSupportsNsApi("reg.ru")).toBe(false);
   });
 
-  it("схлопывает регистр и пробелы — как `to_lowercase()` в десктопе", () => {
+  it("схлопывает регистр — ровно то, что делает `to_lowercase()` в десктопе", () => {
     // В колонке `registrar_accounts.provider` лежит произвольная строка: после
     // чужого импорта там встречается «Namecheap».
     expect(registrarSupportsNsApi("Namecheap")).toBe(true);
-    expect(registrarSupportsNsApi("  HOSTIQ ")).toBe(true);
+    expect(registrarSupportsNsApi("HOSTIQ")).toBe(true);
+  });
+
+  it("пробелы НЕ схлопывает: их не срезает и десктоп", () => {
+    // `make_service` делает только `to_lowercase()`, поэтому `" namecheap "`
+    // для него — неизвестный провайдер. Признай мы такую строку рабочей, фронт
+    // оставил бы живой кнопку с гарантированным `unknown provider` за ней —
+    // ровно то, ради чего этот модуль и заведён.
+    expect(registrarSupportsNsApi("  HOSTIQ ")).toBe(false);
+    expect(registrarSupportsNsApi(" namecheap")).toBe(false);
   });
 
   it("незнание провайдера — это НЕ «умеет»", () => {

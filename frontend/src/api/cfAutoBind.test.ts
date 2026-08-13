@@ -95,7 +95,7 @@ describe("autoBindDomainsToCloudflare", () => {
     expect(report.bound).toEqual([
       { domainId: 1, domain: "example.com", accountId: 7, zoneId: "zone-a" },
     ]);
-    // Без `cloudflare_zone_id` привязка не даёт главного: вкладке NS
+    // Без `cloudflare_zone_id` привязка не даёт главного: карточке домена
     // по-прежнему нечего пушить регистратору. Поэтому `PUT /domains/{id}`, а не
     // роут `bulk-assign-cloudflare`, который знает только аккаунт.
     expect(mocks.apiPut).toHaveBeenCalledWith("/domains/1", {

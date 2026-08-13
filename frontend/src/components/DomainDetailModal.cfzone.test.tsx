@@ -102,12 +102,37 @@ function mockReads(reads: { zones?: any[]; registrarDomains?: any[] } = {}) {
   });
 }
 
-function show(d = domain()) {
-  return render(
+function card(d: any) {
+  return (
     <QueryClientProvider client={queryClient}>
       <DomainDetailModal domain={d} onClose={() => {}} />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+}
+
+function show(d = domain()) {
+  return render(card(d));
+}
+
+/**
+ * Строка домена обновилась на странице — карточка получает её пропсом.
+ *
+ * Именно `rerender`, а не новый `render`: страница держит модалку под
+ * `key={detailDomain.id}` (`pages/Domains.tsx`), то есть при смене аккаунта или
+ * дорезолве зоны карточка НЕ пересоздаётся и весь её локальный стейт (набранные
+ * NS, флаг правки) переживает обновление строки. Смонтировав её заново, тест
+ * проверял бы не то, что происходит у пользователя.
+ */
+function pageSends(rerender: (ui: React.ReactElement) => void, d: any) {
+  rerender(card(d));
+}
+
+function nsField() {
+  return screen.getByLabelText(/Nameservers/i) as HTMLTextAreaElement;
+}
+
+function nsButton() {
+  return screen.getByText(/Set NS at registrar/).closest("button") as HTMLButtonElement;
 }
 
 /** Тела всех `PUT /domains/42` — то, что карточка записала в строку домена. */
@@ -203,6 +228,29 @@ describe("дорезолв зоны", () => {
     expect(domainWrites().length).toBe(1);
   });
 
+  it("выбор аккаунта дорезолвит зону сам, без второго действия", async () => {
+    setTauri(true);
+    const { rerender } = show(domain({ cloudflare_account_id: null, cloudflare_zone_id: null }));
+
+    // Ждём сам список аккаунтов: выбрать пункт, которого ещё нет в разметке,
+    // нельзя — селект молча остался бы пустым.
+    await screen.findByText("Main CF");
+    fireEvent.change(cfSelect(), { target: { value: String(CF_MAIN) } });
+    await waitFor(() =>
+      expect(domainWrites()).toEqual([{ cloudflare_account_id: CF_MAIN, cloudflare_zone_id: null }]),
+    );
+
+    // Дальше цепочка идёт через страницу: `PUT` гасит `/domains`, страница
+    // отдаёт карточке свежую строку — и уже на ней дорезолв находит зону.
+    pageSends(rerender, domain({ cloudflare_account_id: CF_MAIN, cloudflare_zone_id: null }));
+    await waitFor(() => expect(domainWrites()[1]).toEqual({ cloudflare_zone_id: "zone-a" }));
+
+    // И на строке с уже проставленной зоной третьей записи не случается.
+    pageSends(rerender, domain({ cloudflare_account_id: CF_MAIN, cloudflare_zone_id: "zone-a" }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(domainWrites().length).toBe(2);
+  });
+
   it("две одноимённые зоны в аккаунте не сохраняются, но и не замалчиваются", async () => {
     setTauri(true);
     mockReads({ zones: [zone(), zone({ id: "zone-dup", name: "Example.com." })] });
@@ -248,6 +296,63 @@ describe("дорезолв зоны", () => {
     fireEvent.change(cfSelect(), { target: { value: String(CF_SPARE) } });
     // Аккаунт — это метаданные, `PUT /domains/{id}` работает и в вебе.
     await waitFor(() => expect(domainWrites().length).toBe(1));
+  });
+});
+
+describe("поле NS не переживает смену зоны втихую", () => {
+  /** Зоны есть только у аккаунта A: у B домен не найдётся, зоне взяться неоткуда. */
+  function zonesOnlyInMain() {
+    mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "cf_list_zones") return String(args.accountId) === String(CF_MAIN) ? [zone()] : [];
+      if (cmd === "registrar_get_domains") return [];
+      return true;
+    });
+  }
+
+  it("после смены аккаунта в поле не остаются nameservers чужой зоны", async () => {
+    setTauri(true);
+    zonesOnlyInMain();
+    const { rerender } = show();
+
+    // 1. Поле подставлено NS зоны аккаунта A.
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+
+    // 2. Пользователь выбирает аккаунт B: зона обнуляется тем же запросом.
+    fireEvent.change(cfSelect(), { target: { value: String(CF_SPARE) } });
+    await waitFor(() => expect(domainWrites().length).toBe(1));
+
+    // 3. Страница отдаёт свежую строку. Карточка не пересоздаётся.
+    pageSends(rerender, domain({ cloudflare_account_id: CF_SPARE, cloudflare_zone_id: null }));
+
+    // 4. Кнопка при живом поле отправила бы регистратору nameservers аккаунта,
+    // от которого пользователь только что отказался, — и ссылки «Restore from
+    // Cloudflare» рядом уже нет, то есть о протухании не сказал бы никто.
+    await waitFor(() => expect(nsField().value).toBe(""));
+    expect(nsButton().disabled).toBe(true);
+    fireEvent.click(nsButton());
+    await act(async () => {});
+    expect(invoked("registrar_set_nameservers")).toEqual([]);
+    // Причина погасшей кнопки названа, а не оставлена загадкой.
+    expect(screen.getByText(/Nothing to push/)).toBeTruthy();
+  });
+
+  it("набранное руками смену аккаунта переживает", async () => {
+    setTauri(true);
+    zonesOnlyInMain();
+    const { rerender } = show();
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+
+    // Домен, уезжающий на чужой хостинг, заполняется руками — и зеркало зоны
+    // не вправе стереть это ни при смене аккаунта, ни при позднем ответе
+    // Cloudflare (та же задокументированная возможность, что у домена вовсе
+    // без зоны CF).
+    fireEvent.change(nsField(), { target: { value: "ns1.hoster.net\nns2.hoster.net" } });
+    fireEvent.change(cfSelect(), { target: { value: String(CF_SPARE) } });
+    pageSends(rerender, domain({ cloudflare_account_id: CF_SPARE, cloudflare_zone_id: null }));
+
+    await act(async () => {});
+    expect(nsField().value).toBe("ns1.hoster.net\nns2.hoster.net");
+    expect(nsButton().disabled).toBe(false);
   });
 });
 
