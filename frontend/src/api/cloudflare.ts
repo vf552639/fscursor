@@ -90,11 +90,6 @@ export interface DnsRecordUpdate {
   priority?: number;
 }
 
-export interface Nameservers {
-  zone_id: string;
-  name_servers: string[];
-}
-
 function requireUserId(): string {
   const userId = useAuthStore.getState().userId;
   if (!userId) throw new Error("Desktop: unlock session (user id missing)");
@@ -109,11 +104,11 @@ export const cloudflareKeys = {
 
 /**
  * Один запрос `cf_list_zones` на аккаунт — на нём стоят и список зон, и детали
- * зоны, и её nameservers: Cloudflare отдаёт `name_servers` прямо в списке, так
- * что отдельные команды под зону и NS были бы лишними походами с тем же
- * ответом. Три хука ниже — три `select` над одной записью кэша.
+ * зоны, и её nameservers: Cloudflare отдаёт `name_servers` и `status` прямо в
+ * списке, так что отдельные команды под зону и под NS были бы лишними походами
+ * с тем же ответом. Хуки ниже — `select`-ы над одной записью кэша.
  *
- * Экспортируется ради четвёртого потребителя, который живёт ВНЕ React:
+ * Экспортируется ради потребителя, который живёт ВНЕ React:
  * `api/cfAutoBind.ts` зовёт `queryClient.fetchQuery(zonesQuery(id))` на каждый
  * аккаунт. Свой `invokeSynced` там означал бы вторую копию и ключа, и
  * `staleTime` — то есть прогон привязки ходил бы в Cloudflare за зонами,
@@ -218,25 +213,16 @@ export function useCloudflareZones(accountId: number | null | undefined) {
     // показывает вместо таблицы (`pages/Cloudflare.tsx`, ветка `recsError`).
     // Погасив запрос флагом, мы получили бы пустую таблицу без причины.
     //
-    // `useZoneNameservers` (та же запись кэша, что и тут): его отказ читает
-    // вкладка NS карточки домена — «Could not prefill from Cloudflare», потому
-    // что молчаливое пустое поле не отличить от «у зоны нет NS». Но читает
-    // только под `isTauri()`: в вебе весь блок заменён одной строкой про
-    // «десктоп выполняет» (`DomainDetailModal`, есть тест). То есть флаг тут
-    // ничего бы не изменил — он не недостающая защита, а лишний шум.
-    //
     // `useZoneDetails`: производственных вызывающих сегодня нет вовсе —
     // единственным был `EditDomainModal`, удалённый вместе с мёртвым слоем
     // исполнения. Хук рабочий и оставлен намеренно (см. итог плана
     // `plans/2026-08-11-domains-chistka-sloya-ispolneniya.md`), но UI за ним
     // нет, и судить его поведение в вебе сегодня нечем.
     //
-    // Карточку домена ему домом НЕ дали, и это решение, а не недосмотр (план
-    // `plans/2026-08-11-domains-sroki-sortirovka-statistika.md`, фаза 5):
-    // статус зоны просился бы на вкладку overview, а она открыта всегда — то
-    // есть `cf_list_zones` (аккаунт по 50 зон) уходил бы на каждое открытие
-    // любой карточки, ради одного слова. Вкладка NS платит эту цену потому, что
-    // без списка NS ей нечего показывать вовсе.
+    // Карточка домена его вызывающим не стала: ей от зоны нужны сразу три
+    // ответа (NS, статус и поиск по ИМЕНИ для дорезолва), то есть сам список, —
+    // она берёт `useCloudflareZones`. Цену за это (`cf_list_zones` на открытие
+    // карточки) она платит осознанно: без NS зоны показывать там нечего.
     //
     // Привязка домена к зоне по имени (`api/cfAutoBind.ts`) — тот самый план,
     // на который этот долг откладывали, — его вызывающим тоже не стала, и это
@@ -256,22 +242,6 @@ export function useZoneDetails(
     ...zonesQuery(accountId),
     enabled: !!accountId && !!zoneId,
     select: (zones: Zone[]) => zones.find((z) => z.id === zoneId) ?? null,
-  });
-}
-
-export function useZoneNameservers(
-  accountId: number | null | undefined,
-  zoneId: string | null | undefined
-) {
-  return useQuery({
-    ...zonesQuery(accountId),
-    enabled: !!accountId && !!zoneId,
-    // `null` — зоны нет в аккаунте (например, zone_id от другого аккаунта).
-    // Пустой массив тут врал бы: «NS не настроены» вместо «зона не найдена».
-    select: (zones: Zone[]): Nameservers | null => {
-      const zone = zones.find((z) => z.id === zoneId);
-      return zone ? { zone_id: zone.id, name_servers: zone.name_servers ?? [] } : null;
-    },
   });
 }
 

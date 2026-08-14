@@ -1,3 +1,4 @@
+import { CloudflareAccount } from "../../api/cloudflare";
 import { Domain } from "../../api/domains";
 
 /**
@@ -24,6 +25,24 @@ export interface DomainUI {
   last_provision_error?: string | null;
   created: string;
 }
+
+/**
+ * Что живой список зон Cloudflare знает про домен, у которого в базе привязки
+ * нет (`cloudflare_account_id` пуст).
+ *
+ * Это ЗНАНИЕ, а не факт: зоны читаются вживую (`cf_list_zones`), в строке домена
+ * ничего не записано, и до прогона привязки не записано и не будет. Поэтому
+ * подсказка и рисуется иначе, чем сохранённое имя аккаунта, — см. `DomainRow`.
+ *
+ * `ambiguous` попал в тип, хотя сегодня рисуется тем же прочерком, что и
+ * отсутствие подсказки: «мы не нашли» и «нашли в двух аккаунтах, и выбрать за
+ * пользователя не вправе» — разные состояния, и первому нельзя дать поглотить
+ * второе (то же правило, что в `lib/cfZoneMatch`). Показывать неоднозначность в
+ * строке — решение пользователя: не показываем, чтобы не шуметь.
+ */
+export type RowCfHint =
+  | { outcome: "matched"; account: CloudflareAccount }
+  | { outcome: "ambiguous"; accountIds: number[] };
 
 /** Ответ API → строка вкладки. Единственное место, где эти поля переименовываются. */
 export function toDomainUI(d: Domain): DomainUI {

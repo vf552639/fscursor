@@ -91,6 +91,12 @@ export const PROVISION_STEP_LABEL: Record<string, string> = {
  */
 export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "cf.zone.create": "Zone created",
+  // Пара к `cf.zone.create`, и разведены они ровно из-за утвердительного
+  // прошедшего времени: full setup, взявший УЖЕ заведённую зону, шлёт этот
+  // ключ, потому что «Zone created» противоречило бы его же отчёту — а отчёт
+  // читают на вопрос «не завёл ли я второй домен в Cloudflare». Строчки в audit
+  // log за этим действием нет: связку домена с зоной пишет бэкенд.
+  "cf.zone.link": "Zone linked",
   "cf.dns.create": "DNS record created",
   "cf.dns.update": "DNS record updated",
   "cf.dns.delete": "DNS record deleted",
@@ -783,6 +789,12 @@ export default function DesktopWorkspace() {
             // полууспеха — «часть привязана, часть нет», ровно тот случай, ради
             // которого заведён `showWarning`. Четвёртого вида тоста не нужно.
             onCloudflareBindNotice={(n) =>
+              n.kind === "warn" ? showWarning(n.text) : showToast(n.text)
+            }
+            // Итог полной настройки — тем же тостом и по той же причине: пока
+            // страница жива, он живёт её баннером, а сюда доезжает только то,
+            // что осталось без баннера.
+            onFullSetupNotice={(n) =>
               n.kind === "warn" ? showWarning(n.text) : showToast(n.text)
             }
           />

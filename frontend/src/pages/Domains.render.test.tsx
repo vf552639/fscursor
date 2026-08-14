@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   apiPost: vi.fn(),
   apiPut: vi.fn(),
   apiDelete: vi.fn(),
+  invokeSynced: vi.fn(),
   rowRendered: vi.fn(),
 }));
 
@@ -41,7 +42,7 @@ vi.mock("../api/client", async (importOriginal) => ({
 
 vi.mock("../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
-  invokeSynced: vi.fn(),
+  invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
 }));
 
@@ -78,17 +79,37 @@ const DOMAINS = Array.from({ length: ROWS }, (_, i) => ({
   updated_at: "2026-01-01T00:00:00Z",
 }));
 
-function renderPage() {
+const CF_ACCOUNT = {
+  id: 7,
+  name: "main",
+  account_id: null,
+  is_active: true,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
+/**
+ * Десктоп с аккаунтом Cloudflare, у которого зона на каждый домен списка: так
+ * колонка Cloudflare показывает подсказку живого матча в КАЖДОЙ строке.
+ */
+function withLiveZones() {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  mocks.invokeSynced.mockImplementation(async () =>
+    DOMAINS.map((d, i) => ({ id: `zone-${i}`, name: d.domain_name, name_servers: [], status: "active" })),
+  );
+}
+
+function renderPage(cfAccounts: unknown[] = []) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/domains") return DOMAINS;
     if (url === "/servers") return { items: [], total: 0 };
     if (url === "/registrars/accounts") return [];
-    if (url === "/cloudflare/accounts") return [];
+    if (url === "/cloudflare/accounts") return cfAccounts;
     return {};
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} onCloudflareBindNotice={() => {}} />
+      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} onCloudflareBindNotice={() => {}} onFullSetupNotice={() => {}} />
     </QueryClientProvider>,
   );
 }
@@ -108,6 +129,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   queryClient.clear();
+  delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   useAuthStore.getState().clear();
 });
 
@@ -126,6 +148,22 @@ describe("Domains — цена одного действия в рендерах
     // перерендерится. Строкам от этого достаться ничего не должно.
     fireEvent.change(searchBox(), { target: { value: "com" } });
     expect(rowCount()).toBe(ROWS);
+    expect(rowRenders() - before).toBe(0);
+  });
+
+  it("подсказка живого матча не отменяет мемоизацию", async () => {
+    withLiveZones();
+    renderPage([CF_ACCOUNT]);
+    await screen.findByRole("table");
+    // Ждём именно подсказок: до прихода зон карта матчей пуста, и тест мерил бы
+    // мемоизацию пропса, которого ещё нет.
+    expect((await screen.findAllByTitle(/в базе не сохранено/)).length).toBe(ROWS);
+
+    const before = rowRenders();
+    fireEvent.change(searchBox(), { target: { value: "com" } });
+    // Карта подсказок обязана быть одной и той же между рендерами: собранная
+    // заново, она отдаёт каждой строке новый объект — и `React.memo` строки
+    // перестаёт работать, ничем этого не показав.
     expect(rowRenders() - before).toBe(0);
   });
 

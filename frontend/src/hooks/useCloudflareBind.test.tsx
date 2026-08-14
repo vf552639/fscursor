@@ -43,6 +43,11 @@ function Harness({ onAway }: { onAway: (n: CfBindNotice) => void }) {
   return (
     <div>
       <button onClick={() => { void bind.run([], "manual"); }}>Match</button>
+      {/* Два входа в синхрон (шапка вкладки и тулбар) — это две кнопки, и
+          нажать вторую можно, не дожидаясь перерисовки первой. Здесь оба
+          вызова идут в одном такте: так гейт проверяется без React-обвязки
+          страницы, а `pending` к этому моменту заведомо ещё не доехал. */}
+      <button onClick={() => { void bind.run([], "manual"); void bind.run([], "manual"); }}>Match twice</button>
       <button onClick={() => { void bind.run([], "auto"); }}>Auto</button>
       <div data-testid="pending">{bind.pending ? "pending" : "idle"}</div>
       <div data-testid="notice">{bind.notice?.text ?? ""}</div>
@@ -97,6 +102,27 @@ describe("useCloudflareBind", () => {
     // в баннер нового: см. `deliver`.
     await waitFor(() => expect(away).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByTestId("pending").textContent).toBe("idle"));
+  });
+
+  it("два запуска в одном такте дают один прогон", async () => {
+    // Прогон, который не заканчивается сам: гейт обязан отказать второму
+    // запуску, пока идёт первый.
+    mocks.autoBind.mockImplementation(() => new Promise<CfBindReport>(() => {}));
+
+    renderHook(vi.fn());
+    fireEvent.click(screen.getByText("Match twice"));
+    await waitFor(() => expect(mocks.autoBind).toHaveBeenCalled());
+    // Дожидаемся и того, что могло уйти вторым прогоном: оба запуска сделаны в
+    // одном такте, но `mutationFn` их зовётся микрозадачей.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Отрендеренный `pending` между двумя вызовами не менялся: React ничего не
+    // перерисовывал, и погасшая кнопка второй запуск не остановила бы.
+    // Останавливает заявка в `MutationCache` — она встаёт синхронно, до первого
+    // `await`. Иначе зоны каждого аккаунта читались бы дважды, а `PUT`'ы
+    // уходили бы парами.
+    expect(mocks.autoBind).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("pending").textContent).toBe("pending");
   });
 
   it("итог живого прогона идёт в баннер, а не наверх", async () => {

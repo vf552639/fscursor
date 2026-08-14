@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod cloudflare;
 pub mod creds;
+pub mod full_setup;
 pub mod provision;
 pub mod registrars;
 pub mod ssh;

@@ -69,13 +69,32 @@ cmd_setup() {
     -addext "basicConstraints=critical,CA:false" \
     -addext "keyUsage=critical,digitalSignature" 2>/dev/null
 
+  # Контейнер PKCS#12 читает не openssl, а Apple'овский `security` — и он умеет
+  # заметно меньше. Отсюда два неочевидных требования, каждое из которых по
+  # отдельности даёт ОДНУ И ТУ ЖЕ ошибку «MAC verification failed during PKCS12
+  # import (wrong password?)» — то есть сообщение врёт про пароль в обоих
+  # случаях и ничего не говорит про настоящую причину.
+  #
+  # 1. Алгоритмы задаём явно. OpenSSL 3 по умолчанию пишет PBES2/AES-256-CBC и
+  #    MAC на SHA-256; `security` этого не понимает. Раньше скрипт работал не
+  #    потому, что был прав, а потому, что `openssl` в PATH был системным
+  #    LibreSSL со старыми умолчаниями. Появился homebrew-openssl раньше в
+  #    PATH — и setup слёг. Флаги выбраны переносимые: `-legacy` решил бы то же
+  #    самое, но LibreSSL такого флага не знает, а эти три понимают оба.
+  # 2. Пароль обязан быть непустым. На пустом пароле `security` не сходится с
+  #    openssl в кодировании пустой строки и MAC не проверяется. Пароль
+  #    одноразовый: живёт в переменной этого процесса и в файле внутри `$tmp`,
+  #    который сносится по RETURN — храниться ему негде и незачем.
+  local p12_pass
+  p12_pass="$(openssl rand -hex 16)"
   openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
-    -out "$tmp/dev.p12" -passout pass: -name "$CERT_NAME"
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+    -out "$tmp/dev.p12" -passout "pass:$p12_pass" -name "$CERT_NAME"
 
   echo "→ Кладу в связку ключей. macOS спросит пароль — это нормально."
   # `-T /usr/bin/codesign` разрешает утилите подписи пользоваться приватным
   # ключом без отдельного вопроса на каждую подпись.
-  security import "$tmp/dev.p12" -k "$KEYCHAIN" -P "" \
+  security import "$tmp/dev.p12" -k "$KEYCHAIN" -P "$p12_pass" \
     -T /usr/bin/codesign -T /usr/bin/security
 
   echo "→ Отмечаю сертификат доверенным для подписи кода."

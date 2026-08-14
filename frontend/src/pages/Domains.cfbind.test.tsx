@@ -108,6 +108,7 @@ function renderPage(rows = [domainRow(1, "a.com")]) {
         onBulkProvisionResult={vi.fn()}
         onBulkProvisionError={vi.fn()}
         onCloudflareBindNotice={onNotice}
+        onFullSetupNotice={vi.fn()}
       />
     </QueryClientProvider>,
   );
@@ -121,11 +122,16 @@ async function addDomain(name: string) {
   fireEvent.click(screen.getByRole("button", { name: "Add Domain" }));
 }
 
-/** Выделить все строки и вернуть кнопку привязки (в вебе её нет). */
+/** Выделить все строки и вернуть кнопку привязки по выделенным (в вебе её нет). */
 async function selectAll(container: HTMLElement) {
   const all = container.querySelector('thead input[type="checkbox"]') as HTMLInputElement;
   fireEvent.click(all);
-  return screen.queryByRole("button", { name: /Match Cloudflare zones/ }) as HTMLButtonElement | null;
+  return screen.queryByRole("button", { name: /Синхронизировать выделенные/ }) as HTMLButtonElement | null;
+}
+
+/** Кнопка синхрона по всему списку — та, что в шапке вкладки и видна всегда. */
+function syncAllBtn() {
+  return screen.queryByRole("button", { name: /Синхронизировать с Cloudflare/ }) as HTMLButtonElement | null;
 }
 
 beforeEach(() => {
@@ -253,19 +259,83 @@ describe("Domains — автопривязка в вебе", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("кнопки привязки в вебе нет вовсе", async () => {
+  it("кнопок привязки в вебе нет вовсе", async () => {
     setTauri(false);
 
     const { container } = renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
+    // Ни в шапке, ни в тулбаре — и без CTA «открыть в десктопе»: хоста под
+    // синхрон в `parseDeepLinkAction` нет, а ссылка в неразбираемый хост — это
+    // тот же 404, который мы только что убрали.
+    expect(syncAllBtn()).toBeNull();
     expect(await selectAll(container)).toBeNull();
-    // И ссылки в десктоп тоже: хоста под неё в `parseDeepLinkAction` нет, а
-    // ссылка в неразбираемый хост — это тот же 404, который мы только что убрали.
-    expect(container.querySelectorAll('a[href^="sdmp://match-cf"]').length).toBe(0);
   });
 });
 
-describe("Domains — кнопка «Match Cloudflare zones»", () => {
+describe("Domains — кнопка «Синхронизировать с Cloudflare» (весь список)", () => {
+  it("привязывает весь список, ничего не выделяя", async () => {
+    setTauri(true);
+    zonesAre([
+      { id: "zone-a", name: "a.com" },
+      { id: "zone-b", name: "b.com" },
+    ]);
+
+    renderPage([domainRow(1, "a.com"), domainRow(2, "b.com")]);
+    await screen.findByText("a.com");
+    // Границы действия названы: глагол «синхронизировать» обещает больше, чем
+    // делается, и единственное место, где обещание сужено, — этот `title`.
+    expect(syncAllBtn()!.title).toContain("уже привязанное не трогает");
+    // Ни одной галочки не поставлено: подсказка живого матча стоит в строках
+    // сама, и человеку, который её прочитал, выделять нечего.
+    fireEvent.click(syncAllBtn()!);
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(2));
+    expect(mocks.apiPut.mock.calls.map((c: any[]) => c[0])).toEqual(["/domains/1", "/domains/2"]);
+    expect((await screen.findByRole("status")).textContent).toContain("2 of 2 linked");
+  });
+
+  it("берёт и строки, спрятанные поиском", async () => {
+    setTauri(true);
+    zonesAre([{ id: "zone-b", name: "b.com" }]);
+
+    renderPage([domainRow(1, "a.com"), domainRow(2, "b.com")]);
+    await screen.findByText("a.com");
+    fireEvent.change(screen.getByPlaceholderText("Search domains…"), { target: { value: "a.com" } });
+    expect(screen.queryByText("b.com")).toBeNull();
+    fireEvent.click(syncAllBtn()!);
+
+    // Синхрон приводит базу в соответствие с Cloudflare, а не «делает что-то с
+    // показанным»: результат, зависящий от набранной строки поиска, — это
+    // домен, оставшийся непривязанным по причине, о которой никто не сказал.
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledWith("/domains/2", {
+      cloudflare_account_id: 7,
+      cloudflare_zone_id: "zone-b",
+    }));
+  });
+
+  it("гасит на время прогона и себя, и кнопку по выделенным", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
+
+    const { container } = renderPage([domainRow(1, "a.com")]);
+    await screen.findByText("a.com");
+    const btn = syncAllBtn()!;
+    fireEvent.click(btn);
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+
+    // Выделяем строки уже во время прогона: тулбар появляется впервые и обязан
+    // появиться погасшим. Действие у двух кнопок одно, и живая вторая означала
+    // бы, что она делает что-то своё — а она пошла бы вторым проходом по тем же
+    // зонам (гейт его остановит, но молча, см. `useCloudflareBind`).
+    fireEvent.click(container.querySelector('thead input[type="checkbox"]') as HTMLInputElement);
+    const busy = screen.getAllByRole("button", { name: /Синхронизация…/ }) as HTMLButtonElement[];
+    expect(busy.length).toBe(2);
+    expect(busy.every((b) => b.disabled)).toBe(true);
+    expect(btn.disabled).toBe(true);
+  });
+});
+
+describe("Domains — кнопка «Синхронизировать выделенные»", () => {
   it("привязывает выделенные и отчитывается числами", async () => {
     setTauri(true);
     zonesAre([{ id: "zone-a", name: "a.com" }]);
@@ -316,34 +386,44 @@ describe("Domains — кнопка «Match Cloudflare zones»", () => {
           onBulkProvisionResult={vi.fn()}
           onBulkProvisionError={vi.fn()}
           onCloudflareBindNotice={onNotice}
+          onFullSetupNotice={vi.fn()}
         />
       </QueryClientProvider>,
     );
     await screen.findByText("a.com");
     fireEvent.click((await selectAll(container))!);
 
-    // Угадав аккаунт, продукт увёл бы домен в чужую зону — а вкладка NS потом
+    // Угадав аккаунт, продукт увёл бы домен в чужую зону — а карточка потом
     // прописала бы регистратору её nameservers.
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("1 matched in more than one account");
     expect(mocks.apiPut).not.toHaveBeenCalled();
   });
 
-  it("второй клик не запускает второй проход", async () => {
+  it("гасит на время прогона и себя, и кнопку синхрона в шапке", async () => {
     setTauri(true);
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
     const { container } = renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
+    // Ссылку на кнопку шапки берём ДО прогона: во время него у неё другая
+    // подпись, и найти её по прежней уже нельзя.
+    const headerBtn = syncAllBtn()!;
     const btn = (await selectAll(container))!;
+    // Границы действия обе кнопки объясняют одними и теми же словами: текст у
+    // них общий (`CF_SYNC_TITLE`), и разъехаться копиям негде.
+    expect(btn.title).toBe(headerBtn.title);
+    expect(btn.title).toContain("уже привязанное не трогает");
     fireEvent.click(btn);
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
-    // Кнопка гаснет на время прогона, но полагаться только на неё нельзя:
-    // между двумя кликами в одном тике перерисовки не будет.
+    // Гаснут обе: прогон один на два входа. Сам гейт «один прогон за раз»
+    // проверяется там, где живёт (`useCloudflareBind.test.tsx`) — по погасшей
+    // кнопке кликом его не проверить, у disabled-кнопки обработчик не зовётся
+    // вовсе, и тест был бы зелёным и без гейта.
     expect(btn.disabled).toBe(true);
-    fireEvent.click(btn);
-    expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+    expect(headerBtn.disabled).toBe(true);
+    expect(headerBtn.textContent).toContain("Синхронизация…");
   });
 
   it("не проглатывает автопривязку домена, заведённого во время прогона", async () => {

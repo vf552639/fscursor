@@ -14,6 +14,10 @@ SAFE_ACTIONS = frozenset(
         "domain.bulk_import",
         "domain.bulk_assign_server",
         "domain.bulk_assign_cloudflare",
+        # Связки full-setup пачке (`POST /domains/full-setup`). Шаги, требующие
+        # токена (зона Cloudflare, NS у регистратора), пишет в аудит десктоп
+        # под `cf.zone.create` / `registrar.ns_set`.
+        "domain.full_setup",
         "server.create",
         "server.update",
         "server.delete",

@@ -2,12 +2,18 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import select, update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.validators import is_valid_domain, normalize_domain
 from app.models.domain import Domain
 from app.models.registrar_account import RegistrarAccount
-from app.schemas.domain import DomainBulkCreateItem, DomainCreate, DomainUpdate
+from app.schemas.domain import (
+    DomainBulkCreateItem,
+    DomainCreate,
+    DomainUpdate,
+    FullSetupDomain,
+)
 from app.sync.service import bump_version, touch_entity_sync
 
 
@@ -57,28 +63,85 @@ async def get_by_name(db: AsyncSession, name: str, user_id: UUID) -> Optional[Do
     ).scalar_one_or_none()
 
 
-async def _get_existing_domain_names(
-    db: AsyncSession, user_id: UUID, names: list[str]
-) -> set[str]:
+async def _get_existing_domain_names(db: AsyncSession, names: list[str]) -> set[str]:
+    """Занятые имена — по ВСЕЙ таблице, а не по доменам этого пользователя.
+
+    `domains.domain_name` уникален глобально (модель, миграция `001_initial`),
+    поэтому сужение по `user_id` здесь было не безопасностью, а слепотой:
+    имя, заведённое другим пользователем, пролетало мимо предпроверки прямо в
+    `IntegrityError` на общем коммите — и валился ВЕСЬ пакет, включая уже
+    подготовленные строки. Пропуск такого имени (`skipped` / «Duplicate or
+    exists») говорит ровно то же, что и глобальный UNIQUE: имя занято. Кем —
+    не говорит.
+    """
     if not names:
         return set()
     result = await db.execute(
-        select(Domain.domain_name).where(
-            Domain.domain_name.in_(names), Domain.user_id == user_id
-        )
+        select(Domain.domain_name).where(Domain.domain_name.in_(names))
     )
     return set(result.scalars().all())
+
+
+class DomainNameTaken(Exception):
+    """Имя домена уже занято.
+
+    `existing_id` — id СВОЕЙ строки, если имя занято ею; `None`, если строка
+    чужая. Разделение нужно маршруту: своему домену можно назвать id (он и так
+    виден в списке), чужому — нельзя ничего, кроме факта занятости, который
+    глобальный UNIQUE и без того делает наблюдаемым.
+    """
+
+    def __init__(self, existing_id: Optional[int] = None) -> None:
+        super().__init__("domain name is taken")
+        self.existing_id = existing_id
 
 
 async def create(db: AsyncSession, data: DomainCreate, user_id: UUID) -> Domain:
     payload = data.model_dump()
     payload["domain_name"] = _normalize(payload["domain_name"])
+    mine = await get_by_name(db, payload["domain_name"], user_id)
+    if mine is not None:
+        raise DomainNameTaken(existing_id=mine.id)
+
     domain = Domain(**payload, user_id=user_id)
     await touch_entity_sync(db, user_id, domain)
     db.add(domain)
-    await db.commit()
+    await _commit_unique_name(db)
     await db.refresh(domain)
     return domain
+
+
+async def _commit_unique_name(db: AsyncSession) -> None:
+    """Коммит записи имени: конфликт — `DomainNameTaken`, а не 500.
+
+    Сюда приходит и чужой домен (UNIQUE глобальный, а предпроверки у
+    вызывающих — свои), и гонка двух вкладок. Без этого перехвата и заведение,
+    и переименование отвечали 500 на самом обычном сценарии — «домен уже
+    заведён».
+    """
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_unique_violation(exc):
+            # `existing_id` здесь неизвестен, и на своей же строке (гонка двух
+            # вкладок одного пользователя) текст выйдет как у чужой —
+            # «занято» вместо «уже заведено». Идти за id ещё одним запросом
+            # ради текста в гонке, которая длится миллисекунды, дороже, чем
+            # эта неточность.
+            raise DomainNameTaken() from exc
+        # Прочие нарушения целостности (FK на несуществующую строку и т.п.) —
+        # не про имя, и выдавать их за конфликт имени значило бы врать.
+        raise
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """Нарушение UNIQUE, а не любая целостность.
+
+    Разбор по `sqlstate` драйвера (`23505`), а не по тексту сообщения: текст
+    зависит от локали сервера БД, код — нет.
+    """
+    return getattr(exc.orig, "sqlstate", None) == "23505"
 
 
 async def update(
@@ -88,12 +151,24 @@ async def update(
     if not domain:
         return None
     patch = data.model_dump(exclude_unset=True)
-    if "domain_name" in patch and patch["domain_name"]:
+    if patch.get("domain_name"):
         patch["domain_name"] = _normalize(patch["domain_name"])
+        # Переименование в занятое имя — тот же конфликт, что и заведение.
+        # Сравнение с `domain_id` обязательно: `PUT` с текущим именем — не
+        # конфликт, а обычный no-op, и 409 на нём был бы дефектом.
+        mine = await get_by_name(db, patch["domain_name"], user_id)
+        if mine is not None and mine.id != domain_id:
+            raise DomainNameTaken(existing_id=mine.id)
+    # Версия синхронизации — ДО правки полей, и это не косметика порядка.
+    # `bump_version` внутри делает SELECT, а любой запрос по грязной сессии
+    # запускает autoflush: с новым именем, уже проставленным в объект, конфликт
+    # вылетал бы из `touch_entity_sync`, то есть мимо `_commit_unique_name`, и
+    # переименование в занятое имя снова отвечало бы 500. Правило простое: между
+    # правкой имени и коммитом запросов нет.
+    await touch_entity_sync(db, user_id, domain)
     for k, v in patch.items():
         setattr(domain, k, v)
-    await touch_entity_sync(db, user_id, domain)
-    await db.commit()
+    await _commit_unique_name(db)
     await db.refresh(domain)
     return domain
 
@@ -124,7 +199,7 @@ async def bulk_create(
 
     created: list[Domain] = []
     skipped: list[str] = []
-    existing_names = await _get_existing_domain_names(db, user_id, names)
+    existing_names = await _get_existing_domain_names(db, names)
     for name in names:
         if not is_valid_domain(name):
             skipped.append(name)
@@ -164,7 +239,7 @@ async def bulk_create_structured(
     created: list[Domain] = []
     skipped: list[str] = []
     normalized_names = [_normalize(item.domain_name) for item in items]
-    existing_names = await _get_existing_domain_names(db, user_id, normalized_names)
+    existing_names = await _get_existing_domain_names(db, normalized_names)
 
     for item in items:
         name = _normalize(item.domain_name)
@@ -189,19 +264,33 @@ async def bulk_create_structured(
     return created, skipped
 
 
+async def _set_links(
+    db: AsyncSession, user_id: UUID, domain_ids: list[int], values: dict[str, Optional[int]]
+) -> int:
+    """Проставить связки пачке доменов одним UPDATE. Без коммита.
+
+    Коммит оставлен вызывающему: full-setup читает состояние доменов и пишет
+    его в одной транзакции, и промежуточный коммит разорвал бы её пополам.
+    Сужение по `user_id` — часть запроса, а не проверка снаружи: без него
+    массовый UPDATE менял бы чужие строки по угаданному id.
+    """
+    ver = await bump_version(db, user_id)
+    result = await db.execute(
+        sa_update(Domain)
+        .where(Domain.id.in_(domain_ids), Domain.user_id == user_id)
+        .values(**values, sync_version=ver)
+    )
+    return result.rowcount or 0
+
+
 async def bulk_assign_server(
     db: AsyncSession, user_id: UUID, domain_ids: list[int], server_id: Optional[int]
 ) -> int:
     if not domain_ids:
         return 0
-    ver = await bump_version(db, user_id)
-    result = await db.execute(
-        sa_update(Domain)
-        .where(Domain.id.in_(domain_ids), Domain.user_id == user_id)
-        .values(server_id=server_id, sync_version=ver)
-    )
+    updated = await _set_links(db, user_id, domain_ids, {"server_id": server_id})
     await db.commit()
-    return result.rowcount or 0
+    return updated
 
 
 async def bulk_assign_cloudflare(
@@ -212,11 +301,81 @@ async def bulk_assign_cloudflare(
 ) -> int:
     if not domain_ids:
         return 0
-    ver = await bump_version(db, user_id)
-    result = await db.execute(
-        sa_update(Domain)
-        .where(Domain.id.in_(domain_ids), Domain.user_id == user_id)
-        .values(cloudflare_account_id=cloudflare_account_id, sync_version=ver)
+    updated = await _set_links(
+        db, user_id, domain_ids, {"cloudflare_account_id": cloudflare_account_id}
     )
     await db.commit()
-    return result.rowcount or 0
+    return updated
+
+
+async def bulk_full_setup(
+    db: AsyncSession,
+    user_id: UUID,
+    domain_ids: list[int],
+    *,
+    server_id: int,
+    cloudflare_account_id: int,
+    registrar_id: Optional[int] = None,
+) -> tuple[list[FullSetupDomain], list[int]]:
+    """Связки full-setup пачке доменов. Возвращает (обработанные, пропущенные).
+
+    Без коммита — его делает маршрут, вместе с записью аудита: чтение
+    состояния, UPDATE и аудит обязаны быть одной транзакцией.
+
+    Идемпотентность здесь конструкцией, а не журналом ключей. Повторный вызов
+    с теми же аргументами не трогает НИ ОДНОГО домена: строки, уже стоящие в
+    целевом состоянии, из UPDATE выпадают, поэтому не двигается ни
+    `sync_version`, ни `updated_at`, а ответ выходит тот же. (Запись в аудит
+    маршрут при этом делает и на повторе — так и надо: аудит фиксирует
+    попытку, а не изменение строки.) Журнал ключей (как у `provision_bulk`)
+    здесь и не нужен: там ключ сторожит долгую внешнюю работу по SSH, здесь —
+    присваивание трёх колонок, повтор которого по определению даёт то же
+    состояние.
+
+    Речь именно о ПОВТОРЕ — тех же аргументах. Два одновременных прогона с
+    РАЗНЫМИ связками по одному домену этим не упорядочиваются: побеждает
+    последний UPDATE, а «связано» будет сказано обоим. Журнал ключей такого
+    тоже не ловит (ключи-то разные); ловит блокировка строки, и заводить её
+    здесь незачем — конкурирующий прогон означает, что человек в двух окнах
+    сам выбрал разные цели.
+
+    Отсутствующий (или чужой) id — строка отчёта, а не отказ всей пачки. Пачка
+    приходит из выделения на экране, и домен, удалённый в другой вкладке между
+    открытием списка и нажатием кнопки, — обычная гонка, а не повод не связать
+    остальные 199. Владение чужой строкой при этом не раскрывается: «нет у
+    тебя» и «нет вообще» неотличимы.
+
+    Читаем колонками, а не ORM-объектами, намеренно: маршрут строит ответ уже
+    ПОСЛЕ `commit()`, а ORM-объекты к тому моменту протухают, и обращение к их
+    полям в async-сессии — не лишний SELECT, а исключение.
+    """
+    values: dict[str, Optional[int]] = {
+        "server_id": server_id,
+        "cloudflare_account_id": cloudflare_account_id,
+    }
+    if registrar_id is not None:
+        values["registrar_id"] = registrar_id
+
+    # Колонки состояния берутся из ключей `values`, а не перечисляются рядом:
+    # ниже по ним же идёт сравнение через `getattr`, и разъехавшись, эти два
+    # списка дали бы `AttributeError` на ровном месте.
+    rows = (
+        await db.execute(
+            select(Domain.id, Domain.domain_name, *(getattr(Domain, k) for k in values))
+            .where(Domain.id.in_(domain_ids), Domain.user_id == user_id)
+            .order_by(Domain.id)
+        )
+    ).all()
+
+    found = {row.id for row in rows}
+    # `dict.fromkeys` — дедупликация с сохранением порядка запроса: дубль id в
+    # теле не должен давать дубль строки в отчёте.
+    skipped = [d for d in dict.fromkeys(domain_ids) if d not in found]
+
+    outdated = [
+        row.id for row in rows if any(getattr(row, k) != v for k, v in values.items())
+    ]
+    if outdated:
+        await _set_links(db, user_id, outdated, values)
+
+    return [FullSetupDomain(id=row.id, domain_name=row.domain_name) for row in rows], skipped

@@ -46,7 +46,7 @@ vi.mock("../components/RevealSecret", () => ({
 }));
 
 // Тяжёлые соседи страницы, которые в этом сценарии не рендерятся вовсе (они за
-// выключенными флагами). Тянуть их дерево ради вкладки NS незачем: этот файл и
+// выключенными флагами). Тянуть их дерево ради смены NS незачем: этот файл и
 // так единственный, который поднимает страницу целиком, и лишний импорт тут
 // замедляет весь прогон.
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
@@ -83,10 +83,22 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
+/**
+ * Значение строки «NS» на карточке — то, что карточка утверждает про статус
+ * делегирования по нашей записи. Читается по подписи, а не по голому тексту
+ * статуса: то же слово стоит бейджем в строке таблицы под карточкой, и
+ * `getByText("pending")` не различил бы, кто из них обновился.
+ */
+function cardNsStatus(): string {
+  const row = screen.getByText("NS:").parentElement;
+  if (!row) throw new Error("строки «NS» на карточке нет");
+  return (row.textContent ?? "").replace("NS:", "").trim();
+}
+
 function renderPage() {
   return render(
     <QueryClientProvider client={queryClient}>
-      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} onCloudflareBindNotice={() => {}} />
+      <Domains onProvisionResult={() => {}} onBulkProvisionResult={() => {}} onBulkProvisionError={() => {}} onCloudflareBindNotice={() => {}} onFullSetupNotice={() => {}} />
     </QueryClientProvider>
   );
 }
@@ -124,13 +136,16 @@ describe("карточка домена после смены NS", () => {
         return [{ id: 9, provider: "namecheap", name: "NC", api_user: null, is_active: true, created_at: "", updated_at: "" }];
       }
       if (url === "/cloudflare/accounts") return [{ id: 7, name: "CF", account_id: null, is_active: true, created_at: "", updated_at: "" }];
-      // Больше страница и карточка ничего по HTTP не запрашивают (вкладки DB /
-      // SSL / NGINX удалены вместе со своими 404). Заглушка на всякий будущий
-      // запрос: пустой объект безопаснее, чем `undefined` в `useQuery`.
+      // Больше страница и карточка ничего по HTTP не запрашивают: действия
+      // DB / SSL / NGINX удалены вместе со своими 404. Заглушка на всякий
+      // будущий запрос: пустой объект безопаснее, чем `undefined` в `useQuery`.
       return {};
     });
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
       if (cmd === "cf_list_zones") return [ZONE];
+      // Сверку делегирования этот сценарий не проверяет, но карточка её ведёт:
+      // без явного ответа команда ушла бы в общий `mutate` и вернула не список.
+      if (cmd === "registrar_get_nameservers") return [];
       if (cmd === "registrar_set_nameservers") {
         // Write-back внутри команды — то, из-за чего сервер начинает отвечать
         // `ok`. Здесь он ровно этим и моделируется.
@@ -143,8 +158,9 @@ describe("карточка домена после смены NS", () => {
     renderPage();
 
     fireEvent.click(await screen.findByText("example.com"));
-    fireEvent.click(await screen.findByText("NS"));
-    expect(await screen.findByText("pending")).toBeTruthy();
+    // Кликать по вкладке больше не надо: NS живут на том же экране, что и
+    // строка «NS» с нашим статусом, — вкладок у карточки нет.
+    await waitFor(() => expect(cardNsStatus()).toBe("pending (auto)"));
 
     const btn = (await screen.findByText(/Set NS/)).closest("button") as HTMLButtonElement;
     await waitFor(() => expect(btn.disabled).toBe(false));
@@ -152,7 +168,6 @@ describe("карточка домена после смены NS", () => {
 
     // Пропс карточки берётся из живого списка, а список инвалидируется в
     // `onSettled`, — поэтому статус доезжает без переоткрытия.
-    expect(await screen.findByText("ok")).toBeTruthy();
-    expect(screen.queryByText("pending")).toBeNull();
+    await waitFor(() => expect(cardNsStatus()).toBe("ok (auto)"));
   });
 });

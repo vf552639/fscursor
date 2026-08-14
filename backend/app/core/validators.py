@@ -50,6 +50,11 @@ IP_ADDRESS_MAX_LEN = 45
 SSH_USER_MAX_LEN = 64
 OS_MAX_LEN = 64
 
+# Ширина колонки `domains.domain_name`. Здесь и по той же причине: граница
+# проверки и граница колонки должны быть одним значением. Применяется внутри
+# `is_valid_domain` — см. его докстринг.
+DOMAIN_NAME_MAX_LEN = 255
+
 # Пределы целочисленных колонок Postgres: `Integer` — 32 бита, `BigInteger` —
 # 64. Тот же размен, что и у длины строк: без верхней границы в схеме число
 # из промахнувшегося парсера доезжает до драйвера и возвращается
@@ -65,9 +70,23 @@ PG_BIGINT_MAX = 2**63 - 1
 
 
 def is_valid_domain(value: str) -> bool:
+    """Имя домена: правильная форма И пригодная ширина для своей колонки.
+
+    Длина проверяется здесь, а не у вызывающих, потому что вызывающих четыре
+    (`DomainCreate`, `DomainUpdate`, `bulk_create`, `bulk_create_structured`;
+    пятый — импорт CSV через ту же функцию), и правило, вынесенное хотя бы в
+    один из них, немедленно разъезжается с остальными. Разъехавшись, оно стоит
+    дорого: `DOMAIN_REGEX` не ограничивает число меток, поэтому `"aaa." * 70 +
+    "com"` — правильная форма, не влезающая в `String(255)`. В одиночном пути
+    это 500 из драйвера вместо 422, а в массовом — `DataError` на общем
+    коммите, то есть потеря ВСЕЙ пачки из-за одной строки.
+    """
     if not value:
         return False
-    return bool(_DOMAIN_RE.match(value.strip()))
+    stripped = value.strip()
+    if len(stripped) > DOMAIN_NAME_MAX_LEN:
+        return False
+    return bool(_DOMAIN_RE.match(stripped))
 
 
 def is_valid_email(value: str) -> bool:

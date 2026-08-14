@@ -1,9 +1,11 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
+import { trimDnsName } from "../lib/cfZoneMatch";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
+import { registrarsKeys } from "./registrars";
 import { useAuthStore } from "../store/auth";
 
 export interface Domain {
@@ -211,16 +213,32 @@ export const NS_DESKTOP_NOTE = desktopOnly("Setting nameservers");
 export const MIN_NAMESERVERS = 2;
 
 /**
- * Нормализация списка перед отправкой: убрать пустое, схлопнуть регистр и
- * повторы. Дубль (`ns1.x` дважды — обычная опечатка при ручном вводе) Namecheap
- * отбивает ошибкой, а отбитая попытка теперь пишет на сервер `ns_status: error`
- * — то есть опечатка портила бы состояние домена.
+ * Нормализация списка перед отправкой: убрать пустое, срезать завершающую
+ * точку, схлопнуть регистр и повторы. Дубль (`ns1.x` дважды — обычная опечатка
+ * при ручном вводе) Namecheap отбивает ошибкой, а отбитая попытка пишет на
+ * сервер `ns_status: error` — то есть опечатка портила бы состояние домена.
+ *
+ * Дубли считаются ОБЩИМ правилом (`trimDnsName` + регистр), тем же, которым
+ * сверяется делегирование (`lib/nsDelegation`, `lib/cfZoneMatch`) и которым
+ * читает ответы регистратора десктоп (`normalize_ns` в `registrars/mod.rs`).
+ * Пока правило про точку жило только на стороне сверки, `ns1.cf.com.` из
+ * копипасты зонного файла и `ns1.cf.com` были ОДНИМ сервером для бейджа и ДВУМЯ
+ * для отправки: порог `MIN_NAMESERVERS` проходил, а регистратор получал дубль
+ * — то есть ровно ту опечатку, от которой эта функция и заведена.
+ *
+ * Своя функция, а не общий `normalizeNsList` из `lib/nsDelegation`, ровно из-за
+ * регистра: тот сравнивает и потому приводит имена к нижнему, а этот ОТПРАВЛЯЕТ
+ * и отдаёт то, что набрал пользователь (схлопывая повтор, а не «починив» ввод —
+ * на это есть тест в `DomainDetailModal.setns.test.tsx`). Точка — другое дело:
+ * её десктоп в отправляемом списке не срезает (`set_nameservers` шлёт как
+ * есть), а в прочитанном обратно — срезает, и оставленная здесь она означала бы
+ * FQDN, отправленный в одной форме и сверяемый в другой.
  */
 export function normalizeNameservers(input: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of input) {
-    const ns = raw.trim();
+    const ns = trimDnsName(raw);
     if (!ns) continue;
     const key = ns.toLowerCase();
     if (seen.has(key)) continue;
@@ -248,19 +266,6 @@ export interface SetNameserversVars {
 }
 
 /**
- * Прописать NS у регистратора. Выполняет ТОЛЬКО десктоп: API-ключ регистратора
- * лежит на сервере зашифрованным блобом и расшифровывается на клиенте, поэтому
- * `POST /domains/{id}/set-ns` на бэкенде нет и не будет (в `routes/domains.py`
- * его никогда не было — остались только схемы ответа). Веб — «только смотрит».
- *
- * `invokeSynced`, а не `invokeIfTauri`: команда резолвит аккаунт регистратора из
- * локального SQLCipher-кэша, и без свежей синхронизации только что назначенный
- * регистратор ей не виден.
- *
- * Список NS передаётся явно: команда не умеет его добывать. Откуда его берёт UI
- * — вопрос UI (обычно NS зоны Cloudflare, см. `useZoneNameservers`).
- */
-/**
  * Ключ смены NS. Не косметика: по нему `useMutationState` находит результат
  * попытки, начатой до последнего монтирования карточки. Namecheap отвечает
  * секундами, и без ключа отказ, прилетевший после закрытия модалки, терялся бы
@@ -274,6 +279,19 @@ export interface SetNameserversVars {
  */
 export const SET_NAMESERVERS_KEY = ["set-nameservers"] as const;
 
+/**
+ * Прописать NS у регистратора. Выполняет ТОЛЬКО десктоп: API-ключ регистратора
+ * лежит на сервере зашифрованным блобом и расшифровывается на клиенте, поэтому
+ * `POST /domains/{id}/set-ns` на бэкенде нет и не будет (в `routes/domains.py`
+ * его никогда не было — остались только схемы ответа). Веб — «только смотрит».
+ *
+ * `invokeSynced`, а не `invokeIfTauri`: команда резолвит аккаунт регистратора из
+ * локального SQLCipher-кэша, и без свежей синхронизации только что назначенный
+ * регистратор ей не виден.
+ *
+ * Список NS передаётся явно: команда не умеет его добывать. Откуда его берёт UI
+ * — вопрос UI (обычно NS зоны Cloudflare, см. `useCloudflareZones`).
+ */
 export function useSetNameservers() {
   return useMutation({
     mutationKey: SET_NAMESERVERS_KEY,
@@ -322,6 +340,15 @@ export function useSetNameservers() {
       // вызывающего. Оставлено как парная инвалидация — в тот день, когда
       // карточка станет отдельным запросом, забыть её здесь будет дороже.
       queryClient.invalidateQueries({ queryKey: domainsKeys.detail(vars.domainId) });
+      // NS этого домена у регистратора — то, по чему карточка сверяет
+      // делегирование. Мы только что поменяли ровно их, и без сброса бейдж ещё
+      // минуту (`staleTime`) показывал бы «MISMATCH» на удавшейся смене. На
+      // ОБОИХ исходах: отказ регистратора мог примениться частично.
+      if (vars.registrarAccountId != null) {
+        queryClient.invalidateQueries({
+          queryKey: registrarsKeys.nameservers(vars.registrarAccountId, vars.domainName),
+        });
+      }
     },
   });
 }

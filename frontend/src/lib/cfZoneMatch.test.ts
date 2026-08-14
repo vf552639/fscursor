@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { matchDomainsToZones, normalizeZoneName } from "./cfZoneMatch";
+import { matchDomainsToZones, normalizeZoneName, resolveZoneByName } from "./cfZoneMatch";
 
 /**
  * Правило привязки домена к зоне проверяется здесь, а не на странице: зоны
@@ -62,7 +62,7 @@ describe("matchDomainsToZones", () => {
 
     const [m] = matchDomainsToZones([domain(1, "example.com")], [ACCOUNT_7, other]);
 
-    // Угадав аккаунт, продукт записал бы домену чужой zone_id, а вкладка NS
+    // Угадав аккаунт, продукт записал бы домену чужой zone_id, а карточка
     // потом отдала бы регистратору nameservers чужой зоны.
     expect(m).toEqual({
       outcome: "ambiguous",
@@ -104,7 +104,7 @@ describe("matchDomainsToZones", () => {
     const [m] = matchDomainsToZones([domain(1, "shop.example.com")], [ACCOUNT_7]);
 
     // Зафиксированное решение, а не недосмотр: `cloudflare_zone_id` читается
-    // фронтом как «зона ЭТОГО домена», и вкладка NS пушит регистратору её
+    // фронтом как «зона ЭТОГО домена», и карточка пушит регистратору её
     // nameservers. Привязка к родителю заставила бы этот путь врать.
     expect(m.outcome).toBe("none");
   });
@@ -139,5 +139,43 @@ describe("matchDomainsToZones", () => {
     // Отчёт читается рядом со списком, где домены стоят в своём порядке.
     expect(rows.map((r) => r.domainId)).toEqual([1, 2, 3]);
     expect(rows.map((r) => r.outcome)).toEqual(["none", "matched", "skipped"]);
+  });
+});
+
+describe("resolveZoneByName", () => {
+  it("находит зону в выбранном аккаунте", () => {
+    expect(resolveZoneByName("example.com", ACCOUNT_7.zones)).toEqual({
+      outcome: "matched",
+      zoneId: "zone-a",
+    });
+  });
+
+  it("нормализует имя так же, как общий матч", () => {
+    // Одно правило на два места: разъехавшись, строка таблицы показывала бы
+    // совпадение, которого карточка не находит.
+    expect(resolveZoneByName("  Example.COM. ", ACCOUNT_7.zones)).toEqual({
+      outcome: "matched",
+      zoneId: "zone-a",
+    });
+  });
+
+  it("две одноимённые зоны в аккаунте не резолвятся ни в одну", () => {
+    // Выбранная наугад зона — это чужой NS-путь: по `cloudflare_zone_id` потом
+    // пушатся nameservers регистратору.
+    expect(
+      resolveZoneByName("example.com", [
+        { id: "zone-a", name: "example.com" },
+        { id: "zone-dup", name: "Example.com." },
+      ]),
+    ).toEqual({ outcome: "ambiguous", zoneIds: ["zone-a", "zone-dup"] });
+  });
+
+  it("поддомен к родительской зоне не привязывается", () => {
+    expect(resolveZoneByName("shop.example.com", ACCOUNT_7.zones).outcome).toBe("none");
+  });
+
+  it("пустое имя и пустой список зон не падают", () => {
+    expect(resolveZoneByName("   ", ACCOUNT_7.zones).outcome).toBe("none");
+    expect(resolveZoneByName("example.com", []).outcome).toBe("none");
   });
 });

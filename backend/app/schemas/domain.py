@@ -1,7 +1,31 @@
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.validators import is_valid_domain, normalize_domain
+
+
+def _checked_domain_name(value: str) -> str:
+    """Имя домена — проверенное и уже нормализованное.
+
+    До этой проверки имя не проверял НИ один одиночный путь: `is_valid_domain`
+    звался только в массовых, и `POST /domains` с телом «не домен вовсе»
+    отвечал 201. Мусор оттуда уходит в десктоп как имя будущей зоны Cloudflare
+    — то есть всплывает у CF API, на шаге, где его никто не ждёт, и ПОСЛЕ того
+    как связки уже записаны.
+
+    Нормализация идёт до проверки формы: иначе `Example.COM.` (как его и
+    вводят руками) был бы отвергнут.
+
+    Значение присланной строки в текст ошибки НЕ вставляется: 422 отдаёт
+    `input` отдельным полем, и обработчик в `app/main.py` умеет его снять, а из
+    текста — не может.
+    """
+    normalized = normalize_domain(value)
+    if not is_valid_domain(normalized):
+        raise ValueError("not a valid domain name")
+    return normalized
 
 
 class DomainBase(BaseModel):
@@ -16,7 +40,15 @@ class DomainBase(BaseModel):
 
 
 class DomainCreate(DomainBase):
-    pass
+    # Валидатор объявлен на `DomainCreate`, а не на общей `DomainBase`:
+    # `DomainResponse` наследует ту же базу и читает строки, заведённые ДО
+    # появления правила, — на базе оно сделало бы их нечитаемыми (500 на
+    # `GET /domains`). Схем записи с именем домена две, и правило стоит на
+    # каждой отдельно: см. `DomainUpdate`.
+    @field_validator("domain_name")
+    @classmethod
+    def _validate_domain_name(cls, value: str) -> str:
+        return _checked_domain_name(value)
 
 
 class DomainUpdate(BaseModel):
@@ -41,6 +73,15 @@ class DomainUpdate(BaseModel):
     nginx_override: Optional[str] = None
     nginx_presets: Optional[dict] = None
     last_provision_error: Optional[str] = None
+
+    # Переименование — тот же путь записи имени, что и заведение, и правило на
+    # нём то же: без него `PUT {"domain_name": "не домен вовсе"}` отвечал 200,
+    # а слишком длинное имя — 500 из драйвера. `None` значит «поле не
+    # прислали», то есть «не менять», и проходит насквозь.
+    @field_validator("domain_name")
+    @classmethod
+    def _validate_domain_name(cls, value: Optional[str]) -> Optional[str]:
+        return None if value is None else _checked_domain_name(value)
 
 
 class DomainResponse(DomainBase):
@@ -153,15 +194,45 @@ class BulkProvisionResponse(BaseModel):
 
 
 class BulkFullSetupRequest(BaseModel):
-    domain_ids: list[int]
+    # `extra="forbid"` — то же правило, что у схем записи в `server.py` /
+    # `cloudflare.py` / `registrar.py`: незнакомое поле в теле обязано дать 422,
+    # а не молча пропасть. Здесь оно ещё и держит границу zero-knowledge —
+    # тело full-setup описывает ТОЛЬКО связки, и попытка дослать сюда токен
+    # Cloudflare (шаг зоны живёт в десктопе) отобьётся как `extra_forbidden`,
+    # а не уедет на сервер.
+    model_config = ConfigDict(extra="forbid")
+
+    # Пустая пачка — это дефект вызывающего, а не «ноль обновлённых»: экран
+    # зовёт full-setup по выделению, и выделение не бывает пустым.
+    domain_ids: list[int] = Field(min_length=1)
     server_id: int
     cloudflare_account_id: int
+    # `None` означает «не трогать регистратора», а НЕ «отвязать»: в мастере
+    # поле необязательное, и у существующих доменов регистратор обычно уже
+    # проставлен импортом. Отвязка делается через `PUT /domains/{id}`.
     registrar_id: Optional[int] = None
 
 
+class FullSetupDomain(BaseModel):
+    """Домен, доведённый бэкендом до состояния «связки проставлены».
+
+    Ровно то, что нужно десктопу для следующего шага: `id` — адрес write-back
+    `cloudflare_zone_id`, `domain_name` — имя будущей зоны.
+    """
+
+    id: int
+    domain_name: str
+
+
 class BulkFullSetupResponse(BaseModel):
-    task_ids: list[str]
-    task_log_ids: list[int]
+    # Не `task_ids`/`task_log_ids`, как было объявлено в мёртвой версии этой
+    # схемы: бэкенд после переезда на zero-knowledge не запускает по full-setup
+    # ни одной задачи — зону заводит десктоп, у которого есть токен. Отдавать
+    # id несуществующих задач значило бы описывать несуществующий контракт.
+    domains: list[FullSetupDomain]
+    # id из запроса, которых у этого пользователя нет (удалён в другой вкладке,
+    # чужой). Строки отчёта, а не исключение: см. `bulk_full_setup`.
+    skipped_ids: list[int]
 
 
 class DomainBulkImportError(BaseModel):

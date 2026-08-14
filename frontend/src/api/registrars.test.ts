@@ -3,7 +3,7 @@ import { renderHook, waitFor, cleanup } from "@testing-library/react";
 import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { useRegistrarDomains, useTestRegistrarConnection } from "./registrars";
+import { useRegistrarNameservers, useTestRegistrarConnection } from "./registrars";
 import { useAuthStore } from "../store/auth";
 
 /**
@@ -67,8 +67,10 @@ describe("api/registrars — веб не ходит по несуществую�
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
   });
 
-  it("список доменов регистратора объясняет, а не уходит в 404", async () => {
-    const { result } = renderHook(() => useRegistrarDomains(3), { wrapper: wrapper() });
+  it("чтение nameservers объясняет, а не уходит в 404", async () => {
+    const { result } = renderHook(() => useRegistrarNameservers(3, "example.com"), {
+      wrapper: wrapper(),
+    });
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(String(result.current.error?.message)).toMatch(/desktop app/i);
@@ -88,16 +90,24 @@ describe("api/registrars — веб не ходит по несуществую�
       message: "OK",
     });
 
-    const list = renderHook(() => useRegistrarDomains(3), { wrapper: wrapper() });
-    await waitFor(() => expect(list.result.current.isSuccess).toBe(true));
+    const ns = renderHook(() => useRegistrarNameservers(3, "example.com"), { wrapper: wrapper() });
+    await waitFor(() => expect(ns.result.current.isSuccess).toBe(true));
 
     expect(mocks.invokeSynced.mock.calls.map((c: any[]) => c[0]).sort()).toEqual([
-      "registrar_get_domains",
+      "registrar_get_nameservers",
       "registrar_test_connection",
     ]);
-    for (const [, args] of mocks.invokeSynced.mock.calls as any[]) {
-      expect(args).toEqual({ userId: "user-1", accountId: "3" });
-    }
+    // Аргументы у команд разные ровно на имя домена: чтение NS спрашивает про
+    // ОДИН домен, а проверка подключения — про аккаунт целиком.
+    const args = Object.fromEntries(
+      (mocks.invokeSynced.mock.calls as any[]).map(([cmd, a]) => [cmd, a]),
+    );
+    expect(args["registrar_test_connection"]).toEqual({ userId: "user-1", accountId: "3" });
+    expect(args["registrar_get_nameservers"]).toEqual({
+      userId: "user-1",
+      accountId: "3",
+      domain: "example.com",
+    });
     expect(mocks.apiGet).not.toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });

@@ -22,9 +22,26 @@ pub fn open(path: &Path, key: &[u8; 32]) -> Result<Connection, CacheError> {
     }
     conn.pragma_update(None, "key", format!("x'{}'", hex))?;
     hex.zeroize();
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     apply_schema(&conn)?;
     Ok(conn)
 }
+
+/// Сколько ждать чужой записи в кэш, прежде чем признать её блокировкой.
+///
+/// Ставится ЯВНО, хотя мгновенного `database is locked` тут никогда и не было:
+/// rusqlite сам зовёт `sqlite3_busy_timeout(db, 5000)` на каждом открытии
+/// (`inner_connection.rs`), так что молчаливая пятисекундная пауза — это его
+/// умолчание, а не наше решение. Полагаться на неё нельзя дважды: она может
+/// уехать с версией зависимости, и по коду её не видно вовсе.
+///
+/// Десять секунд, а не пять: одно соединение на вызов, а вызовов бывает
+/// несколько сразу — пачка доменов гоняется с конкуренцией и живёт бок о бок с
+/// фоновой синхронизацией, которая пишет в тот же файл сотнями строк в одной
+/// транзакции. База в обычном rollback-режиме, то есть писатель блокирует всех,
+/// и упереться в таймаут значит показать пользователю провал домена там, где
+/// надо было подождать.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -174,6 +191,44 @@ mod tests {
         assert_eq!(get_meta(&conn, "version").unwrap().as_deref(), Some("5"));
     }
 
+    /// Пачка доменов гоняется с конкуренцией и живёт рядом с фоновой
+    /// синхронизацией: два писателя в один файл — норма, а не край.
+    ///
+    /// Проверяется И само ожидание, И его величина. Одного сценария мало:
+    /// умолчание rusqlite (5s) вывезет его и с удалённым `busy_timeout` —
+    /// то есть тест, который «держит» настройку, на деле не держал бы ничего.
+    /// Поэтому рядом стоит чтение `PRAGMA busy_timeout`: оно отличает наше
+    /// решение от чужого умолчания.
+    #[test]
+    fn a_writer_waits_out_a_concurrent_transaction_instead_of_failing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let key = [3u8; 32];
+        // Схему создаёт первый открывающий — дальше речь только о блокировке.
+        let holder = open(&path, &key).unwrap();
+        let timeout_ms: i64 = holder
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout_ms, BUSY_TIMEOUT.as_millis() as i64);
+
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let conn = open(&writer_path, &key).unwrap();
+            set_meta(&conn, "version", "9")
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        holder.execute_batch("COMMIT").unwrap();
+
+        writer
+            .join()
+            .unwrap()
+            .expect("писатель обязан дождаться чужого коммита, а не упасть");
+        assert_eq!(get_meta(&holder, "version").unwrap().as_deref(), Some("9"));
+    }
+
     // Брошенный на середине прогон обязан стать перезапускаемым: `running` и
     // `done` — те два статуса, при которых provision_bulk отвечает
     // `already_ran`, не запустив ни одного домена.
@@ -182,7 +237,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let conn = open(&dir.path().join("cache.db"), &[7u8; 32]).unwrap();
         bulk_run_upsert_start(&conn, "k1", "provision_bulk", "[\"1\"]").unwrap();
-        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().status, "running");
+        assert_eq!(
+            bulk_run_status(&conn, "k1").unwrap().unwrap().status,
+            "running"
+        );
 
         bulk_run_fail(&conn, "k1", "failed on domain 1: boom").unwrap();
         let run = bulk_run_status(&conn, "k1").unwrap().unwrap();
@@ -192,7 +250,10 @@ mod tests {
 
         // И повторный старт с тем же ключом снова переводит его в running.
         bulk_run_upsert_start(&conn, "k1", "provision_bulk", "[\"1\"]").unwrap();
-        assert_eq!(bulk_run_status(&conn, "k1").unwrap().unwrap().status, "running");
+        assert_eq!(
+            bulk_run_status(&conn, "k1").unwrap().unwrap().status,
+            "running"
+        );
     }
 
     // Без даты старта живой прогон неотличим от осиротевшего после краша: и то,

@@ -55,6 +55,25 @@ const ZONE = {
   status: "pending",
 };
 
+/**
+ * Списки учёток карточка читает по HTTP. Провайдер регистратора здесь не
+ * декорация: без него карточка не знает, есть ли у регистратора NS-API
+ * (`lib/registrarCaps`), и гасит «Set NS».
+ */
+function mockAccounts(registrarProvider: string | null = "namecheap") {
+  mocks.apiGet.mockImplementation(async (path: string) => {
+    if (String(path).includes("/registrars/accounts")) {
+      return registrarProvider === null
+        ? []
+        : [{ id: REGISTRAR_ACCOUNT_ID, provider: registrarProvider, name: "Reg", is_active: true }];
+    }
+    if (String(path).includes("/cloudflare/accounts")) {
+      return [{ id: CF_ACCOUNT_ID, name: "Main CF", is_active: true }];
+    }
+    return [];
+  });
+}
+
 function domain(over: Record<string, unknown> = {}) {
   return {
     id: 42,
@@ -81,12 +100,16 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-function mockInvoke(reads: { zones?: any[]; zonesError?: Error } = {}) {
+function mockInvoke(reads: { zones?: any[]; zonesError?: Error; registrarNs?: string[] } = {}) {
   mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
     if (cmd === "cf_list_zones") {
       if (reads.zonesError) throw reads.zonesError;
       return reads.zones ?? [ZONE];
     }
+    // Карточка сверяет NS зоны с настоящими NS у регистратора; чтение — тоже
+    // Tauri-команда, и держать его в `mutate` нельзя: там мокаются ответы
+    // смены NS.
+    if (cmd === "registrar_get_nameservers") return reads.registrarNs ?? [];
     return mocks.mutate(cmd, args);
   });
 }
@@ -104,9 +127,12 @@ function renderModal(d = domain()) {
   );
 }
 
-/** Открыть вкладку NS и вернуть кнопку «Set NS». */
-async function openNsTab() {
-  fireEvent.click(screen.getByText("NS"));
+/**
+ * Кнопка смены NS. Вкладок у карточки нет: NS живут на том же экране, что и
+ * аккаунт Cloudflare, — поэтому открывать перед действием нечего, надо только
+ * дождаться отрисовки.
+ */
+async function nsButton() {
   return (await screen.findByText(/Set NS/)).closest("button") as HTMLButtonElement;
 }
 
@@ -130,7 +156,7 @@ beforeEach(() => {
     mutations: { ...base.mutations, retry: false },
   });
   useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
-  mocks.apiGet.mockResolvedValue({});
+  mockAccounts();
   mockInvoke();
 });
 
@@ -148,7 +174,7 @@ describe("Set NS — десктоп выполняет", () => {
     mocks.mutate.mockResolvedValue(true);
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     // NS подставились из зоны Cloudflare — их и надо прописать регистратору.
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
@@ -175,7 +201,7 @@ describe("Set NS — десктоп выполняет", () => {
     mocks.mutate.mockResolvedValue(true);
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
     fireEvent.change(nsField(), { target: { value: "ns1.hoster.net\n ns2.hoster.net \n\n" } });
@@ -195,11 +221,15 @@ describe("Set NS — десктоп выполняет", () => {
     let releaseZones: (zones: any[]) => void = () => {};
     const zonesPromise = new Promise<any[]>((resolve) => { releaseZones = resolve; });
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) =>
-      cmd === "cf_list_zones" ? zonesPromise : mocks.mutate(cmd, args)
+      cmd === "cf_list_zones"
+        ? zonesPromise
+        : cmd === "registrar_get_nameservers"
+          ? []
+          : mocks.mutate(cmd, args)
     );
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     expect(nsField().value).toBe("");
 
     fireEvent.change(nsField(), { target: { value: "ns1.mine.net\nns2.mine.net" } });
@@ -215,7 +245,7 @@ describe("Set NS — десктоп выполняет", () => {
     setTauri(true);
 
     renderModal();
-    await openNsTab();
+    await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
     // Стирание backspace'ом проходит через пустую строку и через строку из
@@ -236,7 +266,7 @@ describe("Set NS — десктоп выполняет", () => {
     setTauri(true);
 
     renderModal();
-    await openNsTab();
+    await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
     // Стирание больше не воскрешает NS под курсором — но и вернуть их было
@@ -254,7 +284,7 @@ describe("Set NS — десктоп выполняет", () => {
     setTauri(true);
 
     renderModal();
-    await openNsTab();
+    await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
     // Свежая подстановка совпадает с зоной — предлагать нечего.
     expect(screen.queryByText(/Restore from Cloudflare/i)).toBeNull();
@@ -278,7 +308,7 @@ describe("Set NS — десктоп выполняет", () => {
     mocks.mutate.mockResolvedValue(true);
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
     // Один и тот же NS дважды — обычная опечатка при ручном вводе. Оба
@@ -290,6 +320,13 @@ describe("Set NS — десктоп выполняет", () => {
     expect(screen.getByText(/at least 2 distinct nameservers/i)).toBeTruthy();
     fireEvent.click(btn);
     expect(setNsCalls().length).toBe(0);
+
+    // Та же опечатка другой формой: копипаста из зонного файла даёт FQDN с
+    // завершающей точкой. Для бейджа делегирования `ns1.hoster.net.` и
+    // `ns1.hoster.net` — один сервер; будь они двумя для отправки, порог
+    // прошёл бы и регистратор получил бы дубль.
+    fireEvent.change(nsField(), { target: { value: "ns1.hoster.net.\nns1.hoster.net" } });
+    await waitFor(() => expect(btn.disabled).toBe(true));
 
     fireEvent.change(nsField(), { target: { value: "NS1.hoster.net\nns1.hoster.net\nns2.hoster.net" } });
     await waitFor(() => expect(btn.disabled).toBe(false));
@@ -305,7 +342,7 @@ describe("Set NS — десктоп выполняет", () => {
     mocks.mutate.mockResolvedValue(true);
 
     renderModal(domain({ cloudflare_account_id: null, cloudflare_zone_id: null }));
-    const btn = await openNsTab();
+    const btn = await nsButton();
     expect(btn.disabled).toBe(true);
 
     fireEvent.change(nsField(), { target: { value: "ns1.hoster.net,ns2.hoster.net" } });
@@ -324,11 +361,14 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     setTauri(true);
 
     renderModal(domain({ registrar_id: null }));
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
     expect(btn.disabled).toBe(true);
-    expect(screen.getByText(/registrar account/i)).toBeTruthy();
+    // Именно действие рядом с кнопкой. Про тот же пробел говорит и бейдж
+    // делегирования выше («NS у регистратора неизвестны»), но там это ответ на
+    // другой вопрос — что мы знаем, а не что нажать.
+    expect(screen.getByText(/Assign a registrar account to this domain first/)).toBeTruthy();
 
     fireEvent.click(btn);
     expect(setNsCalls().length).toBe(0);
@@ -339,7 +379,7 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     mockInvoke({ zones: [{ ...ZONE, name_servers: [] }] });
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
 
     await waitFor(() => expect(btn.disabled).toBe(true));
     // Выключенная кнопка без объяснения — загадка, а не запрет: у каждого
@@ -354,7 +394,7 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     mockInvoke({ zonesError: new Error("cloudflare: 9109 invalid token") });
 
     renderModal();
-    await openNsTab();
+    await nsButton();
 
     // «Не смогли прочитать» и «у зоны нет NS» — разные ответы на вопрос
     // пользователя, и молчание вместо первого было бы хуже.
@@ -367,7 +407,7 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
     fireEvent.click(btn);
 
@@ -379,7 +419,7 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     mocks.mutate.mockResolvedValue(false);
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
     fireEvent.click(btn);
 
@@ -391,27 +431,38 @@ describe("Set NS — пустые и ошибочные случаи", () => {
   // Пары «чужая ошибка ↔ удавшийся Set NS» удалены вместе с вкладками `db`,
   // `ssl` и `nginx`: чужих действий в карточке больше нет ни одного, а с ними
   // ушли `runAction` и карта ошибок по вкладкам. Осталось то, что и осталось в
-  // коде: отказ Set NS из MutationCache, живущий на своей вкладке.
+  // коде: отказ Set NS, прочитанный из MutationCache.
 
-  it("не встречает красным на Overview того, кто в этой сессии ничего не жал", async () => {
+  it("держит отказ у кнопки, которая его вызвала, а не поверх всей карточки", async () => {
     setTauri(true);
     mocks.mutate.mockRejectedValue(new Error("Namecheap setCustom failed: Invalid nameserver"));
 
-    const first = renderModal();
-    const btn = await openNsTab();
+    renderModal();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
     fireEvent.click(btn);
-    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
-    first.unmount();
 
-    // Карточка открывается на Overview. Красное про NS там — отчёт о том, чего
-    // пользователь в этой сессии не делал; долговременный след отказа это
-    // бейдж «NS: Error» в строке таблицы, а не баннер поверх другой вкладки.
-    renderModal();
-    expect(screen.queryByText(/Invalid nameserver/)).toBeNull();
-    // Но на своей вкладке он никуда не делся — это и задумано.
-    fireEvent.click(screen.getByText("NS"));
-    expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
+    // ВНИМАНИЕ: это принятый РЕГРЕСС, а не переехавшая проверка.
+    //
+    // Пока вкладки были, карточка открывалась на Overview и отказ прошлой
+    // попытки там не показывался вовсе — человек, открывший её заново, не
+    // встречал красного про действие, которого в этот заход не совершал
+    // (соседний тест ниже как раз утверждает обратное: при переоткрытии отказ
+    // виден сразу, без единого клика). Скоуп держался вкладкой, а у экрана без
+    // вкладок её нет — и «показывать только тому, кто нажимал» на одном экране
+    // не выразить: MutationCache помнит попытку, а не сессию просмотра.
+    //
+    // Взамен осталось адресование МЕСТОМ: отказ стоит между полем NS и
+    // кнопкой, то есть там, где его ждёт нажавший, а не заголовком над сроками,
+    // SSL и учётками, к которым отношения не имеет. Это смягчает регресс, но не
+    // отменяет его — если он окажется дорогим, лечить надо отдельным признаком
+    // «эту попытку уже показывали», а не возвратом вкладок.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Invalid nameserver");
+    expect(
+      nsField().compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING,
+      "отказ обязан стоять ПОСЛЕ поля NS, а не над карточкой",
+    ).toBeTruthy();
   });
 
   it("не теряет отказ, прилетевший после закрытия карточки", async () => {
@@ -422,7 +473,7 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     );
 
     const first = renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
     fireEvent.click(btn);
     await waitFor(() => expect(setNsCalls().length).toBe(1));
@@ -434,8 +485,10 @@ describe("Set NS — пустые и ошибочные случаи", () => {
     first.unmount();
     await act(async () => { refuse(new Error("Namecheap setCustom failed: Invalid nameserver")); });
 
+    // Карточку открыли заново — отказ на месте: ответ регистратора мог прийти
+    // уже после её закрытия, и другого следа, кроме бейджа «NS: Error» в
+    // строке таблицы, у него нет.
     renderModal();
-    fireEvent.click(screen.getByText("NS"));
     expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
   });
 
@@ -446,13 +499,13 @@ describe("Set NS — пустые и ошибочные случаи", () => {
       .mockResolvedValueOnce(true);
 
     renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
     await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
 
     fireEvent.click(btn);
     expect(await screen.findByText(/Invalid nameserver/)).toBeTruthy();
 
-    // Повтор на месте — основной сценарий этой вкладки: поле редактируемое,
+    // Повтор на месте — основной сценарий этого блока: поле редактируемое,
     // и всё («Nothing to push», минимум из двух, схлопывание дублей) толкает
     // исправить ввод и нажать ещё раз. Баннер модалки общий и не
     // размонтируется между попытками, так что без явного сброса красное про
@@ -470,16 +523,17 @@ describe("Set NS — веб только смотрит", () => {
     setTauri(false);
 
     const { container } = renderModal();
-    const btn = await openNsTab();
+    const btn = await nsButton();
 
     expect(btn.disabled).toBe(true);
     // Ровно та же фраза, что бросает хук: обе живут в `NS_DESKTOP_NOTE`.
     expect(screen.getAllByText(new RegExp(NS_DESKTOP_NOTE)).length).toBeGreaterThan(0);
 
-    // Вне десктопа `useZoneNameservers` обречён по построению, и его отказ —
-    // это правило продукта, а не поломка. Показывать его как «Could not
-    // prefill» значит выдавать норму за сбой; «добавьте NS выше» и вовсе
-    // предлагает то, чего на вебе не сделать. Одна причина — одна строка.
+    // Вне десктопа зоны не читаются вовсе (`useCloudflareZones` выключен
+    // флагом): их отсутствие здесь — правило продукта, а не поломка.
+    // Показывать его как «Could not prefill» значит выдавать норму за сбой;
+    // «добавьте NS выше» и вовсе предлагает то, чего на вебе не сделать.
+    // Одна причина — одна строка.
     await waitFor(() => expect(mocks.invokeSynced).not.toHaveBeenCalled());
     expect(screen.queryByText(/Could not prefill/)).toBeNull();
     expect(screen.queryByText(/Nothing to push/)).toBeNull();
@@ -496,7 +550,7 @@ describe("Set NS — веб только смотрит", () => {
     setTauri(false);
 
     renderModal();
-    await openNsTab();
+    await nsButton();
 
     // «Read-only here» и три живые мутирующие кнопки на одном экране —
     // взаимоисключающие утверждения. Кнопок больше нет вовсе: роутов
@@ -509,12 +563,12 @@ describe("Set NS — веб только смотрит", () => {
   });
 });
 
-describe("карточка домена — две вкладки вместо пяти", () => {
+describe("карточка домена — один экран без вкладок", () => {
   it("не предлагает DB / SSL / NGINX и Create Site и не ходит по их роутам", async () => {
     setTauri(true);
 
     renderModal();
-    await screen.findByText("OVERVIEW");
+    await nsButton();
 
     // Роутов `create-site`, `create-db`, `db-credentials`, `ssl-request`,
     // `ssl-cancel`, `refresh-ssl` и `nginx-override` на бэкенде нет — каждая из
@@ -522,27 +576,40 @@ describe("карточка домена — две вкладки вместо �
     for (const dead of ["DB", "SSL", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
     }
-    expect(screen.getByText("NS")).toBeTruthy();
+    // Переключателя вкладок нет вовсе: NS переехали к аккаунту Cloudflare, а
+    // разложенные по двум экранам они заставляли ходить туда-сюда, чтобы
+    // понять, почему NS не пушатся.
+    for (const tab of ["OVERVIEW", "NS"]) {
+      expect(screen.queryByText(tab), `вкладки ${tab} быть не должно`).toBeNull();
+    }
+    // Поле NS и сроки домена теперь на одном экране, без единого клика.
+    expect(nsField()).toBeTruthy();
+    expect(screen.getByText("Expires:")).toBeTruthy();
 
-    // Запросы вкладок уходили при ОТКРЫТИИ карточки, а не по клику: креды БД и
-    // nginx-override тянулись `useQuery` с `enabled: !!domainId`.
+    // По домену карточка не ходит НИ ПО ОДНОМУ роуту: креды БД и
+    // nginx-override тянулись `useQuery` с `enabled: !!domainId` прямо при
+    // открытии. Списки учёток — не про домен: по ним показываются имена
+    // аккаунтов и провайдер регистратора.
     await act(async () => {});
-    expect(mocks.apiGet.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
+    expect(mocks.apiGet.mock.calls.map((c: any[]) => String(c[0])).sort()).toEqual([
+      "/cloudflare/accounts",
+      "/registrars/accounts",
+    ]);
     expect(mocks.apiPost.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
   });
 });
 
 describe("мёртвые NS-действия удалены", () => {
-  it("вкладка NS не зовёт несуществующие check-ns / mark-ns-set", async () => {
+  it("карточка не зовёт несуществующие check-ns / mark-ns-set", async () => {
     setTauri(true);
 
     renderModal();
-    await openNsTab();
+    await nsButton();
 
     for (const dead of ["Check NS", "Mark NS set", "Unmark NS"]) {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
     }
-    // На вкладке осталось только то, что действительно работает.
+    // Из NS-действий на карточке осталось только то, что работает.
     expect(screen.getByText(/Set NS/)).toBeTruthy();
     expect(mocks.apiPost.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
   });
@@ -556,7 +623,10 @@ describe("мёртвые NS-действия удалены", () => {
           selectedDomainIds={[1, 2]}
           onAssignServer={() => {}}
           onAssignCF={() => {}}
-          onMatchCFZones={() => {}}
+          onSyncCloudflare={() => {}}
+          syncPending={false}
+          onFullSetup={() => {}}
+          fullSetupPending={false}
           onProvision={() => {}}
           onDelete={() => {}}
         />
@@ -582,7 +652,10 @@ describe("массовый Set NS", () => {
           selectedDomainIds={[1, 2]}
           onAssignServer={() => {}}
           onAssignCF={() => {}}
-          onMatchCFZones={() => {}}
+          onSyncCloudflare={() => {}}
+          syncPending={false}
+          onFullSetup={() => {}}
+          fullSetupPending={false}
           onProvision={() => {}}
           onDelete={() => {}}
         />

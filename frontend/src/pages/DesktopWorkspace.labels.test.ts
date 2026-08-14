@@ -56,6 +56,10 @@ describe("таблицы шагов прогресса", () => {
   it("знает все действия, которые шлёт Rust по каналу audit:progress", () => {
     for (const action of [
       "cf.zone.create",
+      // Шлёт `domain_full_setup`, когда write-back не прошёл по зоне, которая
+      // уже была: с ключом `cf.zone.create` тост сказал бы «Zone created» про
+      // зону, которую команда специально не назвала созданной.
+      "cf.zone.link",
       "cf.dns.create",
       "cf.dns.update",
       "cf.dns.delete",

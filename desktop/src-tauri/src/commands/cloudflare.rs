@@ -63,7 +63,27 @@ async fn cf_ctx(
     let token =
         String::from_utf8(token_bytes).map_err(|_| CommandError::Aead("token not utf8".into()))?;
 
-    let cf_account_id = row.get("account_id").and_then(json_str);
+    // Пустая строка и отсутствие колонки — одно и то же состояние «аккаунт не
+    // назван»: колонка необязательная, а форма аккаунта пишет `null` вместо
+    // пустого ввода. Нормализуем здесь, чтобы ниже по коду это не было двумя
+    // разными случаями — сужение зон по аккаунту молча выключается ровно на
+    // нём, и различать «пусто» и «нет» было бы негде.
+    let cf_account_id = row
+        .get("account_id")
+        .and_then(json_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if cf_account_id.is_none() {
+        // Видимость вместо тишины: без account_id список зон нечем сузить, и
+        // токен со скоупом «All accounts» отдаст зоны всех аккаунтов сразу.
+        // Заведение зоны в такой конфигурации Cloudflare кладёт в аккаунт по
+        // умолчанию, а переиспользование существующей зоны отказано вовсе
+        // (`client::create_zone`).
+        tracing::warn!(
+            target: "cloudflare",
+            "cloudflare account {account_id} has no Cloudflare account id: zones cannot be narrowed to it"
+        );
+    }
     let device_id = cache::get_meta(&conn, "device_id")
         .map_err(|e| CommandError::Api(e.to_string()))?
         .and_then(|s| Uuid::parse_str(&s).ok());
@@ -117,6 +137,12 @@ pub async fn cf_verify_token(
 /// Зоны аккаунта — вместе с их name_servers: отдельной команды под NS не надо,
 /// `Zone.name_servers` приходит прямо здесь.
 ///
+/// «Аккаунта», а не «токена»: список сужается по `cf_account_id`, потому что
+/// вызывающие выдают его за содержимое ОДНОГО аккаунта — по нему фронт
+/// подбирает домену зону и пишет `cloudflare_zone_id`. Токен со скоупом «All
+/// accounts» без сужения отдал бы сюда зоны соседних аккаунтов, и домен получил
+/// бы чужую зону, а его регистратор — её nameservers.
+///
 /// Аудита нет намеренно: это чтение, а audit_log в проекте пишут только
 /// мутации (ср. `cf_verify_token` и `registrar_get_domains` — тоже без него).
 #[tauri::command]
@@ -127,7 +153,7 @@ pub async fn cf_list_zones(
     api: State<'_, ApiClient>,
 ) -> Result<Vec<Zone>, CommandError> {
     let ctx = cf_ctx(&api, &user_id, &handle, &account_id).await?;
-    client::list_zones(&ctx.token)
+    client::list_zones(&ctx.token, ctx.cf_account_id.as_deref())
         .await
         .map_err(|e| CommandError::Api(e.to_string()))
 }
@@ -147,6 +173,49 @@ pub async fn cf_list_dns_records(
         .map_err(|e| CommandError::Api(e.to_string()))
 }
 
+/// Действие аудита создания зоны. Оно же — ключ в `AUDIT_ACTION_LABEL` на
+/// фронте («Zone created»), поэтому по нему же шлётся событие о непрошедшем
+/// write-back'е `cloudflare_zone_id` (`commands::full_setup`).
+pub(crate) const AUDIT_ACTION_ZONE_CREATE: &str = "cf.zone.create";
+
+/// Завести зону домена в аккаунте — или взять уже заведённую — и записать
+/// создание в audit log.
+///
+/// Отдельно от команды, потому что у неё два вызывающих с разными нуждами:
+/// фронту (`cf_create_zone`) нужна зона, а full-setup'у — ещё и ответ на
+/// вопрос, создал ли её ЭТОТ прогон (в отчёте «зона создана» и «зона уже была»
+/// — разные новости). Токен при этом остаётся внутри модуля: наружу уезжает
+/// только зона.
+pub(crate) async fn ensure_zone(
+    app: &AppHandle,
+    api: &ApiClient,
+    user_id: &str,
+    handle: &State<'_, SyncHandle>,
+    account_id: &str,
+    zone_name: &str,
+) -> Result<(Zone, bool), CommandError> {
+    let ctx = cf_ctx(api, user_id, handle, account_id).await?;
+    let (zone, created) = client::create_zone(&ctx.token, zone_name, ctx.cf_account_id.as_deref())
+        .await
+        .map_err(|e| CommandError::Api(e.to_string()))?;
+    if created {
+        // Зона в Cloudflare уже создана. `?` здесь отрапортовал бы неудачу об
+        // удавшейся работе, а повтор упёрся бы в «zone already exists» —
+        // best-effort, не превращать обратно в `?` (см. `audit_best_effort`).
+        audit_best_effort(
+            app,
+            api,
+            AUDIT_ACTION_ZONE_CREATE,
+            "cloudflare_zone",
+            &zone.id,
+            ctx.device_id,
+            Some(serde_json::json!({ "name": zone.name })),
+        )
+        .await;
+    }
+    Ok((zone, created))
+}
+
 #[tauri::command]
 pub async fn cf_create_zone(
     app: AppHandle,
@@ -156,26 +225,9 @@ pub async fn cf_create_zone(
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<Zone, CommandError> {
-    let ctx = cf_ctx(&api, &user_id, &handle, &account_id).await?;
-    let (zone, created) = client::create_zone(&ctx.token, &zone_name, ctx.cf_account_id.as_deref())
+    ensure_zone(&app, &api, &user_id, &handle, &account_id, &zone_name)
         .await
-        .map_err(|e| CommandError::Api(e.to_string()))?;
-    if created {
-        // Зона в Cloudflare уже создана. `?` здесь отрапортовал бы неудачу об
-        // удавшейся работе, а повтор упёрся бы в «zone already exists» —
-        // best-effort, не превращать обратно в `?` (см. `audit_best_effort`).
-        audit_best_effort(
-            &app,
-            &api,
-            "cf.zone.create",
-            "cloudflare_zone",
-            &zone.id,
-            ctx.device_id,
-            Some(serde_json::json!({ "name": zone.name })),
-        )
-        .await;
-    }
-    Ok(zone)
+        .map(|(zone, _)| zone)
 }
 
 #[tauri::command]

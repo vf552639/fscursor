@@ -95,7 +95,7 @@ describe("autoBindDomainsToCloudflare", () => {
     expect(report.bound).toEqual([
       { domainId: 1, domain: "example.com", accountId: 7, zoneId: "zone-a" },
     ]);
-    // Без `cloudflare_zone_id` привязка не даёт главного: вкладке NS
+    // Без `cloudflare_zone_id` привязка не даёт главного: карточке домена
     // по-прежнему нечего пушить регистратору. Поэтому `PUT /domains/{id}`, а не
     // роут `bulk-assign-cloudflare`, который знает только аккаунт.
     expect(mocks.apiPut).toHaveBeenCalledWith("/domains/1", {
@@ -500,7 +500,7 @@ describe("summarizeCfBind", () => {
 
     expect(notice).toEqual({
       kind: "info",
-      text: "Cloudflare: nothing to do — all 1 selected domain(s) are already linked.",
+      text: "Cloudflare: nothing to do — all 1 domain(s) are already linked.",
     });
   });
 
@@ -545,7 +545,7 @@ describe("summarizeCfBind", () => {
     // Кнопка, которая молчит, не отличима от сломанной.
     expect(summarizeCfBind(report({ status: "no-accounts" }), "manual")?.kind).toBe("warn");
     expect(summarizeCfBind(report({ status: "nothing-to-do", skipped: 3 }), "manual")?.text).toContain(
-      "all 3 selected domain(s) are already linked",
+      "all 3 domain(s) are already linked",
     );
     // …а в вебе кнопки нет вовсе — говорить не о чем и некому.
     expect(summarizeCfBind(report({ status: "not-desktop" }), "manual")).toBeNull();
