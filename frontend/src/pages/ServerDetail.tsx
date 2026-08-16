@@ -8,7 +8,7 @@ import { ipError } from "../lib/ipInput";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
-import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
+import { useDomains, useDeleteDomain, useUpdateDomain, Domain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -65,7 +65,7 @@ function CompareColumn({ title, names, tone }: { title: string; names: string[];
  * группы — чистая `compareServerSites` (`lib/serverSites`), с тестами; здесь
  * только рендер.
  */
-function SiteCompareBanner({ sites, domains }: { sites: ServerSite[]; domains: any[] }) {
+function SiteCompareBanner({ sites, domains }: { sites: ServerSite[]; domains: Domain[] }) {
   const cmp = compareServerSites(sites, domains);
   return (
     <div style={{marginBottom:20, padding:"14px 18px", borderRadius:10, background:"#f9fafb", border:"1px solid #e5e7eb"}}>
@@ -154,7 +154,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // источник тех же значений умел бы разойтись с первым.
   const { data: serversList } = useServers();
   const { data: domainsData } = useDomains({ server_id: server?.id });
-  const domains = domainsData ?? [];
+  const domains: Domain[] = domainsData ?? [];
   
   // FastPanel setup
   const isFPInstalled = s?.fastpanel_status === "installed";
@@ -648,10 +648,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               onClick={() => listSites.mutate()}
               disabled={listSites.isPending}
             >
-              {listSites.isPending ? "Checking..." : "Сверить домены"}
+              {listSites.isPending ? "Сверяю…" : "Сверить домены"}
             </Btn>
           ) : (
-            <DesktopOnlyNote what="Listing server sites" />
+            // Русская заметка, а не `DesktopOnlyNote` (тот по шаблону
+            // английский): кнопка и её пояснение на карточке сервера ведутся
+            // по-русски. Чтение сайтов идёт по SSH — из браузера недостижимо.
+            <div style={{fontSize:12.5,color:"#6b7280",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8,padding:"8px 12px"}}>
+              Сверка сайтов доступна только в десктоп-приложении SDMP.
+            </div>
           )
         ) : null}
         <OpenInDesktop

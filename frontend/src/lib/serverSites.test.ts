@@ -59,7 +59,9 @@ describe("compareServerSites", () => {
       [site("a.com"), site("both.com"), site("server-only.com")],
       [dom("both.com"), dom("sdmp-only.com"), dom("a.com")],
     );
-    expect(r.matched.map((m) => m.site.domain_name).sort()).toEqual(["a.com", "both.com"]);
+    // Порядок matched = порядок первого вхождения СРЕДИ САЙТОВ (по нему строится
+    // `siteByName`): "a.com" перед "both.com", как во входном списке сайтов.
+    expect(r.matched.map((m) => m.site.domain_name)).toEqual(["a.com", "both.com"]);
     expect(r.onlyOnServer.map((s) => s.domain_name)).toEqual(["server-only.com"]);
     expect(r.onlyInSdmp.map((d) => d.domain_name)).toEqual(["sdmp-only.com"]);
   });

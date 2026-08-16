@@ -425,14 +425,25 @@ export function useInstallFastPanel(id: number, onCreds: (creds: InstallFastpane
  */
 export function useServerListSites(id: number) {
   return useMutation({
-    mutationKey: ["server-list-sites", id],
+    // Ключа `mutationKey` здесь нет намеренно: сверку наблюдает локальный
+    // инстанс мутации (`listSites.data`/`isPending`), а не `useMutationState` по
+    // ключу. Результат живёт, только пока открыта карточка сервера — это
+    // страница, не модалка, и её перемонтирование посреди секундного чтения
+    // маловероятно, а повтор безвреден (идемпотентное чтение). Наблюдение по
+    // ключу (как у `installFastPanelKey` для получасовой установки) было бы
+    // здесь мёртвым кодом.
+    //
     // Работу делает Tauri-команда, а не webview: `navigator.onLine` про эту сеть
     // ничего не знает, а с дефолтным `networkMode: "online"` react-query на
     // «оффлайне» браузера не запустил бы `mutationFn` вовсе.
     networkMode: "always" as const,
     mutationFn: async (): Promise<ServerSite[]> => {
       if (!isTauri()) {
-        throw new Error(desktopOnly("Listing server sites"));
+        // Своя русская фраза, а не `desktopOnly` (тот по шаблону английский):
+        // кнопка сверки и её сообщения на карточке сервера ведутся по-русски.
+        // Путь по сути недостижим — кнопка рисуется только в десктопе, — но
+        // сообщение обязано быть одного языка с ней.
+        throw new Error("Сверка сайтов доступна только в десктоп-приложении SDMP.");
       }
       const userId = useAuthStore.getState().userId;
       if (!userId) {
