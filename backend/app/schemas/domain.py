@@ -1,7 +1,8 @@
 from datetime import date, datetime
 from typing import Optional
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.validators import is_valid_domain, normalize_domain
 
@@ -73,6 +74,11 @@ class DomainUpdate(BaseModel):
     nginx_override: Optional[str] = None
     nginx_presets: Optional[dict] = None
     last_provision_error: Optional[str] = None
+    # Пароль FTP пользователь задаёт вручную старым доменам: фронт кладёт блоб и
+    # присылает сюда его id (плейнтекст на сервер не уходит — это тот же путь,
+    # что и `ssh_password_blob_id` у сервера). `PUT /domains/{id}` его применяет
+    # общим циклом `setattr` в `domain_service.update`.
+    ftp_password_blob_id: Optional[UUID] = None
 
     # Переименование — тот же путь записи имени, что и заведение, и правило на
     # нём то же: без него `PUT {"domain_name": "не домен вовсе"}` отвечал 200,
@@ -105,8 +111,67 @@ class DomainResponse(DomainBase):
     nginx_override: Optional[str] = None
     nginx_presets: Optional[dict] = None
     last_provision_error: Optional[str] = None
+    # Снимок с сервера и его две отметки времени (разбор — в модели и в
+    # `DomainFactsIn`). `ftp_password_blob_id` наружу отдавать безопасно: это id
+    # непрозрачного блоба, а не пароль, — ровно как `ServerResponse` отдаёт
+    # `fastpanel_password_blob_id` (на нём во фронте стоит `RevealSecret`).
+    fp_checked_at: Optional[datetime] = None
+    fp_check_error: Optional[str] = None
+    fp_facts: Optional[dict] = None
+    fp_facts_at: Optional[datetime] = None
+    php_handler: Optional[str] = None
+    ftp_password_blob_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
+
+
+class DomainFactsIn(BaseModel):
+    """Результат чтения состояния домена с сервера, снятый десктопом по SSH.
+
+    Зеркало `ServerMetricsIn`, и по тем же причинам. После переезда на
+    zero-knowledge бэкенд на сервер зайти не может (SSH-пароль — зашифрованный
+    блоб), состояние читает десктоп (принцип №3), а эта схема — дверь, через
+    которую результат попадает в колонки.
+
+    Ровно два исхода, и тело описывает один из них:
+
+    * `{"facts": {...}}` — успех. Снимок ложится в `fp_facts`, `fp_facts_at` и
+      `fp_checked_at` получают текущее время сервера, `fp_check_error`
+      обнуляется;
+    * `{"error": "..."}` — неудача. `fp_check_error` пишется, `fp_checked_at`
+      двигается, но снимок (`fp_facts`/`fp_facts_at`) НЕ трогается — провал не
+      вправе ни стереть последний хороший снимок, ни омолодить его (принцип №6).
+
+    Чего здесь нет и не должно быть:
+
+    * времени — его ставит сервер (`domain_service.apply_facts`). Присланное
+      клиентом означало бы, что «когда прочитали» диктуют часы удалённой машины;
+    * секретов в любом виде — пароль FTP сюда не едет; он попадает в БД
+      отдельным путём (блоб + `ftp_password_blob_id` через `PUT /domains/{id}`).
+
+    Всё, что не перечислено, — 422 `extra_forbidden` (см. `ServerCreate`, там
+    записана история правила). Тело без единственного значащего поля — тоже 422
+    (`_at_least_facts_or_error`): пустая попытка ничего не сообщает и лишь
+    двигала бы `fp_checked_at`, из-за чего протухший снимок начал бы выглядеть
+    свежим.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    facts: Optional[dict] = None
+    error: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _at_least_facts_or_error(self) -> "DomainFactsIn":
+        """Тело без `facts` и без `error` — отказ.
+
+        Считается `model_fields_set`, а не значения: `{"error": ...}` — законная
+        неудача, а тело вовсе без полей смысла не несёт. Ровно та же граница и по
+        той же причине, что у `ServerMetricsIn._at_least_one_metric`.
+        """
+        if not self.model_fields_set:
+            raise ValueError("either 'facts' or 'error' must be present")
+        return self
 
 
 class DomainBulkCreate(BaseModel):

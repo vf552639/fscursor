@@ -25,6 +25,7 @@ from app.schemas.domain import (
     DomainBulkImportResponse,
     DomainBulkStructuredCreate,
     DomainCreate,
+    DomainFactsIn,
     DomainResponse,
     DomainUpdate,
 )
@@ -156,6 +157,55 @@ async def export_failed_domains_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=failed_domains.csv"},
     )
+
+
+@router.post("/{domain_id}/facts", response_model=DomainResponse)
+async def submit_domain_facts(
+    domain_id: int,
+    data: DomainFactsIn,
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> DomainResponse:
+    """Принять снимок состояния домена, прочитанный десктопом по SSH.
+
+    Зеркало `POST /servers/{id}/metrics`. Сервер тут только получатель: после
+    переезда на zero-knowledge он на машину зайти не может (принцип №3), а
+    десктоп читает состояние домена и шлёт результат сюда, чтобы он лёг в БД и
+    стал виден в read-only вебе. Что именно принимается и почему тело описывает
+    ровно один из двух исходов — в docstring `DomainFactsIn`; как присланное
+    ложится в колонки и почему два времени держатся врозь — в
+    `domain_service.apply_facts`.
+
+    Владение доменом проверяется тем же путём, что и у остальных роутов домена
+    (`apply_facts` зовёт `get_by_id`, отбивающий чужой id как отсутствующий):
+    чужой домен — 404, и ни одна его колонка не меняется. Идентификаторы
+    доменов последовательны, то есть угадываются, и роут без проверки владельца
+    позволил бы заполнять чужие карточки.
+
+    Запись в аудит — по общему правилу репозитория (каждый мутирующий роут
+    оставляет след; молча меняющий строку пользователя приём фактов был бы
+    единственным исключением). Значений снимка в metadata нет намеренно: это
+    свободные строки с чужой машины, читать их надо через API, а гард
+    `test_mutation_audit.py` смотрит на ИМЕНА ключей. Оговорка про автосбор — та
+    же, что у `submit_server_metrics`: запись оправдана, пока проверку запускает
+    человек кнопкой; появится расписание — аудит здесь пересматривать вместе с ним.
+
+    Размещён этот POST выше `GET /{domain_id}`, но порядок для него, в отличие от
+    статик-GET-ов, не несущий: методы разные, и Starlette при несовпадении
+    метода продолжает перебор. Граница ниже — про GET, её смысл он не задевает.
+    """
+    domain = await domain_service.apply_facts(db, domain_id, data, user.id)
+    if not domain:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Domain not found")
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="domain.read_facts",
+        target_type="domain",
+        target_id=str(domain_id),
+    )
+    await db.commit()
+    return DomainResponse.model_validate(domain)
 
 
 # ГРАНИЦА: ниже этой строки новый GET с постоянным путём (`/stats`,

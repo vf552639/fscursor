@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from app.models.registrar_account import RegistrarAccount
 from app.schemas.domain import (
     DomainBulkCreateItem,
     DomainCreate,
+    DomainFactsIn,
     DomainUpdate,
     FullSetupDomain,
 )
@@ -169,6 +171,53 @@ async def update(
     for k, v in patch.items():
         setattr(domain, k, v)
     await _commit_unique_name(db)
+    await db.refresh(domain)
+    return domain
+
+
+async def apply_facts(
+    db: AsyncSession, domain_id: int, data: DomainFactsIn, user_id: UUID
+) -> Optional[Domain]:
+    """Записать снимок состояния домена с сервера и отметить время попытки.
+
+    Два времени держатся врозь намеренно — в этом весь смысл конструкции.
+    `fp_checked_at` двигается ВСЕГДА: это «когда в последний раз пробовали
+    прочитать». `fp_facts_at` двигается только на успехе: «когда в последний раз
+    получилось». Провал (`data.error` задан) пишет ошибку и время попытки, но
+    снимок (`fp_facts`/`fp_facts_at`) не трогает — иначе одна сетевая икота либо
+    стёрла бы последний хороший снимок, либо выдала бы его недельную давность за
+    свежесть (принцип №6 CLAUDE.md).
+
+    Исход выбирается по наличию `error`, а не `facts`: непустой `error` — это
+    неудача, что бы ни лежало рядом. Успех дополнительно ОБНУЛЯЕТ
+    `fp_check_error`: иначе домен, однажды не ответивший, выглядел бы сломанным
+    и после того, как чтение снова заработало.
+
+    Время ставит сервер: у клиента оно означало бы «когда прочитали по мнению
+    часов удалённой машины», а колонка нужна ради «насколько свежо то, что мы
+    показываем». Схема `DomainFactsIn` полей времени не имеет вовсе.
+
+    `touch_entity_sync` обязателен по той же причине, что и у `apply_metrics`:
+    факты — пользовательские данные, которые десктоп добирает инкрементально по
+    `sync_version > since`; без бампа read-only веб и второй десктоп остались бы
+    с прочерком при полной колонке в БД.
+    """
+    domain = await get_by_id(db, domain_id, user_id)
+    if not domain:
+        return None
+
+    now = datetime.now(timezone.utc)
+    domain.fp_checked_at = now
+    if data.error is not None:
+        domain.fp_check_error = data.error
+        # Снимок остаётся прежним — ни `fp_facts`, ни `fp_facts_at`.
+    else:
+        domain.fp_facts = data.facts
+        domain.fp_facts_at = now
+        domain.fp_check_error = None
+
+    await touch_entity_sync(db, user_id, domain)
+    await db.commit()
     await db.refresh(domain)
     return domain
 

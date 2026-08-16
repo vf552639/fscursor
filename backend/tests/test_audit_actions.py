@@ -29,6 +29,10 @@ MUTATION_AUDIT_ACTIONS = [
     "notification.mark_read",
     "notification.delete",
     "notification.check_renewals",
+    # Приём снимка состояния домена с сервера (`POST /domains/{id}/facts`).
+    # Как и `server.metrics`, это мутирующий write-back с десктопа: без строки в
+    # allow-list `audit_service.log` бросил бы ValueError и роут ответил бы 500.
+    "domain.read_facts",
 ]
 
 
