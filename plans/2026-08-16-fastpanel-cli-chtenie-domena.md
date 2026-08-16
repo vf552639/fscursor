@@ -269,7 +269,30 @@ existingBlobId: domain.ftp_password_blob_id })` → `PUT /domains/{id}`.
 внутри обработчика и дальше не расходится. У массового прогона сохранять по мере прихода
 каждого элемента очереди, а не в конце.
 
-### Фаза 5 — Починить «Sync Domains»  `[ ]`
+### Фаза 5 — Починить «Sync Domains»  `[x]`
+
+**Выполнено** (2026-08-16): Tauri-команда `server_list_sites(app, user_id, server_id)` в
+`commands/provision.rs` поверх ожившей `fastpanel::list_sites` (мёртвый код оживлён вызовом,
+не переписан) — форма как у `install_fastpanel`: резолв сервера из локального кэша,
+расшифровка SSH-блоба, `zeroize` пароля сразу после `connect`, `HOST_KEY_UNKNOWN` внутри
+`ssh_connect_session_with_timeout`, ТОЛЬКО чтение, без write-back и аудита (читающая команда).
+Свой `LIST_SITES_SESSION_TIMEOUT`=60с (короткий листинг, не получасовая установка).
+Зарегистрирована в `lib.rs`. Фронт: удалены `useSyncServerDomains` и `SyncDomainsResponse`
+(мёртвый `POST /servers/{id}/sync-domains`), добавлены `ServerSite` + `useServerListSites`
+(десктоп-only, `networkMode:"always"`, `invokeSynced`). Чистый модуль `lib/serverSites.ts`
+(`compareServerSites` → три группы matched/onlyOnServer/onlyInSdmp; нормализация имени
+переиспользует `normalizeZoneName`, не изобретает) — 11 юнит-тестов (пустые, регистр, точка,
+пробелы, дубли на сервере и в SDMP, пустое имя). UI на карточке сервера: кнопка «Сверить
+домены» (десктоп-only, как SSH Test) + баннер сверки `SiteCompareBanner`. `cargo build`/`test`
+(237) зелёные, `tsc`/`npm run build` чисты, `npm test` 933 зелёных.
+
+Долг: живой end-to-end прогон `server_list_sites` на реальном сервере отложен к приёмке
+фазы 2 (root-SSH к тестовому серверу в этой сессии недоступен) — парсеры `list_sites` уже
+покрыты тестами, сверка покрыта сама, но фактический вывод FastPanel не сверялся вживую.
+Отдельного Rust-теста «в argv нет секретов» не заведено: `list_sites` пароль в свои команды
+(`<fp> sites list [--json]`) не принимает вовсе — секрет там невыразим по конструкции.
+
+Изначальный замысел (ниже) исполнен как описано.
 
 Tauri-команда `server_list_sites(server_id)` поверх ожившей `list_sites`. На карточке сервера —
 сравнение «есть на сервере / есть в SDMP / только там / только тут». Удалить

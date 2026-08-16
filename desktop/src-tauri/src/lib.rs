@@ -52,6 +52,7 @@ pub fn run() {
             commands::provision::provision_domain,
             commands::provision::provision_bulk,
             commands::provision::install_fastpanel,
+            commands::provision::server_list_sites,
             commands::cloudflare::cf_verify_token,
             commands::cloudflare::cf_list_zones,
             commands::cloudflare::cf_list_dns_records,

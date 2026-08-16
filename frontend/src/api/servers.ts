@@ -117,11 +117,16 @@ export interface ServerBulkImportResponse {
   errors_csv_url?: string | null;
 }
 
-export interface SyncDomainsResponse {
-  created: number;
-  linked: number;
-  total: number;
-  error: string | null;
+/**
+ * Один сайт, прочитанный с сервера по SSH (`server_list_sites` → `list_sites` в
+ * десктопе). Секретов здесь нет: только имя домена, владелец, путь и версия PHP.
+ * Форма ТОЧНО повторяет `SiteInfo` из `ssh/fastpanel.rs` (serde → snake_case).
+ */
+export interface ServerSite {
+  domain_name: string;
+  site_user: string | null;
+  site_path: string | null;
+  php_version: string | null;
 }
 
 export const serversKeys = {
@@ -402,13 +407,41 @@ export function useInstallFastPanel(id: number, onCreds: (creds: InstallFastpane
   });
 }
 
-export function useSyncServerDomains(id: number) {
+/**
+ * Прочитать список сайтов с сервера по SSH и вернуть его для сверки с доменами
+ * SDMP (`lib/serverSites`). ТОЛЬКО десктоп: команда резолвит сервер из
+ * локального кэша, расшифровывает SSH-блоб и ходит по SSH — веб этого не умеет
+ * (принцип №3). Пришла на замену мёртвому `POST /servers/{id}/sync-domains`,
+ * который переезд на zero-knowledge удалил (каждый клик по «Sync Domains» был
+ * гарантированным 404).
+ *
+ * Результат — список без секретов (`ServerSite`: имя/владелец/путь/PHP), поэтому
+ * его не грех держать в `data` мутации: сверку показывает сама карточка, пока
+ * она открыта. Никаких мутаций на сервере — только чтение (`list_sites`).
+ *
+ * `invokeSynced`, а не `invokeIfTauri`: команда читает сервер из локального
+ * SQLCipher-кэша, и только что заведённого сервера там может ещё не быть, если
+ * не подтянуть изменения (та же причина, что у `install_fastpanel`).
+ */
+export function useServerListSites(id: number) {
   return useMutation({
-    mutationFn: () => apiPost<SyncDomainsResponse>(`/servers/${id}/sync-domains`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["domains"] });
-      queryClient.invalidateQueries({ queryKey: serversKeys.detail(id) });
-      queryClient.invalidateQueries({ queryKey: serversKeys.all });
+    mutationKey: ["server-list-sites", id],
+    // Работу делает Tauri-команда, а не webview: `navigator.onLine` про эту сеть
+    // ничего не знает, а с дефолтным `networkMode: "online"` react-query на
+    // «оффлайне» браузера не запустил бы `mutationFn` вовсе.
+    networkMode: "always" as const,
+    mutationFn: async (): Promise<ServerSite[]> => {
+      if (!isTauri()) {
+        throw new Error(desktopOnly("Listing server sites"));
+      }
+      const userId = useAuthStore.getState().userId;
+      if (!userId) {
+        throw new Error("Desktop: unlock session (user id missing)");
+      }
+      return invokeSynced<ServerSite[]>("server_list_sites", {
+        userId,
+        serverId: String(id),
+      });
     },
   });
 }

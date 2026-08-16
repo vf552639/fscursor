@@ -1761,6 +1761,93 @@ pub async fn install_fastpanel(
     Ok(result)
 }
 
+/// Через сколько секунд считаем сессию листинга оборванной.
+///
+/// Самая долгая одиночная тишина на пути чтения — `which fastpanel` внутри
+/// `get_fastpanel_path` (30 с), дальше `sites list` (по 15 с). Порог заведомо
+/// больше любой из этих пауз, но короткий: листинг — это секунды, а не
+/// получасовая установка, и висеть 5 минут (`FP_SESSION_TIMEOUT`) на мёртвом
+/// сервере ему незачем.
+const LIST_SITES_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Прочитать список сайтов с сервера по SSH — ТОЛЬКО чтение, без мутаций.
+///
+/// Оживляет `fastpanel::list_sites` (до сих пор мёртвый код без вызывающих) под
+/// кнопку сверки «сервер ↔ SDMP» на карточке сервера. Форма — как у
+/// `install_fastpanel`: резолв сервера из локального кэша, расшифровка
+/// SSH-блоба, `zeroize` пароля сразу после `connect`; `HOST_KEY_UNKNOWN`
+/// обрабатывается внутри `ssh_connect_session_with_timeout`.
+///
+/// Аудита нет намеренно: `audit_log` в проекте пишут действия, которые что-то
+/// меняют, — здесь мы только читаем чужую машину (тот же довод, что у читающих
+/// команд Cloudflare/регистраторов). Секретов в argv нет: `list_sites` строит
+/// только `<fp> sites list [--json]`, пароль в её команды не попадает вовсе.
+#[tauri::command]
+pub async fn server_list_sites(
+    app: AppHandle,
+    user_id: String,
+    server_id: String,
+    handle: State<'_, SyncHandle>,
+    api: State<'_, ApiClient>,
+) -> Result<Vec<fastpanel::SiteInfo>, CommandError> {
+    let mut key = keychain::load_master_key(&user_id)
+        .map_err(|e| CommandError::Keychain(e.to_string()))?
+        .ok_or_else(|| CommandError::Keychain("locked".into()))?;
+    let path = cache_path(&handle)?;
+    let conn = cache::open(&path, &key).map_err(|e| CommandError::Api(e.to_string()))?;
+
+    let server_row = cache::get_row_fields(&conn, "servers", &server_id)
+        .map_err(|e| CommandError::Api(e.to_string()))?
+        .ok_or_else(|| CommandError::Api("server not in local cache".into()))?;
+
+    let blob_id = server_row
+        .get("ssh_password_blob_id")
+        .and_then(json_str)
+        .ok_or_else(|| CommandError::Api("server has no ssh_password_blob_id".into()))?;
+    let password = blob_plaintext(&api, &key, &blob_id).await;
+    // Мастер-ключ дальше не нужен: только SSH. Гасим до разбора результата.
+    key.zeroize();
+    let mut password = password?;
+    let host = server_row
+        .get("ip_address")
+        .and_then(json_str)
+        .ok_or_else(|| CommandError::Api("server missing ip_address".into()))?;
+    let port = server_row
+        .get("ssh_port")
+        .and_then(json_i64)
+        .map(|p| p as u16)
+        .unwrap_or(22);
+    let ssh_user = server_row
+        .get("ssh_user")
+        .and_then(json_str)
+        .unwrap_or_else(|| "root".into());
+    // Всё нужное из кэша забрали — держать SQLCipher открытым по SSH незачем.
+    drop(conn);
+
+    let session = ssh_connect_session_with_timeout(
+        &app,
+        &host,
+        port,
+        &ssh_user,
+        &password,
+        LIST_SITES_SESSION_TIMEOUT,
+    )
+    .await;
+    // Пароль сервера дальше не нужен ни на успешном пути, ни на ошибочном.
+    password.zeroize();
+    let mut session = session?;
+
+    // Бинарь панели ищем как везде (`get_fastpanel_path`); не нашли — `list_sites`
+    // всё равно попробует файловую раскладку `/var/www/*/data/www/*`.
+    let fp_path = fastpanel::get_fastpanel_path(&mut session, None).await;
+    let sites = match fp_path {
+        Ok(fp) => fastpanel::list_sites(&mut session, fp.as_deref()).await,
+        Err(e) => Err(e),
+    };
+    let _ = session.disconnect().await;
+    sites.map_err(|e| CommandError::Api(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
