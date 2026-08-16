@@ -510,6 +510,33 @@ impl ApiClient {
             .await
     }
 
+    /// Записать снимок состояния домена (`POST /domains/{id}/facts`).
+    ///
+    /// Не `PUT`, как у метаданных провижининга, а `POST` в отдельный роут: время
+    /// ставит сервер, а тело описывает ровно один из двух исходов —
+    /// `{"facts": {...}}` (успех) либо `{"error": "..."}` (неудача чтения, снимок
+    /// на сервере не трогается). Собирает тело вызывающий; здесь — та же
+    /// проверка на секретоподобные ИМЕНА полей, что у `put_metadata`: снимок
+    /// собран из строк с чужой машины (пути, логины, имена БД), и `POST` их в
+    /// БД, поэтому `debug_assert` мало.
+    pub async fn domain_facts_write_back(
+        &self,
+        domain_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<(), ApiError> {
+        if let Err(field) = crate::audit_redact::ensure_no_secrets(body) {
+            return Err(ApiError::Secret(field));
+        }
+        let (status, text) = self
+            .request_raw("POST", &format!("domains/{domain_id}/facts"), Some(body))
+            .await?;
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            Err(ApiError::Status { status, body: text })
+        }
+    }
+
     /// Записать несекретный результат установки FastPanel (`PUT /servers/{id}`).
     pub async fn server_write_back(
         &self,

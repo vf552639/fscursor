@@ -154,7 +154,36 @@ allow-list `domain.read_facts`. Тесты: `tests/test_domain_facts_endpoint.py
 
 Аудит: действие `domain.read_facts` в allow-list `backend/app/audit/service.py`.
 
-### Фаза 2 — Rust: одна сессия — весь снимок  `[ ]`
+### Фаза 2 — Rust: одна сессия — весь снимок  `[x]`
+
+**Выполнено** (2026-08-16): новый модуль `desktop/src-tauri/src/ssh/fastpanel_facts.rs`
+(`DomainFacts`, `FtpAccount`, `LogFile`; `read_domain_facts` — одна сессия на весь снимок:
+`sites list --json` → `read_ssl_info` (openssl) → FTP (фильтр по домену через `home_dir`) →
+`databases list --json` (фильтр по `site.domain`, мн.ч.) → логи (`stat` по раскладке
+`<home>/logs/<domain>-{frontend,backend}.{access,error}.log`)). PHP из `main_backend`:
+`php_version` починен фоллбэком в `normalize_site_row` (заодно чинит `list_sites`/фазу 5),
+`php_handler` выведен из `main_backend.handler` (`read_php_handler`/`php_handler_from_backend`,
+конфиг не парсим). FTP-парсинг сведён в одно место: `ftp_logins_from_json` удалён, JSON+текст
+разбирает `list_ftp_accounts` (login+home), а `ftp_exists` переписан тонкой обёрткой над ней
+(+ доскан положительного совпадения целой ячейкой). Tauri-команда `domain_read_facts`
+(`commands/domain_facts.rs`) по форме `server_list_sites`: резолв из кэша, `zeroize` пароля
+после `connect`, `HOST_KEY_UNKNOWN` внутри `ssh_connect_session_with_timeout`, write-back
+`POST /domains/{id}/facts` (`{facts}` при успехе / `{error}` без сырья при провале чтения) И
+возврат `DomainFacts` наверх; аудит `domain.read_facts` пишет сам роут. Метод
+`ApiClient::domain_facts_write_back` (гард `ensure_no_secrets`). Таймауты: exec 45с
+(`FACTS_EXEC_TIMEOUT`), сессия 600с (`FACTS_SESSION_TIMEOUT` > 45×12), соотношение под тестом.
+Тесты: 16 новых в `fastpanel_facts`/`domain_facts` на реальном выводе discovery (php-факты,
+фильтр БД по `site.domain`, FTP JSON/текст/фильтр, логи, каскады, `read_commands_argv_has_no_secret`,
+таймаут-соотношение). `cargo test` 253 зелёных (было 237), `cargo build`/`clippy` чисты, старые
+тесты `fastpanel.rs` (включая `ftp_exists`) целы.
+
+Долг: живой end-to-end прогон на root-сервере — к приёмке (парсеры покрыты юнит-тестами, но
+фактический вывод FastPanel в связке не сверялся). Ошибки самого SSH-коннекта (в т.ч.
+`HOST_KEY_UNKNOWN`) проходят наверх как есть и снимок не трогают — как в `server_list_sites`;
+`{error}` пишется только на провал чтения ПОСЛЕ коннекта. SSL берётся из файла LE-серта
+(`read_ssl_info`): у доменов с CloudFlare Origin (`certificate.type=="exists"`, без файла в
+`/etc/letsencrypt/live`) `has_certificate=false` — известный зазор, при нужде добить из
+`sites list` `certificate{}`.
 
 Новый модуль `desktop/src-tauri/src/ssh/fastpanel_facts.rs` (отдельный файл, а не рост
 `fastpanel.rs`: тот уже 1900 строк, и чтение — самостоятельная ответственность).
