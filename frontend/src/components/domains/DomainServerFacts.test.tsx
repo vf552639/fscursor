@@ -6,7 +6,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import DomainServerFacts from "./DomainServerFacts";
 import { queryClient } from "../../api/queryClient";
 import type { DomainFacts } from "../../lib/domainFacts";
-import { setTauri, setBlobUser, clearBlobUser } from "../../test/secretBlobKit";
+import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from "../../test/secretBlobKit";
 
 /**
  * Секция «Server state» карточки домена: витрина прочитанного с сервера с
@@ -18,12 +18,26 @@ import { setTauri, setBlobUser, clearBlobUser } from "../../test/secretBlobKit";
  *  - лестница SSL: протухший снимок не зелёный, «нет сертификата» отличимо.
  */
 
-const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn(), invokeIfTauri: vi.fn(), apiPut: vi.fn() }));
 
 vi.mock("../../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
+}));
+
+// Мокаем транспорт (`vault_put_blob`-канал и `apiPut`), а не сам `secretBlob`:
+// тест обязан ВИДЕТЬ, что уехало в блоб (плейнтекст) и что — в тело PUT (только
+// blobId). Заглушка над `putSecretBlob`/`useSecretSave` пропустила бы регрессию,
+// прокидывающую пароль в `variables` мутации домена.
+vi.mock("../../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
+}));
+
+vi.mock("../../api/client", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  apiPut: mocks.apiPut,
 }));
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -56,6 +70,25 @@ function domain(over: Record<string, unknown> = {}) {
     ftp_user: "example_ftp",
     ...over,
   } as any;
+}
+
+/**
+ * Аргументы всех mock-вызовов, КРОМЕ `vault_put_blob` (единственного законного
+ * получателя плейнтекста), в виде JSON-строк — чтобы искать в них утечку.
+ */
+function otherMockCalls(): { name: string; blob: string }[] {
+  const out: { name: string; blob: string }[] = [];
+  for (const c of mocks.invokeIfTauri.mock.calls) {
+    if (c[0] === "vault_put_blob") continue;
+    out.push({ name: `invokeIfTauri:${String(c[0])}`, blob: JSON.stringify(c) });
+  }
+  for (const c of mocks.invokeSynced.mock.calls) {
+    out.push({ name: `invokeSynced:${String(c[0])}`, blob: JSON.stringify(c) });
+  }
+  for (const c of mocks.apiPut.mock.calls) {
+    out.push({ name: "apiPut", blob: JSON.stringify(c) });
+  }
+  return out;
 }
 
 function show(over: Record<string, unknown> = {}, server = SERVER) {
@@ -157,11 +190,48 @@ describe("пароль FTP", () => {
     expect(screen.queryByText("Задать пароль")).toBeNull();
   });
 
-  it("в десктопе «Задать пароль» открывает поле, плейнтекста-значения в DOM нет", () => {
+  it("«Задать пароль»: плейнтекст уходит ТОЛЬКО в vault_put_blob, в PUT домена — лишь blobId", async () => {
+    // Единственный security-инвариант фазы: пароль FTP не попадает ни в
+    // `variables` мутации `updateDomain`, ни в тело PUT, ни в один другой вызов
+    // — только в блоб. Регрессия «прокинули `ftp_password` в мутацию» обязана
+    // красить этот тест, поэтому он ВВОДИТ значение и стережёт его отсутствие.
+    const SENTINEL = "ftp-sentinel-pw-9f3";
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValue(undefined);
+    mocks.apiPut.mockResolvedValue(domain());
+    show();
+
+    fireEvent.click(screen.getByText("Задать пароль"));
+    fireEvent.change(screen.getByLabelText("FTP password"), { target: { value: SENTINEL } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+
+    // Легитимный путь: плейнтекст уехал в блоб байт в байт и под верным kind.
+    const blob = putBlobArgs(mocks.invokeIfTauri);
+    expect(blob.blobKind).toBe("domain_ftp_password");
+    expect(blobPlaintext(blob)).toBe(SENTINEL);
+    const b64 = blob.plaintextB64 as string;
+
+    // Инвариант: PUT /domains/42 несёт ТОЛЬКО ссылку на блоб.
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/domains/42");
+    expect(body).toEqual({ ftp_password_blob_id: blob.blobId });
+    expect(JSON.stringify(body)).not.toContain(SENTINEL);
+    expect(JSON.stringify(body)).not.toContain(b64);
+
+    // И нигде больше: ни в одном mock-вызове, кроме `vault_put_blob`, нет ни
+    // плейнтекста, ни его base64.
+    const leaked = otherMockCalls().filter(
+      (c) => c.blob.includes(SENTINEL) || c.blob.includes(b64),
+    );
+    expect(leaked).toEqual([]);
+  });
+
+  it("в десктопе «Задать пароль» открывает поле ввода (по aria-label), а не показывает секрет", () => {
     setTauri(true);
     show();
     fireEvent.click(screen.getByText("Задать пароль"));
-    // Поле ввода есть (по aria-label), но это ВВОД, а не показанный секрет.
     expect(screen.getByLabelText("FTP password")).toBeTruthy();
   });
 

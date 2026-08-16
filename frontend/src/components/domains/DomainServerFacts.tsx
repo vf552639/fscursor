@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { Domain, useReadDomainFacts, useUpdateDomain } from "../../api/domains";
 import { Server } from "../../api/servers";
 import { SslState, isFactsStale, sslState } from "../../lib/domainFacts";
+import { formatExpiryDate } from "../../lib/domainExpiry";
 import { BLOB_KIND } from "../../lib/secretBlob";
 import { isTauri } from "../../lib/runtime";
 import { useSecretSave } from "../../hooks/useSecretSave";
@@ -149,7 +150,11 @@ export default function DomainServerFacts({
           {facts?.ssl.error ? (
             <div style={{ fontSize: 12.5, color: "#b91c1c" }}>{facts.ssl.error}</div>
           ) : null}
-          <Row k="Expires" v={facts?.ssl.expires_at ? fmtUtcDate(facts.ssl.expires_at) : null} />
+          {/* `ssl.expires_at` — полный datetime: печатаем в зоне ЧИТАТЕЛЯ
+              (`formatExpiryDate` сам это решает по форме iso), не в UTC. Иначе
+              далеко от UTC дата съедет на день и разойдётся с остальным кодом
+              (правило в `domainExpiry.ts`). */}
+          <Row k="Expires" v={facts?.ssl.expires_at ? formatExpiryDate(facts.ssl.expires_at) : null} />
           <Row k="Issuer" v={facts?.ssl.issuer} />
         </div>
 
@@ -188,18 +193,6 @@ export default function DomainServerFacts({
       </div>
     </div>
   );
-}
-
-/** `2026-09-01T…Z` → `01.09.2026` в UTC — как срок домена в остальной карточке. */
-function fmtUtcDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return NONE;
-  return d.toLocaleDateString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    timeZone: "UTC",
-  });
 }
 
 /**

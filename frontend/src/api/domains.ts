@@ -255,6 +255,13 @@ export function readDomainFactsKey(domainId: number) {
  * Инвалидация — в `finally`: провалившаяся попытка тоже кладёт `fp_check_error`
  * в БД, и его надо показать. Сам снимок при провале не трогается — за это
  * отвечает сервер (`domain_service.apply_facts`).
+ *
+ * Путь `userId missing` бросает, и `runExclusive` его глотает — сообщения
+ * пользователю нет, и это СОЗНАТЕЛЬНО: кнопка «Проверить» рисуется только в
+ * десктопе, а `fp_check_error` в БД кладёт лишь Tauri-команда (сюда мы до неё не
+ * доходим). Показать в вебе-читалке нечем и негде; в заблокированной сессии
+ * десктопа клик просто снимет `pending`, а не соврёт про результат. Отдельный
+ * канал ошибки этой кнопки — отдельная уборка, не эта фаза.
  */
 export async function runReadDomainFacts(domainId: number): Promise<void> {
   await runExclusive(readDomainFactsKey(domainId), async () => {
