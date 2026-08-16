@@ -98,7 +98,15 @@
   `opaque_exit` для команд с паролем в argv, каскад json → текстовая таблица → «не знаем».
 - Прописать `docs/FASTPANEL_CLI.md` в `CLAUDE.md` (таблица «где что искать») и в `docs/`.
 
-### Фаза 1 — Бэкенд: место под факты с сервера  `[ ]`
+### Фаза 1 — Бэкенд: место под факты с сервера  `[x]`
+
+**Выполнено** (2026-08-16): миграция `017_domain_fastpanel_facts` применена к БД;
+модель, схемы (`DomainFactsIn`, поля в `DomainResponse`/`DomainUpdate`), роут
+`POST /domains/{id}/facts` (выше `GET /{domain_id}`), `domain_service.apply_facts`,
+allow-list `domain.read_facts`. Тесты: `tests/test_domain_facts_endpoint.py` (9),
+гард в `test_audit_actions.py`. Регрессия смежных файлов зелёная. Замечание:
+колонку `php_handler` роут пока не пишет — сам снимок хранится в `fp_facts`;
+отдельная колонка добавлена для будущего запроса/фильтра (фазы 2–3).
 
 Миграция `backend/alembic/versions/017_domain_fastpanel_facts.py` — колонки в `domains`:
 
