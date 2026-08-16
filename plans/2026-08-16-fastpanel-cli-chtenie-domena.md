@@ -235,7 +235,25 @@ existingBlobId: domain.ftp_password_blob_id })` → `PUT /domains/{id}`.
 править не нужно. Плейнтекст не кладётся ни в `useState`, ни в `variables` мутации —
 ограничение расписано в JSDoc `putSecretBlob`, соблюсти дословно.
 
-### Фаза 4 — Provision перестаёт терять пароль FTP  `[ ]`
+### Фаза 4 — Provision перестаёт терять пароль FTP  `[x]`
+
+**Выполнено** (2026-08-16): в `frontend/src/api/domains.ts` — helper
+`persistProvisionSecrets(domainId, result)`: `putSecretBlob` (FTP → `BLOB_KIND.domainFtpPassword`,
+БД → новый `BLOB_KIND.domainDbPassword`) + `PUT /domains/{id}` с одними лишь `*_blob_id`.
+Встроен в ЗАМЫКАНИЕ `mutationFn` одиночного provision (`provisionDomainOptions`) ДО
+`onResult`, и в цикл по `res.items` массового прогона (`runBulkProvisionDomains`) —
+поштучно на каждый `outcome:"done"`. Сохраняем только при `status:"created"`.
+`existingBlobId` берётся из строки домена в кэше (`cachedDomain` по `domainsKeys`), чтобы
+переprovision переписал ТОТ ЖЕ блоб, а не осиротил старый; строки нет — новый блоб (`null`).
+Плейнтекст живёт только в замыкании; провал сохранения обёрнут `try/catch` (лог без
+плейнтекста, показ кредов не роняется). Схемы: `db_password_blob_id` добавлен в
+`DomainUpdate`/`DomainResponse` (бэк) и в `Domain`/`DomainUpdate` (фронт); `BLOB_KIND.domainDbPassword`.
+Тесты: `frontend/src/api/domains.provisionsecrets.test.ts` (10) — плейнтекст только в
+`vault_put_blob`, в PUT лишь id, exists не сохраняет, поштучно в bulk, persist до модалки,
+провал не роняет; `backend/tests/test_provision_writeback.py::test_domain_update_accepts_ftp_and_db_password_blob_ids`.
+`npm test` 921 зелёных, `tsc`/`build` чисты, затронутый бэкенд-файл 16 passed.
+
+Изначальный замысел (ниже) исполнен как описано.
 
 В обработчике `onResult` у `useProvisionDomain` и у массового прогона
 (`frontend/src/api/domains.ts`) — сразу `putSecretBlob` + `PUT /domains/{id}` с полученным

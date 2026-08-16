@@ -5,6 +5,7 @@ import { trimDnsName } from "../lib/cfZoneMatch";
 import { type DomainFacts } from "../lib/domainFacts";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
+import { BLOB_KIND, putSecretBlob } from "../lib/secretBlob";
 import { queryClient } from "./queryClient";
 import { registrarsKeys } from "./registrars";
 import { runExclusive, useRunPending } from "./runGate";
@@ -48,6 +49,8 @@ export interface Domain {
   php_handler?: string | null;
   /** Id непрозрачного блоба с паролем FTP; наружу безопасен (как у сервера). */
   ftp_password_blob_id?: string | null;
+  /** Id непрозрачного блоба с паролем БД; наружу безопасен (как FTP выше). */
+  db_password_blob_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -81,6 +84,8 @@ export interface DomainUpdate {
    * ТОТ ЖЕ id: версии блоба ведёт сервер внутри одного id.
    */
   ftp_password_blob_id?: string | null;
+  /** То же, что `ftp_password_blob_id`, но для пароля БД (см. фазу 4). */
+  db_password_blob_id?: string | null;
 }
 
 export interface DomainBulkCreate {
@@ -531,6 +536,76 @@ export interface ProvisionOutcome {
 }
 
 /**
+ * Найти строку домена в любом закэшированном списке `useDomains` — по id. Нужна
+ * ровно для `existingBlobId`: при переprovision у домена уже может быть блоб
+ * пароля (ручной ввод фазы 3 или прошлый прогон), и переписать надо ТОТ ЖЕ id,
+ * а не осиротить старый (см. JSDoc `putSecretBlob`). Строки под рукой нет —
+ * значит блоб новый, `null`.
+ */
+function cachedDomain(domainId: number): Domain | undefined {
+  for (const [, data] of queryClient.getQueriesData<unknown>({ queryKey: domainsKeys.all })) {
+    if (Array.isArray(data)) {
+      const found = (data as Domain[]).find((d) => d?.id === domainId);
+      if (found) return found;
+    } else if (data && (data as Domain).id === domainId) {
+      return data as Domain;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Сохранить пароли FTP и БД, сгенерированные provision, в зашифрованные блобы и
+ * записать их id в домен — ДО показа модалки. Раньше пароли жили только в
+ * модалке разового показа и терялись навсегда (сервер их не знает, CLI отдаёт
+ * лишь логины).
+ *
+ * Плейнтекст (`ftp_password`/`db_password`) живёт ТОЛЬКО в этом замыкании: он
+ * приходит в `result`, уходит в `putSecretBlob` и наружу не расходится — ни в
+ * возврат `mutationFn` (там по-прежнему только `domain_id`), ни в `variables`,
+ * ни в тело `PUT` (туда едет лишь `*_blob_id`), ни в лог. Модалка разового
+ * показа остаётся как есть — она получает `result` отдельно.
+ *
+ * Сохраняем только когда пароль реально есть (`status === "created"`): у
+ * `exists` пароля в типе нет вовсе, блоб не трогаем.
+ *
+ * Провал сохранения — деградация, а не катастрофа: пароль уже показан в модалке.
+ * Поэтому вся операция обёрнута в `try/catch` — ошибка `putSecretBlob`/`PUT`
+ * логируется (без плейнтекста: `e` их не содержит) и не мешает показать креды.
+ * Молча не глотаем — `console.error` остаётся следом.
+ */
+async function persistProvisionSecrets(
+  domainId: string | number,
+  result: ProvisionDesktopResult,
+): Promise<void> {
+  try {
+    const existing = cachedDomain(Number(domainId));
+    const patch: DomainUpdate = {};
+    if (result.ftp?.status === "created") {
+      patch.ftp_password_blob_id = await putSecretBlob({
+        plaintext: result.ftp.ftp_password,
+        blobKind: BLOB_KIND.domainFtpPassword,
+        existingBlobId: existing?.ftp_password_blob_id ?? null,
+      });
+    }
+    if (result.db?.status === "created") {
+      patch.db_password_blob_id = await putSecretBlob({
+        plaintext: result.db.db_password,
+        blobKind: BLOB_KIND.domainDbPassword,
+        existingBlobId: existing?.db_password_blob_id ?? null,
+      });
+    }
+    if (patch.ftp_password_blob_id != null || patch.db_password_blob_id != null) {
+      await apiPut<Domain>(`/domains/${domainId}`, patch);
+    }
+  } catch (e) {
+    // Без плейнтекста: `e` — Error от Tauri-IPC или свёрнутый axios-`detail`,
+    // а тело `PUT` несёт только id блоба. Провал одного домена не роняет показ.
+    console.error(`provision: could not persist FTP/DB password for domain #${domainId}`, e);
+  }
+}
+
+/**
  * Ключ запущенного provision. Общий на все домены, конкретный отбирается
  * предикатом по `variables.domainId` — как у `SET_NAMESERVERS_KEY`, и по той же
  * причине: хук на странице один, а строк в таблице много.
@@ -586,6 +661,10 @@ function provisionDomainOptions(onResult: (outcome: ProvisionOutcome) => void) {
         siteOnly: false,
         withDb: vars.withDb,
       });
+      // Сохранить пароли FTP/БД в блобы ДО показа модалки — иначе они живут
+      // только в модалке разового показа и теряются навсегда. Плейнтекст не
+      // покидает это замыкание (см. `persistProvisionSecrets`).
+      await persistProvisionSecrets(vars.domainId, result);
       onResult({ domain: vars.domainName, result });
       // НЕ «return result»: пароли ушли бы в data MutationCache — см. JSDoc.
       return { domain_id: result.domain_id };
@@ -898,6 +977,16 @@ export async function runBulkProvisionDomains(
       userId,
       domainIds: ids,
     });
+    // Сохранить пароли ПО МЕРЕ прохода по очереди, а не одним махом в конце:
+    // у каждого отработавшего домена свой `putSecretBlob` + `PUT`, и провал
+    // одного (внутри `persistProvisionSecrets` он в `try/catch`) не уносит
+    // остальные. Rust отдаёт весь отчёт разом, поэтому «по мере» здесь — это
+    // поэлементный цикл, а не общий батч.
+    for (const item of res.items) {
+      if (item.outcome === "done") {
+        await persistProvisionSecrets(item.domain_id, item.result);
+      }
+    }
     return parseBulkProvisionResult(res);
   } finally {
     release();

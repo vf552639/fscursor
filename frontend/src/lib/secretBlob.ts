@@ -26,6 +26,7 @@ export const BLOB_KIND = {
   registrarApiSecret: "registrar_api_secret",
   cloudflareApiToken: "cloudflare_api_token",
   domainFtpPassword: "domain_ftp_password",
+  domainDbPassword: "domain_db_password",
 } as const;
 
 export type BlobKind = (typeof BLOB_KIND)[keyof typeof BLOB_KIND];

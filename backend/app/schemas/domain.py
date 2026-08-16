@@ -79,6 +79,10 @@ class DomainUpdate(BaseModel):
     # что и `ssh_password_blob_id` у сервера). `PUT /domains/{id}` его применяет
     # общим циклом `setattr` в `domain_service.update`.
     ftp_password_blob_id: Optional[UUID] = None
+    # Пароль БД — тот же путь, что и FTP выше: provision генерирует его на
+    # сервере и больше нигде не хранит, фронт шифрует в блоб и присылает сюда
+    # только его id. Плейнтекста здесь нет и быть не должно.
+    db_password_blob_id: Optional[UUID] = None
 
     # Переименование — тот же путь записи имени, что и заведение, и правило на
     # нём то же: без него `PUT {"domain_name": "не домен вовсе"}` отвечал 200,
@@ -121,6 +125,10 @@ class DomainResponse(DomainBase):
     fp_facts_at: Optional[datetime] = None
     php_handler: Optional[str] = None
     ftp_password_blob_id: Optional[UUID] = None
+    # id блоба с паролем БД — наружу безопасен по той же причине, что и
+    # `ftp_password_blob_id` выше: это непрозрачная ссылка, а не пароль. Фронт
+    # берёт его, чтобы при переprovision переписать тот же блоб, а не осиротить.
+    db_password_blob_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
 

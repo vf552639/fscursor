@@ -58,6 +58,7 @@ describe("BLOB_KIND", () => {
       registrarApiSecret: "registrar_api_secret",
       cloudflareApiToken: "cloudflare_api_token",
       domainFtpPassword: "domain_ftp_password",
+      domainDbPassword: "domain_db_password",
     });
     // Ограничение колонки `blob_kind` — String(64).
     for (const v of Object.values(BLOB_KIND)) expect(v.length).toBeLessThanOrEqual(64);
