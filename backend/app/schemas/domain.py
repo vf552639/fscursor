@@ -154,6 +154,15 @@ class DomainFactsIn(BaseModel):
     (`_at_least_facts_or_error`): пустая попытка ничего не сообщает и лишь
     двигала бы `fp_checked_at`, из-за чего протухший снимок начал бы выглядеть
     свежим.
+
+    Успех — это `facts` с содержимым, а не `facts: null`. Здесь мы намеренно
+    ЖЁСТЧЕ зеркала (`ServerMetricsIn`, где `null` на отдельной метрике — легальное
+    «эту метрику снять не смогли»): там поле — одно из многих показаний, а тут
+    `facts` — весь снимок целиком, и `null` в нём не значит ничего законного.
+    «Не смогли прочитать» выражается каналом `error`; `{"facts": null}` без
+    `error` попал бы в success-ветку и стёр бы (да ещё омолодил) последний
+    хороший снимок — ровно то, что инвариант двух времён обязан не допустить.
+    Поэтому такое тело — 422 (`_at_least_facts_or_error`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -163,14 +172,25 @@ class DomainFactsIn(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_facts_or_error(self) -> "DomainFactsIn":
-        """Тело без `facts` и без `error` — отказ.
+        """Тело обязано нести успех (`facts` с содержимым) либо неудачу (`error`).
 
-        Считается `model_fields_set`, а не значения: `{"error": ...}` — законная
-        неудача, а тело вовсе без полей смысла не несёт. Ровно та же граница и по
-        той же причине, что у `ServerMetricsIn._at_least_one_metric`.
+        Две проверки, обе про инвариант двух времён:
+
+        * тело без единственного значащего поля — отказ. Считается
+          `model_fields_set`, а не значения: `{"error": ...}` — законная неудача,
+          а тело вовсе без полей смысла не несёт (та же граница, что у
+          `ServerMetricsIn._at_least_one_metric`);
+        * успех без снимка — тоже отказ. Если `error` не задан, это success-путь,
+          и `facts=None` там стёр бы и омолодил последний хороший снимок. «Не
+          смогли прочитать» шлётся через `error`, а не `facts: null`.
         """
         if not self.model_fields_set:
             raise ValueError("either 'facts' or 'error' must be present")
+        if self.error is None and self.facts is None:
+            raise ValueError(
+                "'facts' must be a non-null snapshot on success; "
+                "send 'error' to report a failure"
+            )
         return self
 
 

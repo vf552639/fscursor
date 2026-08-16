@@ -101,6 +101,12 @@ async def test_facts_land_in_the_columns_and_time_is_set_by_the_server():
             assert before - timedelta(minutes=1) <= ts <= datetime.now(timezone.utc) + timedelta(
                 minutes=1
             ), f"{col}={ts!r}"
+        # На успехе оба времени — один и тот же момент: сервис ставит их из одной
+        # переменной `now`. Якорим равенство, иначе разъезд двух `datetime.now()`
+        # тест не заметил бы (окно ±1 мин проглотило бы его).
+        assert stored["fp_checked_at"] == stored["fp_facts_at"], (
+            "успех проставил fp_checked_at и fp_facts_at разными моментами"
+        )
 
         # Тело ответа тоже отдаёт свежее — иначе для read-only веба снимка нет.
         body = r.json()
@@ -218,6 +224,36 @@ async def test_empty_body_is_refused():
         assert r.status_code == 422, r.text
         assert (await _stored(domain_id))["fp_checked_at"] is None, (
             "пустое тело сдвинуло время попытки"
+        )
+
+
+@pytest.mark.asyncio
+async def test_null_facts_without_error_is_refused_and_keeps_the_snapshot():
+    """`{"facts": null}` без `error` — 422, и прошлый снимок НЕ стёрт.
+
+    `facts` — весь снимок целиком, и `null` в нём не значит ничего законного:
+    «не смогли прочитать» шлётся через `error`. Без ужесточения (`DomainFactsIn.
+    _at_least_facts_or_error`) такое тело попало бы в success-ветку `apply_facts`
+    и записало бы `fp_facts=None` + свежий `fp_facts_at` — то есть и стёрло, и
+    омолодило последний хороший снимок. Проверка по колонкам: предмет здесь —
+    что снимок остался прежним, а не что вернулся 422.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "facts-null")
+        domain_id = await _create_domain(c)
+
+        r = await c.post(f"/api/domains/{domain_id}/facts", json={"facts": FACTS})
+        assert r.status_code == 200, r.text
+        good = await _stored(domain_id)
+
+        r = await c.post(f"/api/domains/{domain_id}/facts", json={"facts": None})
+        assert r.status_code == 422, r.text
+
+        after = await _stored(domain_id)
+        assert after["fp_facts"] == good["fp_facts"], "facts:null стёр последний хороший снимок"
+        assert after["fp_facts_at"] == good["fp_facts_at"], "facts:null омолодил снимок"
+        assert after["fp_checked_at"] == good["fp_checked_at"], (
+            "отвергнутое тело сдвинуло время попытки"
         )
 
 
