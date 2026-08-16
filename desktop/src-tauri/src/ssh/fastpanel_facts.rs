@@ -179,6 +179,23 @@ pub(crate) fn ssl_from_certificate(cert: &serde_json::Value) -> Option<SslInfo> 
     })
 }
 
+/// Обезличенный класс вместо сырого вывода openssl в `SslInfo::error`.
+///
+/// `read_ssl_info` шарится с провижинингом и при неудаче openssl кладёт в
+/// `error` сырой stdout/stderr. Секрета в нём нет (openssl над публичным сертом),
+/// но модуль обещает «ни сырого вывода команд», а `SslInfo` уходит write-back'ом
+/// в БД. Чиним на ГРАНИЦЕ фактов, не трогая сам `read_ssl_info`: сырьё есть —
+/// заменяем классом, `None` (успех) не трогаем. Форму `SslInfo` не меняем.
+const SSL_READ_FAILED: &str = "ssl read failed";
+
+/// Заменить сырой `error` обезличенным классом; успешный путь (`None`) не трогаем.
+pub(crate) fn redact_ssl_error(mut ssl: SslInfo) -> SslInfo {
+    if ssl.error.is_some() {
+        ssl.error = Some(SSL_READ_FAILED.to_string());
+    }
+    ssl
+}
+
 /// Домашний каталог владельца сайта из строки JSON (`owner.home_dir`).
 /// По нему строится путь к логам. `None` — владелец в JSON не назван.
 fn owner_home_from_row(site_row: &serde_json::Value) -> Option<String> {
@@ -575,7 +592,7 @@ pub async fn read_domain_facts(
     // серт установлен и валиден. Когда файла нет, но в строке сайта есть объект
     // `certificate{}` с разбираемой датой — обогащаем из него (приоритет всё
     // равно у openssl: сюда попадаем только при `has_certificate=false`).
-    let mut ssl = read_ssl_info(s, domain).await?;
+    let mut ssl = redact_ssl_error(read_ssl_info(s, domain).await?);
     if !ssl.has_certificate {
         if let Some(enriched) = site_row
             .as_ref()
@@ -709,6 +726,38 @@ mod tests {
 
         // Без разбираемой даты — None (остаётся честное «серта нет»).
         assert!(ssl_from_certificate(&serde_json::json!({"type":"exists"})).is_none());
+    }
+
+    #[test]
+    fn ssl_error_is_redacted_at_the_facts_boundary() {
+        // Сырой вывод openssl (несекретный, но именно СЫРОЙ) не должен уезжать в
+        // `DomainFacts`/БД — инвариант «нет сырого вывода команд».
+        let raw = SslInfo {
+            has_certificate: true,
+            expires_at: None,
+            issuer: None,
+            is_letsencrypt: false,
+            error: Some(
+                "unable to load certificate\n140735:error:0906D06C:PEM routines:\
+                 PEM_read_bio:no start line:/BUILD/crypto/pem/pem_lib.c:707"
+                    .into(),
+            ),
+        };
+        let out = redact_ssl_error(raw);
+        assert_eq!(out.error.as_deref(), Some("ssl read failed"));
+        assert!(!out.error.as_deref().unwrap().contains("PEM"));
+        // Прочие поля не тронуты.
+        assert!(out.has_certificate);
+
+        // Успешный путь (error=None) не задет.
+        let ok = SslInfo {
+            has_certificate: true,
+            expires_at: None,
+            issuer: Some("Let's Encrypt".into()),
+            is_letsencrypt: true,
+            error: None,
+        };
+        assert_eq!(redact_ssl_error(ok).error, None);
     }
 
     #[test]
