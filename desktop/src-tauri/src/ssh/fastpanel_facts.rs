@@ -151,6 +151,34 @@ pub(crate) fn find_site_row(raw: &str, domain: &str) -> Option<serde_json::Value
     None
 }
 
+/// SSL из объекта `certificate{}` строки `sites list --json` — фоллбэк, когда
+/// LE-файла на диске нет.
+///
+/// `read_ssl_info` смотрит только `/etc/letsencrypt/live/<domain>/fullchain.pem`,
+/// а у доменов с CloudFlare Origin (`certificate.type=="exists"`) LE-файла нет —
+/// без этого обогащения живой серт (в discovery `gala-casino-uk.net`,
+/// `expired_at` в 2040) выглядел бы как «сертификата нет». `None` — объекта нет
+/// либо дату не разобрать; тогда остаётся честное «серта нет» от `read_ssl_info`.
+///
+/// ⚠️ `certificate.enabled` бывает `false` даже у валидного будущего серта
+/// (сверено) — признаком наличия он НЕ служит, доверяем `expired_at`. Издателя
+/// точно не знаем (это не openssl над цепочкой), поэтому `issuer: None`;
+/// `is_letsencrypt` — по `type`.
+pub(crate) fn ssl_from_certificate(cert: &serde_json::Value) -> Option<SslInfo> {
+    let raw = cert.get("expired_at").and_then(|v| v.as_str())?.trim();
+    let exp = chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let cert_type = cert.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    Some(SslInfo {
+        has_certificate: true,
+        expires_at: Some(exp),
+        issuer: None,
+        is_letsencrypt: cert_type.eq_ignore_ascii_case("letsencrypt"),
+        error: None,
+    })
+}
+
 /// Домашний каталог владельца сайта из строки JSON (`owner.home_dir`).
 /// По нему строится путь к логам. `None` — владелец в JSON не назван.
 fn owner_home_from_row(site_row: &serde_json::Value) -> Option<String> {
@@ -542,8 +570,22 @@ pub async fn read_domain_facts(
         });
 
     // 2. SSL — переиспользуем `read_ssl_info` (openssl над файлом серта): точный
-    // срез и издатель, как задумано планом.
-    let ssl = read_ssl_info(s, domain).await?;
+    // срез и издатель, как задумано планом. Но он видит только LE-файл на диске;
+    // у доменов с CloudFlare Origin (`certificate.type=="exists"`) его нет, а
+    // серт установлен и валиден. Когда файла нет, но в строке сайта есть объект
+    // `certificate{}` с разбираемой датой — обогащаем из него (приоритет всё
+    // равно у openssl: сюда попадаем только при `has_certificate=false`).
+    let mut ssl = read_ssl_info(s, domain).await?;
+    if !ssl.has_certificate {
+        if let Some(enriched) = site_row
+            .as_ref()
+            .and_then(|r| r.get("certificate"))
+            .filter(|c| c.is_object())
+            .and_then(ssl_from_certificate)
+        {
+            ssl = enriched;
+        }
+    }
 
     // 3. FTP — глобальный список, отфильтрованный по домену через home_dir.
     let ftp_all = list_ftp_accounts(s, fp_path).await?.unwrap_or_default();
@@ -635,6 +677,38 @@ mod tests {
         let row2 = find_site_row(SITES_JSON, "template1.website").unwrap();
         assert_eq!(read_php_handler(&row2).as_deref(), Some("php-fpm"));
         assert_eq!(normalize_site_row(&row2).unwrap().php_version.as_deref(), Some("8.1"));
+    }
+
+    // ---- SSL из certificate{} (фоллбэк для CloudFlare Origin) --------------
+
+    #[test]
+    fn ssl_enriched_from_certificate_object() {
+        // Реальный объект gala-casino-uk.net из discovery: type="exists",
+        // enabled=false, но серт валиден до 2040. Доверяем дате, не enabled.
+        let cert: serde_json::Value = serde_json::from_str(
+            r#"{"id":6,"name":"CloudFlare Origin Certificate_2025-12-09-17-46_59",
+                "type":"exists","enabled":false,"expires":5474,
+                "created_at":"2025-12-09T17:46:59.147254687Z","expired_at":"2040-12-05T17:42:00Z"}"#,
+        )
+        .unwrap();
+        let ssl = ssl_from_certificate(&cert).unwrap();
+        assert!(ssl.has_certificate);
+        assert!(!ssl.is_letsencrypt);
+        assert_eq!(ssl.issuer, None);
+        assert_eq!(
+            ssl.expires_at.unwrap().to_rfc3339(),
+            "2040-12-05T17:42:00+00:00"
+        );
+
+        // LE-серт из объекта — is_letsencrypt=true.
+        let le: serde_json::Value = serde_json::from_str(
+            r#"{"type":"letsencrypt","enabled":false,"expired_at":"2026-10-03T23:47:45Z"}"#,
+        )
+        .unwrap();
+        assert!(ssl_from_certificate(&le).unwrap().is_letsencrypt);
+
+        // Без разбираемой даты — None (остаётся честное «серта нет»).
+        assert!(ssl_from_certificate(&serde_json::json!({"type":"exists"})).is_none());
     }
 
     #[test]

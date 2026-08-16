@@ -177,13 +177,20 @@ allow-list `domain.read_facts`. Тесты: `tests/test_domain_facts_endpoint.py
 таймаут-соотношение). `cargo test` 253 зелёных (было 237), `cargo build`/`clippy` чисты, старые
 тесты `fastpanel.rs` (включая `ftp_exists`) целы.
 
+Спец-ревью (2026-08-16) закрыто двумя правками:
+- **#2 честная свежесть**: провал самого коннекта (TCP refused, auth) теперь пишет на сервер
+  `{error}` ПЕРЕД пробросом `Err` (`apply_facts` двигает `fp_checked_at`/`fp_check_error`,
+  снимок не трогая) — лежачий сервер больше не выглядит «давно не проверяли». `HOST_KEY_UNKNOWN`
+  различён и НЕ трактуется как провал (проброс без записи). Тест `only_host_key_unknown_is_not_a_failure`;
+  полный путь через SSH — к живому прогону.
+- **#3 верный SSL**: `read_domain_facts` обогащает `SslInfo` из `site_row.certificate{}`, когда
+  LE-файла нет (`ssl_from_certificate`): CloudFlare Origin (`type=="exists"`, `expired_at` 2040)
+  показывается валидным, а не «серта нет». Форма `SslInfo` не тронута; `enabled` игнорируется
+  (бывает false у валидного), доверяем `expired_at`; issuer=None, is_letsencrypt по `type`.
+  Тест `ssl_enriched_from_certificate_object` на реальном объекте gala. `cargo test` 255 зелёных.
+
 Долг: живой end-to-end прогон на root-сервере — к приёмке (парсеры покрыты юнит-тестами, но
-фактический вывод FastPanel в связке не сверялся). Ошибки самого SSH-коннекта (в т.ч.
-`HOST_KEY_UNKNOWN`) проходят наверх как есть и снимок не трогают — как в `server_list_sites`;
-`{error}` пишется только на провал чтения ПОСЛЕ коннекта. SSL берётся из файла LE-серта
-(`read_ssl_info`): у доменов с CloudFlare Origin (`certificate.type=="exists"`, без файла в
-`/etc/letsencrypt/live`) `has_certificate=false` — известный зазор, при нужде добить из
-`sites list` `certificate{}`.
+фактический вывод FastPanel в связке не сверялся, и полный путь провала коннекта — тоже).
 
 Новый модуль `desktop/src-tauri/src/ssh/fastpanel_facts.rs` (отдельный файл, а не рост
 `fastpanel.rs`: тот уже 1900 строк, и чтение — самостоятельная ответственность).

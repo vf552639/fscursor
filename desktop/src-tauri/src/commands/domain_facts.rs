@@ -39,6 +39,11 @@ const FACTS_SESSION_TIMEOUT: Duration = Duration::from_secs(600);
 /// ошибке; серверу зеро-нолидж, поэтому только эта константа.
 const FACTS_READ_FAILED: &str = "could not read domain facts over ssh";
 
+/// Строка-маркер «нужно подтверждение ключа хоста», которую кладёт
+/// `ssh_connect_session_with_timeout` в `CommandError::Api`. Держим одним
+/// значением, чтобы `is_host_key_unknown` и фронт различали её одинаково.
+const HOST_KEY_UNKNOWN_SENTINEL: &str = "HOST_KEY_UNKNOWN";
+
 /// Прочитать состояние домена с сервера по SSH и записать снимок — ТОЛЬКО
 /// чтение, без мутаций сервера.
 ///
@@ -125,7 +130,25 @@ pub async fn domain_read_facts(
     .await;
     // Пароль сервера дальше не нужен ни на успешном пути, ни на ошибочном.
     password.zeroize();
-    let mut session = session?;
+    let mut session = match session {
+        Ok(s) => s,
+        Err(e) => {
+            // Провал самого коннекта (TCP refused, auth) — это НАСТОЯЩИЙ провал
+            // попытки, и он обязан быть виден в вебе (принцип №6): фиксируем на
+            // сервере телом `{error}` — `apply_facts` подвинет `fp_checked_at` и
+            // запишет `fp_check_error`, снимок не тронув. Иначе лежачий сервер
+            // выглядел бы как «давно не проверяли».
+            //
+            // Исключение — `HOST_KEY_UNKNOWN`: это не отказ, а «нужен ключ хоста».
+            // Его проброс оставляем как есть, без фиксации провала: пользователь
+            // подтвердит ключ и повторит. Различаем по тексту, как это делает
+            // фронт (`ssh_connect_session_with_timeout` кладёт именно эту строку).
+            if !is_host_key_unknown(&e) {
+                record_facts_error(&api, &domain_id).await;
+            }
+            return Err(e);
+        }
+    };
 
     // Бинарь панели ищем как везде (`get_fastpanel_path`). Без него снимок снять
     // нечем — это неудача чтения, а не «домена нет».
@@ -160,14 +183,33 @@ pub async fn domain_read_facts(
             Ok(facts)
         }
         Err(e) => {
-            // Провал чтения — фиксируем на сервере телом `{error}` (снимок не
-            // трогаем), наружу отдаём полный текст. Тоже best-effort.
-            let body = serde_json::json!({ "error": FACTS_READ_FAILED });
-            if let Err(we) = api.domain_facts_write_back(&domain_id, &body).await {
-                tracing::warn!(target: "facts", "write-back of facts error failed: {we}");
-            }
+            // Провал чтения после установленного коннекта — фиксируем на сервере
+            // телом `{error}` (снимок не трогаем), наружу отдаём полный текст.
+            record_facts_error(&api, &domain_id).await;
             Err(e)
         }
+    }
+}
+
+/// `HOST_KEY_UNKNOWN` — не отказ, а «нужно подтверждение ключа хоста».
+///
+/// `ssh_connect_session_with_timeout` схлопывает этот случай в
+/// `CommandError::Api("HOST_KEY_UNKNOWN")` (и шлёт фронту `ssh:host-key-prompt`);
+/// по этой же строке фронт узнаёт его. Отдельный класс, чтобы не записать провал
+/// туда, где провала нет.
+fn is_host_key_unknown(e: &CommandError) -> bool {
+    matches!(e, CommandError::Api(m) if m == HOST_KEY_UNKNOWN_SENTINEL)
+}
+
+/// Зафиксировать неудачную попытку на сервере (`{error}`), best-effort.
+///
+/// Снимок (`fp_facts`/`fp_facts_at`) роут при этом не трогает — двигаются только
+/// `fp_checked_at` и `fp_check_error`. Провал самой записи не роняет команду
+/// поверх исходной ошибки: пишем варнинг и идём дальше (как write-back везде).
+async fn record_facts_error(api: &ApiClient, domain_id: &str) {
+    let body = serde_json::json!({ "error": FACTS_READ_FAILED });
+    if let Err(we) = api.domain_facts_write_back(domain_id, &body).await {
+        tracing::warn!(target: "facts", "write-back of facts error failed: {we}");
     }
 }
 
@@ -185,5 +227,20 @@ mod tests {
             FACTS_SESSION_TIMEOUT > FACTS_EXEC_TIMEOUT * FACTS_READ_COMMANDS,
             "session {FACTS_SESSION_TIMEOUT:?} must exceed {FACTS_READ_COMMANDS} × {FACTS_EXEC_TIMEOUT:?}"
         );
+    }
+
+    // Ветвление правки #2: только `HOST_KEY_UNKNOWN` — не провал (его проброс без
+    // фиксации), всё прочее — настоящий провал коннекта, который надо записать.
+    // Полный путь через SSH/keychain/кэш мокать тяжело — проверяется живым
+    // прогоном; здесь закреплено само различение.
+    #[test]
+    fn only_host_key_unknown_is_not_a_failure() {
+        assert!(is_host_key_unknown(&CommandError::Api(
+            "HOST_KEY_UNKNOWN".into()
+        )));
+        assert!(!is_host_key_unknown(&CommandError::Api(
+            "connect: connection refused".into()
+        )));
+        assert!(!is_host_key_unknown(&CommandError::Ssh("auth failed".into())));
     }
 }
