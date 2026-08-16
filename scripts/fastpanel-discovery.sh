@@ -28,10 +28,20 @@
 #   #sdmp:note <текст>      пояснение разведчика, не вывод команды
 #   #sdmp:end               вывод доехал целиком
 #
+# Секции чтения конфигов нумерованы: `nginx-conf-1`, `nginx-conf-2`, … по одному
+# файлу на секцию (и так же для `apache-conf-N`). Номер держит имя уникальным,
+# сколько бы конфигов у домена ни нашлось; `*-conf-0` — «читать было нечего»
+# (каталога, домена или файлов нет).
+#
 # Всё до первого маркера — предупреждение оператору и SSH-баннер, не данные.
 #
 # Использование:
-#   bash scripts/fastpanel-discovery.sh [домен] > discovery.txt 2>&1
+#   bash scripts/fastpanel-discovery.sh [домен] > discovery.txt
+#
+# Без `2>&1` намеренно: stderr самих команд перехватывается внутри `run`/`run_sh`
+# и уходит в файл через stdout, а на канале stderr остаётся только копия
+# предупреждения — при `> discovery.txt` она и покажется оператору на экране.
+# Дописать `2>&1` значило бы спрятать предупреждение обратно в файл.
 #
 # Домен нужен доменно-зависимым секциям (конфиги nginx/apache, логи). Если не
 # передан — берётся первый сайт с сервера, а если и его нет, секции честно
@@ -144,14 +154,22 @@ run() {
 # То же, но через шелл — только там, где нужны конвейер или glob. Строка
 # собирается из констант этого файла; единственное, что приезжает в неё извне —
 # путь к логам, и он проходит через `printf %q` на месте сборки.
+#
+# `set -o pipefail` внутри подоболочки: все конвейеры здесь — `find|head` и
+# `ls|head`, и без него `#sdmp:exit` отражал бы код `head`, а не исследуемой
+# команды, хотя в шапке заявлено обратное. Побочный эффект приемлем и
+# информативен: когда `head` обрывает длинный вывод, отправитель ловит SIGPIPE и
+# код секции становится 141 — это видно в выводе и означает «данных было больше
+# лимита», а не отказ. Скрипт при этом не падает: `set -e` тут нет, а pipefail
+# заперт в подоболочке `$(...)` и на остальные секции не распространяется.
 run_sh() {
   local name="$1" cmd="$2"
   section "$name"
   printf '%scmd %s\n' "$MARK" "$cmd"
   if [ -n "$TIMEOUT_BIN" ]; then
-    LAST_OUT="$("$TIMEOUT_BIN" "$CMD_TIMEOUT" bash -c "$cmd" </dev/null 2>&1)"
+    LAST_OUT="$("$TIMEOUT_BIN" "$CMD_TIMEOUT" bash -c "set -o pipefail; $cmd" </dev/null 2>&1)"
   else
-    LAST_OUT="$(bash -c "$cmd" </dev/null 2>&1)"
+    LAST_OUT="$(bash -c "set -o pipefail; $cmd" </dev/null 2>&1)"
   fi
   LAST_CODE=$?
   if [ -n "$LAST_OUT" ]; then printf '%s\n' "$LAST_OUT"; fi
@@ -176,11 +194,12 @@ fp() {
 
 usage() {
   cat <<'USAGE'
-Использование: bash scripts/fastpanel-discovery.sh [домен] > discovery.txt 2>&1
+Использование: bash scripts/fastpanel-discovery.sh [домен] > discovery.txt
 
   домен   для секций с конфигами nginx/apache и раскладкой логов.
           Не передан — берётся первый сайт с сервера.
 
+Без 2>&1: так предупреждение о логинах и путях останется на экране.
 Скрипт только читает: --help, list, test, ls, find, cat, grep. Запускать от root.
 USAGE
 }
@@ -424,10 +443,16 @@ collect_site_configs() {
   # Пропускаем все три секции, а не молчим о них: набор секций в выводе должен
   # быть одинаковым на любой машине, иначе разрез вывода зависит от того, что
   # на сервере установлено.
+  # Конфигов у домена бывает несколько (nginx + apache, а то и по паре на
+  # вариант), поэтому секция чтения нумерованная: `<prefix>-conf-1`,
+  # `<prefix>-conf-2`, … Одно и то же имя, повторённое переменное число раз,
+  # ломало бы адресацию по имени у парсера; суффикс-номер делает каждую секцию
+  # уникальной. Случай «файлов нет» — это `<prefix>-conf-0`: набор имён секций
+  # тогда одинаков на любой машине, а по номеру 0 видно, что читать было нечего.
   if [ ! -d "$root" ]; then
     skip_section "$prefix-dir" "каталога $root нет"
     skip_section "$prefix-tree" "каталога $root нет"
-    skip_section "$prefix-conf" "каталога $root нет"
+    skip_section "$prefix-conf-0" "каталога $root нет"
     return 0
   fi
 
@@ -436,7 +461,7 @@ collect_site_configs() {
     "find $root -maxdepth 3 -type f -name '*.conf' | head -n $MAX_LIST_LINES"
 
   if [ -z "$DOMAIN" ]; then
-    skip_section "$prefix-conf" 'домен не определён'
+    skip_section "$prefix-conf-0" 'домен не определён'
     return 0
   fi
 
@@ -445,15 +470,16 @@ collect_site_configs() {
   local found
   found="$(find "$root" -maxdepth 3 -type f -name "${DOMAIN}*" 2>/dev/null | head -n "$MAX_SITE_CONFIGS")"
   if [ -z "$found" ]; then
-    skip_section "$prefix-conf" "файлов ${DOMAIN}* в $root нет"
+    skip_section "$prefix-conf-0" "файлов ${DOMAIN}* в $root нет"
     return 0
   fi
 
-  local file
+  local file n=0
   while IFS= read -r file; do
     [ -n "$file" ] || continue
+    n=$((n + 1))
     CONF_FILES+=("$file")
-    run "$prefix-conf" cat "$file"
+    run "$prefix-conf-$n" cat "$file"
   done <<<"$found"
 }
 
