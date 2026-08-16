@@ -2,3 +2,4 @@
 
 pub mod client;
 pub mod fastpanel;
+pub mod fastpanel_facts;

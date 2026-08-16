@@ -185,6 +185,47 @@ async def test_domain_update_accepts_provision_result_fields():
 
 
 @pytest.mark.asyncio
+async def test_domain_update_accepts_ftp_and_db_password_blob_ids():
+    """`PUT /api/domains/{id}` принимает `ftp_password_blob_id` и `db_password_blob_id`.
+
+    Фаза 4: provision генерирует пароли FTP и БД на сервере и больше нигде их не
+    хранит. Фронт шифрует их в блобы и присылает СЮДА только id блобов —
+    плейнтекст на сервер не уходит (инвариант ZK). До фазы 4 схема `DomainUpdate`
+    поле `db_password_blob_id` не принимала, и id молча пропадал.
+
+    Проверка round-trip через `GET`: id действительно легли в колонки. Блобы
+    заводятся заранее — на `*_password_blob_id` стоит FK на `blob_storage`.
+    """
+    dom = f"{uuid.uuid4().hex[:8]}.example.com"
+    ftp_blob = str(uuid.uuid4())
+    db_blob = str(uuid.uuid4())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_login(c, f"wb-blob-{uuid.uuid4().hex[:8]}@example.com")
+        # Оба блоба должны существовать: иначе FK отобьёт PUT.
+        for bid, kind in ((ftp_blob, "domain_ftp_password"), (db_blob, "domain_db_password")):
+            r = await c.put(
+                f"/api/blobs/{bid}",
+                json={"blob_kind": kind, "ciphertext_b64": b64(b"cipher")},
+            )
+            assert r.status_code == 200, r.text
+        r = await c.post("/api/domains", json={"domain_name": dom})
+        assert r.status_code == 201, r.text
+        domain_id = r.json()["id"]
+        try:
+            r = await c.put(
+                f"/api/domains/{domain_id}",
+                json={"ftp_password_blob_id": ftp_blob, "db_password_blob_id": db_blob},
+            )
+            assert r.status_code == 200, r.text
+
+            body = (await c.get(f"/api/domains/{domain_id}")).json()
+            assert body["ftp_password_blob_id"] == ftp_blob
+            assert body["db_password_blob_id"] == db_blob
+        finally:
+            await _purge(Domain, domain_id)
+
+
+@pytest.mark.asyncio
 async def test_domain_update_clears_last_provision_error_with_explicit_null():
     """Явный `null` сбрасывает `last_provision_error` в NULL.
 

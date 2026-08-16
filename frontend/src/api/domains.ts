@@ -2,10 +2,13 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { trimDnsName } from "../lib/cfZoneMatch";
+import { type DomainFacts } from "../lib/domainFacts";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
+import { BLOB_KIND, putSecretBlob } from "../lib/secretBlob";
 import { queryClient } from "./queryClient";
 import { registrarsKeys } from "./registrars";
+import { runExclusive, useRunPending } from "./runGate";
 import { useAuthStore } from "../store/auth";
 
 export interface Domain {
@@ -35,6 +38,19 @@ export interface Domain {
   nginx_override?: string | null;
   nginx_presets?: Record<string, unknown> | null;
   last_provision_error?: string | null;
+  // Факты, прочитанные с сервера по кнопке (см. `lib/domainFacts`). Два времени
+  // намеренно: `fp_facts_at` — когда снят удачный снимок (по нему считается
+  // свежесть), `fp_checked_at` — когда была последняя ПОПЫТКА (по нему уместен
+  // `fp_check_error`). Провал не стирает и не молодит снимок.
+  fp_checked_at?: string | null;
+  fp_check_error?: string | null;
+  fp_facts?: DomainFacts | null;
+  fp_facts_at?: string | null;
+  php_handler?: string | null;
+  /** Id непрозрачного блоба с паролем FTP; наружу безопасен (как у сервера). */
+  ftp_password_blob_id?: string | null;
+  /** Id непрозрачного блоба с паролем БД; наружу безопасен (как FTP выше). */
+  db_password_blob_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +77,15 @@ export interface DomainUpdate {
   expiry_date?: string | null;
   purchase_date?: string | null;
   ns_status?: string | null;
+  /**
+   * Ссылка на блоб с паролем FTP — единственный способ его сохранить. Поля
+   * `ftp_password` здесь нет намеренно: плейнтекст едет через `putSecretBlob`
+   * (см. его JSDoc), а сюда попадает только полученный id блоба. При правке —
+   * ТОТ ЖЕ id: версии блоба ведёт сервер внутри одного id.
+   */
+  ftp_password_blob_id?: string | null;
+  /** То же, что `ftp_password_blob_id`, но для пароля БД (см. фазу 4). */
+  db_password_blob_id?: string | null;
 }
 
 export interface DomainBulkCreate {
@@ -204,6 +229,85 @@ export function useBulkAssignCloudflare() {
  * оба места объясняют пользователю одно и то же, и разъехаться они не должны.
  */
 export const NS_DESKTOP_NOTE = desktopOnly("Setting nameservers");
+
+/** Та же одна фраза для чтения фактов с сервера — только десктоп. */
+export const CHECK_SERVER_DESKTOP_NOTE = desktopOnly("Checking the server");
+
+/**
+ * Ключ прогона «прочитать факты домена с сервера». По одному на домен: гейт
+ * `runExclusive` не пускает второй прогон по тому же домену (двойной клик по
+ * «Проверить»), а `useRunPending` по этому же ключу гасит кнопку. Живёт дольше
+ * карточки: чтение идёт по SSH секундами, а модалку могут закрыть, и гейт во
+ * флаге `useState` её бы не пережил (см. `runGate`).
+ */
+export function readDomainFactsKey(domainId: number) {
+  return ["read-domain-facts", domainId] as const;
+}
+
+/**
+ * Прочитать состояние домена с сервера одной SSH-сессией. ТОЛЬКО десктоп:
+ * команда резолвит домен и сервер из локального кэша, расшифровывает SSH-блоб и
+ * ходит по SSH — веб этого не может (принцип №3).
+ *
+ * Результат НЕ возвращается наружу и НЕ идёт через per-call `onSuccess`.
+ * Команда сама делает write-back снимка (или его ошибки) в
+ * `POST /domains/{id}/facts`, а обновление карточки — это инвалидация списка
+ * ВНУТРИ прогона (`run`-замыкание `runExclusive`). И то и другое переживает
+ * закрытие модалки во время чтения; per-call `onSuccess` — нет (`MutationObserver`
+ * гасит его при размонтировании, ровно как у provision). Фактов-секретов в
+ * ответе нет (пароль FTP CLI не отдаёт), но и гонять их через кэш ни к чему.
+ *
+ * Инвалидация — в `finally`: провалившаяся попытка тоже кладёт `fp_check_error`
+ * в БД, и его надо показать. Сам снимок при провале не трогается — за это
+ * отвечает сервер (`domain_service.apply_facts`).
+ *
+ * Путь `userId missing` бросает, и `runExclusive` его глотает — сообщения
+ * пользователю нет, и это СОЗНАТЕЛЬНО: кнопка «Проверить» рисуется только в
+ * десктопе, а `fp_check_error` в БД кладёт лишь Tauri-команда (сюда мы до неё не
+ * доходим). Показать в вебе-читалке нечем и негде; в заблокированной сессии
+ * десктопа клик просто снимет `pending`, а не соврёт про результат. Отдельный
+ * канал ошибки этой кнопки — отдельная уборка, не эта фаза.
+ */
+export async function runReadDomainFacts(domainId: number): Promise<void> {
+  await runExclusive(readDomainFactsKey(domainId), async () => {
+    if (!isTauri()) {
+      throw new Error(CHECK_SERVER_DESKTOP_NOTE);
+    }
+    const userId = useAuthStore.getState().userId;
+    if (!userId) {
+      throw new Error("Desktop: unlock session (user id missing)");
+    }
+    try {
+      // `networkMode: "always"` обеспечивает сам `runExclusive`: работу делает
+      // Tauri-команда, а не webview, и `navigator.onLine` про эту сеть не знает.
+      await invokeSynced<DomainFacts>("domain_read_facts", {
+        userId,
+        domainId: String(domainId),
+      });
+    } finally {
+      // Свежую строку тянем на ОБОИХ исходах: и снимок, и `fp_check_error`
+      // команда уже записала write-back'ом, и карточка должна их показать —
+      // даже если её к этому моменту закрыли и открыли снова.
+      queryClient.invalidateQueries({ queryKey: domainsKeys.all });
+    }
+  });
+}
+
+/**
+ * Кнопка «Проверить на сервере»: запуск чтения фактов и признак «идёт прогон».
+ * `pending` читается из `MutationCache` по ключу домена, поэтому переживает
+ * закрытие/открытие модалки — второй клик по перемонтированной карточке новой
+ * SSH-сессии не откроет.
+ */
+export function useReadDomainFacts(domainId: number) {
+  const pending = useRunPending(readDomainFactsKey(domainId));
+  return {
+    pending,
+    run: () => {
+      void runReadDomainFacts(domainId);
+    },
+  };
+}
 
 /**
  * Минимум nameservers, который принимают оба регистратора. Меньше двух — это
@@ -432,6 +536,89 @@ export interface ProvisionOutcome {
 }
 
 /**
+ * Найти строку домена в любом закэшированном списке `useDomains` — по id. Нужна
+ * ровно для `existingBlobId`: при переprovision у домена уже может быть блоб
+ * пароля (ручной ввод фазы 3 или прошлый прогон), и переписать надо ТОТ ЖЕ id,
+ * а не осиротить старый (см. JSDoc `putSecretBlob`). Строки под рукой нет —
+ * значит блоб новый, `null`.
+ */
+function cachedDomain(domainId: number): Domain | undefined {
+  for (const [, data] of queryClient.getQueriesData<unknown>({ queryKey: domainsKeys.all })) {
+    if (Array.isArray(data)) {
+      const found = (data as Domain[]).find((d) => d?.id === domainId);
+      if (found) return found;
+    } else if (data && (data as Domain).id === domainId) {
+      return data as Domain;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Сохранить пароли FTP и БД, сгенерированные provision, в зашифрованные блобы и
+ * записать их id в домен — ДО показа модалки. Раньше пароли жили только в
+ * модалке разового показа и терялись навсегда (сервер их не знает, CLI отдаёт
+ * лишь логины).
+ *
+ * Плейнтекст (`ftp_password`/`db_password`) живёт ТОЛЬКО в этом замыкании: он
+ * приходит в `result`, уходит в `putSecretBlob` и наружу не расходится — ни в
+ * возврат `mutationFn` (там по-прежнему только `domain_id`), ни в `variables`,
+ * ни в тело `PUT` (туда едет лишь `*_blob_id`), ни в лог. Модалка разового
+ * показа остаётся как есть — она получает `result` отдельно.
+ *
+ * Сохраняем только когда пароль реально есть (`status === "created"`): у
+ * `exists` пароля в типе нет вовсе, блоб не трогаем.
+ *
+ * Провал сохранения — деградация, а не катастрофа: пароль уже показан в модалке.
+ * Поэтому КАЖДЫЙ `putSecretBlob` обёрнут в свой `try/catch` и `apiPut` уходит с
+ * тем, что успело зашифроваться. Иначе провал шифрования пароля БД уносил бы
+ * уже записанный блоб FTP: id получен, но `PUT` до домена не доехал — пароль
+ * зашифрован, а домен на него не ссылается, то есть потерян, ровно вопреки
+ * цели фазы. Ошибки логируются без плейнтекста (`e` его не содержит: это Error
+ * от Tauri-IPC или свёрнутый axios-`detail`), молча не глотаем.
+ *
+ * Пустой `patch` (оба блоба упали или ни одного `created`) — `PUT` не зовём.
+ */
+async function persistProvisionSecrets(
+  domainId: string | number,
+  result: ProvisionDesktopResult,
+): Promise<void> {
+  const existing = cachedDomain(Number(domainId));
+  const patch: DomainUpdate = {};
+  if (result.ftp?.status === "created") {
+    try {
+      patch.ftp_password_blob_id = await putSecretBlob({
+        plaintext: result.ftp.ftp_password,
+        blobKind: BLOB_KIND.domainFtpPassword,
+        existingBlobId: existing?.ftp_password_blob_id ?? null,
+      });
+    } catch (e) {
+      console.error(`provision: could not encrypt FTP password for domain #${domainId}`, e);
+    }
+  }
+  if (result.db?.status === "created") {
+    try {
+      patch.db_password_blob_id = await putSecretBlob({
+        plaintext: result.db.db_password,
+        blobKind: BLOB_KIND.domainDbPassword,
+        existingBlobId: existing?.db_password_blob_id ?? null,
+      });
+    } catch (e) {
+      console.error(`provision: could not encrypt DB password for domain #${domainId}`, e);
+    }
+  }
+  // `PUT` уходит с тем, что успело зашифроваться: линковку уже записанного
+  // блоба не теряем, даже если соседний упал. Тело — только `*_blob_id`.
+  if (patch.ftp_password_blob_id != null || patch.db_password_blob_id != null) {
+    try {
+      await apiPut<Domain>(`/domains/${domainId}`, patch);
+    } catch (e) {
+      console.error(`provision: could not link password blobs to domain #${domainId}`, e);
+    }
+  }
+}
+
+/**
  * Ключ запущенного provision. Общий на все домены, конкретный отбирается
  * предикатом по `variables.domainId` — как у `SET_NAMESERVERS_KEY`, и по той же
  * причине: хук на странице один, а строк в таблице много.
@@ -487,6 +674,10 @@ function provisionDomainOptions(onResult: (outcome: ProvisionOutcome) => void) {
         siteOnly: false,
         withDb: vars.withDb,
       });
+      // Сохранить пароли FTP/БД в блобы ДО показа модалки — иначе они живут
+      // только в модалке разового показа и теряются навсегда. Плейнтекст не
+      // покидает это замыкание (см. `persistProvisionSecrets`).
+      await persistProvisionSecrets(vars.domainId, result);
       onResult({ domain: vars.domainName, result });
       // НЕ «return result»: пароли ушли бы в data MutationCache — см. JSDoc.
       return { domain_id: result.domain_id };
@@ -799,6 +990,16 @@ export async function runBulkProvisionDomains(
       userId,
       domainIds: ids,
     });
+    // Сохранить пароли ПО МЕРЕ прохода по очереди, а не одним махом в конце:
+    // у каждого отработавшего домена свой `putSecretBlob` + `PUT`, и провал
+    // одного (внутри `persistProvisionSecrets` он в `try/catch`) не уносит
+    // остальные. Rust отдаёт весь отчёт разом, поэтому «по мере» здесь — это
+    // поэлементный цикл, а не общий батч.
+    for (const item of res.items) {
+      if (item.outcome === "done") {
+        await persistProvisionSecrets(item.domain_id, item.result);
+      }
+    }
     return parseBulkProvisionResult(res);
   } finally {
     release();

@@ -65,10 +65,13 @@ function domain(over: Record<string, unknown> = {}) {
   } as any;
 }
 
+/** Сервер домена (id 3) — чтобы карточка назвала его именем, а не сырым id. */
+const SERVERS = [{ id: 3, name: "web-01", ip_address: "10.0.0.3" }] as any[];
+
 function show(over: Record<string, unknown> = {}) {
   render(
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={domain(over)} onClose={() => {}} />
+      <DomainDetailModal domain={domain(over)} servers={SERVERS} onClose={() => {}} />
     </QueryClientProvider>,
   );
 }
@@ -142,20 +145,34 @@ describe("DomainDetailModal — overview", () => {
     expect(field("Last error")).toBe("—");
   });
 
-  it("полей под пароли нет вовсе", () => {
-    // Их и не может быть: пароли FTP и БД показываются один раз сразу после
-    // provision и нигде не хранятся. Пустая строка «FTP password: —» обещала бы
-    // значение, которое не появится никогда.
+  it("пароль FTP — поле первого класса (блоб + RevealSecret), плейнтекста в DOM нет", () => {
+    // Смысл фазы: доступ по FTP пригоден к использованию, поэтому пароль FTP
+    // теперь показывается (через блоб `ftp_password_blob_id` и `RevealSecret`).
+    // Но плейнтекста в DOM всё равно нет: без блоба — «not set», с блобом —
+    // кнопка «Show», а не сам секрет. Пароля БД по-прежнему нет вовсе — сервер
+    // его не знает.
     show({ ftp_user: "example_ftp", db_user: "example_dbu" });
-    expect(screen.queryByText(/password/i)).toBeNull();
+    expect(screen.getByText("Password")).toBeTruthy();
+    expect(screen.getByText("not set")).toBeTruthy();
+    expect(screen.queryByText(/DB password/i)).toBeNull();
   });
 
-  it("сервер и регистратор пока названы id — имён у карточки нет", () => {
-    // Зафиксировано намеренно: за именами пришлось бы тянуть сюда три списка
-    // или три новых пропа, а это работа плана про разбор страницы на
-    // компоненты. Тест не одобряет id, он не даёт им поменяться молча.
+  it("сервер назван именем (проп servers доехал), регистратор — пока id", () => {
+    // Долг «Server: 3» закрыт: имя берётся из списка серверов. Регистратор
+    // остаётся id — подставить его имя это отдельная правка (см. модалку).
     show();
-    expect(field("Server")).toBe("3");
+    expect(field("Server")).toBe("web-01");
     expect(field("Registrar")).toBe("9");
+  });
+
+  it("сервер без совпадения в списке — сырой id резервом", () => {
+    // Домен на сервере, которого в списке нет (исчез, под фильтром): id лучше
+    // пустоты. `server_id` фабрики — 3, список пуст.
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DomainDetailModal domain={domain()} servers={[]} onClose={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(field("Server")).toBe("3");
   });
 });

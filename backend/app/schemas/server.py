@@ -430,13 +430,6 @@ class FastpanelStatusResponse(BaseModel):
     log_tail: list[str]
 
 
-class SyncDomainsResponse(BaseModel):
-    created: int
-    linked: int
-    total: int
-    error: Optional[str] = None
-
-
 class ServerBulkImportError(BaseModel):
     row: int
     server: str

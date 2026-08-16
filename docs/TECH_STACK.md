@@ -32,7 +32,7 @@
 ## External Integrations
 - Cloudflare API
 - Registrar APIs (Hostiq, Namecheap)
-- FastPanel APIs / SSH-driven setup flows
+- FastPanel APIs / SSH-driven setup flows — справочник по CLI (команды, форма вывода, коды возврата, обезличенный реальный вывод): [`FASTPANEL_CLI.md`](FASTPANEL_CLI.md)
 - Optional: RapidAPI **temporary Gmail** provider (used only when `RAPIDAPI_KEY` is set and `Auto Temp Mail Enabled` is true in `system_config`)
 - Optional: **Telegram Bot API** for outbound alerts (env `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` when enabled in `system_config`)
 - Optional: operator **webhook** URL for outbound JSON payloads (stored in `system_config`, optional HMAC secret)

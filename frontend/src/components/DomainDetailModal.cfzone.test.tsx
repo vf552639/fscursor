@@ -109,7 +109,7 @@ function mockReads(reads: { zones?: any[]; registrarNs?: string[]; registrarNsEr
 function card(d: any) {
   return (
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={d} onClose={() => {}} />
+      <DomainDetailModal domain={d} servers={[]} onClose={() => {}} />
     </QueryClientProvider>
   );
 }

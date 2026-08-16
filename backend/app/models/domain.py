@@ -61,6 +61,18 @@ class Domain(Base, TimestampMixin):
     nginx_presets: Mapped[Optional[dict]] = mapped_column(JSON)
     last_provision_error: Mapped[Optional[str]] = mapped_column(Text)
 
+    # Снимок состояния домена, прочитанный десктопом с сервера по SSH
+    # (`POST /domains/{id}/facts`). Два времени намеренно: `fp_checked_at` —
+    # когда была последняя ПОПЫТКА чтения (двигается всегда), `fp_facts_at` —
+    # когда попытка в последний раз УДАЛАСЬ (двигается только на успехе).
+    # Провал пишет `fp_check_error` и `fp_checked_at`, но снимок не трогает —
+    # принцип №6 CLAUDE.md. Разбор — в миграции `017` и `domain_service.apply_facts`.
+    fp_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    fp_check_error: Mapped[Optional[str]] = mapped_column(Text)
+    fp_facts: Mapped[Optional[dict]] = mapped_column(JSON)
+    fp_facts_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    php_handler: Mapped[Optional[str]] = mapped_column(String(16))
+
     registrar: Mapped[Optional["RegistrarAccount"]] = relationship(
         back_populates="domains"
     )

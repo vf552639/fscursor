@@ -1,13 +1,14 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, mbToGb, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
-import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useSyncServerDomains } from "../api/servers";
+import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useServerListSites, ServerSite } from "../api/servers";
+import { compareServerSites } from "../lib/serverSites";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { ipError } from "../lib/ipInput";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
-import { useDomains, useDeleteDomain, useUpdateDomain } from "../api/domains";
+import { useDomains, useDeleteDomain, useUpdateDomain, Domain } from "../api/domains";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -42,6 +43,42 @@ function fastpanelUrlOf(server: any): string {
   // осесть имя хоста, и его скобки как раз сломали бы.
   const host = ip.includes(":") ? `[${ip}]` : ip;
   return `https://${host}:8888`;
+}
+
+/** Одна колонка сверки: заголовок с количеством и список имён (пусто → «—»). */
+function CompareColumn({ title, names, tone }: { title: string; names: string[]; tone: string }) {
+  return (
+    <div style={{display:"grid",gap:6,alignContent:"start"}}>
+      <div style={{fontSize:12,fontWeight:700,color:tone,textTransform:"uppercase",letterSpacing:"0.4px"}}>{title} ({names.length})</div>
+      {names.length === 0 ? (
+        <div style={{fontSize:12.5,color:"#9ca3af"}}>—</div>
+      ) : (
+        names.map((n)=><div key={n} style={{fontSize:12.5,color:"#374151",wordBreak:"break-all"}}>{n}</div>)
+      )}
+    </div>
+  );
+}
+
+/**
+ * Сверка «сайты на сервере ↔ домены SDMP». Только показывает расхождение —
+ * ничего не ресинкает (принцип №3, веб/сверка не мутируют). Раскладка на три
+ * группы — чистая `compareServerSites` (`lib/serverSites`), с тестами; здесь
+ * только рендер.
+ */
+function SiteCompareBanner({ sites, domains }: { sites: ServerSite[]; domains: Domain[] }) {
+  const cmp = compareServerSites(sites, domains);
+  return (
+    <div style={{marginBottom:20, padding:"14px 18px", borderRadius:10, background:"#f9fafb", border:"1px solid #e5e7eb"}}>
+      <div style={{fontSize:13,fontWeight:600,color:"#111",marginBottom:12}}>
+        Сверка с сервером: на сервере {sites.length}, в SDMP {domains.length}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16}}>
+        <CompareColumn title="Только на сервере" names={cmp.onlyOnServer.map((s)=>s.domain_name)} tone="#b45309" />
+        <CompareColumn title="Совпало" names={cmp.matched.map((m)=>m.domain.domain_name)} tone="#166534" />
+        <CompareColumn title="Только в SDMP" names={cmp.onlyInSdmp.map((d)=>d.domain_name)} tone="#6b7280" />
+      </div>
+    </div>
+  );
 }
 
 export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: {
@@ -117,7 +154,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // источник тех же значений умел бы разойтись с первым.
   const { data: serversList } = useServers();
   const { data: domainsData } = useDomains({ server_id: server?.id });
-  const domains = domainsData ?? [];
+  const domains: Domain[] = domainsData ?? [];
   
   // FastPanel setup
   const isFPInstalled = s?.fastpanel_status === "installed";
@@ -170,7 +207,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // Сущность, а не id: метрики снимает десктоп по SSH, и ссылку на блоб с
   // паролем знает только она (см. `useTestSsh`).
   const refreshMetrics = useRefreshMetrics(s);
-  const syncDomains = useSyncServerDomains(server?.id || 0);
+  // Сверка «сайты на сервере ↔ домены SDMP». Пришла на замену мёртвому
+  // «Sync Domains» (роут `POST /servers/{id}/sync-domains` удалён переездом на
+  // zero-knowledge — был гарантированный 404). Читает по SSH и показывает
+  // расхождение; ничего на сервере не меняет.
+  const listSites = useServerListSites(server?.id || 0);
   const updateServer = useUpdateServer(server?.id || 0);
   const deleteDomain = useDeleteDomain();
   const updateDomain = useUpdateDomain(editingDomain?.id || 0);
@@ -594,13 +635,29 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
             <DesktopOnlyNote what="Saving secrets" />
           )
         ) : null}
+        {/* Сверка сайтов с сервером — чтение по SSH, значит только десктоп (как
+            «SSH Test» и «Refresh metrics»). Не OpenInDesktop: хоста
+            `sync-domains` в parseDeepLinkAction нет (и не было — старая кнопка
+            вела в мёртвый роут), ссылка вела бы в {handled:false} и тостила бы
+            сама себя. */}
         {s.has_ssh && isFPInstalled ? (
-          <OpenInDesktop
-            action={`sync-domains?serverId=${s.id}`}
-            label={syncDomains.isPending ? "Syncing..." : "Sync Domains"}
-            desktopOnClick={() => syncDomains.mutate()}
-            disabled={syncDomains.isPending}
-          />
+          isTauri() ? (
+            <Btn
+              size="sm"
+              variant="secondary"
+              onClick={() => listSites.mutate()}
+              disabled={listSites.isPending}
+            >
+              {listSites.isPending ? "Сверяю…" : "Сверить домены"}
+            </Btn>
+          ) : (
+            // Русская заметка, а не `DesktopOnlyNote` (тот по шаблону
+            // английский): кнопка и её пояснение на карточке сервера ведутся
+            // по-русски. Чтение сайтов идёт по SSH — из браузера недостижимо.
+            <div style={{fontSize:12.5,color:"#6b7280",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8,padding:"8px 12px"}}>
+              Сверка сайтов доступна только в десктоп-приложении SDMP.
+            </div>
+          )
         ) : null}
         <OpenInDesktop
           variant="danger"
@@ -653,18 +710,17 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         Refresh metrics failed: {(refreshMetrics.error as any)?.message || "unknown error"}
       </div>
     )}
-    {syncDomains.data && (
-      <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: syncDomains.data.error ? "#fee2e2" : "#dcfce7", color: syncDomains.data.error ? "#991b1b" : "#166534", fontSize: 13}}>
-        {syncDomains.data.error
-          ? `Sync failed: ${syncDomains.data.error}`
-          : `Synced ${syncDomains.data.total} domains (${syncDomains.data.created} new, ${syncDomains.data.linked} linked).`}
+    {/* Отказ ДО/во время чтения (заперт keychain, не принятый ключ хоста, отказ
+        в коннекте) — ошибка мутации. Ветвление, а не два блока: react-query не
+        стирает `data` на старте следующей попытки, иначе рядом с красным «не
+        удалось» висела бы прошлая удачная сверка. */}
+    {listSites.isError ? (
+      <div role="alert" style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
+        Не удалось прочитать сайты с сервера: {(listSites.error as any)?.message || "request error"}
       </div>
-    )}
-    {syncDomains.isError && (
-      <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
-        Sync failed: {(syncDomains.error as any)?.message || "request error"}
-      </div>
-    )}
+    ) : listSites.data ? (
+      <SiteCompareBanner sites={listSites.data} domains={domains} />
+    ) : null}
     {s.last_check_ok === false && s.last_check_error && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
         Uptime check failed: {s.last_check_error}
@@ -852,7 +908,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
                   { icon: "✕", title: "Delete domain", variant: "danger", onClick: async () => { if (!(await confirmAction(`Delete ${d.domain_name}?`))) return; deleteDomain.mutate(d.id); } },
                 ]}/></td>
               </tr>)}
-              {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found{s.has_ssh && isFPInstalled ? '. Click "Sync Domains" to pull sites from FastPanel.' : ""}</td></tr>}
+              {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found{s.has_ssh && isFPInstalled ? '. Нажмите «Сверить домены», чтобы увидеть сайты на сервере.' : ""}</td></tr>}
             </tbody>
           </table>
         </div>

@@ -18,6 +18,9 @@ SAFE_ACTIONS = frozenset(
         # токена (зона Cloudflare, NS у регистратора), пишет в аудит десктоп
         # под `cf.zone.create` / `registrar.ns_set`.
         "domain.full_setup",
+        # Приём снимка состояния домена с сервера (`POST /domains/{id}/facts`).
+        # Мутирующий write-back с десктопа, как и `server.metrics`.
+        "domain.read_facts",
         "server.create",
         "server.update",
         "server.delete",

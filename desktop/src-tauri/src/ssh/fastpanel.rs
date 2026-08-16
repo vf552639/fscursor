@@ -103,7 +103,7 @@ pub struct EnsurePortsResult {
     pub error: Option<String>,
 }
 
-fn q(s: &str) -> String {
+pub(crate) fn q(s: &str) -> String {
     escape(Cow::Borrowed(s)).into_owned()
 }
 
@@ -296,50 +296,11 @@ fn looks_like_already_exists(output: &str) -> bool {
 /// баннер, варнинг или строка от sudo, напечатанные перед JSON, ломают разбор
 /// целиком — а «не разобрался» уводит проверку в текстовый фолбэк, то есть в
 /// самое слабое её место. Дешевле срезать шапку, чем потом гадать по таблице.
-fn json_slice(raw: &str) -> &str {
+pub(crate) fn json_slice(raw: &str) -> &str {
     match raw.find(['[', '{']) {
         Some(i) => &raw[i..],
         None => raw,
     }
-}
-
-/// Логины FTP-аккаунтов из JSON-вывода `ftp_account list --json`.
-///
-/// `None` — «разобрать не удалось», и это НЕ то же самое, что «аккаунтов нет».
-/// Список, из которого достались НЕ ВСЕ логины, — тоже `None`: формат вывода
-/// FastPanel не документирован, и запись с ключом вне нашей четвёрки означает,
-/// что мы читаем его неправильно. Молча решить «аккаунта нет» по такому чтению
-/// значило бы пойти создавать поверх существующего — а это ровно тот дефект,
-/// ради которого функция и написана. Пропущенных записей нам не видно, поэтому
-/// сравниваем длины: их равенство — единственное доказательство, что понят весь
-/// список, а не его часть.
-fn ftp_logins_from_json(raw: &str) -> Option<Vec<String>> {
-    let mut v: serde_json::Value = serde_json::from_str(json_slice(raw)).ok()?;
-    if let Some(obj) = v.as_object_mut() {
-        for key in ["result", "ftp_accounts", "accounts", "data"] {
-            if let Some(inner) = obj.get(key).cloned() {
-                v = inner;
-                break;
-            }
-        }
-    }
-    let arr = v.as_array()?;
-    let mut logins = Vec::new();
-    for item in arr {
-        let login = first_non_empty(&[
-            item.get("login").and_then(|x| x.as_str()),
-            item.get("username").and_then(|x| x.as_str()),
-            item.get("user").and_then(|x| x.as_str()),
-            item.get("name").and_then(|x| x.as_str()),
-        ]);
-        if let Some(l) = login {
-            logins.push(l.trim().to_string());
-        }
-    }
-    if logins.len() != arr.len() {
-        return None;
-    }
-    Some(logins)
 }
 
 /// Разделитель колонок: два и более пробела, табы, вертикальная черта.
@@ -349,12 +310,12 @@ fn ftp_logins_from_json(raw: &str) -> Option<Vec<String>> {
 /// выглядит любая фраза из двух слов — например `Unknown command 'ftp_account'.
 /// See --help`, которую печатает сборка без этой подкоманды, — и проверка
 /// уверенно отвечает «аккаунта нет» по выводу, которого не поняла.
-fn table_cell_re() -> &'static Regex {
+pub(crate) fn table_cell_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\s{2,}|\t+|\|").unwrap())
 }
 
-fn cells(line: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn cells(line: &str) -> impl Iterator<Item = &str> {
     table_cell_re()
         .split(line.trim())
         .map(str::trim)
@@ -380,7 +341,7 @@ fn cells(line: &str) -> impl Iterator<Item = &str> {
 /// таблицы, не видя живого FastPanel, нечем; проверить — на ручной приёмке.
 /// Цену остатка снижает то, что положительный ответ берётся и из такого вывода
 /// (см. `ftp_exists`): совпадение целой ячейкой гейта не требует.
-fn looks_like_a_table(output: &str) -> bool {
+pub(crate) fn looks_like_a_table(output: &str) -> bool {
     output.lines().any(|line| cells(line).count() >= 2)
 }
 
@@ -389,7 +350,7 @@ fn looks_like_a_table(output: &str) -> bool {
 /// Сравнение по целой колонке, а не `contains`: логин вида `ftp_shop` входит
 /// подстрокой и в `ftp_shop_old`, и в путь `/var/www/ftp_shop`, и «нашли»
 /// означало бы не создать аккаунт вовсе.
-fn text_lists_login(output: &str, login: &str) -> bool {
+pub(crate) fn text_lists_login(output: &str, login: &str) -> bool {
     output.lines().any(|line| cells(line).any(|cell| cell == login))
 }
 
@@ -410,34 +371,27 @@ pub async fn ftp_exists(
     fp_path: &str,
     login: &str,
 ) -> Result<Option<bool>, SshError> {
-    let json_cmd = format!("{} ftp_account list --json", q(fp_path));
-    let (code, out) = s.run(&json_cmd, Duration::from_secs(30)).await?;
-    if code == 0 {
-        if let Some(logins) = ftp_logins_from_json(&out) {
-            return Ok(Some(logins.iter().any(|l| l == login)));
-        }
+    // Разбор списка живёт в ОДНОМ месте — `fastpanel_facts::list_ftp_accounts`
+    // (её же зовёт чтение фактов). Здесь остаётся только решение «есть ли такой
+    // логин»: понятый как целое список отвечает членством, а непонятый уводит в
+    // последнюю линию — положительное совпадение целой ячейкой в тексте.
+    if let Some(accounts) =
+        crate::ssh::fastpanel_facts::list_ftp_accounts(s, fp_path).await?
+    {
+        return Ok(Some(accounts.iter().any(|a| a.login == login)));
     }
+    // Список целиком разобрать не удалось. Гейт формы стоял ТОЛЬКО на
+    // отрицательном ответе, и это не симметрия ради симметрии: совпадение целой
+    // ячейкой с детерминированным логином — самостоятельное доказательство (чем
+    // бы вывод ни был, логин в нём назван), а цены у ошибок разные — ложное «да»
+    // стоит несозданного аккаунта, который и так есть, ложное «нет» — создания
+    // поверх живого, то есть выдуманного пароля в модалке. Одна колонка (логин
+    // на строку) таблицей не выглядит, поэтому `list_ftp_accounts` вернула
+    // `None`, но назвать логин в ней — по-прежнему «да».
     let text_cmd = format!("{} ftp_account list", q(fp_path));
-    let (c2, o2) = s.run(&text_cmd, Duration::from_secs(30)).await?;
-    if c2 == 0 {
-        // Гейт формы — ТОЛЬКО на отрицательный ответ, и это не симметрия ради
-        // симметрии. Совпадение целой ячейкой с детерминированным логином —
-        // самостоятельное доказательство: чем бы вывод ни был, логин в нём
-        // назван. А цены у ошибок разные: ложное «да» стоит несозданного
-        // аккаунта, который и так есть, ложное «нет» — создания поверх живого,
-        // то есть выдуманного пароля в модалке.
-        //
-        // Одна колонка (логин на строку) — обычная форма для `list`, и
-        // таблицей она не выглядит. Гейт на весь ответ выбрасывал бы вместе с
-        // мусором и её.
-        if text_lists_login(&o2, login) {
-            return Ok(Some(true));
-        }
-        // «Непустой вывод с кодом 0» — недостаточное основание, чтобы поверить
-        // отрицательному ответу: см. `looks_like_a_table`.
-        if looks_like_a_table(&o2) {
-            return Ok(Some(false));
-        }
+    let (code, out) = s.run(&text_cmd, Duration::from_secs(30)).await?;
+    if code == 0 && text_lists_login(&out, login) {
+        return Ok(Some(true));
     }
     Ok(None)
 }
@@ -1096,11 +1050,11 @@ fn coerce_str(value: Option<&str>, max_len: usize) -> Option<String> {
     Some(s.chars().take(max_len).collect())
 }
 
-fn first_non_empty<'a>(candidates: &[Option<&'a str>]) -> Option<&'a str> {
+pub(crate) fn first_non_empty<'a>(candidates: &[Option<&'a str>]) -> Option<&'a str> {
     candidates.iter().flatten().find(|s| !s.trim().is_empty()).copied()
 }
 
-fn normalize_site_row(raw: &serde_json::Value) -> Option<SiteInfo> {
+pub(crate) fn normalize_site_row(raw: &serde_json::Value) -> Option<SiteInfo> {
     let domain = raw
         .get("domain_name")
         .or(raw.get("domain"))
@@ -1135,11 +1089,18 @@ fn normalize_site_row(raw: &serde_json::Value) -> Option<SiteInfo> {
         }
         Some(format!("{}/www/{domain_str}", h.trim_end_matches('/')))
     });
-    let php_raw = coerce_php_version(
-        raw.get("php_version")
-            .or(raw.get("php"))
+    // Версия PHP: у этой сборки FastPanel её нет ни в верхнеуровневом
+    // `php_version`, ни в `php` — она лежит в `main_backend.handler_version`
+    // (`"8.3"`, `"7.4"`). Верхний уровень оставлен фоллбэком на случай других
+    // сборок, но без нижней ветки `list_sites`/`server_list_sites` возвращали
+    // тут `None` (сверено вживую, discovery 2026-08-16).
+    let php_raw = coerce_php_version(first_non_empty(&[
+        raw.get("php_version").and_then(|v| v.as_str()),
+        raw.get("php").and_then(|v| v.as_str()),
+        raw.get("main_backend")
+            .and_then(|b| b.get("handler_version"))
             .and_then(|v| v.as_str()),
-    );
+    ]));
     let php_version = coerce_str(php_raw.as_deref(), 16);
     Some(SiteInfo {
         domain_name: domain_str.chars().take(255).collect(),
@@ -1738,26 +1699,8 @@ mod tests {
         assert_eq!(ftp_exists(&mut s, FP, "ftp_example").await.unwrap(), None);
     }
 
-    // Список разобран частично: во второй записи ключ вне нашей четвёрки. Это
-    // значит, что формат мы читаем неправильно, — а «логина нет» по неправильно
-    // прочитанному списку и есть создание поверх существующего.
-    #[test]
-    fn a_partially_understood_list_is_not_understood() {
-        assert!(
-            ftp_logins_from_json(r#"[{"login":"ftp_other"},{"id":7,"account":"ftp_example"}]"#)
-                .is_none()
-        );
-    }
-
-    // `exec` сливает stdout и stderr: баннер перед JSON ломал разбор целиком и
-    // уводил проверку в текстовый фолбэк — то есть в самое слабое её место.
-    #[test]
-    fn a_banner_in_front_of_json_does_not_break_the_parse() {
-        assert_eq!(
-            ftp_logins_from_json("Warning: locale not set\n[{\"login\":\"ftp_a\"}]"),
-            Some(vec!["ftp_a".to_string()])
-        );
-    }
+    // Разбор JSON-списка FTP переехал в `fastpanel_facts::ftp_accounts_from_json`
+    // (частичный разбор → `None`, срез баннера перед JSON) — там же и его тесты.
 
     // Пустой список — это ответ «аккаунтов нет», а не «не смогли прочитать».
     #[tokio::test]
@@ -1789,17 +1732,6 @@ mod tests {
         assert_eq!(
             ftp_exists(&mut s, FP, "ftp_example").await.unwrap(),
             Some(true)
-        );
-    }
-
-    // Список непустой, но логинов из него не достаётся — формат вывода не тот,
-    // что мы ждём. «Не знаем» вместо «нет»: иначе создадим поверх живого.
-    #[test]
-    fn a_list_without_recognizable_logins_is_not_an_empty_list() {
-        assert!(ftp_logins_from_json(r#"[{"unexpected":"shape"}]"#).is_none());
-        assert_eq!(
-            ftp_logins_from_json(r#"{"result":[{"username":"ftp_a"}]}"#),
-            Some(vec!["ftp_a".to_string()])
         );
     }
 
