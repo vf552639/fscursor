@@ -182,7 +182,27 @@ Tauri-команда `domain_read_facts(domain_id)` в `desktop/src-tauri/src/co
 закрепить тестом, как для `SSL_ISSUE_EXEC_TIMEOUT`. Регистрация команды в
 `desktop/src-tauri/src/lib.rs`.
 
-### Фаза 3 — Фронтенд: overview, который не врёт  `[ ]`
+### Фаза 3 — Фронтенд: overview, который не врёт  `[x]`
+
+**Выполнено** (2026-08-16): чистый модуль `frontend/src/lib/domainFacts.ts`
+(`DomainFacts`, `FACTS_STALE_MS`=7 дней, `isFactsStale`, лестница `sslState` с
+асимметрией «срок переживает протухание, наличие — нет»; порог `expiring`=14
+дней тоже в модуле). Хук `useReadDomainFacts` в `api/domains.ts` через
+`runExclusive`/`useRunPending` (гейт «один прогон на домен», `networkMode:
+always` от runGate), write-back делает Rust, обновление карточки — инвалидация
+в `finally` замыкания (переживает закрытие модалки). `BLOB_KIND.domainFtpPassword`
+добавлен. Новый компонент `components/domains/DomainServerFacts.tsx` (шапка с
+кнопкой «Проверить на сервере» + свежесть от `fp_facts_at` + `fp_check_error`;
+FTP хост/порт21/логин/`RevealSecret`/«Задать пароль» через `useSecretSave`;
+SSL по лестнице; Site путь/владелец/PHP+обработчик/БД/логи). `DomainDetailModal`
+принял проп `servers` (долг «Server: 3» закрыт — имя сервера), прокинут из
+`Domains.tsx`. Ручной ввод пароля — только десктоп, плейнтекст живёт лишь в
+`useSecretSave`, в `variables` мутации не попадает. Тесты: `domainFacts.test.ts`
+(17), `DomainServerFacts.test.tsx` (13), правки трёх тестов модалки и снапшота
+BLOB_KIND. `npm test` — 910 зелёных, `tsc`/`npm run build` чисты. Долг: FTP-порт
+захардкожен 21 (отдельного поля нет; подтвердится живым прогоном), правый
+столбец карточки (снимок provision) оставлен рядом как «наша запись» — секция
+фактов показывает живое чтение, как уживаются `ns_status` и сверка делегирования.
 
 `frontend/src/lib/domainFacts.ts` — чистый модуль правил, по образцу
 `frontend/src/lib/serverStatus.ts` (порог протухания живёт в модуле, а не в компоненте —

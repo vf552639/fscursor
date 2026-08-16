@@ -2,10 +2,12 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { trimDnsName } from "../lib/cfZoneMatch";
+import { type DomainFacts } from "../lib/domainFacts";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { queryClient } from "./queryClient";
 import { registrarsKeys } from "./registrars";
+import { runExclusive, useRunPending } from "./runGate";
 import { useAuthStore } from "../store/auth";
 
 export interface Domain {
@@ -35,6 +37,17 @@ export interface Domain {
   nginx_override?: string | null;
   nginx_presets?: Record<string, unknown> | null;
   last_provision_error?: string | null;
+  // Факты, прочитанные с сервера по кнопке (см. `lib/domainFacts`). Два времени
+  // намеренно: `fp_facts_at` — когда снят удачный снимок (по нему считается
+  // свежесть), `fp_checked_at` — когда была последняя ПОПЫТКА (по нему уместен
+  // `fp_check_error`). Провал не стирает и не молодит снимок.
+  fp_checked_at?: string | null;
+  fp_check_error?: string | null;
+  fp_facts?: DomainFacts | null;
+  fp_facts_at?: string | null;
+  php_handler?: string | null;
+  /** Id непрозрачного блоба с паролем FTP; наружу безопасен (как у сервера). */
+  ftp_password_blob_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +74,13 @@ export interface DomainUpdate {
   expiry_date?: string | null;
   purchase_date?: string | null;
   ns_status?: string | null;
+  /**
+   * Ссылка на блоб с паролем FTP — единственный способ его сохранить. Поля
+   * `ftp_password` здесь нет намеренно: плейнтекст едет через `putSecretBlob`
+   * (см. его JSDoc), а сюда попадает только полученный id блоба. При правке —
+   * ТОТ ЖЕ id: версии блоба ведёт сервер внутри одного id.
+   */
+  ftp_password_blob_id?: string | null;
 }
 
 export interface DomainBulkCreate {
@@ -204,6 +224,78 @@ export function useBulkAssignCloudflare() {
  * оба места объясняют пользователю одно и то же, и разъехаться они не должны.
  */
 export const NS_DESKTOP_NOTE = desktopOnly("Setting nameservers");
+
+/** Та же одна фраза для чтения фактов с сервера — только десктоп. */
+export const CHECK_SERVER_DESKTOP_NOTE = desktopOnly("Checking the server");
+
+/**
+ * Ключ прогона «прочитать факты домена с сервера». По одному на домен: гейт
+ * `runExclusive` не пускает второй прогон по тому же домену (двойной клик по
+ * «Проверить»), а `useRunPending` по этому же ключу гасит кнопку. Живёт дольше
+ * карточки: чтение идёт по SSH секундами, а модалку могут закрыть, и гейт во
+ * флаге `useState` её бы не пережил (см. `runGate`).
+ */
+export function readDomainFactsKey(domainId: number) {
+  return ["read-domain-facts", domainId] as const;
+}
+
+/**
+ * Прочитать состояние домена с сервера одной SSH-сессией. ТОЛЬКО десктоп:
+ * команда резолвит домен и сервер из локального кэша, расшифровывает SSH-блоб и
+ * ходит по SSH — веб этого не может (принцип №3).
+ *
+ * Результат НЕ возвращается наружу и НЕ идёт через per-call `onSuccess`.
+ * Команда сама делает write-back снимка (или его ошибки) в
+ * `POST /domains/{id}/facts`, а обновление карточки — это инвалидация списка
+ * ВНУТРИ прогона (`run`-замыкание `runExclusive`). И то и другое переживает
+ * закрытие модалки во время чтения; per-call `onSuccess` — нет (`MutationObserver`
+ * гасит его при размонтировании, ровно как у provision). Фактов-секретов в
+ * ответе нет (пароль FTP CLI не отдаёт), но и гонять их через кэш ни к чему.
+ *
+ * Инвалидация — в `finally`: провалившаяся попытка тоже кладёт `fp_check_error`
+ * в БД, и его надо показать. Сам снимок при провале не трогается — за это
+ * отвечает сервер (`domain_service.apply_facts`).
+ */
+export async function runReadDomainFacts(domainId: number): Promise<void> {
+  await runExclusive(readDomainFactsKey(domainId), async () => {
+    if (!isTauri()) {
+      throw new Error(CHECK_SERVER_DESKTOP_NOTE);
+    }
+    const userId = useAuthStore.getState().userId;
+    if (!userId) {
+      throw new Error("Desktop: unlock session (user id missing)");
+    }
+    try {
+      // `networkMode: "always"` обеспечивает сам `runExclusive`: работу делает
+      // Tauri-команда, а не webview, и `navigator.onLine` про эту сеть не знает.
+      await invokeSynced<DomainFacts>("domain_read_facts", {
+        userId,
+        domainId: String(domainId),
+      });
+    } finally {
+      // Свежую строку тянем на ОБОИХ исходах: и снимок, и `fp_check_error`
+      // команда уже записала write-back'ом, и карточка должна их показать —
+      // даже если её к этому моменту закрыли и открыли снова.
+      queryClient.invalidateQueries({ queryKey: domainsKeys.all });
+    }
+  });
+}
+
+/**
+ * Кнопка «Проверить на сервере»: запуск чтения фактов и признак «идёт прогон».
+ * `pending` читается из `MutationCache` по ключу домена, поэтому переживает
+ * закрытие/открытие модалки — второй клик по перемонтированной карточке новой
+ * SSH-сессии не откроет.
+ */
+export function useReadDomainFacts(domainId: number) {
+  const pending = useRunPending(readDomainFactsKey(domainId));
+  return {
+    pending,
+    run: () => {
+      void runReadDomainFacts(domainId);
+    },
+  };
+}
 
 /**
  * Минимум nameservers, который принимают оба регистратора. Меньше двух — это

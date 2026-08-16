@@ -444,6 +444,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       <DomainDetailModal
         key={detailDomain.id}
         domain={domainsData.find((x) => x.id === detailDomain.id) ?? detailDomain}
+        servers={servers}
         onClose={() => setDetailDomain(null)}
       />
     )}

@@ -122,7 +122,7 @@ function mockInvoke(reads: { zones?: any[]; zonesError?: Error; registrarNs?: st
 function renderModal(d = domain()) {
   return render(
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={d} onClose={() => {}} />
+      <DomainDetailModal domain={d} servers={[]} onClose={() => {}} />
     </QueryClientProvider>
   );
 }
@@ -572,8 +572,11 @@ describe("карточка домена — один экран без вкла�
 
     // Роутов `create-site`, `create-db`, `db-credentials`, `ssl-request`,
     // `ssl-cancel`, `refresh-ssl` и `nginx-override` на бэкенде нет — каждая из
-    // этих вкладок всегда отвечала 404 в общий баннер.
-    for (const dead of ["DB", "SSL", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
+    // этих вкладок всегда отвечала 404 в общий баннер. Голый «SSL» из списка
+    // ушёл: теперь это заголовок read-only секции «Server state» (живое чтение
+    // с сервера, без мутаций), а не вкладка-действие. Мёртвые SSL-ДЕЙСТВИЯ
+    // (Request/Cancel/Refresh SSL) по-прежнему обязаны отсутствовать.
+    for (const dead of ["DB", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
     }
     // Переключателя вкладок нет вовсе: NS переехали к аккаунту Cloudflare, а

@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 
 import { Domain } from "../api/domains";
+import { Server } from "../api/servers";
 import { Zone, useCloudflareZones } from "../api/cloudflare";
 import { useRegistrarAccounts, useRegistrarNameservers } from "../api/registrars";
 import { NO_VALUE, expiryState, expiryTextColor, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
@@ -9,6 +10,7 @@ import { registrarSupportsNsApi } from "../lib/registrarCaps";
 import { isTauri } from "../lib/runtime";
 import DomainCloudflareField from "./domains/DomainCloudflareField";
 import DomainNsPanel from "./domains/DomainNsPanel";
+import DomainServerFacts from "./domains/DomainServerFacts";
 import { Modal } from "./ui/Primitives";
 
 /**
@@ -69,11 +71,20 @@ function expiryValue(iso: string | null | undefined, now: number): React.ReactNo
  */
 export default function DomainDetailModal({
   domain,
+  servers,
   onClose,
 }: {
   domain: Domain;
+  /**
+   * Список серверов — чтобы назвать сервер домена ИМЕНЕМ, а не сырым id, и
+   * отдать его IP секции фактов (адрес FTP-хоста). На странице `Domains` он уже
+   * загружен и раздаётся другим детям — до модалки просто не доезжал.
+   */
+  servers: Server[];
   onClose: () => void;
 }) {
+  // Сервер домена: имя вместо id в шапке и адрес для секции фактов.
+  const server = servers.find((s) => s.id === domain.server_id);
   // Одно чтение часов на рендер карточки: два срока на одном экране обязаны
   // отвечать на «сейчас» одинаково.
   //
@@ -154,13 +165,11 @@ export default function DomainDetailModal({
           справа — что развёрнуто на сервере. В один столбец полтора десятка
           строк уезжали бы под сгиб модалки.
 
-          Server и Registrar остаются ЧИСЛАМИ — это id, и имён у карточки нет:
-          за ними пришлось бы тянуть сюда список серверов или новый проп. Долг
-          живой и ничей: id вместо имени читателю ничего не говорит. У
-          Cloudflare такого долга нет — имя там нужно самой функции (выбрать
-          аккаунт и дорезолвить зону), а не только читателю; у регистратора
-          список уже читается ради провайдера, но подставить из него имя —
-          отдельная правка, а не побочный эффект этой.
+          Server теперь ИМЯ (проп `servers` доехал — заодно нужен секции фактов
+          для IP FTP-хоста). Registrar остаётся числом: список аккаунтов тут
+          читается ради провайдера, но подставить из него имя — отдельная
+          правка, а не побочный эффект этой. У Cloudflare имя нужно самой
+          функции (выбрать аккаунт и дорезолвить зону), а не только читателю.
 
           Паролей здесь нет и быть не может: сервер их не знает (FTP и БД
           показываются один раз сразу после provision и нигде не хранятся).
@@ -169,7 +178,9 @@ export default function DomainDetailModal({
       <div style={{ fontSize: 13, color: "#374151", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
           <Field k="Status" v={domain.status} />
-          <Field k="Server" v={domain.server_id} />
+          {/* Имя сервера, если он найден в списке; иначе — сырой id резервом
+              (домен без сервера или сервер исчез из списка). */}
+          <Field k="Server" v={server?.name ?? domain.server_id} />
           <Field k="Registrar" v={domain.registrar_id} />
           <DomainCloudflareField
             domain={domain}
@@ -199,6 +210,10 @@ export default function DomainDetailModal({
           <Field k="DB user" v={domain.db_user} />
         </div>
       </div>
+
+      {/* Живое чтение с сервера с честной свежестью — отдельно от нашей записи
+          выше (та — снимок момента provision из колонок домена). */}
+      <DomainServerFacts domain={domain} server={server} now={now} />
 
       <DomainNsPanel
         domain={domain}
