@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # старт приложения, если голова в БД разошлась с этой строкой. Забыть его —
 # значит получить упавший бэкенд сразу после `alembic upgrade head` (так и
 # случилось при добавлении `015_server_provider`).
-EXPECTED_ALEMBIC_HEAD = "016_server_consecutive_failures"
+EXPECTED_ALEMBIC_HEAD = "017_domain_fastpanel_facts"
 
 
 @asynccontextmanager
