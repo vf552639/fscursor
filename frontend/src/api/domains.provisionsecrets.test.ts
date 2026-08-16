@@ -192,6 +192,34 @@ describe("одиночный provision — пароли уходят в блоб
     );
   });
 
+  it("шифрование пароля БД упало — линковка FTP не потеряна (PUT уходит с ftp_password_blob_id)", async () => {
+    // FTP-блоб записывается, DB-блоб бросает. Регрессия: единый catch до apiPut
+    // уносил бы уже зашифрованный FTP-пароль — id получен, но домен на него не
+    // ссылается, то есть пароль потерян ровно вопреки цели фазы.
+    let call = 0;
+    mocks.invokeIfTauri.mockImplementation((cmd: string) => {
+      if (cmd !== "vault_put_blob") return Promise.resolve(undefined);
+      call += 1;
+      // Первый vault_put_blob — FTP (успех), второй — БД (провал).
+      return call === 1 ? Promise.resolve(undefined) : Promise.reject(new Error("vault down"));
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.invokeSynced.mockResolvedValue(result());
+
+    const out = await runProvisionDomain({ domainId: 42, domainName: "example.com", withDb: true });
+    expect(out.domain).toBe("example.com");
+
+    // PUT всё равно ушёл — и ровно с блобом FTP, без блоба БД.
+    expect(mocks.apiPut).toHaveBeenCalledTimes(1);
+    const ftp = putBlobCalls().find((b) => b.blobKind === "domain_ftp_password");
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/domains/42");
+    expect(body).toEqual({ ftp_password_blob_id: ftp!.blobId });
+    // Плейнтекста в теле нет ни FTP, ни БД.
+    expect(JSON.stringify(body)).not.toContain("FTP-PW");
+    expect(JSON.stringify(body)).not.toContain("DB-PW");
+  });
+
   it("провал сохранения не роняет provision-результат и не глушит модалку", async () => {
     mocks.invokeSynced.mockResolvedValue(result({ db: undefined }));
     mocks.apiPut.mockRejectedValue(new Error("network down"));

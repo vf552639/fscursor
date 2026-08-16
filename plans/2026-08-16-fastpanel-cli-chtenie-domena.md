@@ -253,6 +253,12 @@ existingBlobId: domain.ftp_password_blob_id })` → `PUT /domains/{id}`.
 провал не роняет; `backend/tests/test_provision_writeback.py::test_domain_update_accepts_ftp_and_db_password_blob_ids`.
 `npm test` 921 зелёных, `tsc`/`build` чисты, затронутый бэкенд-файл 16 passed.
 
+Ревью качества (Minor): закрыт п.1 — частичный провал больше не теряет линковку
+уже зашифрованного блоба. Каждый `putSecretBlob` в своём `try/catch`, `apiPut`
+уходит с накопленным `patch` (тем, что успело зашифроваться), пустой `patch` →
+`PUT` не зовём. Тест «шифрование БД упало → в PUT всё равно `ftp_password_blob_id`»
+добавлен (`npm test` 922 зелёных).
+
 Изначальный замысел (ниже) исполнен как описано.
 
 В обработчике `onResult` у `useProvisionDomain` и у массового прогона

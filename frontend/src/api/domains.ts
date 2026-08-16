@@ -570,38 +570,51 @@ function cachedDomain(domainId: number): Domain | undefined {
  * `exists` пароля в типе нет вовсе, блоб не трогаем.
  *
  * Провал сохранения — деградация, а не катастрофа: пароль уже показан в модалке.
- * Поэтому вся операция обёрнута в `try/catch` — ошибка `putSecretBlob`/`PUT`
- * логируется (без плейнтекста: `e` их не содержит) и не мешает показать креды.
- * Молча не глотаем — `console.error` остаётся следом.
+ * Поэтому КАЖДЫЙ `putSecretBlob` обёрнут в свой `try/catch` и `apiPut` уходит с
+ * тем, что успело зашифроваться. Иначе провал шифрования пароля БД уносил бы
+ * уже записанный блоб FTP: id получен, но `PUT` до домена не доехал — пароль
+ * зашифрован, а домен на него не ссылается, то есть потерян, ровно вопреки
+ * цели фазы. Ошибки логируются без плейнтекста (`e` его не содержит: это Error
+ * от Tauri-IPC или свёрнутый axios-`detail`), молча не глотаем.
+ *
+ * Пустой `patch` (оба блоба упали или ни одного `created`) — `PUT` не зовём.
  */
 async function persistProvisionSecrets(
   domainId: string | number,
   result: ProvisionDesktopResult,
 ): Promise<void> {
-  try {
-    const existing = cachedDomain(Number(domainId));
-    const patch: DomainUpdate = {};
-    if (result.ftp?.status === "created") {
+  const existing = cachedDomain(Number(domainId));
+  const patch: DomainUpdate = {};
+  if (result.ftp?.status === "created") {
+    try {
       patch.ftp_password_blob_id = await putSecretBlob({
         plaintext: result.ftp.ftp_password,
         blobKind: BLOB_KIND.domainFtpPassword,
         existingBlobId: existing?.ftp_password_blob_id ?? null,
       });
+    } catch (e) {
+      console.error(`provision: could not encrypt FTP password for domain #${domainId}`, e);
     }
-    if (result.db?.status === "created") {
+  }
+  if (result.db?.status === "created") {
+    try {
       patch.db_password_blob_id = await putSecretBlob({
         plaintext: result.db.db_password,
         blobKind: BLOB_KIND.domainDbPassword,
         existingBlobId: existing?.db_password_blob_id ?? null,
       });
+    } catch (e) {
+      console.error(`provision: could not encrypt DB password for domain #${domainId}`, e);
     }
-    if (patch.ftp_password_blob_id != null || patch.db_password_blob_id != null) {
+  }
+  // `PUT` уходит с тем, что успело зашифроваться: линковку уже записанного
+  // блоба не теряем, даже если соседний упал. Тело — только `*_blob_id`.
+  if (patch.ftp_password_blob_id != null || patch.db_password_blob_id != null) {
+    try {
       await apiPut<Domain>(`/domains/${domainId}`, patch);
+    } catch (e) {
+      console.error(`provision: could not link password blobs to domain #${domainId}`, e);
     }
-  } catch (e) {
-    // Без плейнтекста: `e` — Error от Tauri-IPC или свёрнутый axios-`detail`,
-    // а тело `PUT` несёт только id блоба. Провал одного домена не роняет показ.
-    console.error(`provision: could not persist FTP/DB password for domain #${domainId}`, e);
   }
 }
 
