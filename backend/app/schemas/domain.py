@@ -123,6 +123,10 @@ class DomainResponse(DomainBase):
     fp_check_error: Optional[str] = None
     fp_facts: Optional[dict] = None
     fp_facts_at: Optional[datetime] = None
+    # Зарезервированная колонка под будущий SQL-фильтр по обработчику. Роут
+    # `apply_facts` её НЕ пишет (снимок целиком лежит в `fp_facts`), поэтому
+    # наружу она пока всегда `None`; UI берёт обработчик из `fp_facts.php_handler`.
+    # Заполнится, когда появится фильтрация доменов по обработчику на уровне SQL.
     php_handler: Optional[str] = None
     ftp_password_blob_id: Optional[UUID] = None
     # id блоба с паролем БД — наружу безопасен по той же причине, что и

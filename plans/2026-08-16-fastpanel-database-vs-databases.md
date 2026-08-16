@@ -79,7 +79,30 @@ Discovery на живом FastPanel 2 под root показал: команды
 - Тест «пароль не в argv-результате» (по образцу `issue_ssl_argv_has_no_secret`).
 - Живая приёмка: provision домена с БД на реальном сервере, вход в созданную базу.
 
+## Смежная находка (тот же класс — дрейф версии FastPanel)
+
+`read_ssl_info` (`desktop/src-tauri/src/ssh/fastpanel.rs`) читает серт по пути
+`/etc/letsencrypt/live/<domain>/fullchain.pem`. На живом FastPanel 2 (2026-08-16) этого
+каталога **нет вовсе** — серты лежат в `/var/www/httpd-cert/<domain>_<timestamp>.crt`
+(ссылка в `/etc/nginx/fastpanel2-available/<owner>/<domain>.conf`, директива
+`ssl_certificate`). Значит openssl-путь `read_ssl_info` на этой версии всегда даёт
+`has_certificate=false`.
+
+**Функционально SSL спасён** обогащением из `sites list --json` `certificate{}`
+(фаза 2 task9, `ssl_from_certificate`): `has_certificate` и `expires_at` берутся оттуда, и
+срок сверен вживую — `certificate.expired_at` совпал с `openssl` на реальном файле
+байт-в-байт (`notAfter=Sep 17 23:47:42 2026 GMT`). Теряется только точный `issuer` (в
+обогащении он `None`) — косметика.
+
+Кандидат на починку (низкий приоритет): научить `read_ssl_info`/факты брать путь серта из
+`ssl_certificate` в конфиге сайта (или из `/var/www/httpd-cert/`), тогда openssl даст точные
+издателя и срок для всех FastPanel-доменов, а не только там, где сработал certbot в
+`/etc/letsencrypt/live`. Учесть дрейф версий: на других установках путь может быть иным —
+нужен каскад, как для команды БД.
+
 ## Итог
 
 - Реализован целиком: **нет** — заведён как follow-up находки discovery 2026-08-16.
 - Что осталось: все фазы. Блокирующая часть — живой доступ root к тестовому серверу.
+  Плюс смежная находка про путь серта `read_ssl_info` (низкий приоритет, SSL уже
+  функционально работает через обогащение из `certificate{}`).
