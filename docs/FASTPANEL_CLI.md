@@ -20,10 +20,13 @@
 
 1. **Полный набор команд доступен только под `root`.** Бинарь —
    `/usr/local/fastpanel2/fastpanel`. Под непривилегированным пользователем панели
-   (`fastuser` и т.п.) CLI показывает лишь 3–4 команды, а `sites` / `ftp_account` /
-   `databases` / `certificates` **не существуют** — попытка их вызвать падает
-   `error: expected command but got "sites"` (exit 1). Читать факты домена можно
-   только из root-сессии.
+   (`fastuser` и т.п.) CLI показывает лишь 3–4 команды (help / `backup:plan` /
+   `scan:virtualhost`), а `sites` / `ftp_account` / `databases` / `certificates`
+   **не существуют** — попытка их вызвать падает `error: expected command but got
+   "sites"` (exit 1). Читать факты домена можно только из root-сессии.
+   *(Провенанс: проверено прямым ручным прогоном `fastpanel help` / `fastpanel sites list`
+   под непривилегированным пользователем панели 2026-08-16; discovery-скрипт гонялся только
+   под root, поэтому этой ветки в сыром выводе нет.)*
 2. **Флаг `--json` ставится ПОСЛЕ подкоманды**: `fastpanel sites list --json`, а не
    `fastpanel --json sites list`. (В `--help` `--json` числится глобальным флагом, но
    на практике мы всегда ставим его после `list`.)
@@ -90,7 +93,7 @@
   будущим:
 
   ```json
-  "certificate":{"id":6,"name":"CloudFlare Origin Certificate_2025-12-09-17-46_59","type":"exists","enabled":false,"expires":5474,"created_at":"2025-12-09T17:46:59.147254687Z","expired_at":"2040-12-05T17:42:00Z"}
+  "certificate":{"id":6,"name":"CloudFlare Origin Certificate_2025-01-01-00-00_00","type":"exists","enabled":false,"expires":5474,"created_at":"2025-12-09T17:46:59.147254687Z","expired_at":"2040-12-05T17:42:00Z"}
   ```
 
 ⚠️ **`certificate.enabled` бывает `false` даже у валидного будущего серта.** Доверять
@@ -219,9 +222,10 @@ error: expected command but got "database"
 
 ### 3.2 `databases list --json` — **сверено вживую (2026-08-16)**
 
-> Источник формы — курированные находки discovery (`databases`, мн. ч.). В приложенном
-> сыром выводе скрипт по ошибке слал `database` (ед. ч.) и получал exit 1 — это и вскрыло
-> баг §3.1.
+> **Провенанс.** Форма снята **прямым ручным прогоном `databases list --json` под root
+> 2026-08-16** (exit 0). Discovery-скрипт эту форму НЕ снял: он слал ошибочную ед. ч.
+> `database` и получал exit 1 — что и вскрыло баг §3.1. То есть метка «сверено вживую»
+> верна, просто источник — ручной прогон, а не автоскрипт.
 
 **argv:** `<fp> databases list --json` **· exit 0**
 
@@ -377,7 +381,7 @@ error: expected command but got "php"
 | `test -d /var/www/<owner>/data/www/<domain>` | `site_dir_exists` | ✅ (форма) |
 | `test -f /etc/letsencrypt/live/<domain>/fullchain.pem` | `cert_exists` | ✅ (форма) |
 | `openssl x509 -in <fullchain> -noout -enddate -issuer -subject` | `read_ssl_info` | ✅ (форма) |
-| `<fp> databases list --json` | (фаза 2, чтение БД) | ✅ 2026-08-16 |
+| `<fp> databases list --json` | (фаза 2, чтение БД) | ✅ 2026-08-16 (ручной прогон под root, не автоскрипт — см. §3.2) |
 
 ### Мутации (provision / lifecycle)
 
