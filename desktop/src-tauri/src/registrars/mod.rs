@@ -22,12 +22,21 @@ pub struct DomainInfo {
     pub nameservers: Vec<String>,
 }
 
+/// Что мы просим у API регистратора.
+///
+/// Чтения nameservers здесь НЕТ, и это решение, а не пробел. Источник «как есть»
+/// один на всех провайдеров — реестр (`crate::rdap`): у Hostiq чтения NS в API
+/// не существует вовсе (в `domain/list` нет такого поля — проверено на всех 127
+/// доменах боевого аккаунта, см. `docs/HOSTIQ_API.md` §5), а у ручных
+/// провайдеров вроде Dynadot нет и самого API. Метод в трейте означал бы, что
+/// путь есть, — и у двух провайдеров из двух он врал бы по-разному: у Hostiq
+/// отказом, у Namecheap правдой, которую всё равно никто не спрашивает.
+/// Регистратору остаётся то, чего реестр не умеет: ЗАПИСЬ (`set_nameservers`).
 #[async_trait]
 pub trait RegistrarService: Send + Sync {
     async fn test_connection(&self) -> Result<(bool, String), RegistrarError>;
     async fn get_domains(&self) -> Result<Vec<DomainInfo>, RegistrarError>;
     async fn set_nameservers(&self, domain: &str, ns: &[String]) -> Result<bool, RegistrarError>;
-    async fn get_nameservers(&self, domain: &str) -> Result<Vec<String>, RegistrarError>;
 }
 
 /// Имя nameserver'а в сравнимом виде: без пробелов по краям, без завершающей

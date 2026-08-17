@@ -50,7 +50,7 @@ Notes:
     - create-db + credential retrieval,
     - SSL request/cancel/refresh,
     - nginx override apply/read (presets + raw snippet),
-    - NS check (`registrar.get_nameservers` when available, DNS fallback otherwise),
+    - NS check — *(historical)* задумывалась как `registrar.get_nameservers` с DNS-фолбэком; ни того, ни другого больше нет. NS домена «как есть» читает десктоп из РЕЕСТРА (RDAP, `domain_registry_nameservers`), одинаково для всех провайдеров: у Hostiq чтения NS в API не существует, у ручных провайдеров нет и самого API,
     - manual NS override state (`ns_check_mode` `auto|manual`).
   - A bulk orchestration endpoint (`POST /api/domains/bulk-full-setup`) runs per-domain chain semantics:
     1. assign server/cloudflare/registrar,
@@ -163,7 +163,10 @@ Notes:
 > и write-back в бэкенд. Ветка `feat/domains-cloudflare-match` добавила две:
 > `registrar_get_nameservers` (NS домена у регистратора — поимённо, а не листингом аккаунта)
 > и `domain_full_setup` (зона Cloudflare + write-back `cloudflare_zone_id` + по флагу NS;
-> отчёт по шагам, `Err` означает «работа не начиналась»).
+> отчёт по шагам, `Err` означает «работа не начиналась»). Первая из них с тех пор **удалена**:
+> «как есть» спрашивают у реестра (`domain_registry_nameservers`, `src/rdap.rs`) — источник
+> один на всех провайдеров, а через API регистратора отвечал один из двух. Регистратору
+> осталась только запись (`registrar_set_nameservers`).
 - **Location:** `desktop/` (npm shell + `desktop/src-tauri/` Rust project).
 - **UI loading:** `tauri.conf.json` runs `npm run dev` from repo-root **`frontend/`** in dev and points `frontendDist` at **`../../frontend/dist`** for release builds.
 - **Capabilities:** `desktop/src-tauri/capabilities/default.json` grants `core:default` and `shell:default` for the window labeled `main`.

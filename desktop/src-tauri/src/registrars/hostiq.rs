@@ -521,25 +521,6 @@ impl RegistrarService for HostiqService {
             )),
         }
     }
-
-    /// Чтения nameservers у Hostiq НЕ СУЩЕСТВУЕТ.
-    ///
-    /// Не «не реализовано» и не «сломано»: в единственном источнике данных о
-    /// доменах (`domain/list`) нет поля с nameservers вовсе — проверено на всех
-    /// 127 доменах боевого аккаунта, — а отдельного эндпоинта под них у DI-API
-    /// v3 нет. Поэтому здесь честный отказ без сети: выдуманный эндпоинт вернул
-    /// бы 404, и «Hostiq не отвечает» врало бы про причину, а пустой список врал
-    /// бы ещё хуже — «у домена нет NS».
-    ///
-    /// Метод существует только потому, что он ещё в трейте `RegistrarService`.
-    /// Источником «как есть» становится RDAP (реестр), после чего метод уезжает
-    /// из трейта целиком вместе с этой заглушкой.
-    async fn get_nameservers(&self, _domain: &str) -> Result<Vec<String>, RegistrarError> {
-        Err(RegistrarError::Api(
-            "Hostiq DI-API v3 does not expose nameservers: read them from the registry (RDAP)"
-                .into(),
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -1033,20 +1014,6 @@ mod tests {
         let svc = HostiqService::with_base_url("secret-token", &srv.uri());
         let five: Vec<String> = (1..=MAX_NS).map(|i| format!("ns{i}.example.com")).collect();
         assert!(svc.set_nameservers("betify2.com", &five).await.unwrap());
-    }
-
-    /// Чтение NS у Hostiq невозможно, и отказ обязан быть без сети: выдуманный
-    /// эндпоинт вернул бы 404, то есть соврал бы про причину.
-    #[tokio::test]
-    async fn get_nameservers_refuses_instead_of_inventing_an_endpoint() {
-        let svc = HostiqService::with_base_url("secret-token", NOWHERE);
-        let text = svc
-            .get_nameservers("betify2.com")
-            .await
-            .expect_err("чтения NS у Hostiq нет")
-            .to_string();
-        assert!(text.contains("does not expose nameservers"), "{text}");
-        assert!(!text.contains("127.0.0.1"), "в сеть всё-таки сходили: {text}");
     }
 
     /// Вложенный конверт ошибки — родная форма DI-API v3. Проверяется живым

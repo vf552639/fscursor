@@ -58,15 +58,14 @@ export interface DomainNsPanelProps {
   zonesError: unknown;
   /** Итог сверки «NS зоны против NS у регистратора» (`lib/nsDelegation`). */
   delegation: NsDelegation;
-  /** `provider` аккаунта регистратора; `undefined` — аккаунт ещё не прочитан. */
-  registrarProvider: string | null | undefined;
   /**
-   * Отказ чтения NS у регистратора. Нужен рядом с бейджем: «не знаем» без
-   * причины — это сообщение о том, что мы чего-то не сделали, а текст
-   * регистратора («Domain not found», «API key is invalid») говорит, что
-   * именно чинить.
+   * `provider` аккаунта регистратора; `undefined` — аккаунт ещё не прочитан.
+   *
+   * Нужен только кнопке (умеет ли этот регистратор менять NS через API). Бейдж
+   * делегирования про провайдера больше не спрашивает: «как есть» читается из
+   * реестра, которому всё равно, чей это домен.
    */
-  registrarNsError: unknown;
+  registrarProvider: string | null | undefined;
 }
 
 /**
@@ -86,7 +85,6 @@ export default function DomainNsPanel({
   zonesError,
   delegation,
   registrarProvider,
-  registrarNsError,
 }: DomainNsPanelProps) {
   const setNs = useSetNameservers();
 
@@ -158,10 +156,13 @@ export default function DomainNsPanel({
 
   // Провайдера ещё не знаем — это не «нет API»: пуш гасим (иначе десктоп
   // ответит `unknown provider`), но обвиняем в этом не регистратора, а
-  // непрочитанный список аккаунтов. Оба предиката — из `lib/registrarCaps`, те
-  // же самые, по которым судит бейдж делегирования: своя копия правила здесь
-  // означала бы, что подпись под кнопкой и бейдж над ней говорят про один
-  // аккаунт разное.
+  // непрочитанный список аккаунтов. Оба предиката — из `lib/registrarCaps`, а не
+  // свои копии: правило про строку в колонке `provider` обязано быть одно на
+  // фронт, иначе Settings рисует бейдж «API», а тут кнопка мертва.
+  //
+  // Решается этим только ЗАПИСЬ. Бейдж делегирования выше читает реестр и живёт
+  // своей жизнью: у домена с провайдером без API он полноценный — выключена
+  // одна кнопка, а не весь ответ на вопрос «куда домен делегирован».
   const providerKnown = registrarProviderKnown(registrarProvider);
   const nsApi = registrarSupportsNsApi(registrarProvider);
 
@@ -187,11 +188,7 @@ export default function DomainNsPanel({
 
   return (
     <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10, marginTop: 18, borderTop: "1px solid #f3f4f6", paddingTop: 14 }}>
-      <NsDelegationLine
-        delegation={delegation}
-        registrarProvider={registrarProvider}
-        registrarNsError={registrarNsError}
-      />
+      <NsDelegationLine delegation={delegation} />
       <div style={{ display: "grid", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
@@ -317,21 +314,18 @@ export default function DomainNsPanel({
  * Бейдж делегирования и одна фраза под ним.
  *
  * Состояний четыре, и четвёртое — «не знаем» — такое же полноправное, как
- * остальные три: NS зоны и NS у регистратора читаются вживую из двух чужих API,
- * и любое из чтений может не состояться. Без отдельного состояния незнание
+ * остальные три: NS зоны читаются у Cloudflare, NS домена — в реестре (RDAP), и
+ * любое из чтений может не состояться. Без отдельного состояния незнание
  * пришлось бы округлить — в зелёное («расхождений не нашли») или в красное
  * («расходится»), — и оба округления врут. Причина рядом обязательна: серый
  * бейдж без неё сообщает только то, что мы чего-то не сделали.
+ *
+ * Про регистратора компонент не спрашивает ничего: источник «как есть» один на
+ * всех провайдеров, поэтому у бейджа нет ни аккаунта, ни провайдера, ни отдельного
+ * канала для ошибки чтения — слова реестра приезжают в самом состоянии
+ * (`NsDelegation.detail`).
  */
-function NsDelegationLine({
-  delegation,
-  registrarProvider,
-  registrarNsError,
-}: {
-  delegation: NsDelegation;
-  registrarProvider: string | null | undefined;
-  registrarNsError: unknown;
-}) {
+function NsDelegationLine({ delegation }: { delegation: NsDelegation }) {
   const label =
     delegation.state === "delegated"
       ? "DELEGATED"
@@ -346,14 +340,12 @@ function NsDelegationLine({
         <b>Delegation:</b>
         <Badge variant={nsDelegationVariant(delegation.state)}>{label}</Badge>
         <span style={{ fontSize: 12, color: "#6b7280" }}>
-          {delegationText(delegation, registrarProvider)}
-          {/* Отказ регистратора приписывается к причине, а не заменяет её:
-              «не знаем» отвечает на вопрос пользователя, а текст ошибки
-              («Domain not found», «API key is invalid») говорит, что чинить. */}
-          {delegation.state === "unknown" &&
-          delegation.reason === "registrar-nameservers-unknown" &&
-          registrarNsError
-            ? ` ${clip(errorText(registrarNsError))}`
+          {delegationText(delegation)}
+          {/* Слова источника приписываются к причине, а не заменяют её: «не
+              знаем» отвечает на вопрос пользователя, а текст реестра («no RDAP
+              server for .xyz», «timeout») говорит, ждать ли ответа вообще. */}
+          {delegation.state === "unknown" && delegation.detail
+            ? ` ${clip(delegation.detail)}`
             : null}
         </span>
       </div>
@@ -361,7 +353,10 @@ function NsDelegationLine({
         // Оба набора рядом: «расходится» без того, что на что менять, — это
         // диагноз без содержания.
         <div style={{ fontSize: 12, color: WARN_TEXT, fontFamily: "monospace" }}>
-          <div>at registrar: {delegation.actual.join(", ")}</div>
+          {/* Пустой `actual` — это ответ реестра «NS не прописаны», и напечатать
+              его пустой строкой значило бы показать самый плохой случай как
+              обрезанную вёрстку. */}
+          <div>in registry: {delegation.actual.length > 0 ? delegation.actual.join(", ") : "(none)"}</div>
           <div>zone: {delegation.expected.join(", ")}</div>
         </div>
       ) : null}
@@ -370,15 +365,20 @@ function NsDelegationLine({
 }
 
 /** Фраза под бейджем: что именно известно и, для незнания, чего не хватило. */
-function delegationText(d: NsDelegation, provider: string | null | undefined): string {
+function delegationText(d: NsDelegation): string {
   if (d.state === "delegated") {
-    return "The registrar points at this zone's nameservers and Cloudflare has confirmed it.";
+    return "The registry points at this zone's nameservers and Cloudflare has confirmed it.";
   }
   if (d.state === "pending") {
-    return `The registrar points at this zone's nameservers; Cloudflare has not confirmed the delegation yet (zone status: ${d.zoneStatus ?? "unknown"}).`;
+    return `The registry points at this zone's nameservers; Cloudflare has not confirmed the delegation yet (zone status: ${d.zoneStatus ?? "unknown"}).`;
   }
   if (d.state === "mismatch") {
-    return "The registrar points somewhere else — push the zone's nameservers below.";
+    // Пустой «как есть» — тот же диагноз («не туда») и то же действие («прописать
+    // NS»), но называть его «points somewhere else» было бы неправдой: домен не
+    // делегирован никуда, то есть не работает вовсе.
+    return d.actual.length === 0
+      ? "The registry has no nameservers for this domain — it is not delegated anywhere. Push the zone's nameservers below."
+      : "The registry points somewhere else — push the zone's nameservers below.";
   }
   switch (d.reason) {
     case "no-zone":
@@ -389,13 +389,14 @@ function delegationText(d: NsDelegation, provider: string | null | undefined): s
       return "The saved Cloudflare zone has a different name than this domain — rebind it above.";
     case "zone-nameservers-unknown":
       return "The nameservers of the Cloudflare zone are not known here.";
-    case "no-registrar":
-      return "No registrar account is assigned to this domain, so its real nameservers are unknown.";
-    case "registrar-no-api":
-      // Про то же ограничение сказано и янтарной строкой у кнопки, но там —
-      // что делать (открыть панель регистратора), а здесь — почему сверки нет.
-      return `The real nameservers cannot be read: «${provider}» has no nameserver API in SDMP.`;
-    case "registrar-nameservers-unknown":
-      return "The nameservers at the registrar are not known here.";
+    case "registry-nameservers-unknown":
+      // Ждать, и только: ответа ещё нет, винить некого.
+      return "Asking the domain registry where this domain points...";
+    case "not-in-registry":
+      // Не «мы не нашли», а «реестр этого домена не знает»: чинится не здесь и не
+      // кнопкой ниже — прописывать NS домену, которого нет, некуда.
+      return "The domain registry has no record of this domain — check the name, and whether it is still registered.";
+    case "registry-unavailable":
+      return "The domain registry could not be asked, so the real nameservers are unknown.";
   }
 }

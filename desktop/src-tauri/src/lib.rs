@@ -66,7 +66,6 @@ pub fn run() {
             commands::rdap::domain_registry_nameservers,
             commands::registrars::registrar_test_connection,
             commands::registrars::registrar_get_domains,
-            commands::registrars::registrar_get_nameservers,
             commands::registrars::registrar_set_nameservers,
             commands::full_setup::domain_full_setup,
         ])

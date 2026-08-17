@@ -3,21 +3,32 @@
  *
  * Отдельный модуль по той же причине, что `lib/serverStatus.ts`: правило
  * нетривиальное (регистр, точка на конце FQDN, порядок серверов, разное их
- * число), а проверяется без сети и без React — оба списка NS приезжают от
+ * число), а проверяется без сети и без React — оба сведения приезжают от
  * Tauri-команд, и тест на реальном пути стоил бы мока десктопа ради сравнения
  * двух наборов строк.
  *
  * Главное правило то же, что у серверов: **незнание нельзя рисовать здоровьем.**
- * Сведений тут два и оба чужие — NS зоны у Cloudflare и NS домена у
- * регистратора, — и отсутствие любого из них это не «расходится» и тем более не
- * «делегировано», а отдельное состояние с названной причиной. Причина здесь не
- * украшение: «зоны нет», «зона называется иначе, чем домен» и «у провайдера нет
- * NS-API» чинятся тремя разными действиями — привязкой, перепривязкой и походом
- * в панель регистратора.
+ * Сведений тут два и оба чужие: NS зоны — у Cloudflare, NS домена — В РЕЕСТРЕ
+ * (RDAP, `api/rdap.ts`), — и отсутствие любого из них это не «расходится» и тем
+ * более не «делегировано», а отдельное состояние с названной причиной.
+ *
+ * Источник «как есть» — реестр, а не API регистратора, и это не смена
+ * транспорта. У Hostiq чтения NS в API не существует вовсе (в `domain/list` нет
+ * такого поля — проверено на всех 127 доменах боевого аккаунта), у ручных
+ * провайдеров вроде Dynadot нет и самого API: у большинства доменов «как есть»
+ * не читалось НИКАК, и бейдж был серым по построению. Реестр отвечает про любой
+ * домен — и именно поэтому второй путь снят целиком, а не оставлен резервом: два
+ * источника, из которых один отвечает у одного провайдера из двух, дали бы под
+ * одним и тем же бейджем разную по надёжности правду.
+ *
+ * Причина у незнания здесь не украшение — каждая это своё ДЕЙСТВИЕ: «зоны нет»
+ * чинится привязкой, «зона называется иначе» — перепривязкой, «домена нет в
+ * реестре» — разбором с самим доменом, «реестр не ответил» — повтором позже, а
+ * «ответа ещё нет» не чинится вовсе, его ждут.
  */
 
+import { RegistryNameservers, foldRegistryNameservers } from "../api/rdap";
 import { normalizeZoneName } from "./cfZoneMatch";
-import { registrarProviderKnown, registrarSupportsNsApi } from "./registrarCaps";
 
 /**
  * Статус зоны, которым Cloudflare подтверждает делегирование. Остальные его
@@ -42,17 +53,38 @@ export type NsUnknownReason =
   | "zone-name-mismatch"
   /** Зона есть, а её nameservers не прочитаны — или зона не назвала ни одного. */
   | "zone-nameservers-unknown"
-  /** Аккаунт регистратора домену не назначен: сверять не с чем. */
-  | "no-registrar"
-  /** У провайдера нет NS-API (см. `registrarSupportsNsApi`): спросить регистратора нечем. */
-  | "registrar-no-api"
-  /** NS у регистратора не прочитаны (отказ API) — или регистратор не назвал ни одного. */
-  | "registrar-nameservers-unknown";
+  /**
+   * Ответа реестра ещё нет — запрос летит.
+   *
+   * Не «реестр не ответил»: это разные новости и разные действия. Здесь
+   * действие одно — дождаться, и обвинять в задержке нечего и некого; поэтому
+   * же имя устроено как у `zone-nameservers-unknown`, а не как у отказа ниже.
+   */
+  | "registry-nameservers-unknown"
+  /**
+   * Реестр говорит, что такого домена у него НЕТ.
+   *
+   * Утверждение реестра, а не наша неудача (`api/rdap.ts`,
+   * `RegistryNameservers`), и действие у него своё: разобраться с самим
+   * доменом — опечатка в имени, домен не продлён, ещё не зарегистрирован.
+   * Прописывать NS тут некуда, поэтому это НЕ `mismatch`: кнопка «Прописать NS»
+   * такому домену не поможет, а красный бейдж послал бы к ней.
+   */
+  | "not-in-registry"
+  /**
+   * Спросить реестр не удалось — про делегирование не известно ничего.
+   *
+   * Отдельно от «домена нет», хотя серый бейдж у них один: там чинить нечего,
+   * тут надо повторить позже (или узнать из `detail`, что у TLD нет RDAP-сервера
+   * вовсе). Слить их значило бы сказать «домена не существует» про домен, до
+   * реестра которого мы просто не дошли.
+   */
+  | "registry-unavailable";
 
 /**
  * Что мы знаем про делегирование.
  *
- * `pending` — не полумера и не «почти делегировано»: NS у регистратора уже те,
+ * `pending` — не полумера и не «почти делегировано»: NS домена в реестре уже те,
  * что выдал Cloudflare, но сам Cloudflare делегирование ещё не подтвердил.
  * Между этими двумя событиями проходит от минут до суток, и всё это время
  * зелёный бейдж был бы обещанием работающего домена.
@@ -60,9 +92,22 @@ export type NsUnknownReason =
 export type NsDelegation =
   | { state: "delegated"; nameservers: string[] }
   | { state: "pending"; nameservers: string[]; zoneStatus: string | null }
-  /** Регистратор указывает не туда. Оба набора — чтобы было видно, что на что менять. */
+  /**
+   * Домен делегирован не туда. Оба набора — чтобы было видно, что на что менять.
+   *
+   * `actual` МОЖЕТ быть пустым: это «домен есть в реестре, а NS у него не
+   * прописаны», то есть не делегирован никуда (см. `nsDelegation`).
+   */
   | { state: "mismatch"; expected: string[]; actual: string[] }
-  | { state: "unknown"; reason: NsUnknownReason };
+  /**
+   * Не знаем — и знаем, чего именно не хватило.
+   *
+   * `detail` — слова САМОГО источника, когда они есть (сегодня их приносит
+   * только отказ реестра: «no RDAP server for .xyz», «timeout»). Поле
+   * обязательное, а не опциональное, чтобы каждое новое место возврата решало
+   * про него явно: «нечего добавить» — это `null`, а не забытое поле.
+   */
+  | { state: "unknown"; reason: NsUnknownReason; detail: string | null };
 
 /** Зона Cloudflare в том виде, в каком её знает это правило. */
 export interface ZoneNameservers {
@@ -86,22 +131,25 @@ export interface NsDelegationInput {
    * от «привязки нет» отличается только историей, которой у пользователя нет.
    */
   zone: ZoneNameservers | null | undefined;
-  /** `domains.registrar_id`: аккаунт регистратора, у которого спрашиваем NS. */
-  registrarAccountId: number | null;
-  /** `provider` этого аккаунта. `null`/`undefined` — список аккаунтов ещё не прочитан. */
-  registrarProvider: string | null | undefined;
   /**
-   * NS домена у регистратора — ответ на вопрос ПРО ЭТОТ ДОМЕН
-   * (`useRegistrarNameservers`), а не строка из листинга аккаунта.
+   * Что сказал реестр про ЭТОТ домен (`useRegistryNameservers`). `undefined` —
+   * ответа ещё нет.
    *
-   * `undefined` — не прочитаны (запрос ещё летит или регистратор ответил
-   * отказом). Отдельного «домена в аккаунте нет» здесь нет намеренно:
-   * непагинированный листинг такого утверждения не позволял — отсутствие
-   * строки в нём значило «страница кончилась» ничуть не реже, — а поимённый
-   * запрос отвечает либо списком, либо ошибкой регистратора, и её текст
-   * показывается как есть.
+   * Здесь весь ответ, а не список строк, потому что три его состояния значат
+   * разное и разводятся ниже через `foldRegistryNameservers`: список (в том
+   * числе пустой), «домена нет» и «спросить не удалось». Приезжай сюда
+   * `string[] | undefined`, два последних схлопнулись бы в одно — ровно то, чего
+   * тип `RegistryNameservers` и заведён не допускать.
+   *
+   * Полей про аккаунт регистратора в этом входе НЕТ, и это тоже решение.
+   * Реестру всё равно, чей домен и есть ли у него у нас аккаунт регистратора, —
+   * значит, «аккаунт не назначен» и «у провайдера нет NS-API» больше не глушат
+   * чтение, и домен у ручного провайдера впервые получает настоящий бейдж
+   * делегирования вместо серого «нет API». Способность провайдера к API осталась
+   * гейтом ЗАПИСИ и живёт там, где эта запись начинается
+   * (`lib/registrarCaps.registrarSupportsNsApi`).
    */
-  registrarNameservers: readonly string[] | undefined;
+  registryNameservers: RegistryNameservers | undefined;
 }
 
 /**
@@ -109,11 +157,11 @@ export interface NsDelegationInput {
  *
  * Общая нормализация — не экономия строк, а условие сходимости: имя зоны и имя
  * nameserver'а это одинаковые DNS-имена, приезжающие из одних и тех же мест
- * (ответ Cloudflare — в нижнем регистре, ответ регистратора — как придётся,
- * иногда с завершающей точкой `ns1.example.com.`, а поле ввода набирается
- * руками). Вторая копия этого правила разошлась бы с первой молча.
+ * (ответ Cloudflare — в нижнем регистре, ответ реестра — как придётся, иногда с
+ * завершающей точкой `ns1.example.com.` или в верхнем регистре, а поле ввода
+ * набирается руками). Вторая копия этого правила разошлась бы с первой молча.
  *
- * Дубли схлопываются: `ns1` и `NS1.` у регистратора — один и тот же сервер, и
+ * Дубли схлопываются: `ns1` и `NS1.` в ответе реестра — один и тот же сервер, и
  * посчитанные за два они превратили бы совпавшие наборы в «расходится».
  */
 function normalizeNsList(list: ReadonlyArray<string>): string[] {
@@ -130,12 +178,12 @@ function normalizeNsList(list: ReadonlyArray<string>): string[] {
 
 /**
  * Одинаковые ли наборы. Именно наборы: порядок nameservers не значит ничего —
- * регистраторы отдают их в своём порядке, и сравнение списками объявляло бы
+ * реестр отдаёт их в своём порядке, и сравнение списками объявляло бы
  * «расходится» на верном делегировании.
  *
- * А вот ЧИСЛО значит: лишний NS у регистратора — это не «те же плюс запасной»,
- * а делегирование, поделённое с чужим сервером; Cloudflare такую зону активной
- * не считает.
+ * А вот ЧИСЛО значит: лишний NS в реестре — это не «те же плюс запасной», а
+ * делегирование, поделённое с чужим сервером; Cloudflare такую зону активной не
+ * считает.
  */
 function sameNsSet(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean {
   if (a.length !== b.length) return false;
@@ -146,10 +194,11 @@ function sameNsSet(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean 
 /**
  * Состояние делегирования домена на его зону Cloudflare.
  *
- * Порядок проверок — это порядок починки: сначала то, что чинится выше в
- * карточке (привязка зоны), потом то, что чинится в настройках регистратора.
- * Поэтому неизвестная зона перебивает неизвестного регистратора: пока не с чем
- * сверять, ответ регистратора всё равно ничего не решает.
+ * Порядок проверок — это порядок починки: сначала сторона Cloudflare (привязка
+ * зоны — то, что чинится выше в той же карточке), потом ответ реестра. Поэтому
+ * неизвестная зона перебивает любую новость от реестра: пока сверять не с чем,
+ * ответ реестра всё равно ничего не решает, а звать пользователя разбираться с
+ * доменом значило бы послать его не туда.
  *
  * Незнакомый статус зоны (в том числе `null`) уводит совпавшие NS в `pending`, а
  * не в `delegated`: «делегировано» — единственное зелёное состояние на этой
@@ -159,42 +208,57 @@ function sameNsSet(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean 
  */
 export function nsDelegation(input: NsDelegationInput): NsDelegation {
   const { zone } = input;
-  if (zone === null) return { state: "unknown", reason: "no-zone" };
-  if (zone === undefined) return { state: "unknown", reason: "zone-nameservers-unknown" };
+  if (zone === null) return { state: "unknown", reason: "no-zone", detail: null };
+  if (zone === undefined) {
+    return { state: "unknown", reason: "zone-nameservers-unknown", detail: null };
+  }
   // Имя зоны сверяется ДО nameservers, и это не педантизм: набор NS у
   // Cloudflare один на аккаунт, поэтому чужая зона сойдётся по ним с настоящими
   // NS домена и выдаст зелёное «делегировано» на домен, зоны которого в
   // Cloudflare нет. Правило сравнения — общее с матчем зон (`normalizeZoneName`).
   if (normalizeZoneName(zone.name) !== normalizeZoneName(input.domainName)) {
-    return { state: "unknown", reason: "zone-name-mismatch" };
+    return { state: "unknown", reason: "zone-name-mismatch", detail: null };
   }
   const expected = normalizeNsList(zone.nameservers);
   // Зона без единого NS — это не «зона без делегирования», а зона, про NS
   // которой мы ничего не узнали: сравнивать не с чем.
-  if (expected.length === 0) return { state: "unknown", reason: "zone-nameservers-unknown" };
+  if (expected.length === 0) {
+    return { state: "unknown", reason: "zone-nameservers-unknown", detail: null };
+  }
 
-  if (input.registrarAccountId == null) return { state: "unknown", reason: "no-registrar" };
-  // Провайдера ещё не знаем (список аккаунтов не прочитан) — это «не прочитано»,
-  // а НЕ «у провайдера нет API»: вторая фраза обвиняла бы регистратора в том,
-  // чего мы про него не выяснили. Предикат общий с панелью (`registrarCaps`):
-  // разъехавшись, бейдж и подпись под кнопкой сказали бы про один аккаунт
-  // разное.
-  if (!registrarProviderKnown(input.registrarProvider)) {
-    return { state: "unknown", reason: "registrar-nameservers-unknown" };
+  const answer = input.registryNameservers;
+  if (answer === undefined) {
+    return { state: "unknown", reason: "registry-nameservers-unknown", detail: null };
   }
-  if (!registrarSupportsNsApi(input.registrarProvider)) {
-    return { state: "unknown", reason: "registrar-no-api" };
-  }
-  if (input.registrarNameservers === undefined) {
-    return { state: "unknown", reason: "registrar-nameservers-unknown" };
-  }
-  const actual = normalizeNsList(input.registrarNameservers);
-  if (actual.length === 0) return { state: "unknown", reason: "registrar-nameservers-unknown" };
-
-  if (!sameNsSet(expected, actual)) return { state: "mismatch", expected, actual };
-  return zone.status === ZONE_ACTIVE
-    ? { state: "delegated", nameservers: expected }
-    : { state: "pending", nameservers: expected, zoneStatus: zone.status };
+  // Разбор через `foldRegistryNameservers`, а не через `if (state === …)`:
+  // хелпер со `never`-ветвью не даёт отмахнуться от двух состояний одним `else`
+  // и ломает сборку, если у реестра появится четвёртый ответ. Именно ради этого
+  // он и заведён (`api/rdap.ts`).
+  return foldRegistryNameservers<NsDelegation>(answer, {
+    registered: (nameservers) => {
+      const actual = normalizeNsList(nameservers);
+      // ПУСТОЙ список от реестра — это `mismatch`, а не «не знаем», и это
+      // главная перемена лестницы. `Registered { nameservers: [] }` —
+      // утверждение: домен в реестре есть, а делегирования у него нет (ключа
+      // `nameservers` в RDAP-ответе просто нет, и фаза 3 специально отделила
+      // этот случай от «не смогли спросить»). Прежний код уводил пустоту в
+      // `unknown`, потому что пустой список от API регистратора значил «разбор
+      // промахнулся» ничуть не реже, чем «NS не прописаны», — у реестра такой
+      // двусмысленности нет. И серый бейдж тут был бы худшим из исходов:
+      // домен, не делегированный НИКУДА, то есть не работающий вовсе,
+      // выглядел бы как «мы не выяснили», хотя чинится он ровно тем же
+      // действием, что любое другое расхождение — прописать NS зоны.
+      if (!sameNsSet(expected, actual)) return { state: "mismatch", expected, actual };
+      return zone.status === ZONE_ACTIVE
+        ? { state: "delegated", nameservers: expected }
+        : { state: "pending", nameservers: expected, zoneStatus: zone.status };
+    },
+    notRegistered: () => ({ state: "unknown", reason: "not-in-registry", detail: null }),
+    // Слова реестра доезжают до бейджа как есть: «не знаем» отвечает на вопрос
+    // пользователя, а причина («no RDAP server for .xyz», «timeout») говорит,
+    // ждать ли ответа вообще.
+    unavailable: (reason) => ({ state: "unknown", reason: "registry-unavailable", detail: reason }),
+  });
 }
 
 /**

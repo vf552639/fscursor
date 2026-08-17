@@ -6,6 +6,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import DomainDetailModal from "./DomainDetailModal";
 import { cloudflareKeys } from "../api/cloudflare";
 import { queryClient } from "../api/queryClient";
+import type { RegistryNameservers } from "../api/rdap";
 import { useAuthStore } from "../store/auth";
 
 /**
@@ -17,15 +18,21 @@ import { useAuthStore } from "../store/auth";
  * `cloudflare_zone_id` выглядел настроенным, хотя пушить NS ему было нечем.
  *
  * Правило, которое здесь проверяется главным: **незнание не рисуется
- * здоровьем.** Оба сведения (NS зоны и NS у регистратора) читаются вживую из
- * двух чужих API, и когда любое из них не прочиталось, бейдж обязан быть
- * серым «UNKNOWN» с названной причиной, а не зелёным и не прочерком.
+ * здоровьем.** Оба сведения (NS зоны у Cloudflare и NS домена В РЕЕСТРЕ)
+ * читаются вживую из двух чужих сервисов, и когда любое из них не прочиталось,
+ * бейдж обязан быть серым «UNKNOWN» с названной причиной, а не зелёным и не
+ * прочерком.
+ *
+ * «Как есть» приезжает из реестра (RDAP), а не от API регистратора, и это видно
+ * по мокам: у команды реестра нет ни `userId`, ни аккаунта — поэтому бейдж
+ * работает и у провайдера без API вовсе.
  */
 
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiPut: vi.fn(),
   invokeSynced: vi.fn(),
+  invokeIfTauri: vi.fn(),
 }));
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -38,6 +45,13 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
+}));
+
+// Чтение реестра идёт мимо локального кэша (`invokeIfTauri`, а не
+// `invokeSynced`): синк перед вопросом о чужом домене был бы платой ни за что.
+vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
 }));
 
 const CF_MAIN = 7;
@@ -94,13 +108,25 @@ function mockAccounts(provider: string | null = "namecheap") {
   });
 }
 
-/** Ответы двух чужих API: зоны Cloudflare и nameservers домена у регистратора. */
-function mockReads(reads: { zones?: any[]; registrarNs?: string[]; registrarNsError?: Error } = {}) {
+/**
+ * Ответы двух чужих сервисов: зоны Cloudflare и делегирование из реестра.
+ *
+ * `registry` — весь ответ реестра, а не список строк: три его состояния
+ * («вот NS», «домена нет», «спросить не удалось») значат разное, и мок обязан
+ * уметь выдать каждое. `registryError` — отдельно: это провал самого запроса, а
+ * не ответ реестра.
+ */
+function mockReads(
+  reads: { zones?: any[]; registry?: RegistryNameservers; registryError?: Error } = {},
+) {
   mocks.invokeSynced.mockImplementation(async (cmd: string) => {
     if (cmd === "cf_list_zones") return reads.zones ?? [zone()];
-    if (cmd === "registrar_get_nameservers") {
-      if (reads.registrarNsError) throw reads.registrarNsError;
-      return reads.registrarNs ?? [];
+    return true;
+  });
+  mocks.invokeIfTauri.mockImplementation(async (cmd: string) => {
+    if (cmd === "domain_registry_nameservers") {
+      if (reads.registryError) throw reads.registryError;
+      return reads.registry ?? { state: "registered", nameservers: [] };
     }
     return true;
   });
@@ -154,6 +180,13 @@ function delegationBadge() {
 
 function invoked(cmd: string) {
   return mocks.invokeSynced.mock.calls.filter((c: any[]) => c[0] === cmd);
+}
+
+/** Вопросы, заданные реестру: они идут другим путём, чем команды с ключами. */
+function askedRegistry() {
+  return mocks.invokeIfTauri.mock.calls.filter(
+    (c: any[]) => c[0] === "domain_registry_nameservers",
+  );
 }
 
 beforeEach(() => {
@@ -317,7 +350,6 @@ describe("поле NS не переживает смену зоны втихую
   function zonesOnlyInMain() {
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
       if (cmd === "cf_list_zones") return String(args.accountId) === String(CF_MAIN) ? [zone()] : [];
-      if (cmd === "registrar_get_nameservers") return [];
       return true;
     });
   }
@@ -395,24 +427,19 @@ describe("поле NS не переживает смену зоны втихую
 });
 
 describe("делегирование — три состояния и «не знаем»", () => {
-  it("делегировано у Namecheap — по ответу про ЭТОТ домен, а не по листингу", async () => {
+  it("делегировано — по ответу РЕЕСТРА, и вопрос задан только про имя домена", async () => {
     setTauri(true);
-    // Аккаунт по умолчанию — namecheap, и это здесь главное: его листинг
-    // (`namecheap.domains.getList`) nameservers не отдаёт вовсе, поэтому
-    // сверка по листингу у Namecheap не могла дать ничего, кроме серого
-    // «не знаем». Спрашиваем поимённо — и зелёное состояние достижимо.
-    mockReads({ registrarNs: [...CF_NS].reverse() });
+    mockReads({ registry: { state: "registered", nameservers: [...CF_NS].reverse() } });
     show();
 
     // Регистр, точка на конце и порядок серверов — не расхождение.
     await waitFor(() => expect(delegationBadge().textContent).toBe("DELEGATED"));
-    expect(invoked("registrar_get_nameservers")[0][1]).toEqual({
-      userId: "user-1",
-      // Аккаунт РЕГИСТРАТОРА и ИМЯ домена — то, что ждёт команда.
-      accountId: String(REGISTRAR),
-      domain: "example.com",
-    });
-    // Выкачки аккаунта при этом не происходит.
+    // Ни `userId`, ни аккаунта регистратора: реестр отвечает про домен, а не про
+    // нашу учётку, — на этом и держится бейдж у провайдеров без API.
+    expect(askedRegistry()[0][1]).toEqual({ domain: "example.com" });
+    // И ни одной команды с ключами регистратора: чтения NS через его API больше
+    // не существует, выкачки аккаунта — тем более.
+    expect(invoked("registrar_get_nameservers")).toEqual([]);
     expect(invoked("registrar_get_domains")).toEqual([]);
   });
 
@@ -422,7 +449,10 @@ describe("делегирование — три состояния и «не з�
     // NS у Cloudflare одни на весь аккаунт, а статус зоны `active`, — то есть
     // всё «сходится», и без сверки имени бейдж был бы зелёным про домен,
     // зоны которого в Cloudflare нет.
-    mockReads({ zones: [zone({ name: "other.com" })], registrarNs: CF_NS });
+    mockReads({
+      zones: [zone({ name: "other.com" })],
+      registry: { state: "registered", nameservers: CF_NS },
+    });
     show();
 
     expect(await screen.findByText(/different name than this domain/)).toBeTruthy();
@@ -433,7 +463,10 @@ describe("делегирование — три состояния и «не з�
 
   it("pending, пока Cloudflare не подтвердил зону", async () => {
     setTauri(true);
-    mockReads({ zones: [zone({ status: "pending" })], registrarNs: CF_NS });
+    mockReads({
+      zones: [zone({ status: "pending" })],
+      registry: { state: "registered", nameservers: CF_NS },
+    });
     show();
 
     await waitFor(() => expect(delegationBadge().textContent).toBe("PENDING"));
@@ -442,56 +475,109 @@ describe("делегирование — три состояния и «не з�
 
   it("расходится — и показывает, что на что менять", async () => {
     setTauri(true);
-    mockReads({ registrarNs: ["ns1.hoster.net", "ns2.hoster.net"] });
+    mockReads({ registry: { state: "registered", nameservers: ["ns1.hoster.net", "ns2.hoster.net"] } });
     show();
 
     await waitFor(() => expect(delegationBadge().textContent).toBe("MISMATCH"));
-    expect(screen.getByText(/at registrar: ns1.hoster.net, ns2.hoster.net/)).toBeTruthy();
+    expect(screen.getByText(/in registry: ns1.hoster.net, ns2.hoster.net/)).toBeTruthy();
     expect(screen.getByText(/zone: ada.ns.cloudflare.com, bob.ns.cloudflare.com/)).toBeTruthy();
   });
 
-  it("отказ регистратора — это «не знаем», и причина названа его же словами", async () => {
+  it("домен есть в реестре, а NS у него нет — красное «не делегирован никуда», а не серое", async () => {
     setTauri(true);
-    mockReads({ registrarNsError: new Error("Namecheap error: Domain not found") });
+    // Пустой список — УТВЕРЖДЕНИЕ реестра, а не отсутствие ответа. Серый бейдж
+    // прятал бы за «мы не выяснили» домен, который не работает вообще, — при том
+    // что чинится он той же кнопкой, что любое расхождение.
+    mockReads({ registry: { state: "registered", nameservers: [] } });
+    show();
+
+    await waitFor(() => expect(delegationBadge().textContent).toBe("MISMATCH"));
+    expect(screen.getByText(/not delegated anywhere/)).toBeTruthy();
+    // Пустое «как есть» напечатано словом, а не пустотой: обрезанная строка
+    // читалась бы как сломанная вёрстка, а не как самый плохой случай.
+    expect(screen.getByText(/in registry: \(none\)/)).toBeTruthy();
+  });
+
+  it("домена нет в реестре — своя причина и своё действие", async () => {
+    setTauri(true);
+    mockReads({ registry: { state: "not_registered" } });
+    show();
+
+    // Не «расходится» и не «не смогли спросить»: прописывать NS домену, которого
+    // в реестре нет, некуда — разбираться надо с самим доменом.
+    expect(await screen.findByText(/no record of this domain/)).toBeTruthy();
+    expect(delegationBadge().textContent).toBe("UNKNOWN");
+  });
+
+  it("реестр не смог ответить — это «не знаем», и причина названа его же словами", async () => {
+    setTauri(true);
+    mockReads({ registry: { state: "unavailable", reason: "no RDAP server for .test" } });
     show();
 
     // Самая опасная ошибка этой карточки: сверка не состоялась, расхождений «не
     // нашлось», и зелёный бейдж объявил бы домен рабочим. Причина при этом
-    // берётся у регистратора, а не выдумывается: раньше на этом месте стояло
-    // «домена нет в аккаунте», хотя знать этого было неоткуда.
-    expect(await screen.findByText(/Domain not found/)).toBeTruthy();
+    // берётся у реестра, а не выдумывается: по ней видно, ждать ли ответа вообще.
+    expect(await screen.findByText(/could not be asked/)).toBeTruthy();
+    expect(await screen.findByText(/no RDAP server for .test/)).toBeTruthy();
     expect(delegationBadge().textContent).toBe("UNKNOWN");
   });
 
-  it("провайдер без NS-API: сверять нечем и кнопка выключена", async () => {
+  it("упавший запрос в реестр не выдаётся за «ответ ещё летит»", async () => {
     setTauri(true);
-    mockAccounts("godaddy");
+    mockReads({ registryError: new Error("invoke failed: window is gone") });
     show();
 
-    // `make_service` в десктопе знает двух провайдеров и на третьем отказывает
-    // ещё до сети (`lib/registrarCaps`) — живая кнопка обещала бы работу,
-    // которой не будет.
-    // Незнание названо причиной: сверки нет не потому, что «всё сошлось».
-    expect(await screen.findByText(/«godaddy» has no nameserver API in SDMP/)).toBeTruthy();
+    // «Подождите» про ответ, которого не будет, — это обещание. Провал запроса
+    // приезжает тем же состоянием, что отказ реестра.
+    expect(await screen.findByText(/could not be asked/)).toBeTruthy();
+    expect(screen.getByText(/window is gone/)).toBeTruthy();
     expect(delegationBadge().textContent).toBe("UNKNOWN");
-    // А у кнопки — что с этим делать.
-    expect(screen.getByText(/set the nameservers in the registrar's own panel/)).toBeTruthy();
-    expect((screen.getByText(/Set NS at registrar/).closest("button") as HTMLButtonElement).disabled).toBe(true);
-    // И в чужой API не ходим: ответа там всё равно нет.
-    await act(async () => {});
-    expect(invoked("registrar_get_nameservers")).toEqual([]);
   });
 
-  it("без зоны регистратора не спрашивает вовсе", async () => {
+  it("домен у РУЧНОГО провайдера получает живой бейдж, а кнопка остаётся выключенной", async () => {
+    setTauri(true);
+    // Dynadot заведён ярлыком: API у него нет вовсе (`lib/registrarCaps`), и
+    // раньше это глушило ЧТЕНИЕ — бейдж был серым «нет API» у всех таких
+    // доменов. Реестру же аккаунт не нужен: он отвечает и здесь.
+    mockAccounts("dynadot");
+    mockReads({ registry: { state: "registered", nameservers: CF_NS } });
+    show();
+
+    await waitFor(() => expect(delegationBadge().textContent).toBe("DELEGATED"));
+    expect(askedRegistry()[0][1]).toEqual({ domain: "example.com" });
+
+    // А вот ЗАПИСЬ по-прежнему невозможна, и сказано об этом там, где кнопка:
+    // `make_service` в десктопе знает двух провайдеров и на третьем отказывает
+    // ещё до сети — живая кнопка обещала бы работу, которой не будет.
+    expect(
+      screen.getByText(/SDMP has no nameserver API for «dynadot» — set the nameservers in the registrar's own panel/),
+    ).toBeTruthy();
+    expect((screen.getByText(/Set NS at registrar/).closest("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("домен без аккаунта регистратора тоже получает живой бейдж", async () => {
+    setTauri(true);
+    // Строка домена без `registrar_id` — обычное дело у только что заведённых
+    // доменов. Реестру всё равно: раньше это была причина `no-registrar`, то
+    // есть серый бейдж вместо ответа, который у нас был.
+    mockReads({ registry: { state: "registered", nameservers: CF_NS } });
+    show(domain({ registrar_id: null }));
+
+    await waitFor(() => expect(delegationBadge().textContent).toBe("DELEGATED"));
+    // Причина у выключенной кнопки при этом своя и на своём месте.
+    expect(screen.getByText(/Assign a registrar account to this domain first/)).toBeTruthy();
+  });
+
+  it("без зоны реестр не спрашивают вовсе", async () => {
     setTauri(true);
     show(domain({ cloudflare_account_id: null, cloudflare_zone_id: null }));
 
     await waitFor(() => expect(delegationBadge().textContent).toBe("UNKNOWN"));
     expect(screen.getByText(/not bound to a live Cloudflare zone/)).toBeTruthy();
-    // Сверять не с чем, а поход в API регистратора стоил бы запроса на каждое
-    // открытие карточки.
+    // Сверять не с чем, а поход в чужой публичный сервис стоил бы запроса на
+    // каждое открытие карточки.
     await act(async () => {});
-    expect(invoked("registrar_get_nameservers")).toEqual([]);
+    expect(askedRegistry()).toEqual([]);
     expect(invoked("cf_list_zones")).toEqual([]);
   });
 });

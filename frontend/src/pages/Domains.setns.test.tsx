@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   apiPut: vi.fn(),
   apiDelete: vi.fn(),
   invokeSynced: vi.fn(),
+  /** Реестр спрашивают мимо локального кэша, своим путём (`api/rdap.ts`). */
+  invokeIfTauri: vi.fn(),
   mutate: vi.fn(),
 }));
 
@@ -39,6 +41,11 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
+}));
+
+vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
 }));
 
 vi.mock("../components/RevealSecret", () => ({
@@ -143,9 +150,6 @@ describe("карточка домена после смены NS", () => {
     });
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
       if (cmd === "cf_list_zones") return [ZONE];
-      // Сверку делегирования этот сценарий не проверяет, но карточка её ведёт:
-      // без явного ответа команда ушла бы в общий `mutate` и вернула не список.
-      if (cmd === "registrar_get_nameservers") return [];
       if (cmd === "registrar_set_nameservers") {
         // Write-back внутри команды — то, из-за чего сервер начинает отвечать
         // `ok`. Здесь он ровно этим и моделируется.
@@ -154,6 +158,11 @@ describe("карточка домена после смены NS", () => {
       }
       return mocks.mutate(cmd, args);
     });
+    // Сверку делегирования этот сценарий не проверяет, но карточка её ведёт —
+    // теперь через реестр, и без ответа бейдж висел бы в «ответа ещё нет».
+    mocks.invokeIfTauri.mockImplementation(async (cmd: string) =>
+      cmd === "domain_registry_nameservers" ? { state: "registered", nameservers: [] } : true,
+    );
 
     renderPage();
 
