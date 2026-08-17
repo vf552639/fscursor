@@ -6,8 +6,10 @@ import { describe, it, expect } from "vitest";
 import { registrarSupportsNsApi } from "./registrarCaps";
 import {
   API_PROVIDERS,
+  apiKeyLabel,
   apiUserField,
   hasApi,
+  needsApiUser,
   needsClientIp,
   normalizeProvider,
   providerMeta,
@@ -48,6 +50,52 @@ describe("registrarProviders — API-способность", () => {
   });
 });
 
+describe("registrarProviders — состав учётки: API User и подпись секрета", () => {
+  /**
+   * Живая проверка боевым токеном: настоящий API Hostiq — DI-API v3, вся
+   * авторизация в одном заголовке `X-Authorization-Token`. Email в запрос не
+   * уходит, значит и спрашивать его нельзя: поле, которое никуда не едет,
+   * называет пользователю ложную причину отказа регистратора.
+   */
+  it("needsApiUser: только Namecheap — Hostiq авторизуется одним токеном", () => {
+    expect(needsApiUser("namecheap")).toBe(true);
+    expect(needsApiUser("Namecheap")).toBe(true);
+    expect(needsApiUser("hostiq")).toBe(false);
+    expect(needsApiUser("HOSTIQ")).toBe(false);
+  });
+
+  it("needsApiUser: у ручного и неизвестного провайдера полей API не бывает", () => {
+    for (const manual of ["godaddy", "GoDaddy", "", null, undefined]) {
+      expect(needsApiUser(manual), String(manual)).toBe(false);
+    }
+  });
+
+  it("needsApiUser: пробелы НЕ схлопывает — такого провайдера десктоп не знает", () => {
+    // Тот же гейт `hasApi`, что у `needsClientIp`: у провайдера, которому форма
+    // отказала в бейдже «API», не спрашивают НИ ОДНОГО поля учётки.
+    expect(hasApi(" namecheap ")).toBe(false);
+    expect(needsApiUser(" namecheap ")).toBe(false);
+    expect(needsApiUser(" hostiq ")).toBe(false);
+  });
+
+  it("apiKeyLabel: как поле называется у самого регистратора", () => {
+    // В личном кабинете Hostiq нет ничего с названием «API key» — есть токен
+    // DI-API. Подпись формы обязана совпадать с тем, что человек ищет глазами.
+    expect(apiKeyLabel("hostiq")).toBe("API token");
+    expect(apiKeyLabel("HOSTIQ")).toBe("API token");
+    expect(apiKeyLabel("namecheap")).toBe("API key");
+    expect(apiKeyLabel("Namecheap")).toBe("API key");
+  });
+
+  it("apiKeyLabel: у провайдера без API — общее имя, а не пустая строка", () => {
+    // Отсюда подпись уходит в `labels` хука, а тот собирает из неё «… is
+    // required». Пустая строка дала бы сообщение, начинающееся с пробела.
+    for (const manual of ["godaddy", " hostiq ", "", null, undefined]) {
+      expect(apiKeyLabel(manual), String(manual)).toBe("API key");
+    }
+  });
+});
+
 describe("registrarProviders — подсказки поля API User", () => {
   /**
    * Последнее место, где страница знала регистраторов по именам: подпись и
@@ -59,13 +107,16 @@ describe("registrarProviders — подсказки поля API User", () => {
    * остальным показом.
    */
   it("подсказки берутся у провайдера, а не выводятся из другой способности", () => {
-    expect(apiUserField("hostiq")).toEqual({ suffix: " (email)", placeholder: "admin@hostiq.ua" });
     expect(apiUserField("Namecheap")).toEqual({ suffix: "", placeholder: "your_namecheap_username" });
   });
 
-  it("у провайдера без API подсказок нет — поля ему не показывают вовсе", () => {
-    for (const manual of ["GoDaddy", " hostiq ", "", null, undefined]) {
-      expect(apiUserField(manual)).toEqual({ suffix: "", placeholder: "" });
+  it("у кого поля нет — у того нет и подсказок: Hostiq, ручной, битый ввод", () => {
+    // Hostiq здесь стоит рядом с ручным провайдером намеренно: подсказки
+    // гейтятся тем же `needsApiUser`, что решает про само поле. Оставь мы ему
+    // прежний `admin@hostiq.ua` — и первый читатель принял бы живой плейсхолдер
+    // за указание вернуть поле, которого у DI-API v3 не бывает.
+    for (const noField of ["hostiq", "HOSTIQ", "GoDaddy", " hostiq ", "", null, undefined]) {
+      expect(apiUserField(noField), String(noField)).toEqual({ suffix: "", placeholder: "" });
     }
   });
 });

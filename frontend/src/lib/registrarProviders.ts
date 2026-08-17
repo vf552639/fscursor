@@ -2,10 +2,11 @@ import { registrarSupportsNsApi } from "./registrarCaps";
 
 /**
  * Каталог провайдеров, у которых в десктопе есть Rust-клиент: как их показывать
- * (метка, буква, цвета) и нужен ли им Client IP. Всё остальное — «ручной»
- * провайдер: хранится ярлыком, API нет.
+ * (метка, буква, цвета) и из каких полей состоит их учётка (Client IP, API User,
+ * как называется секрет). Всё остальное — «ручной» провайдер: хранится ярлыком,
+ * API нет.
  *
- * Источник правды здесь — про ПОКАЗ и про `needsClientIp`, и только про них.
+ * Источник правды здесь — про ПОКАЗ и про состав полей формы, и только про них.
  * Ответ на вопрос «есть ли API» каталог не даёт сам, а НАСЛЕДУЕТ у
  * `registrarCaps.registrarSupportsNsApi` (см. `hasApi` ниже): предикат в
  * проекте должен быть один, иначе один и тот же аккаунт получает два разных
@@ -18,10 +19,21 @@ import { registrarSupportsNsApi } from "./registrarCaps";
 export const API_PROVIDERS = {
   hostiq: {
     label: "Hostiq", icon: "H", bg: "#fff7ed", color: "#ea580c", needsClientIp: false,
-    apiUserSuffix: " (email)", apiUserPlaceholder: "admin@hostiq.ua",
+    // Ни `needsApiUser`, ни подсказок к нему: живая проверка боевым токеном
+    // показала, что настоящий API Hostiq — DI-API v3, и авторизуется он ОДНИМ
+    // токеном в заголовке `X-Authorization-Token`. Email в запрос не уходит
+    // вовсе, а тот самый «hash» из личного кабинета и есть этот токен. Пустые
+    // строки, а не отсутствующие ключи, — чтобы у записей каталога была одна
+    // форма: разнобой превратил бы `apiEntry` в объединение типов, у которого
+    // общего поля нет ни у кого.
+    needsApiUser: false, apiKeyLabel: "API token",
+    apiUserSuffix: "", apiUserPlaceholder: "",
   },
   namecheap: {
     label: "Namecheap", icon: "N", bg: "#fef2f2", color: "#dc2626", needsClientIp: true,
+    // `ApiUser` — обязательный параметр каждого запроса Namecheap (имя
+    // пользователя панели), поэтому поле у него настоящее, а не наследство.
+    needsApiUser: true, apiKeyLabel: "API key",
     apiUserSuffix: "", apiUserPlaceholder: "your_namecheap_username",
   },
 } as const;
@@ -88,6 +100,49 @@ export function needsClientIp(provider: string | null | undefined): boolean {
 }
 
 /**
+ * Нужно ли поле «API User» (сегодня — только Namecheap).
+ *
+ * Отдельный признак, а не `hasApi`, и это не украшение формы, а исправление
+ * вранья: у Hostiq поле спрашивали как часть учётных данных, хотя настоящий
+ * API (DI-API v3) авторизуется ОДНИМ токеном в заголовке
+ * `X-Authorization-Token` — email не уходит в запрос ни в каком виде.
+ * Спрошенное и никуда не отправляемое поле хуже лишнего ввода: оно называет
+ * причину отказа. Человек, которому регистратор отвечает 401, идёт проверять
+ * email — то есть ровно то, что на ответ не влияет, — вместо токена.
+ *
+ * У Namecheap поле нужно по-настоящему: `ApiUser` уходит в каждый запрос, и без
+ * него API отвечает ошибкой ещё до проверки ключа.
+ *
+ * Гейт `apiEntry` — по той же причине, что у `needsClientIp`: у провайдера,
+ * которого десктоп не признаёт, полей API не спрашивают вовсе.
+ */
+export function needsApiUser(provider: string | null | undefined): boolean {
+  return apiEntry(provider)?.needsApiUser ?? false;
+}
+
+/**
+ * Как называется поле секрета этому провайдеру: Hostiq выдаёт «API token» (он
+ * же вся авторизация), Namecheap — «API key», который работает в паре с
+ * `ApiUser`. Разница не косметическая: в личном кабинете Hostiq нет ничего с
+ * названием «API key», и подпись формы обязана совпадать с тем, что человек
+ * ищет глазами на чужом экране.
+ *
+ * Строкой в каталоге, а не в разметке формы, потому что подпись нужна в ДВУХ
+ * местах и они обязаны совпадать: над полем ввода и в сообщении «… is required»,
+ * которое собирает `useMultiSecretSave` из своих `labels` (см.
+ * `registrarSecretLabels` в `pages/Settings.tsx`). Разъедься они — и форма
+ * отказывала бы, называя поле не тем именем, которое человек видит на экране.
+ *
+ * У провайдера без API — общее «API key», а не пустая строка: отсюда подпись
+ * попадает в `labels` хука, а тот из пустой собрал бы сообщение « is required».
+ * Сегодня оно недостижимо (у ручного ярлыка секретов нет вовсе, и требовать
+ * нечего), но фолбэк для того и нужен, чтобы отвечать на недостижимое.
+ */
+export function apiKeyLabel(provider: string | null | undefined): string {
+  return apiEntry(provider)?.apiKeyLabel ?? "API key";
+}
+
+/**
  * Запись каталога — но только если провайдера признаёт `hasApi`.
  *
  * Гейт здесь, а не у каждого спрашивающего: у провайдера, которого десктоп не
@@ -106,8 +161,8 @@ function apiEntry(provider: string | null | undefined) {
 }
 
 /**
- * Подпись и плейсхолдер поля «API User» — они у каждого провайдера свои: Hostiq
- * ждёт email, Namecheap — имя пользователя панели.
+ * Подпись и плейсхолдер поля «API User» — они у каждого провайдера свои:
+ * Namecheap ждёт имя пользователя панели, а у Hostiq поля нет вовсе.
  *
  * Отдельной функцией, а не полями `ProviderMeta`: это метаданные ФОРМЫ, а
  * рисовать провайдера (аватар, метка, чип) умеют и там, где никакой формы нет.
@@ -115,13 +170,19 @@ function apiEntry(provider: string | null | undefined) {
  * Заведена, чтобы страница не выбирала подсказки тернарником по `needsClientIp`:
  * «нужен ли Client IP» работало там прокси для «это Namecheap», и совпадение это
  * случайное. Третий Rust-клиент с whitelist получил бы чужой
- * `your_namecheap_username`, а без него — чужой `admin@hostiq.ua`; заметили бы
- * это не раньше, чем кто-то пожаловался бы на подсказку.
+ * `your_namecheap_username`; заметили бы это не раньше, чем кто-то пожаловался
+ * бы на подсказку.
  *
- * У провайдера без API — пустые строки: поля «API User» ему не показывают вовсе.
+ * Пустые строки — у всех, кому поля не показывают: и у провайдера без API, и у
+ * Hostiq, который авторизуется одним токеном.
  */
 export function apiUserField(provider: string | null | undefined): { suffix: string; placeholder: string } {
-  const entry = apiEntry(provider);
+  // Гейт по `needsApiUser`, а не просто по наличию записи в каталоге: подсказки
+  // — это подписи к полю, и решать про них обязан ровно тот признак, который
+  // решает про само поле. Разведи их — и провайдер без поля продолжал бы носить
+  // осмысленный плейсхолдер, а первый читатель принял бы его за указание поле
+  // вернуть (именно так `admin@hostiq.ua` и пережил бы эту правку).
+  const entry = needsApiUser(provider) ? apiEntry(provider) : undefined;
   return { suffix: entry?.apiUserSuffix ?? "", placeholder: entry?.apiUserPlaceholder ?? "" };
 }
 

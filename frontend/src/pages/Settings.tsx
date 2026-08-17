@@ -8,32 +8,49 @@ import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave } from "../hooks/useSecretSave";
-import { apiUserField, hasApi, needsClientIp, providerMeta } from "../lib/registrarProviders";
+import { apiKeyLabel, apiUserField, hasApi, needsApiUser, needsClientIp, providerMeta } from "../lib/registrarProviders";
 import { ProviderCombobox } from "../components/settings/ProviderCombobox";
 import { ProviderAvatar, ProviderApiTag, ProviderLabel } from "../components/settings/ProviderVisuals";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 import RecoveryPhraseCard from "./RecoveryPhraseCard";
 
 /**
- * Как поля секретов регистратора называются пользователю. Одни и те же на
- * форме создания и правки: из них хук собирает и «… is required», и текст
+ * Как поля секретов регистратора называются пользователю. Одна функция на форму
+ * создания и на правку: из этих подписей хук собирает и «… is required», и текст
  * ошибки записи, а два набора формулировок разъехались бы.
+ *
+ * ВЫЧИСЛЯЕТСЯ от провайдера, а не лежит константой: у Hostiq секрет называется
+ * «API token» (DI-API v3, вся авторизация в одном токене), у Namecheap — «API
+ * key» рядом с `ApiUser`. Подпись над полем и подпись в отказе формы обязаны
+ * быть одной строкой, иначе отказ говорит про поле, которого человек на экране
+ * не видит. Имя берётся из каталога (`apiKeyLabel`), а не из тернарника здесь:
+ * состав учётки — свойство провайдера, и живёт оно в одном месте на весь фронт.
+ *
+ * Пересчёт на каждый рендер безопасен: `useMultiSecretSave` держит подписи в
+ * ref и обновляет их в рендере (см. `labelsRef`), а набор КЛЮЧЕЙ здесь
+ * постоянный — от провайдера зависят только значения. Меняйся ключи, поехал бы
+ * начальный `blanked()`, который снимается один раз.
  *
  * `apiSecret` — это НЕ второй ключ: десктоп отдаёт его Namecheap как
  * whitelisted client IP (`commands/registrars.rs`), поэтому и подпись про IP.
+ * Она одна на всех: провайдер с whitelist сегодня ровно один, а появись второй —
+ * называть IP он будет так же.
  *
- * ИЗМЕНЕНИЕ ПОВЕДЕНИЯ: на создании Namecheap-аккаунта IP теперь ОБЯЗАТЕЛЕН —
- * ключ всегда объявлен в `saveAll`, а пустое значение хук отбивает. Раньше
- * аккаунт заводился вообще без IP, и это была ловушка: поле было нарисовано,
- * но никуда не вело, а десктоп подставлял `127.0.0.1` (`make_service`), после
- * чего Namecheap отбивал вызовы по whitelist. Отказ формы честнее, чем
- * заведённый аккаунт, который не работает и не говорит почему. У Hostiq поля
- * нет, ключ не объявляется, `api_secret_blob_id` остаётся NULL — и это верно:
- * этот параметр Hostiq не получает вовсе. У ручного провайдера (`hasApi` = false)
- * не объявляется НИ ОДИН из двух: полей секретов у него нет, и оба `*_blob_id`
- * остаются NULL — ярлык, по которому раскладывают домены, а не учётка.
+ * ИЗМЕНЕНИЕ ПОВЕДЕНИЯ (более раннее, всё ещё в силе): на создании
+ * Namecheap-аккаунта IP ОБЯЗАТЕЛЕН — ключ всегда объявлен в `saveAll`, а пустое
+ * значение хук отбивает. Раньше аккаунт заводился вообще без IP, и это была
+ * ловушка: поле было нарисовано, но никуда не вело, а десктоп подставлял
+ * `127.0.0.1` (`make_service`), после чего Namecheap отбивал вызовы по
+ * whitelist. Отказ формы честнее, чем заведённый аккаунт, который не работает и
+ * не говорит почему. У Hostiq поля нет, ключ не объявляется,
+ * `api_secret_blob_id` остаётся NULL — и это верно: этот параметр Hostiq не
+ * получает вовсе. У ручного провайдера (`hasApi` = false) не объявляется НИ ОДИН
+ * из двух: полей секретов у него нет, и оба `*_blob_id` остаются NULL — ярлык,
+ * по которому раскладывают домены, а не учётка.
  */
-const REGISTRAR_SECRETS = { apiKey: "API key", apiSecret: "Client IP" } as const;
+function registrarSecretLabels(provider: string | null | undefined) {
+  return { apiKey: apiKeyLabel(provider), apiSecret: "Client IP" };
+}
 
 export default function Settings(){
   const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
@@ -301,16 +318,23 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
   const [provider,setProvider]=useState<RegistrarProvider>("hostiq");
   const [accName, setAccName] = useState("");
   const [apiUser, setApiUser] = useState("");
+  // Подписи секретов зависят от провайдера (у Hostiq это «API token»), поэтому
+  // считаются здесь и уходят и в хук, и в разметку — одной строкой на оба места.
+  const secretLabels = registrarSecretLabels(provider);
   // Плейнтексты обоих секретов держит хук, а не форма: он же знает, когда их
   // стереть, и он же гарантирует «оба блоба → один POST» (см. useSecretSave).
-  const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
+  const secrets = useMultiSecretSave(secretLabels);
   const createReg = useCreateRegistrarAccount();
 
   // Есть ли у провайдера рабочий API-клиент в десктопе. От этого зависит ВСЁ
   // остальное в форме: набор полей, состав объявленных секретов и тело POST.
   const api = hasApi(provider);
+  // Спрашивать ли «API User» — ОТДЕЛЬНЫЙ вопрос от «есть ли API». Раньше поле
+  // показывалось по `hasApi`, и Hostiq спрашивал email, который никуда не едет:
+  // DI-API v3 авторизуется одним токеном (см. `needsApiUser`).
+  const wantsApiUser = needsApiUser(provider);
   // Подсказки поля «API User» — свойство провайдера, и лежат они в каталоге
-  // рядом с остальным его показом (у ручного — пустые: поля у него нет).
+  // рядом с остальным его показом (у того, кому поля не показывают, — пустые).
   const userField = apiUserField(provider);
 
   const handleAdd = async () => {
@@ -343,9 +367,12 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
           // сервер имя не чистит (`RegistrarAccountCreate.name: str`, без
           // валидатора) — значит чистит форма, и в обеих половинах одинаково.
           name: accName.trim(),
-          // У ручного провайдера учётных полей нет вовсе: `api_user` уезжает
-          // жёстким `null`, а не остатком от провайдера, выбранного до него.
-          api_user: api ? apiUser : null,
+          // Гейт — ТОТ ЖЕ признак, что рисует поле: чего не показали, того и не
+          // сохраняем. У ручного провайдера учётных полей нет вовсе, у Hostiq
+          // нет именно этого, и в обоих случаях `api_user` уезжает жёстким
+          // `null` — а не остатком от провайдера, выбранного до него (набранное
+          // в поле переживает переключение, см. `switchProvider`).
+          api_user: wantsApiUser ? apiUser : null,
           // Спредом, а не `*_blob_id: undefined`: полей, которых у провайдера
           // быть не должно, в теле быть не должно тоже, а ключ со значением
           // undefined — это уже ключ (серверная схема `extra="forbid"`).
@@ -381,8 +408,9 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
   // тот же, и `reset()` сотрёт набранный ключ без единого видимого изменения.
   //
   // `apiUser` намеренно НЕ сбрасываем: это не секрет, а логин, и он всегда виден
-  // в своём поле, когда поле показано. У ручного провайдера в POST вместо него
-  // уезжает жёсткий `null` (см. `handleAdd`) — незаметно утечь ему некуда.
+  // в своём поле, когда поле показано. Там, где поля нет (ручной провайдер,
+  // Hostiq), в POST вместо него уезжает жёсткий `null` (см. `handleAdd`) —
+  // незаметно утечь набранному некуда.
   const switchProvider = (next: RegistrarProvider) => {
     if (secrets.saving || next === provider) return;
     setProvider(next);
@@ -416,13 +444,20 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
           API без всякой связи с формой. Client IP с пробелом просто не
           совпадёт с whitelist. */}
       {api ? <>
-        {/* Подпись и плейсхолдер — из каталога, а не тернарником по
-            `needsClientIp`: Hostiq ждёт email, Namecheap — имя пользователя
-            панели, и это свойство провайдера, а не следствие его whitelist'а.
-            Совпадение сегодня точное, но случайное (см. `apiUserField`). */}
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User{userField.suffix}</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={userField.placeholder}/></div>
+        {/* Поле «API User» — по `needsApiUser`, а не по `hasApi`: у Hostiq его
+            нет вовсе. DI-API v3 авторизуется одним токеном в заголовке
+            `X-Authorization-Token`, email в запрос не уходит, и спрошенный
+            здесь он оказывался бы ложной причиной отказа регистратора —
+            человек шёл бы перепроверять email вместо токена.
+
+            Подпись и плейсхолдер — из каталога, а не тернарником по
+            `needsClientIp`: состав учётки — свойство провайдера, а не следствие
+            его whitelist'а (см. `apiUserField`). */}
+        {wantsApiUser && <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User{userField.suffix}</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={userField.placeholder}/></div>}
         <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
+          {/* Подпись — та же строка, из которой хук собирает «… is required»:
+              у Hostiq это «API token», у Namecheap «API key». */}
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>{secretLabels.apiKey}</label>
           {isTauri() ? (
             <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder={needsClientIp(provider) ? "••••••••" : "••••••••••••••••"}/>
           ) : (
@@ -475,7 +510,10 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
 function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: () => void }) {
   const [name, setName] = useState(registrar.name || "");
   const [apiUser, setApiUser] = useState(registrar.api_user || "");
-  const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
+  // Те же подписи, что на создании, и по тому же провайдеру: отказ формы обязан
+  // называть поле так же, как называет его метка над ним.
+  const secretLabels = registrarSecretLabels(registrar.provider);
+  const secrets = useMultiSecretSave(secretLabels);
   const update = useUpdateRegistrarAccount(registrar.id);
   // ВСЁ про провайдера — из одного `providerMeta`, как на карточке: и метка с
   // аватаром в read-only строке, и `m.api`, который решает, показывать ли поля
@@ -489,17 +527,22 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   // «нужен ли этому провайдеру Client IP» уже разъезжались (см. Фазу 1 плана).
   // Сам он уже гейтится по `hasApi`, то есть у ручного провайдера всегда false.
   const hasClientIp = needsClientIp(registrar.provider);
+  // Поле «API User» показываем по тому же признаку, что и форма создания: у
+  // Hostiq его нет — авторизация DI-API v3 состоит из одного токена.
+  const showApiUser = needsApiUser(registrar.provider);
 
   const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
     name: name.trim(),
-    // `api_user` уезжает и у ручного провайдера — тем, чем он был в аккаунте
-    // (обычно `null`: форма создания у ручного шлёт жёсткий `null`). Жёсткого
-    // `null` здесь НЕТ намеренно: поле мы у него не показываем, а «не показываем»
-    // значит «не меняем». Достижимое исключение — строка вроде `" hostiq "`
-    // (провайдер с пробелами: десктоп такую не знает, значит для нас она ручная)
-    // с заполненным `api_user`; отправь мы `null`, переименование аккаунта молча
-    // стёрло бы логин, которого пользователю даже не показали. У API-провайдера
-    // поле на экране есть, и его значение сохраняется ровно как раньше.
+    // `api_user` уезжает и там, где поля нет, — тем, чем он был в аккаунте.
+    // Жёсткого `null` здесь НЕТ намеренно: поле мы не показываем, а «не
+    // показываем» значит «не меняем». Случаев два, и оба живые: ручной
+    // провайдер (обычно `null` — форма создания шлёт его жёстко, но строка
+    // вроде `" hostiq "` из чужого импорта могла принести и заполненный логин)
+    // и Hostiq, у которого в колонке лежит email от прежней, неверной формы.
+    // Отправь мы `null`, переименование аккаунта молча стирало бы значение,
+    // которого пользователю даже не показали, — а это правка, которую он не
+    // просил. Само по себе оно безвредно: в DI-API v3 email не уходит.
+    // У Namecheap поле на экране есть, и его значение сохраняется как раньше.
     api_user: apiUser.trim() || null,
     ...(blobIds.apiKey ? { api_key_blob_id: blobIds.apiKey } : {}),
     ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
@@ -579,7 +622,7 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
       </div>
       {/* Поля учётных данных — только у провайдера с рабочим API-клиентом, тем же
           гейтом, что и в форме создания: у ручного ярлыка нет ни ключа, ни
-          Client IP, и «API Key (optional)» на его правке предлагал бы завести
+          Client IP, и поле «… (optional)» на его правке предлагало бы завести
           секрет, который никто никогда не прочитает. В вебе у API-провайдера на
           месте этих полей стоит заметка (`DesktopOnlyNote`), а у ручного нет и
           её: сказать «секреты сохраняются в десктопе» про аккаунт, у которого
@@ -588,10 +631,13 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
           Переименовать аккаунт в вебе при этом можно — и ручной, и API-шный:
           для имени секреты не нужны. */}
       {m.api && <>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} /></div>
+        {/* По `needsApiUser`, как и на создании: у Hostiq поля нет — оставь мы
+            его в правке, форма предлагала бы менять значение, которое ни в один
+            запрос к регистратору не уходит. */}
+        {showApiUser && <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} /></div>}
         {/* Почему в вебе полей нет — JSDoc `DesktopOnlyNote`. */}
         <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key (optional)</label>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>{secretLabels.apiKey} (optional)</label>
           {isTauri() ? (
             <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="Leave empty to keep current key" />
           ) : (

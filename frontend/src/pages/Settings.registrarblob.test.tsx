@@ -94,6 +94,24 @@ const MANUAL = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+/**
+ * Аккаунт Hostiq в том виде, в каком его оставила прежняя форма: в колонке
+ * `api_user` лежит email, который DI-API v3 не использует. Именно на такой
+ * записи и проверяется правка — новых аккаунтов с email больше не заводится, а
+ * старые никуда не делись.
+ */
+const HOSTIQ = {
+  id: 5,
+  provider: "hostiq",
+  name: "hq-main",
+  api_user: "admin@hostiq.ua",
+  is_active: true,
+  api_key_blob_id: KEY_BLOB,
+  api_secret_blob_id: null,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
 function renderPage(accounts: any[] = [NAMECHEAP]) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/registrars/accounts") return accounts;
@@ -175,15 +193,12 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(Math.max(...mocks.invokeIfTauri.mock.invocationCallOrder)).toBeLessThan(postAt);
   });
 
-  it("Hostiq: пишет только ключ, api_secret_blob_id не шлёт вовсе", async () => {
+  it("Hostiq: пишет только токен, api_secret_blob_id не шлёт вовсе", async () => {
     setTauri(true);
     mocks.apiPost.mockResolvedValue({ ...NAMECHEAP, provider: "hostiq" });
 
     renderPage([]);
     await openAddModal("hostiq");
-    fireEvent.change(screen.getByPlaceholderText("admin@hostiq.ua"), {
-      target: { value: "admin@hostiq.ua" },
-    });
     // У Hostiq поле ключа своё (другой плейсхолдер) и свой `trim` в onChange —
     // значит и пробелы по краям надо ловить отдельно от Namecheap.
     fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
@@ -198,6 +213,62 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
     expect(blobPlaintext(blobOfKind("registrar_api_key"))).toBe(API_KEY);
     expect(mocks.apiPost.mock.calls[0][1]).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("Hostiq: поля API User нет, а api_user уезжает null", async () => {
+    // Настоящий API Hostiq — DI-API v3: вся авторизация в одном заголовке
+    // `X-Authorization-Token`, email в запрос не уходит ни в каком виде. Пока
+    // поле стояло на форме, оно называло ложную причину отказа: человек с
+    // неработающим аккаунтом шёл перепроверять email вместо токена.
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ ...NAMECHEAP, provider: "hostiq", api_user: null });
+
+    renderPage([]);
+    await openAddModal("hostiq");
+
+    expect(screen.queryByPlaceholderText("admin@hostiq.ua")).toBeNull();
+    expect(screen.queryByText(/API User/)).toBeNull();
+    // Подпись поля секрета — та, что стоит в личном кабинете Hostiq: «API key»
+    // там искать нечего, там токен.
+    expect(screen.getByText("API token")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
+      target: { value: API_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    // Жёсткий `null`, а не пустая строка: колонка nullable, и «поля нет» должно
+    // выглядеть в БД одинаково у Hostiq и у ручного провайдера.
+    expect(mocks.apiPost.mock.calls[0][1].api_user).toBeNull();
+  });
+
+  it("Namecheap: API User остаётся — без него его API не отвечает", async () => {
+    // Обратная половина: признак `needsApiUser` не должен был снести поле у
+    // всех подряд. У Namecheap `ApiUser` уходит в каждый запрос, и подпись
+    // секрета у него своя — «API key», а не токен.
+    setTauri(true);
+    renderPage([]);
+    await openAddModal("namecheap");
+
+    expect(screen.getByPlaceholderText("your_namecheap_username")).toBeTruthy();
+    expect(screen.getByText("API key")).toBeTruthy();
+    expect(screen.queryByText("API token")).toBeNull();
+  });
+
+  it("пустой ключ Hostiq: отказ называет поле так же, как метка над ним", async () => {
+    // Подписи полей вычисляются от провайдера и уходят в хук: разъедься они с
+    // разметкой — и форма отказывала бы, требуя «API key», которого на экране
+    // нет ни на поле, ни в личном кабинете регистратора.
+    setTauri(true);
+
+    renderPage([]);
+    await openAddModal("hostiq");
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "API token is required");
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
   it("ручной провайдер: без полей секретов, создаётся с null-блобами", async () => {
@@ -437,6 +508,37 @@ describe("Settings — ключ и секрет регистратора чер�
     // Ссылок на секреты в теле нет вовсе — их и не появлялось.
     expect(body).not.toHaveProperty("api_key_blob_id");
     expect(body).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("правка Hostiq: поля API User нет, а прежний email не стирается молча", async () => {
+    // Две половины одного правила «чего не показали — того не меняем». Поле у
+    // Hostiq снято (email в DI-API v3 не уходит), но у заведённых аккаунтов он
+    // лежит в колонке, и переименование не должно его вычищать: пользователь
+    // просил сменить имя, а не трогать то, чего ему даже не показали. Само
+    // значение безвредно — в запросы к регистратору оно не попадает.
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...HOSTIQ, name: "hq2" });
+
+    renderPage([HOSTIQ]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    expect(screen.queryByText("API User")).toBeNull();
+    expect(screen.queryByDisplayValue("admin@hostiq.ua")).toBeNull();
+    // Поле секрета при этом на месте и подписано по-своему.
+    expect(screen.getByText("API token (optional)")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Leave empty to keep current key")).toBeTruthy();
+    // Client IP у Hostiq не бывает — это отдельный признак, и он не поехал.
+    expect(screen.queryByPlaceholderText("Leave empty to keep current IP")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("hq-main"), { target: { value: "hq2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/registrars/accounts/5");
+    expect(body.name).toBe("hq2");
+    expect(body.api_user).toBe("admin@hostiq.ua");
   });
 
   it("правка ручного провайдера в вебе: заметки про секреты не прибавляется", async () => {
