@@ -4,8 +4,10 @@ import {
   buildProviderList,
   providerMeta,
   normalizeProvider,
-  type ProviderMeta,
 } from "../../lib/registrarProviders";
+// Аватар и бейдж способности — общие с карточкой аккаунта в `Settings`: почему
+// они вынесены и почему «manual» тоже чип, а не голый текст, — в JSDoc модуля.
+import { ProviderAvatar, ProviderApiTag } from "./ProviderVisuals";
 
 interface Props {
   value: string;
@@ -13,51 +15,6 @@ interface Props {
   accounts: { provider: string }[];
   /** Во время записи блобов/POST переключать провайдера нельзя (см. AddRegistrarModal). */
   disabled?: boolean;
-}
-
-function Avatar({ m }: { m: ProviderMeta }) {
-  return (
-    <div
-      style={{
-        width: 28,
-        height: 28,
-        borderRadius: 7,
-        background: m.bg,
-        color: m.color,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontWeight: 800,
-        fontSize: 13,
-        flexShrink: 0,
-      }}
-    >
-      {m.icon}
-    </div>
-  );
-}
-
-/**
- * Бейдж способности. «manual» не украшаем зелёным: у такого провайдера нет ни
- * кнопки Test, ни Set NS, и рисовать его наравне с API-провайдером значило бы
- * обещать работоспособность, которой нет (CLAUDE.md §6).
- */
-function ApiTag({ api }: { api: boolean }) {
-  return api ? (
-    <span
-      style={{
-        background: "#dcfce7",
-        color: "#166534",
-        fontSize: 10,
-        padding: "1px 6px",
-        borderRadius: 4,
-      }}
-    >
-      API
-    </span>
-  ) : (
-    <span style={{ color: "#9ca3af", fontSize: 11 }}>manual</span>
-  );
 }
 
 /**
@@ -138,11 +95,11 @@ export function ProviderCombobox({ value, onChange, accounts, disabled }: Props)
           cursor: disabled ? "default" : "pointer",
         }}
       >
-        <Avatar m={selected} />
+        <ProviderAvatar m={selected} />
         <span style={{ fontSize: 13.5, fontWeight: 600, color: "#111" }}>
           {selected.label}
         </span>
-        <ApiTag api={selected.api} />
+        <ProviderApiTag api={selected.api} />
         <span style={{ marginLeft: "auto", color: "#9ca3af" }}>▾</span>
       </button>
 
@@ -196,10 +153,10 @@ export function ProviderCombobox({ value, onChange, accounts, disabled }: Props)
                     background: o.key === selected.key ? "#eff4ff" : "#fff",
                   }}
                 >
-                  <Avatar m={o} />
+                  <ProviderAvatar m={o} />
                   <span style={{ fontSize: 13, color: "#111" }}>{o.label}</span>
                   <span style={{ marginLeft: "auto" }}>
-                    <ApiTag api={o.api} />
+                    <ProviderApiTag api={o.api} />
                   </span>
                 </div>
               ))}
