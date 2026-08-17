@@ -8,8 +8,9 @@ import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave } from "../hooks/useSecretSave";
-import { hasApi, needsClientIp } from "../lib/registrarProviders";
+import { hasApi, needsClientIp, providerMeta } from "../lib/registrarProviders";
 import { ProviderCombobox } from "../components/settings/ProviderCombobox";
+import { ProviderAvatar, ProviderApiTag } from "../components/settings/ProviderVisuals";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 import RecoveryPhraseCard from "./RecoveryPhraseCard";
 
@@ -122,9 +123,13 @@ export default function Settings(){
         <div style={{padding:40, textAlign:"center", color:"#6b7280"}}>Loading registrars...</div>
       ) : registrars.length === 0 ? (
         <Card>
+          {/* Пустое состояние больше не обещает только двоих: провайдером теперь
+              может быть любой. Hostiq и Namecheap подключаются учётными данными
+              и умеют Test/Set NS, остальные заводятся ярлыком — по нему домены
+              раскладывают, но API у них нет (см. `registrarProviders`). */}
           <EmptyState
             title="No registrar accounts yet"
-            description="Add Hostiq or Namecheap credentials to assign domains to registrars."
+            description="Add Hostiq or Namecheap credentials for API access, or any other registrar as a label to group domains."
           >
             {/* Второй вход в ту же форму — и в вебе он закрыт по той же причине;
                 объяснение уже стоит в шапке, повторять его тут незачем. */}
@@ -132,18 +137,40 @@ export default function Settings(){
           </EmptyState>
         </Card>
       ) : registrars.map((r: any)=>{
-        const plMap: any={hostiq:{bg:"#fff7ed",c:"#ea580c",icon:"H"},namecheap:{bg:"#fef2f2",c:"#dc2626",icon:"N"}};
-        const pl=plMap[r.provider]||{bg:"#f3f4f6",c:"#374151",icon:"?"};
+        // ВСЁ про показ провайдера — из одного `providerMeta`: и аватар, и
+        // подпись, и `m.api`. Раньше карточка знала про провайдеров сама
+        // (зашитый `plMap` и тернарник «hostiq или Namecheap»), и любой другой
+        // provider получал «?» на сером и подпись «Namecheap» — то есть карточка
+        // прямо врала о том, к какому регистратору привязаны домены.
+        //
+        // `m.api` — тот же предикат `hasApi`, что решает про поля формы: отдельный
+        // вызов рядом с `providerMeta` был бы вторым ответом на один вопрос, и
+        // бейдж «API» однажды разъехался бы с кнопкой Test внутри одной строки.
+        const m = providerMeta(r.provider);
         return <Card key={r.id} style={{marginBottom:12}}>
           <div style={{padding:"16px 20px",display:"flex",alignItems:"center",gap:14}}>
-            <div style={{width:38,height:38,borderRadius:9,background:pl.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:800,color:pl.c,flexShrink:0}}>{pl.icon}</div>
+            <ProviderAvatar m={m} size={38} />
             <div style={{flex:1}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}><span style={{fontSize:14.5,fontWeight:700,color:"#111"}}>{r.name}</span><Badge variant={r.is_active?"green":"gray"}>{r.is_active?"Active":"Inactive"}</Badge></div>
-              <div style={{fontSize:12.5,color:"#6b7280"}}>{r.provider==="hostiq"?"Hostiq":"Namecheap"} · <span style={{fontFamily:"monospace"}}>{r.api_user}</span></div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                <span style={{fontSize:14.5,fontWeight:700,color:"#111"}}>{r.name}</span>
+                <Badge variant={r.is_active?"green":"gray"}>{r.is_active?"Active":"Inactive"}</Badge>
+                <ProviderApiTag api={m.api} />
+              </div>
+              {/* У ручного провайдера `api_user` всегда NULL (форма его не
+                  спрашивает) — на его месте прямо сказано «manual», а не пустое
+                  место после точки. */}
+              <div style={{fontSize:12.5,color:"#6b7280"}}>
+                {m.label}{m.api ? <> · <span style={{fontFamily:"monospace"}}>{r.api_user}</span></> : " · manual"}
+              </div>
             </div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
-              {testRes[r.id]&&<Badge variant={testRes[r.id]==="ok"?"green":"red"}>{testRes[r.id]==="ok"?"✓ Connected":"✕ Failed"}</Badge>}
-              <Btn size="sm" variant="secondary" onClick={()=>handleTest(r.id)} disabled={testing[r.id]}>{testing[r.id]?"Testing…":"🔌 Test"}</Btn>
+              {/* Test и его результат — только у API-провайдера: у ручного за этой
+                  кнопкой стоит `unknown provider` от десктопа, то есть красное
+                  «✕ Failed» на аккаунте, с которым всё в порядке. Edit и удаление
+                  остаются у всех: ярлык переименовывают и убирают, как любой
+                  другой аккаунт. */}
+              {m.api&&testRes[r.id]&&<Badge variant={testRes[r.id]==="ok"?"green":"red"}>{testRes[r.id]==="ok"?"✓ Connected":"✕ Failed"}</Badge>}
+              {m.api&&<Btn size="sm" variant="secondary" onClick={()=>handleTest(r.id)} disabled={testing[r.id]}>{testing[r.id]?"Testing…":"🔌 Test"}</Btn>}
               <Btn size="sm" variant="secondary" onClick={() => setEditingRegistrar(r)}>✎ Edit</Btn>
               <Btn size="sm" variant="danger" onClick={async () => { if (!(await confirmAction(`Delete registrar ${r.name}?`))) return; deleteReg.mutate(r); }}>✕</Btn>
             </div>

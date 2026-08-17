@@ -390,6 +390,29 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body).not.toHaveProperty("api_secret_blob_id");
   });
 
+  it("карточка ручного провайдера: подпись manual и без кнопки Test", async () => {
+    setTauri(true);
+    renderPage([{ id: 9, provider: "GoDaddy", name: "gd", api_user: null, is_active: true,
+      api_key_blob_id: null, api_secret_blob_id: null,
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }]);
+
+    expect(await screen.findByText(/GoDaddy · manual/)).toBeTruthy();
+    // У ручного провайдера Test недостижим (десктоп вернул бы unknown provider).
+    expect(screen.queryByRole("button", { name: "🔌 Test" })).toBeNull();
+    // Правка и удаление остаются: ярлык переименовывают и убирают, как любой
+    // другой аккаунт, — гейт по API касается только Test.
+    expect(screen.getByRole("button", { name: "✎ Edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "✕" })).toBeTruthy();
+  });
+
+  it("карточка API-провайдера сохраняет кнопку Test и api_user", async () => {
+    setTauri(true);
+    renderPage(); // NAMECHEAP по умолчанию
+    expect(await screen.findByText(/Namecheap ·/)).toBeTruthy();
+    expect(screen.getByText("ncuser")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "🔌 Test" })).toBeTruthy();
+  });
+
   it("в вебе форма не открывается вовсе — объяснение стоит на месте кнопки", async () => {
     setTauri(false);
     renderPage([]);
