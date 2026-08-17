@@ -61,12 +61,24 @@ pub struct HostiqService {
 }
 
 impl HostiqService {
-    pub fn new(api_key: &str) -> Self {
+    pub fn new(api_key: &str) -> Result<Self, RegistrarError> {
         Self::with_base_url(api_key, HOSTIQ_API)
     }
 
-    fn with_base_url(api_key: &str, base_url: &str) -> Self {
-        Self {
+    /// `Result`, а не `expect("reqwest")`, и это не педантичность.
+    ///
+    /// Сборка клиента теоретически может не удаться (rustls без корневых
+    /// сертификатов), а паника здесь случилась бы ВНУТРИ async-команды Tauri:
+    /// промис на фронте остался бы невыполненным, и карточка домена навсегда
+    /// повисла бы в «загружаю» вместо честной красной строки. Тот же вывод и та
+    /// же починка, что в новом `crate::rdap` (`RdapClient::build`), — а `unwrap`
+    /// здесь стоял с тех времён, когда текст отказа регистратора на экран не
+    /// выезжал вовсе.
+    ///
+    /// Возвращать ошибку есть куда: `make_service` и так объявлен
+    /// `Result<_, RegistrarError>` ради неизвестного провайдера.
+    fn with_base_url(api_key: &str, base_url: &str) -> Result<Self, RegistrarError> {
+        Ok(Self {
             // Токен приезжает вставкой из личного кабинета, а вставка охотно
             // тащит перевод строки и пробелы по краям — в заголовок такое
             // значение не кладётся вовсе (см. `headers`).
@@ -75,9 +87,11 @@ impl HostiqService {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .expect("reqwest"),
+                .map_err(|e| {
+                    RegistrarError::Api(format!("could not build an HTTP client for Hostiq: {e}"))
+                })?,
             domain_ids: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
     /// Заголовки запроса.
@@ -317,9 +331,12 @@ impl HostiqService {
 /// Как назвать неудачный ответ Hostiq.
 ///
 /// Тело сюда НЕ попадает, и это не про формат, а про то, что текст ошибки
-/// теперь виден пользователю: карточка домена печатает его в бейдже
-/// делегирования (`DomainNsPanel`). Ответ не от Hostiq — страница корпоративного
-/// прокси, WAF, капча, HTML-заглушка — не должен въезжать в интерфейс целиком.
+/// теперь виден пользователю: карточка домена печатает его отдельной красной
+/// строкой (`role="alert"`) над кнопкой «Set NS at registrar» — см. `setNsError`
+/// в `DomainNsPanel`. Бейдж делегирования тут ни при чём: он питается ответом
+/// РЕЕСТРА (RDAP) и про регистратора не спрашивает ничего. Ответ не от Hostiq —
+/// страница корпоративного прокси, WAF, капча, HTML-заглушка — не должен
+/// въезжать в интерфейс целиком.
 /// Тот же приём и по той же причине, что у `namecheap::failure_text`; секрета в
 /// теле нет (токен уходит заголовком), но и мусору там не место.
 fn failure_text(status: reqwest::StatusCode, body: &str) -> String {
@@ -550,7 +567,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         assert_eq!(svc.test_connection().await.unwrap(), (true, "ok".into()));
     }
 
@@ -588,7 +605,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let domains = svc.get_domains().await.unwrap();
 
         let names: Vec<&str> = domains.iter().map(|d| d.domain.as_str()).collect();
@@ -627,7 +644,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         // Регистр и завершающая точка нормализуются по дороге: реестр принимает
         // только существующие хосты, и мусор по краям имени — лишний повод для
         // отказа без объяснения.
@@ -674,7 +691,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let ns = vec![
             "ada.ns.cloudflare.com".to_string(),
             "bob.ns.cloudflare.com".to_string(),
@@ -724,7 +741,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let names: Vec<String> = svc
             .get_domains()
             .await
@@ -751,7 +768,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let text = svc.get_domains().await.unwrap_err().to_string();
         assert!(text.contains("did not end"), "{text}");
         assert_eq!(srv.received_requests().await.unwrap().len(), MAX_PAGES);
@@ -780,7 +797,7 @@ mod tests {
                 .mount(&srv)
                 .await;
 
-            let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+            let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
             let text = svc
                 .get_domains()
                 .await
@@ -828,7 +845,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let text = svc
             .get_domains()
             .await
@@ -848,7 +865,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         assert!(svc.get_domains().await.unwrap().is_empty());
     }
 
@@ -870,7 +887,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let ns = vec![
             "ada.ns.cloudflare.com".to_string(),
             "bob.ns.cloudflare.com".to_string(),
@@ -899,7 +916,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let ns = vec![
             "ada.ns.cloudflare.com".to_string(),
             "bob.ns.cloudflare.com".to_string(),
@@ -927,7 +944,7 @@ mod tests {
     /// достался бы голый `{"code":400,"message":"error"}` от API.
     #[tokio::test]
     async fn a_wrong_number_of_nameservers_never_reaches_the_network() {
-        let svc = HostiqService::with_base_url("secret-token", NOWHERE);
+        let svc = HostiqService::with_base_url("secret-token", NOWHERE).expect("клиент Hostiq");
         let one = vec!["ada.ns.cloudflare.com".to_string()];
         let text = svc
             .set_nameservers("betify2.com", &one)
@@ -950,7 +967,7 @@ mod tests {
     /// `400`.
     #[tokio::test]
     async fn blank_entries_do_not_count_as_nameservers() {
-        let svc = HostiqService::with_base_url("secret-token", NOWHERE);
+        let svc = HostiqService::with_base_url("secret-token", NOWHERE).expect("клиент Hostiq");
         let ns = vec!["ada.ns.cloudflare.com".to_string(), "  ".to_string()];
         let text = svc
             .set_nameservers("betify2.com", &ns)
@@ -965,7 +982,7 @@ mod tests {
     /// были бы приняты как делегирование на один сервер.
     #[tokio::test]
     async fn a_repeated_nameserver_does_not_count_twice() {
-        let svc = HostiqService::with_base_url("secret-token", NOWHERE);
+        let svc = HostiqService::with_base_url("secret-token", NOWHERE).expect("клиент Hostiq");
         let ns = vec![
             "ADA.ns.cloudflare.com.".to_string(),
             "ada.ns.cloudflare.com".to_string(),
@@ -1004,7 +1021,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let five: Vec<String> = (1..=MAX_NS).map(|i| format!("ns{i}.example.com")).collect();
         assert!(svc.set_nameservers("betify2.com", &five).await.unwrap());
     }
@@ -1022,7 +1039,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let text = svc.get_domains().await.unwrap_err().to_string();
         assert!(text.contains("Hostiq error: Syntax error"), "{text}");
     }
@@ -1052,7 +1069,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let ns = vec![
             "ada.ns.cloudflare.com".to_string(),
             "bob.ns.cloudflare.com".to_string(),
@@ -1099,7 +1116,7 @@ mod tests {
                 .mount(&srv)
                 .await;
 
-            let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+            let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
             let ns = vec![
                 "ada.ns.cloudflare.com".to_string(),
                 "bob.ns.cloudflare.com".to_string(),
@@ -1125,7 +1142,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let text = svc
             .get_domains()
             .await
@@ -1148,7 +1165,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let text = svc.get_domains().await.unwrap_err().to_string();
         assert!(text.contains("Hostiq error: Forbidden"), "{text}");
     }
@@ -1168,7 +1185,7 @@ mod tests {
             .mount(&srv)
             .await;
 
-        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri()).expect("клиент Hostiq");
         let err = svc.get_domains().await.unwrap_err();
         let text = err.to_string();
         assert!(text.contains("unrecognised response (HTTP 502"), "{text}");
@@ -1183,7 +1200,7 @@ mod tests {
     /// паникой внутри tauri-команды — и уж точно не утечкой самого токена.
     #[tokio::test]
     async fn an_unsendable_token_becomes_an_error_not_a_panic() {
-        let svc = HostiqService::with_base_url("secret\ntoken", NOWHERE);
+        let svc = HostiqService::with_base_url("secret\ntoken", NOWHERE).expect("клиент Hostiq");
         let text = svc.get_domains().await.unwrap_err().to_string();
         assert!(text.contains("cannot be sent"), "{text}");
         assert!(!text.contains("secret"), "токен уехал в текст ошибки: {text}");

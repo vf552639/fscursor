@@ -1,6 +1,7 @@
 import { apiPost } from "./client";
 import { clip, errorText, mapWithLimit } from "./cfAutoBind";
 import { domainsKeys } from "./domains";
+import { noteNsPush } from "./nsPush";
 import { queryClient } from "./queryClient";
 import { FullSetupPlan } from "../lib/fullSetupPlan";
 import { syncLocalCache } from "../lib/localCache";
@@ -204,6 +205,19 @@ async function runSteps(
   for (let i = 0; i < outcomes.length; i += 1) {
     const outcome = outcomes[i];
     if (outcome.kind === "ok") items.push({ domain: targets[i].domain_name, result: outcome.result });
+  }
+  // Прогон с включённым «Прописать NS» меняет делегирование той же командой, что
+  // и кнопка на карточке домена (`domain_full_setup` → `registrar_set_nameservers`),
+  // — значит и последствия у него те же, и признак обязан быть тот же
+  // (`api/nsPush.ts`): иначе карточка пять минут показывает ответ реестра ДО
+  // пуша и предлагает прописать NS, которые мастер только что прописал.
+  //
+  // Только там, где к регистратору действительно ходили: `skipped` — это шаг,
+  // который не выполнялся, и гасить по нему кэш реестра значило бы платить
+  // запросом в чужой сервис за ничего. `failed` считается пушем «не
+  // применившимся», но кэш гасит: отказ мог примениться частично.
+  for (const item of items) {
+    if (item.result.ns.status !== "skipped") noteNsPush(item.domain, item.result.ns.status === "pushed");
   }
   if (items.length > 0) {
     // Одна инвалидация на прогон: у зон появились `cloudflare_zone_id`, у

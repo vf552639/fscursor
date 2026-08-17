@@ -88,7 +88,10 @@ pub fn make_service(
     api_secret: Option<&str>,
 ) -> Result<Box<dyn RegistrarService>, RegistrarError> {
     match provider.to_lowercase().as_str() {
-        "hostiq" => Ok(Box::new(hostiq::HostiqService::new(api_key))),
+        // `?`, а не `expect` внутри клиента: сборка HTTP-клиента может не
+        // удаться, и паника в async-команде оставила бы промис на фронте
+        // невыполненным (см. `HostiqService::with_base_url`).
+        "hostiq" => Ok(Box::new(hostiq::HostiqService::new(api_key)?)),
         "namecheap" => Ok(Box::new(namecheap::NamecheapService::new(
             api_key,
             api_user.unwrap_or(""),

@@ -11,6 +11,7 @@ import {
   normalizeNameservers,
   useSetNameservers,
 } from "../../api/domains";
+import { useNsJustPushed } from "../../api/nsPush";
 import { NsDelegation, nsDelegationVariant } from "../../lib/nsDelegation";
 import { registrarProviderKnown, registrarSupportsNsApi } from "../../lib/registrarCaps";
 import { isTauri } from "../../lib/runtime";
@@ -118,11 +119,13 @@ export default function DomainNsPanel({
    * обещал бы работающий домен. А вот подпись «пропишите NS зоны ниже» велела бы
    * сделать то, что пользователь только что сделал.
    *
-   * Читается из той же записи MutationCache, что и `setNsError`: per-call
-   * `onSuccess` умер бы вместе с размонтированием карточки, а ответ регистратора
-   * может прийти уже после её закрытия.
+   * Спрашивается у общего признака (`api/nsPush.ts`), а не у записи MutationCache
+   * рядом: путей записи NS два, и второй — массовый прогон полной настройки —
+   * своей мутации под `SET_NAMESERVERS_KEY` не создаёт вовсе. Пока признак читался
+   * из этой мутации, карточка после массового прогона предлагала прописать NS,
+   * которые прогон только что прописал.
    */
-  const nsJustPushed = lastSetNs?.status === "success";
+  const nsJustPushed = useNsJustPushed(domain.domain_name);
 
   const [nsText, setNsText] = useState("");
   /**

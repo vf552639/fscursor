@@ -6,8 +6,8 @@ import { type DomainFacts } from "../lib/domainFacts";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { BLOB_KIND, putSecretBlob } from "../lib/secretBlob";
+import { noteNsPush } from "./nsPush";
 import { queryClient } from "./queryClient";
-import { rdapKeys } from "./rdap";
 import { runExclusive, useRunPending } from "./runGate";
 import { useAuthStore } from "../store/auth";
 
@@ -437,7 +437,7 @@ export function useSetNameservers() {
     // команды, и он срабатывает на ОБОИХ исходах — отказ регистратора кладёт
     // туда `error` и только потом доезжает сюда ошибкой. На `onSuccess` самый
     // интересный случай остался бы без обновления списка.
-    onSettled: (_data, _err, vars) => {
+    onSettled: (data, _err, vars) => {
       // Работу делает `all`: карточку домена рисует строка из списка (см.
       // `DomainDetailModal` в `Domains.tsx`), и без этой инвалидации она бы ещё
       // долго показывала «pending» после удавшейся смены.
@@ -446,20 +446,21 @@ export function useSetNameservers() {
       // вызывающего. Оставлено как парная инвалидация — в тот день, когда
       // карточка станет отдельным запросом, забыть её здесь будет дороже.
       queryClient.invalidateQueries({ queryKey: domainsKeys.detail(vars.domainId) });
-      // Делегирование домена ПО ДАННЫМ РЕЕСТРА — то, по чему карточка рисует
-      // бейдж. Мы только что попросили регистратора поменять ровно его, и без
-      // сброса ответ реестра лежал бы в кэше ещё пять минут (`staleTime`).
+      // Пуш состоялся — со всеми последствиями, которые из этого следуют:
+      // ответ реестра в кэше протух (иначе бейдж пять минут показывал бы
+      // делегирование ДО пуша) и домен стал «только что запушенным» (иначе
+      // подпись под бейджем велела бы сделать только что сделанное).
       //
-      // Ключ — на домен, без аккаунта регистратора: реестру всё равно, чей это
-      // домен (`rdapKeys`), поэтому сброс безусловный. На ОБОИХ исходах: отказ
-      // регистратора мог примениться частично.
+      // Оба последствия — одним вызовом `noteNsPush`, потому что путей записи NS
+      // два: этот и массовый прогон (`api/fullSetup.ts`). Разложенные по местам,
+      // они уже разъехались — см. JSDoc `api/nsPush.ts`.
       //
       // Мгновенного «DELEGATED» это не даёт и не должно: реестр узнаёт о смене
       // NS не сразу, и оставшийся «MISMATCH» — правда, а не протухший кэш.
       // Делегирование действительно ещё не сменилось; раньше на этом месте API
       // регистратора отвечал «уже сменилось», обещая работающий домен за минуты
       // до того, как это становилось так.
-      queryClient.invalidateQueries({ queryKey: rdapKeys.nameservers(vars.domainName) });
+      noteNsPush(vars.domainName, data === true);
     },
   });
 }

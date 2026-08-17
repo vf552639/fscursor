@@ -237,7 +237,11 @@ describe("Settings — ключ и секрет регистратора чер�
     renderPage([]);
     await openAddModal("hostiq");
 
-    expect(screen.queryByPlaceholderText("admin@hostiq.ua")).toBeNull();
+    // Ловит поле сама подпись: она одна на обе формы и рисуется вместе с полем.
+    // Плейсхолдера здесь не проверяем — у Hostiq в каталоге он пустой, и
+    // утверждение про отсутствие `admin@hostiq.ua` не могло упасть никогда
+    // (такой строки в продакшн-коде нет вовсе); пустоту сторожит
+    // `registrarProviders.test.ts`, где ей и место.
     expect(screen.queryByText(/API User/)).toBeNull();
     // Подпись поля секрета — та, что стоит в личном кабинете Hostiq: «API key»
     // там искать нечего, там токен.

@@ -964,17 +964,53 @@ mod tests {
     /// `User-Agent` шлёт сам. Ни один мок такое не поймает — wiremock отвечает на
     /// что угодно. Поэтому утверждения этого файла про живые ответы проверяются
     /// здесь, и менять их надо ПО РЕЗУЛЬТАТУ этого теста, а не наоборот.
+    ///
+    /// И проверяются они `assert`'ами, а не глазами: печать четырёх ответов роль
+    /// замка не исполняет — со снятым `.user_agent(…)` такая проба напечатала бы
+    /// четыре `Unavailable { reason: "the RDAP redirector returned HTTP 403" }` и
+    /// вышла бы «зелёной». Каждый из четырёх доменов ниже держит своё состояние,
+    /// и все три состояния модуля представлены: без этого «работает» означало бы
+    /// «не паникует».
     #[tokio::test]
     #[ignore = "ходит в настоящий rdap.org"]
     async fn live_probe_confirms_what_this_module_claims() {
         let client = shared().as_ref().expect("клиент RDAP");
-        for domain in [
-            "betify2.com",
-            "hostiq.ua",
-            "nosuchdomain-zzz9988.com",
-            "example.invalidtldxyz",
-        ] {
-            println!("{domain} -> {:?}", client.nameservers(domain).await);
+
+        // Делегированные домены: `.com` через `rdap.verisign.com`, `.ua` через
+        // `rdap.hostmaster.ua` (второго в IANA bootstrap нет — см. докстринг
+        // модуля, поэтому именно он держит выбор редиректора).
+        //
+        // Список обязан быть НЕПУСТЫМ, и это главное утверждение пробы: пустой
+        // `Registered` — законное состояние протокола («не делегирован никуда»),
+        // но на этих двух доменах он означал бы потерянный разбор `nameservers`,
+        // то есть красный бейдж «расходится» на верном делегировании.
+        for domain in ["betify2.com", "hostiq.ua"] {
+            match client.nameservers(domain).await {
+                RegistryNameservers::Registered { nameservers } => {
+                    assert!(
+                        !nameservers.is_empty(),
+                        "{domain}: реестр ответил без nameservers"
+                    );
+                    println!("{domain} -> {nameservers:?}");
+                }
+                other => panic!("{domain}: ожидался Registered, получено {other:?}"),
+            }
+        }
+
+        // 404 ПОСЛЕ редиректа — слово реестра «такого домена нет».
+        assert_eq!(
+            client.nameservers("nosuchdomain-zzz9988.com").await,
+            RegistryNameservers::NotRegistered,
+            "незарегистрированный домен обязан отличаться от «спросить не удалось»"
+        );
+
+        // 404 БЕЗ редиректа — редиректор не знает такого TLD, то есть спросить
+        // не удалось. Различие двух сортов 404 живёт только здесь: перепутав их,
+        // модуль объявил бы «домена не существует» о любом домене в непокрытой
+        // зоне.
+        match client.nameservers("example.invalidtldxyz").await {
+            RegistryNameservers::Unavailable { reason } => println!("непокрытый TLD -> {reason}"),
+            other => panic!("непокрытый TLD: ожидался Unavailable, получено {other:?}"),
         }
     }
 }

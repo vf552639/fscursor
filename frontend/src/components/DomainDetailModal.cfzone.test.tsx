@@ -5,6 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainDetailModal from "./DomainDetailModal";
 import { cloudflareKeys } from "../api/cloudflare";
+import { type FullSetupDesktopResult, newDomainFullSetup } from "../api/fullSetup";
 import { queryClient } from "../api/queryClient";
 import type { RegistryNameservers } from "../api/rdap";
 import { useAuthStore } from "../store/auth";
@@ -115,9 +116,18 @@ function mockAccounts(provider: string | null = "namecheap") {
  * («вот NS», «домена нет», «спросить не удалось») значат разное, и мок обязан
  * уметь выдать каждое. `registryError` — отдельно: это провал самого запроса, а
  * не ответ реестра.
+ *
+ * `fullSetup` — ответ второго пути записи NS (`domain_full_setup`). Он идёт тем
+ * же каналом без ключей, что и вопрос реестру, а на карточку влияет ровно так же,
+ * как кнопка рядом.
  */
 function mockReads(
-  reads: { zones?: any[]; registry?: RegistryNameservers; registryError?: Error } = {},
+  reads: {
+    zones?: any[];
+    registry?: RegistryNameservers;
+    registryError?: Error;
+    fullSetup?: FullSetupDesktopResult;
+  } = {},
 ) {
   mocks.invokeSynced.mockImplementation(async (cmd: string) => {
     if (cmd === "cf_list_zones") return reads.zones ?? [zone()];
@@ -128,6 +138,7 @@ function mockReads(
       if (reads.registryError) throw reads.registryError;
       return reads.registry ?? { state: "registered", nameservers: [] };
     }
+    if (cmd === "domain_full_setup" && reads.fullSetup) return reads.fullSetup;
     return true;
   });
 }
@@ -510,6 +521,68 @@ describe("делегирование — три состояния и «не з�
     // Бейдж остаётся красным — и это правда, делегирование ещё не сменилось.
     // Меняться обязан СОВЕТ: единственное, что подпись предлагала, пользователь
     // только что сделал.
+    expect(await screen.findByText(/has just sent this zone's nameservers to the registrar/)).toBeTruthy();
+    expect(delegationBadge().textContent).toBe("MISMATCH");
+    expect(screen.queryByText(/Push the zone's nameservers below/)).toBeNull();
+  });
+
+  it("отказавший пуш совета не отменяет, но кэш реестра гасит", async () => {
+    setTauri(true);
+    mockReads({ registry: { state: "registered", nameservers: ["dns1.registrar-servers.com", "dns2.registrar-servers.com"] } });
+    // Регистратор отказал: признак «только что запушено» ставить нельзя — иначе
+    // карточка перестала бы говорить единственное, что тут надо сделать.
+    mocks.invokeSynced.mockImplementation(async (cmd: string) => {
+      if (cmd === "cf_list_zones") return [zone()];
+      throw new Error("Hostiq error: invalid token");
+    });
+    show();
+
+    await waitFor(() => expect(askedRegistry().length).toBe(1));
+    fireEvent.click(nsButton());
+
+    // Отказ показан, а совет остался советом.
+    expect((await screen.findByRole("alert")).textContent).toContain("invalid token");
+    expect(screen.getByText(/Push the zone's nameservers below/)).toBeTruthy();
+    expect(screen.queryByText(/has just sent this zone's nameservers/)).toBeNull();
+    // А вот ответ реестра всё равно протух: отказ мог примениться частично.
+    await waitFor(() => expect(askedRegistry().length).toBe(2));
+  });
+
+  it("пуш из массового прогона — тот же признак: ни протухшего диагноза, ни совета сделать сделанное", async () => {
+    setTauri(true);
+    // Домен на дефолтных NS регистратора — состояние ДО пуша.
+    mockReads({
+      registry: { state: "registered", nameservers: ["dns1.registrar-servers.com", "dns2.registrar-servers.com"] },
+      fullSetup: {
+        domain_id: "42",
+        zone: { status: "existed", zone_id: "zone-a", name_servers: CF_NS },
+        zone_saved: true,
+        ns: { status: "pushed", nameservers: CF_NS },
+      },
+    });
+
+    // 1. Пользователь открыл карточку — ответ реестра лёг в кэш на пять минут.
+    const view = show();
+    await waitFor(() => expect(askedRegistry().length).toBe(1));
+    // 2. …и закрыл её. Прогон полной настройки идёт со страницы: своей мутации
+    // под `SET_NAMESERVERS_KEY` у него нет вовсе, NS меняет команда
+    // `domain_full_setup` — то есть признак «пуш только что был» обязан быть
+    // общим на оба пути, а не читаться из мутации кнопки.
+    view.unmount();
+    await newDomainFullSetup(
+      { id: 42, domain_name: "example.com" },
+      { serverId: null, cloudflareAccountId: CF_MAIN, registrarId: REGISTRAR, createZone: true, pushNs: true },
+    );
+
+    // 3. И открыл карточку снова.
+    show();
+
+    // Реестр спрошен заново: без гашения кэша бейдж пять минут показывал бы
+    // делегирование ДО пуша.
+    await waitFor(() => expect(askedRegistry().length).toBe(2));
+    // Бейдж остаётся красным честно — реестр ещё не узнал о смене. Врал бы
+    // СОВЕТ: единственное действие, которое подпись умеет предложить, прогон
+    // только что выполнил.
     expect(await screen.findByText(/has just sent this zone's nameservers to the registrar/)).toBeTruthy();
     expect(delegationBadge().textContent).toBe("MISMATCH");
     expect(screen.queryByText(/Push the zone's nameservers below/)).toBeNull();
