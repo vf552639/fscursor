@@ -196,7 +196,7 @@ pub async fn cert_exists(s: &mut impl Exec, domain: &str) -> Result<bool, SshErr
 /// Создать сайт. `impl Exec`, а не `SshSession`, ровно затем же, зачем у
 /// `create_ftp_account`: единственная защита от секрета в argv этой команды —
 /// тест, который видит УШЕДШУЮ на сервер строку (`create_site_argv_has_no_secret`).
-/// Её вывод, в отличие от `database create` и `ftp_account create`, уходит в
+/// Её вывод, в отличие от `databases create` и `ftp_account create`, уходит в
 /// текст ошибки целиком, и цена промаха здесь выше всего.
 pub async fn create_site(
     s: &mut impl Exec,
@@ -506,7 +506,7 @@ pub struct DbPresence {
 /// Команда проверки существования базы и её пользователя.
 ///
 /// Пароля в ней нет ни в argv, ни в самом запросе — поэтому её вывод, в отличие
-/// от `database create` и `CREATE USER ... IDENTIFIED BY`, читать безопасно
+/// от `databases create` и `CREATE USER ... IDENTIFIED BY`, читать безопасно
 /// (см. `opaque_exit`).
 ///
 /// Пользователя ищем именно `@'localhost'` — ровно того, кого создаём ниже.
@@ -730,8 +730,9 @@ pub async fn create_database(
     let fallback_cmd = format!("mysql -e {}", q(&sql));
     let (fb_code, fb_out) = s.run(&fallback_cmd, Duration::from_secs(60)).await?;
     if fb_code != 0 {
-        // Ни `out` (вывод fastpanel с `--password=` в argv), ни `fb_out` (mysql
-        // повторяет в ошибке весь запрос, включая IDENTIFIED BY) наружу нельзя.
+        // Вывод FastPanel-команды (с `--password=` в argv) мы и не читаем вовсе —
+        // он отброшен ещё выше через `let (code, _)`. Наружу нельзя только
+        // `fb_out`: mysql повторяет в ошибке весь запрос, включая IDENTIFIED BY.
         // Но прочитать `fb_out` мы имеем право: сюда попадает и случай, когда
         // проверка выше не отработала (`None`), а пользователь на самом деле
         // есть, — и тогда это не ошибка, а «уже было».
@@ -1574,6 +1575,72 @@ mod tests {
         assert!(matches!(out, DbCreation::Created(_)));
         assert!(!s.ran("databases create"), "{:?}", s.seen);
         assert!(s.ran("CREATE USER"), "{:?}", s.seen);
+    }
+
+    // Смешанный список (postgres + mysql) — фильтр `type=="mysql"` обязан выбрать
+    // ИМЕННО mysql-сервер, а не первый попавшийся. Без фильтра сюда уехал бы
+    // постгресовый id и база создалась бы не на том движке. Id намеренно разные
+    // (postgres:3, mysql:5), чтобы промах был виден.
+    #[tokio::test]
+    async fn create_database_picks_the_mysql_server_out_of_a_mixed_list() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":3,"name":"pg(localhost)","type":"postgres"},{"id":5,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 0, "created"),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, DbCreation::Created(_)));
+
+        let create_cmd = s
+            .seen
+            .iter()
+            .find(|c| c.contains("databases create"))
+            .expect("нет команды создания БД");
+        assert!(create_cmd.contains("--server=5"), "{create_cmd}");
+        assert!(!create_cmd.contains("--server=3"), "{create_cmd}");
+    }
+
+    // Прямые ассерты на парсер: покрытие через `create_database` дороже и с
+    // дырами (напр. `type`-фильтр не отличить от «первый попавшийся», если id
+    // совпали). Здесь каждый краевой случай проверен адресно.
+    #[test]
+    fn parse_db_server_id_edge_cases() {
+        // Ровно один mysql → его id.
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#),
+            Some(1)
+        );
+        // Два mysql → не угадываем.
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":1,"type":"mysql"},{"id":2,"type":"mysql"}]"#),
+            None
+        );
+        // Ноль серверов (пустой массив) → None.
+        assert_eq!(parse_db_server_id("[]"), None);
+        // mysql + не-mysql → id именно mysql-а, а не первого.
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":3,"type":"postgres"},{"id":7,"type":"mysql"}]"#),
+            Some(7)
+        );
+        // `id` строкой — `as_i64` строку не парсит: фиксируем текущее поведение
+        // (тихий уход в фоллбэк, а не молчаливое приведение).
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":"7","type":"mysql"}]"#),
+            None
+        );
+        // Нет поля `id` → None.
+        assert_eq!(parse_db_server_id(r#"[{"type":"mysql"}]"#), None);
+        // Не-массивный корень → None, без паники.
+        assert_eq!(parse_db_server_id(r#"{"id":1,"type":"mysql"}"#), None);
+        // Мусор вместо json → None, без паники.
+        assert_eq!(parse_db_server_id("not json at all"), None);
     }
 
     // Пароль стоит в argv `databases create` — это ОК, команда под opaque_exit.
