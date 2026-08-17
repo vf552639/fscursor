@@ -397,6 +397,11 @@ describe("Settings — ключ и секрет регистратора чер�
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }]);
 
     expect(await screen.findByText(/GoDaddy · manual/)).toBeTruthy();
+    // Аватар — сгенерированный, а не «?» на сером: это прямой пункт acceptance
+    // criteria плана, и до него карточка красила «?» любому провайдеру вне
+    // зашитой пары. Проверяем и букву, и отсутствие прежней заглушки.
+    expect(screen.getByText("G")).toBeTruthy();
+    expect(screen.queryByText("?")).toBeNull();
     // У ручного провайдера Test недостижим (десктоп вернул бы unknown provider).
     expect(screen.queryByRole("button", { name: "🔌 Test" })).toBeNull();
     // Правка и удаление остаются: ярлык переименовывают и убирают, как любой
@@ -410,6 +415,23 @@ describe("Settings — ключ и секрет регистратора чер�
     renderPage(); // NAMECHEAP по умолчанию
     expect(await screen.findByText(/Namecheap ·/)).toBeTruthy();
     expect(screen.getByText("ncuser")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "🔌 Test" })).toBeTruthy();
+  });
+
+  it("API-провайдер без api_user: подпись без висящей точки", async () => {
+    // Состояние достижимо и из приложения, и из БД: `AddRegistrarModal` не
+    // требует API User (кнопка гейтится только именем аккаунта), а колонка
+    // nullable — старые строки и чужой импорт дают `null`. Подпись «Hostiq · »
+    // с оборванным хвостом читается как «тут что-то было и пропало».
+    setTauri(true);
+    renderPage([{ id: 7, provider: "hostiq", name: "hq", api_user: null, is_active: true,
+      api_key_blob_id: KEY_BLOB, api_secret_blob_id: null,
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }]);
+
+    expect(await screen.findByText("Hostiq")).toBeTruthy();
+    expect(screen.queryByText(/Hostiq ·/)).toBeNull();
+    // Провайдер при этом остаётся API-провайдером: бейдж и Test — про
+    // способность провайдера, а не про полноту учётки.
     expect(screen.getByRole("button", { name: "🔌 Test" })).toBeTruthy();
   });
 

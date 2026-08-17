@@ -161,11 +161,25 @@ export default function Settings(){
                 <Badge variant={r.is_active?"green":"gray"}>{r.is_active?"Active":"Inactive"}</Badge>
                 <ProviderApiTag api={m.api} />
               </div>
-              {/* У ручного провайдера `api_user` всегда NULL (форма его не
-                  спрашивает) — на его месте прямо сказано «manual», а не пустое
-                  место после точки. */}
+              {/* Точка появляется только вместе с тем, что за ней стоит. Пустых
+                  хвостов здесь два, и оба живые:
+                  — ручной провайдер: `api_user` у него всегда NULL (форма его не
+                    спрашивает), и на этом месте прямо сказано «manual»;
+                  — API-провайдер без логина: `AddRegistrarModal` API User не
+                    требует (кнопка гейтится только именем аккаунта), да и колонка
+                    nullable — старые строки и чужой импорт дают `null`. Тогда
+                    остаётся одна метка провайдера.
+                  «Hostiq · » с оборванным хвостом читается как «тут что-то было и
+                  пропало» — ровно то враньё, ради которого строку переписывали.
+                  Заметим: бейдж «API» при этом остаётся зелёным, и это верно — он
+                  про способность провайдера, а не про полноту учётки; неполную
+                  учётку показывает Test своим «✕ Failed». Чинить это надо в форме
+                  (обязательность поля), а не в подписи. */}
               <div style={{fontSize:12.5,color:"#6b7280"}}>
-                {m.label}{m.api ? <> · <span style={{fontFamily:"monospace"}}>{r.api_user}</span></> : " · manual"}
+                {m.label}
+                {m.api
+                  ? (r.api_user ? <> · <span style={{fontFamily:"monospace"}}>{r.api_user}</span></> : null)
+                  : " · manual"}
               </div>
             </div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
