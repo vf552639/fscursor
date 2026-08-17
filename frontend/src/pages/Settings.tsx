@@ -8,7 +8,7 @@ import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave } from "../hooks/useSecretSave";
-import { apiKeyLabel, apiUserField, hasApi, needsApiUser, needsClientIp, providerMeta } from "../lib/registrarProviders";
+import { apiKeyLabel, apiUserDeadByContract, apiUserField, hasApi, needsApiUser, needsClientIp, providerMeta } from "../lib/registrarProviders";
 import { ProviderCombobox } from "../components/settings/ProviderCombobox";
 import { ProviderAvatar, ProviderApiTag, ProviderLabel } from "../components/settings/ProviderVisuals";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
@@ -462,10 +462,11 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
 
             Плейсхолдер — из каталога, а не тернарником по `needsClientIp`:
             состав учётки — свойство провайдера, а не следствие его whitelist'а
-            (см. `apiUserField`). Подпись же одна на оба экрана и стоит прямо
-            здесь: суффикс из каталога был задел, у которого потребитель был
-            только один из двух — правка рисовала просто «API User», и первый
-            же вернувший суффикс получил бы две разные подписи. */}
+            (см. `apiUserField`). Он же стоит и в форме правки: расходиться этим
+            двум экранам нельзя ни в какую сторону. Подпись же одна на оба и
+            прописана прямо здесь: суффикс из каталога был задел, у которого
+            потребитель был только один из двух — правка рисовала просто «API
+            User», и первый же вернувший суффикс получил бы две разные подписи. */}
         {wantsApiUser && <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={userField.placeholder}/></div>}
         <div>
           {/* Подпись — та же строка, из которой хук собирает «… is required»:
@@ -544,10 +545,16 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   // Hostiq его нет — авторизация DI-API v3 состоит из одного токена.
   const showApiUser = needsApiUser(registrar.provider);
   // А вот ЧИСТИТЬ колонку можно только у провайдера, которого мы ОПОЗНАЛИ:
-  // «поля нет» и «поле мертво» — разные вещи, и `needsApiUser` сам по себе
-  // первое от второго не отличает (у неизвестного провайдера он тоже `false`).
-  // Подробности — у `api_user` в `patch`.
-  const apiUserDeadByContract = m.api && !showApiUser;
+  // «поля нет» и «поле мертво по контракту» — разные вещи, и `needsApiUser` сам
+  // по себе первое от второго не отличает (у неизвестного провайдера он тоже
+  // `false`). Предикатом из каталога, а не связкой руками здесь: связка,
+  // собранная на странице, уже один раз собралась неверно (JSDoc предиката).
+  // Что из этого следует для тела PATCH — у `api_user` в `patch`.
+  const apiUserDead = apiUserDeadByContract(registrar.provider);
+  // Плейсхолдер поля «API User» — из того же каталога, что и в форме создания:
+  // Namecheap с пустым логином правится с пустым полем, и без подсказки с него
+  // непонятно, чего от него хотят (логин панели, не email).
+  const userField = apiUserField(registrar.provider);
 
   const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
     name: name.trim(),
@@ -574,7 +581,10 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
     // не-API провайдера `api_user` тоже не рисуется, — стёртый логин пропал бы
     // полностью незаметно, а понадобится он в ту же секунду, когда кто-то
     // поправит колонку `provider` в БД. Здесь правило «чего не показали, того
-    // не трогаем» и живёт: значение уезжает тем, чем пришло.
+    // не трогаем» и живёт — с одной оговоркой: значение уезжает ТРИМЛЕННЫМ (см.
+    // ниже), то есть `"   "` всё же станет `null`. Ровно столько мы себе и
+    // позволяем: пробельный логин нерабочий в любом случае, а симметрия `trim`
+    // с формой создания важнее абсолютной формулировки.
     //
     // ГРАНИЦА, чтобы чистка не расползлась на соседей: ключ и Client IP так
     // обнулять НЕЛЬЗЯ — они не мертвы, а просто не тронуты, и «пусто» значит у
@@ -585,7 +595,7 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
     // (см. `handleAdd`): разойдись половины, и первая правка аккаунта,
     // заведённого с пробелами по краям, молча меняла бы логин. У `api_user`
     // цена выше — `" ncuser "` Namecheap просто не сматчит.
-    api_user: apiUserDeadByContract ? null : apiUser.trim() || null,
+    api_user: apiUserDead ? null : apiUser.trim() || null,
     ...(blobIds.apiKey ? { api_key_blob_id: blobIds.apiKey } : {}),
     ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
   });
@@ -676,7 +686,7 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
         {/* По `needsApiUser`, как и на создании: у Hostiq поля нет — оставь мы
             его в правке, форма предлагала бы менять значение, которое ни в один
             запрос к регистратору не уходит. */}
-        {showApiUser && <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} /></div>}
+        {showApiUser && <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={userField.placeholder} /></div>}
         {/* Почему в вебе полей нет — JSDoc `DesktopOnlyNote`. */}
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>{secretLabels.apiKey} (optional)</label>

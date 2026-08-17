@@ -562,6 +562,27 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body).not.toHaveProperty("api_key_blob_id");
   });
 
+  it("правка Namecheap: у поля API User тот же плейсхолдер, что в создании", async () => {
+    // Экран достижимый: `api_user` в колонке nullable, а форма создания логин не
+    // требует (кнопка гейтится только именем) — Namecheap с пустым логином
+    // правится с пустым полем, и без подсказки с него непонятно, чего от него
+    // хотят: это имя пользователя панели, а не email.
+    //
+    // Подсказка берётся из того же `apiUserField`, что и в форме создания
+    // (см. тест «Namecheap: API User остаётся»), и утверждение здесь ровно про
+    // то, что два экрана не разъехались. Разъезд уже был — в другую сторону: у
+    // поля жил суффикс подписи, которого правка не рисовала.
+    setTauri(true);
+    renderPage([{ ...NAMECHEAP, api_user: null }]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    const field = screen.getByPlaceholderText("your_namecheap_username") as HTMLInputElement;
+    expect(field.value).toBe("");
+    // И это именно поле логина, а не что-то похожее: рядом стоят два поля
+    // секретов со своими плейсхолдерами.
+    expect(screen.getByText("API User")).toBeTruthy();
+  });
+
   it("правка неопознанного провайдера: чужой api_user НЕ стирается", async () => {
     // Граница чистки проходит по «опознан ли провайдер», а не по «показываем ли
     // поле»: `needsApiUser` ложен и у того, кого каталог не знает. Случай

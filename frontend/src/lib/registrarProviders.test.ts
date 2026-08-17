@@ -7,6 +7,7 @@ import { registrarSupportsNsApi } from "./registrarCaps";
 import {
   API_PROVIDERS,
   apiKeyLabel,
+  apiUserDeadByContract,
   apiUserField,
   hasApi,
   needsApiUser,
@@ -76,6 +77,36 @@ describe("registrarProviders — состав учётки: API User и подп
     expect(hasApi(" namecheap ")).toBe(false);
     expect(needsApiUser(" namecheap ")).toBe(false);
     expect(needsApiUser(" hostiq ")).toBe(false);
+  });
+
+  describe("apiUserDeadByContract — знаем ли ТОЧНО, что поля в контракте нет", () => {
+    it("да — у опознанного Hostiq: DI-API v3 обходится одним заголовком", () => {
+      expect(apiUserDeadByContract("hostiq")).toBe(true);
+      expect(apiUserDeadByContract("HOSTIQ")).toBe(true);
+    });
+
+    it("нет — у Namecheap: поле в контракте есть и уходит в каждый запрос", () => {
+      expect(apiUserDeadByContract("namecheap")).toBe(false);
+      expect(apiUserDeadByContract("Namecheap")).toBe(false);
+    });
+
+    it("нет — у неопознанного: про его контракт мы не знаем НИЧЕГО", () => {
+      // Не инверсия `needsApiUser`, и вот на чём эта разница ловится. Правка
+      // аккаунта с таким провайдером обнуляла колонку `api_user`, а в ней у
+      // `" namecheap "` (пробелы из чужого импорта) лежит рабочий логин панели:
+      // поля на форме нет, на карточке `api_user` не-API провайдеру не рисуется,
+      // и потеря невидима целиком. Незнание в право стирать не округляем.
+      for (const unknown of [" namecheap ", " hostiq ", "hostiq ", "godaddy", "GoDaddy", "", null, undefined]) {
+        expect(needsApiUser(unknown), String(unknown)).toBe(false); // «поля нет» — да
+        expect(apiUserDeadByContract(unknown), String(unknown)).toBe(false); // «мертво» — нет
+      }
+    });
+
+    it("имя из прототипа объекта тоже не даёт права стирать", () => {
+      for (const name of ["constructor", "__proto__", "valueOf", "toString"]) {
+        expect(apiUserDeadByContract(name), name).toBe(false);
+      }
+    });
   });
 
   it("apiKeyLabel: как поле называется у самого регистратора", () => {
