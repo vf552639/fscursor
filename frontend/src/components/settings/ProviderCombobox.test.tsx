@@ -19,8 +19,9 @@ afterEach(cleanup);
 function Harness({
   accounts = [] as { provider: string }[],
   onChange = vi.fn(),
+  initial = "hostiq",
 }) {
-  const [value, setValue] = useState("hostiq");
+  const [value, setValue] = useState(initial);
   return (
     <ProviderCombobox
       value={value}
@@ -154,6 +155,49 @@ describe("ProviderCombobox", () => {
     expect(screen.getByText(/Создать/)).toBeTruthy();
   });
 
+  /**
+   * Выбранный провайдер входит в список сам по себе, без аккаунта под ним:
+   * в форме создания это состояние наступает сразу после «Создать «Porkbun»».
+   */
+  it("выбранный провайдер вне каталога и вне аккаунтов подсвечен в списке", () => {
+    render(<Harness initial="Porkbun" />);
+    openList();
+    const opt = screen.getByRole("option", { name: /Porkbun/ });
+    expect(opt.getAttribute("aria-selected")).toBe("true");
+    expect(opt.textContent).toContain("manual");
+  });
+
+  it("поиск по уже выбранному своему провайдеру не предлагает создать его повторно", () => {
+    render(<Harness initial="Porkbun" />);
+    openList();
+    fireEvent.change(screen.getByPlaceholderText(/Поиск/), {
+      target: { value: "Porkbun" },
+    });
+    expect(screen.queryByText(/Создать/)).toBeNull();
+    expect(screen.getAllByRole("option").length).toBe(1);
+  });
+
+  it("каталожный value не задваивает пункт списка", () => {
+    render(<Harness initial="hostiq" />);
+    openList();
+    const opts = screen.getAllByRole("option");
+    expect(opts.length).toBe(2);
+    expect(opts.map((o) => o.textContent).join("|")).toContain("Hostiq");
+    expect(opts.map((o) => o.textContent).join("|")).toContain("Namecheap");
+  });
+
+  it("value с пробелами вокруг каталожного имени тоже не задваивает пункт", () => {
+    render(<Harness initial=" hostiq " />);
+    openList();
+    expect(screen.getAllByRole("option").length).toBe(2);
+  });
+
+  it("пустой value не заводит пункт-призрак", () => {
+    render(<Harness initial="" />);
+    openList();
+    expect(screen.getAllByRole("option").length).toBe(2);
+  });
+
   it("disabled не даёт раскрыть список", () => {
     const [value, onChange] = ["hostiq", vi.fn()];
     render(
@@ -161,5 +205,24 @@ describe("ProviderCombobox", () => {
     );
     openList();
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  /**
+   * Тот же `disabled`, но пришедший поверх уже раскрытого списка — так его и
+   * подаёт форма (`disabled={secrets.saving}`), если сохранение началось
+   * из-под открытой выпадашки. Список обязан исчезнуть на время записи и
+   * вернуться тем же, каким его открывали: своего стейта `open` мы не рушим.
+   */
+  it("disabled поверх открытого списка прячет его, а снятие — возвращает", () => {
+    const props = { value: "hostiq", accounts: [], onChange: vi.fn() };
+    const { rerender } = render(<ProviderCombobox {...props} />);
+    openList();
+    expect(screen.getByRole("listbox")).toBeTruthy();
+
+    rerender(<ProviderCombobox {...props} disabled />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    rerender(<ProviderCombobox {...props} />);
+    expect(screen.getByRole("listbox")).toBeTruthy();
   });
 });

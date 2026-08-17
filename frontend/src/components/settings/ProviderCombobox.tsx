@@ -82,7 +82,18 @@ export function ProviderCombobox({ value, onChange, accounts, disabled }: Props)
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
-  const options = useMemo(() => buildProviderList(accounts), [accounts]);
+  /**
+   * Текущий выбор входит в список наравне с аккаунтами. Иначе только что
+   * созданный провайдер (аккаунта под него ещё нет — это ровно первый живой
+   * сценарий формы) не подсвечивался бы как выбранный, а поиск по его же имени
+   * предлагал бы «Создать» второй раз. Дедуп у `buildProviderList` идёт по
+   * нормализованному ключу, поэтому каталожный `value` не задваивается, а
+   * пустой (`""`, одни пробелы) отсеивается вместе с пустыми ключами аккаунтов.
+   */
+  const options = useMemo(
+    () => buildProviderList([...accounts, { provider: value }]),
+    [accounts, value],
+  );
   const selected = providerMeta(value);
 
   const q = query.trim();
@@ -213,8 +224,11 @@ export function ProviderCombobox({ value, onChange, accounts, disabled }: Props)
                 истинен только когда какая-то опция совпала по ключу, а её
                 `label.toLowerCase()` тогда совпадает с запросом и по фильтру —
                 то есть пустой `filtered` всегда идёт в паре с `canCreate`.
-                Оставлена намеренно: поменяется фильтрация — выпадашка объяснит
-                пустоту, а не покажет пустую коробку. */}
+                Держится это не на фильтре, а на свойстве `providerMeta`:
+                `label.toLowerCase() === key` в обеих её ветках (у каталожной
+                метка — то же имя, у ручной — тримленный ввод). Сломается оно —
+                рассуждение развалится, и ветка оживёт. Оставлена намеренно:
+                выпадашка объяснит пустоту, а не покажет пустую коробку. */}
             {!filtered.length && !canCreate && (
               <div style={{ padding: "10px 12px", color: "#9ca3af", fontSize: 13 }}>
                 Ничего не найдено
