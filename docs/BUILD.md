@@ -68,7 +68,7 @@ because nothing failed.
 
 ## Code signing (why the keychain keeps asking)
 
-Every operation on a secret reads the master key from the macOS keychain. The keychain
+Every operation on a secret reads the vault key from the macOS keychain. The keychain
 identifies the asking program by its code signature — and an unsigned build only carries
 an ad-hoc signature, where the identity *is* the code hash. Every rebuild changes that
 hash, so macOS sees a brand-new program, the ACL entry does not match, and you get the

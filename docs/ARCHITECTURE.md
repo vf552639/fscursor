@@ -3,7 +3,8 @@
 > и `docs/AUDIT_2026-08-02.md` (спека `plan.md` удалена как исполненная — история git).
 >
 > **Исключение:** § *Server signals*, § *Server reachability monitoring flow*, § *Server metrics
-> flow* и «Server status ladder» в разделе Frontend переписаны по коду **2026-08-06** и актуальны.
+> flow* и «Server status ladder» в разделе Frontend переписаны по коду **2026-08-06** и актуальны;
+> § *Zero-knowledge: KEK и ключ хранилища* — по коду **2026-08-17**.
 > Разделы, помеченные *(historical)*, описывают код, которого больше нет.
 
 # ARCHITECTURE
@@ -173,7 +174,63 @@ Notes:
 - **Distribution:** unsigned install flows (Gatekeeper / SmartScreen) are documented in [`INSTALL.md`](INSTALL.md).
 - **Developer isolation:** optional `git worktree` checkouts can live under `.worktrees/` (ignored by git); symlink or copy root `.env` into the worktree when running backend tests against a real DB.
 
+## Zero-knowledge: KEK и ключ хранилища (VK)
+
+Ключей два, и путать их нельзя — на этом различии держится и восстановление пароля, и
+сама возможность его сменить. Раздел написан по коду 2026-08-17 (`backend/app/auth/routes.py`,
+`desktop/src-tauri/src/{crypto,commands/auth.rs,keychain}`, `frontend/src/lib/crypto.ts`).
+
+| Ключ | Откуда берётся | Что им делают | Где живёт |
+|---|---|---|---|
+| `auth_key` | Argon2id(пароль, `users.salt`, метка `sdmp-auth-key-v1`) | доказывает серверу знание пароля | на сервере только bcrypt-хэш `users.auth_key_hash` |
+| **KEK** | Argon2id(пароль, `users.salt`, метка `sdmp-master-key-v1`) — функция всё ещё зовётся `derive_master_key` | **только** оборачивает VK | нигде не хранится, выводится на каждый вход |
+| **VK** (vault key) | 32 случайных байта при регистрации (`aead::random_key`) | шифрует блобы `blob_storage` и открывает локальный sqlcipher-кэш десктопа | связка ключей ОС (`com.sdmp.desktop`, account = `user_id`); в вебе — память вкладки, `useAuthStore.vaultKey`, гаснет по idle |
+| `wrapped_vk` | `aead::encrypt(VK, KEK)` = nonce 24 + тег 16 + ключ 32 = **72 байта** | отдаёт VK тому, кто знает пароль | `users.wrapped_vault_key` |
+| recovery-блоб | `wrap_vault_key(VK, фраза)` | отдаёт VK тому, кто знает BIP-39 фразу | `recovery_blob.ciphertext` |
+
+**Почему не один ключ.** Раньше блобы шифровались прямо KEK'ом (тогда он и звался master
+key). Значит любой поворот соли или пароля менял ключ шифрования — а перешифровки не было
+ни на одной стороне: восстановление поворачивало и соль, и пароль и молча оставляло
+шифротексты, которые новым ключом уже не открывались. VK разрывает эту связь: пароль
+меняет только 72 байта обёртки, ключ шифрования остаётся прежним, и перешифровывать нечего
+по построению.
+
+**Что поворачивается.** Ни одна операция не трогает `blob_storage` — это и есть проверяемое
+свойство (`version` блобов не растёт):
+
+| Операция | `users.salt` | `auth_key_hash` | `wrapped_vault_key` | recovery-блоб | сессии | VK |
+|---|---|---|---|---|---|---|
+| `POST /auth/password/change` | новая | новый | новый | не трогается | живут (текущая в том числе) | **тот же** |
+| `POST /auth/recovery/finish` | новая | новый | новый | перевыпускается (та же фраза → тот же VK внутри), хэш ключа-доказательства по желанию | все удаляются | **тот же** |
+| `POST /auth/vault-key/init` | — | — | пишется, только если был NULL | — | — | **тот же** |
+
+Отсюда же фиксированная `RECOVERY_SALT` в `crypto/kdf.rs`: ключ-доказательство фразы не
+может зависеть от `users.salt`, которую обе операции поворачивают, иначе он обесценивал бы
+сам себя на каждой смене пароля.
+
+**Аккаунты до перехода.** `users.wrapped_vault_key IS NULL` читается как `VK == KEK`: их
+блобы зашифрованы ровно тем ключом, который теперь называется их VK, а recovery-блоб
+оборачивает его же. Поэтому переход не переписал ни одного блоба. Обёртка проставляется
+лениво, на первом входе десктопа: `POST /auth/vault-key/init` пишет её `UPDATE ... WHERE
+wrapped_vault_key IS NULL`, отвечает 200 на те же байты и 409 на чужие — проигравший гонку
+клиент перечитывает `/auth/me` и берёт обёртку оттуда (обе разворачиваются в один ключ, до
+перехода терять нечего). Ленивая миграция **fail-open**: отказ эндпоинта не роняет вход,
+потому что незакреплённая обёртка — это в точности состояние «аккаунт до перехода», которое
+код поддерживает целиком, а вот отказ во входе оставил бы пользователя без единственного
+клиента, умеющего читать секреты. Строгим остался ровно один исход: обёртка **есть** и не
+разворачивается нашим KEK — там правильного ключа нет вовсе.
+
+**Zero-knowledge не протекает.** Анонимный `POST /auth/recovery/start` отдаёт соль и
+recovery-блоб, но **не** `wrapped_vk` — иначе это был бы оффлайн-оракул для перебора пароля
+по e-mail. Обёртка едет только в `login/finish` и `/auth/me`, то есть после аутентификации.
+VK при этом сервер не видит никогда: он оборачивается и разворачивается на клиенте, а формат
+обёртки сведён тест-вектором между тремя реализациями (libsodium C, libsodium-wasm в
+браузере, `dryoc` в Rust) — разошедшийся браузер запер бы пользователя в аккаунте, заведённом
+с десктопа.
+
 ## Security Notes
-- Sensitive values are encrypted at rest (based on configured encryption key).
+- Sensitive values are encrypted at rest (based on configured encryption key). This is about
+  server-side columns only; user secrets never reach the server in plaintext — see
+  § *Zero-knowledge: KEK и ключ хранилища*.
 - Docker build contexts are constrained with service-level `.dockerignore` files to reduce accidental inclusion of `.env*`, caches, and runtime state files.
 - This deployment profile is internal/development-oriented; public exposure still requires full auth hardening and production controls.
