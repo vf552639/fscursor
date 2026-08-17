@@ -50,7 +50,7 @@ Notes:
     - create-db + credential retrieval,
     - SSL request/cancel/refresh,
     - nginx override apply/read (presets + raw snippet),
-    - NS check — *(historical)* задумывалась как `registrar.get_nameservers` с DNS-фолбэком; ни того, ни другого больше нет. NS домена «как есть» читает десктоп из РЕЕСТРА (RDAP, `domain_registry_nameservers`), одинаково для всех провайдеров: у Hostiq чтения NS в API не существует, у ручных провайдеров нет и самого API,
+    - NS check — *(historical)* задумывалась как `registrar.get_nameservers` с DNS-фолбэком; ни того, ни другого больше нет. NS домена «как есть» читает десктоп из РЕЕСТРА (RDAP, `domain_registry_nameservers`), одинаково для всех провайдеров: у Hostiq чтения NS в API не существует (`docs/HOSTIQ_API.md` §5), а у ручных провайдеров нет и самого API, — то есть путь отвечал у одного провайдера из двух. Регистратору осталась запись.
     - manual NS override state (`ns_check_mode` `auto|manual`).
   - A bulk orchestration endpoint (`POST /api/domains/bulk-full-setup`) runs per-domain chain semantics:
     1. assign server/cloudflare/registrar,
