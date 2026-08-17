@@ -6,8 +6,8 @@ import { type DomainFacts } from "../lib/domainFacts";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { BLOB_KIND, putSecretBlob } from "../lib/secretBlob";
+import { noteNsPush } from "./nsPush";
 import { queryClient } from "./queryClient";
-import { registrarsKeys } from "./registrars";
 import { runExclusive, useRunPending } from "./runGate";
 import { useAuthStore } from "../store/auth";
 
@@ -324,7 +324,8 @@ export const MIN_NAMESERVERS = 2;
  *
  * Дубли считаются ОБЩИМ правилом (`trimDnsName` + регистр), тем же, которым
  * сверяется делегирование (`lib/nsDelegation`, `lib/cfZoneMatch`) и которым
- * читает ответы регистратора десктоп (`normalize_ns` в `registrars/mod.rs`).
+ * десктоп разбирает имена NS из ответа реестра (`normalize_ns` в
+ * `registrars/mod.rs`, зовётся из `rdap.rs`).
  * Пока правило про точку жило только на стороне сверки, `ns1.cf.com.` из
  * копипасты зонного файла и `ns1.cf.com` были ОДНИМ сервером для бейджа и ДВУМЯ
  * для отправки: порог `MIN_NAMESERVERS` проходил, а регистратор получал дубль
@@ -334,9 +335,10 @@ export const MIN_NAMESERVERS = 2;
  * регистра: тот сравнивает и потому приводит имена к нижнему, а этот ОТПРАВЛЯЕТ
  * и отдаёт то, что набрал пользователь (схлопывая повтор, а не «починив» ввод —
  * на это есть тест в `DomainDetailModal.setns.test.tsx`). Точка — другое дело:
- * её десктоп в отправляемом списке не срезает (`set_nameservers` шлёт как
- * есть), а в прочитанном обратно — срезает, и оставленная здесь она означала бы
- * FQDN, отправленный в одной форме и сверяемый в другой.
+ * её десктоп в отправляемом списке не срезает (`set_nameservers` шлёт как есть),
+ * а в ответе РЕЕСТРА, с которым этот же список потом сверяется, — срезает;
+ * оставленная здесь, она означала бы FQDN, отправленный в одной форме и
+ * сверяемый в другой.
  */
 export function normalizeNameservers(input: string[]): string[] {
   const seen = new Set<string>();
@@ -435,7 +437,7 @@ export function useSetNameservers() {
     // команды, и он срабатывает на ОБОИХ исходах — отказ регистратора кладёт
     // туда `error` и только потом доезжает сюда ошибкой. На `onSuccess` самый
     // интересный случай остался бы без обновления списка.
-    onSettled: (_data, _err, vars) => {
+    onSettled: (data, _err, vars) => {
       // Работу делает `all`: карточку домена рисует строка из списка (см.
       // `DomainDetailModal` в `Domains.tsx`), и без этой инвалидации она бы ещё
       // долго показывала «pending» после удавшейся смены.
@@ -444,15 +446,21 @@ export function useSetNameservers() {
       // вызывающего. Оставлено как парная инвалидация — в тот день, когда
       // карточка станет отдельным запросом, забыть её здесь будет дороже.
       queryClient.invalidateQueries({ queryKey: domainsKeys.detail(vars.domainId) });
-      // NS этого домена у регистратора — то, по чему карточка сверяет
-      // делегирование. Мы только что поменяли ровно их, и без сброса бейдж ещё
-      // минуту (`staleTime`) показывал бы «MISMATCH» на удавшейся смене. На
-      // ОБОИХ исходах: отказ регистратора мог примениться частично.
-      if (vars.registrarAccountId != null) {
-        queryClient.invalidateQueries({
-          queryKey: registrarsKeys.nameservers(vars.registrarAccountId, vars.domainName),
-        });
-      }
+      // Пуш состоялся — со всеми последствиями, которые из этого следуют:
+      // ответ реестра в кэше протух (иначе бейдж пять минут показывал бы
+      // делегирование ДО пуша) и домен стал «только что запушенным» (иначе
+      // подпись под бейджем велела бы сделать только что сделанное).
+      //
+      // Оба последствия — одним вызовом `noteNsPush`, потому что путей записи NS
+      // два: этот и массовый прогон (`api/fullSetup.ts`). Разложенные по местам,
+      // они уже разъехались — см. JSDoc `api/nsPush.ts`.
+      //
+      // Мгновенного «DELEGATED» это не даёт и не должно: реестр узнаёт о смене
+      // NS не сразу, и оставшийся «MISMATCH» — правда, а не протухший кэш.
+      // Делегирование действительно ещё не сменилось; раньше на этом месте API
+      // регистратора отвечал «уже сменилось», обещая работающий домен за минуты
+      // до того, как это становилось так.
+      noteNsPush(vars.domainName, data === true);
     },
   });
 }

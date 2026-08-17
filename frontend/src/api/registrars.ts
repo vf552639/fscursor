@@ -76,12 +76,6 @@ function requireUserId(): string {
 
 export const registrarsKeys = {
   accounts: ["registrars", "accounts"] as const,
-  /**
-   * Ключ на ДОМЕН, а не на аккаунт: спрашиваем мы про один домен
-   * (`registrar_get_nameservers`), и запись кэша обязана совпадать с вопросом.
-   */
-  nameservers: (accountId: number, domain: string) =>
-    ["registrars", accountId, "nameservers", domain] as const,
 };
 
 export function useRegistrarAccounts() {
@@ -135,41 +129,14 @@ export function useTestRegistrarConnection() {
 }
 
 /**
- * Настоящие nameservers ОДНОГО домена — как их видит его регистратор.
+ * Чтения nameservers здесь НЕТ — «как есть» спрашивают у реестра
+ * (`api/rdap.ts`, `useRegistryNameservers`).
  *
- * Поимённый запрос, а не строка из листинга аккаунта, и это не оптимизация.
- * Листинг у Namecheap nameservers не отдаёт вовсе, а у обоих провайдеров он
- * непагинирован — то есть отсутствие домена в ответе означает «страница
- * кончилась» ничуть не реже, чем «домена в аккаунте нет», и сказать по нему
- * что-либо о делегировании нельзя. Здесь ответ однозначен: либо список, либо
- * ошибка регистратора с её текстом.
- *
- * `staleTime` — как у зон Cloudflare (`zonesQuery`) и по той же причине: это
- * поход в чужой API с лимитами (Namecheap считает запросы поминутно), а
- * меняются NS домена либо нашей же кнопкой (она гасит этот ключ в
- * `useSetNameservers`), либо руками в панели регистратора — то есть редко.
- * Дефолтные 10 секунд означали бы полный опрос на каждое переоткрытие
- * карточки.
+ * Не переезд, а снятие пути: у Hostiq чтения NS в API не существует вовсе, у
+ * ручных провайдеров нет и самого API, — то есть хук отвечал у одного провайдера
+ * из двух, а у остальных доменов бейдж делегирования был серым по построению.
+ * Реестр отвечает про любой домен и не спрашивает ни ключей, ни аккаунта. Второй
+ * источник рядом с ним означал бы разную по надёжности правду под одним и тем же
+ * бейджем — поэтому команды `registrar_get_nameservers` в десктопе тоже больше
+ * нет. Регистратору осталась ЗАПИСЬ (`useSetNameservers` в `api/domains.ts`).
  */
-export function useRegistrarNameservers(
-  accountId: number | null | undefined,
-  domain: string | null | undefined,
-) {
-  return useQuery({
-    queryKey:
-      accountId && domain
-        ? registrarsKeys.nameservers(accountId, domain)
-        : ["registrars", "nameservers", "disabled"],
-    queryFn: async () => {
-      requireDesktop("Reading nameservers from a registrar");
-      const userId = requireUserId();
-      return invokeSynced<string[]>("registrar_get_nameservers", {
-        userId,
-        accountId: String(accountId),
-        domain,
-      });
-    },
-    enabled: !!accountId && !!domain,
-    staleTime: 60_000,
-  });
-}

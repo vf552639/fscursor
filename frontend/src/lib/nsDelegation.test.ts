@@ -1,27 +1,40 @@
 import { describe, it, expect } from "vitest";
 
-import { NsDelegation, nsDelegation, nsDelegationVariant } from "./nsDelegation";
+import type { RegistryNameservers } from "../api/rdap";
+import { NsDelegation, NsDelegationInput, nsDelegation, nsDelegationVariant } from "./nsDelegation";
 
 /**
- * Правило сверки проверяется здесь, а не на карточке домена: оба списка NS
- * приезжают от Tauri-команд (`cf_list_zones`, `registrar_get_nameservers`), и на
- * реальном пути каждое утверждение стоило бы мока десктопа ради сравнения двух
- * наборов строк. Ломается же тут не механика, а правило — регистр, точка на
+ * Правило сверки проверяется здесь, а не на карточке домена: оба сведения
+ * приезжают от Tauri-команд (`cf_list_zones`, `domain_registry_nameservers`), и
+ * на реальном пути каждое утверждение стоило бы мока десктопа ради сравнения
+ * двух наборов строк. Ломается же тут не механика, а правило — регистр, точка на
  * конце, порядок, число серверов и лестница «не знаем».
  */
 
 const CF_NS = ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"];
 
-/** Всё известно и всё сходится — от этого набора отклоняются остальные кейсы. */
-function input(over: Record<string, unknown> = {}) {
+/** Ответ реестра «зарегистрирован, вот его NS» — самая частая форма. */
+function registered(nameservers: string[]): RegistryNameservers {
+  return { state: "registered", nameservers };
+}
+
+/**
+ * Всё известно и всё сходится — от этого набора отклоняются остальные кейсы.
+ *
+ * Полей про аккаунт регистратора здесь НЕТ, и это не упущение теста, а предмет
+ * проверки: тип входа их больше не объявляет, поэтому сам факт, что этот файл
+ * компилируется (`tsc --noEmit` в прогоне), и есть доказательство, что реестру
+ * незачем знать, чей это домен. Ровно из-за этого домен у ручного провайдера
+ * (Dynadot, любой ярлык) впервые получает настоящий бейдж — живьём это
+ * проверяется на карточке (`DomainDetailModal.cfzone.test.tsx`).
+ */
+function input(over: Partial<NsDelegationInput> = {}): NsDelegationInput {
   return {
     domainName: "example.com",
     zone: { name: "example.com", nameservers: CF_NS, status: "active" },
-    registrarAccountId: 9,
-    registrarProvider: "namecheap",
-    registrarNameservers: CF_NS,
+    registryNameservers: registered(CF_NS),
     ...over,
-  } as Parameters<typeof nsDelegation>[0];
+  };
 }
 
 function reason(d: NsDelegation): string {
@@ -34,21 +47,28 @@ describe("nsDelegation — делегировано", () => {
   });
 
   it("не считает расхождением регистр, точку на конце и порядок", () => {
-    // Регистратор отдаёт NS как хочет: Namecheap — в том порядке, в каком их
-    // записали, Hostiq — в своём; завершающая точка это законный FQDN.
+    // Реестр отдаёт NS в своём порядке и своим регистром (RDAP-ответы бывают и
+    // в верхнем), а завершающая точка — законный FQDN.
     const d = nsDelegation(
-      input({ registrarNameservers: ["BOB.ns.cloudflare.com.", " ada.NS.cloudflare.com "] }),
+      input({
+        registryNameservers: registered(["BOB.ns.cloudflare.com.", " ada.NS.cloudflare.com "]),
+      }),
     );
     expect(d.state).toBe("delegated");
   });
 
-  it("схлопывает дубли у регистратора", () => {
+  it("схлопывает дубли в ответе реестра", () => {
     // «ns1 + NS1.» — один сервер, записанный дважды. Посчитанные за два, они
     // сделали бы из верного делегирования «расходится» (разное число).
-    const d = nsDelegation({
-      ...input(),
-      registrarNameservers: ["ada.ns.cloudflare.com", "ADA.ns.cloudflare.com.", "bob.ns.cloudflare.com"],
-    });
+    const d = nsDelegation(
+      input({
+        registryNameservers: registered([
+          "ada.ns.cloudflare.com",
+          "ADA.ns.cloudflare.com.",
+          "bob.ns.cloudflare.com",
+        ]),
+      }),
+    );
     expect(d.state).toBe("delegated");
   });
 });
@@ -68,8 +88,10 @@ describe("nsDelegation — pending", () => {
 });
 
 describe("nsDelegation — расходится", () => {
-  it("регистратор указывает на чужие NS", () => {
-    const d = nsDelegation(input({ registrarNameservers: ["ns1.hoster.net", "ns2.hoster.net"] }));
+  it("реестр показывает чужие NS", () => {
+    const d = nsDelegation(
+      input({ registryNameservers: registered(["ns1.hoster.net", "ns2.hoster.net"]) }),
+    );
     expect(d).toEqual({
       state: "mismatch",
       expected: CF_NS,
@@ -80,24 +102,37 @@ describe("nsDelegation — расходится", () => {
   it("лишний NS сверх зоны — тоже расхождение", () => {
     // Не «те же плюс запасной»: делегирование, поделённое с чужим сервером,
     // Cloudflare активным не считает.
-    const d = nsDelegation({ ...input(), registrarNameservers: [...CF_NS, "ns1.hoster.net"] });
+    const d = nsDelegation(input({ registryNameservers: registered([...CF_NS, "ns1.hoster.net"]) }));
     expect(d.state).toBe("mismatch");
   });
 
   it("половина нужных NS — тоже расхождение, а не pending", () => {
-    const d = nsDelegation({ ...input(), registrarNameservers: ["ada.ns.cloudflare.com"] });
+    const d = nsDelegation(input({ registryNameservers: registered(["ada.ns.cloudflare.com"]) }));
     expect(d.state).toBe("mismatch");
   });
 
   it("расхождение сильнее активного статуса зоны", () => {
-    // Cloudflare мог видеть делегирование раньше, а список регистратора —
-    // свежее. Утверждать «делегировано» поверх ответа регистратора нельзя.
-    const d = nsDelegation({
-      ...input(),
-      zone: { name: "example.com", nameservers: CF_NS, status: "active" },
-      registrarNameservers: ["ns1.hoster.net", "ns2.hoster.net"],
-    });
+    // Cloudflare мог видеть делегирование раньше, а ответ реестра — свежее.
+    // Утверждать «делегировано» поверх реестра нельзя.
+    const d = nsDelegation(
+      input({
+        zone: { name: "example.com", nameservers: CF_NS, status: "active" },
+        registryNameservers: registered(["ns1.hoster.net", "ns2.hoster.net"]),
+      }),
+    );
     expect(d.state).toBe("mismatch");
+  });
+
+  it("домен в реестре есть, а NS у него не прописаны — расхождение с пустым «как есть»", () => {
+    // Самое важное утверждение новой лестницы. `registered` с пустым списком —
+    // это ОТВЕТ реестра («домен зарегистрирован, делегирования нет»), а не
+    // отсутствие ответа: ключа `nameservers` в RDAP-ответе просто нет, и фаза 3
+    // специально отделила этот случай от «не смогли спросить». Уводить его в
+    // «не знаем» значило бы прятать домен, который не работает вообще, за серым
+    // бейджем — при том что чинится он ровно тем же действием, что любое другое
+    // расхождение: прописать NS зоны.
+    const d = nsDelegation(input({ registryNameservers: registered([]) }));
+    expect(d).toEqual({ state: "mismatch", expected: CF_NS, actual: [] });
   });
 });
 
@@ -113,23 +148,6 @@ describe("nsDelegation — незнание отдельным состояни�
   it("зона без единого nameserver — не «нет делегирования», а «не знаем»", () => {
     expect(reason(nsDelegation(input({ zone: { name: "example.com", nameservers: [], status: "active" } })))).toBe(
       "zone-nameservers-unknown",
-    );
-  });
-
-  it("аккаунт регистратора не назначен", () => {
-    expect(reason(nsDelegation(input({ registrarAccountId: null })))).toBe("no-registrar");
-  });
-
-  it("провайдер без NS-API", () => {
-    // Спросить регистратора нечем: `make_service` в десктопе такого не знает.
-    expect(reason(nsDelegation(input({ registrarProvider: "godaddy" })))).toBe("registrar-no-api");
-  });
-
-  it("непрочитанный список аккаунтов не выдаётся за «провайдер без API»", () => {
-    // Разные фразы и разные действия: одну чинит ожидание, другую — смена
-    // регистратора руками в его панели.
-    expect(reason(nsDelegation(input({ registrarProvider: undefined })))).toBe(
-      "registrar-nameservers-unknown",
     );
   });
 
@@ -150,23 +168,49 @@ describe("nsDelegation — незнание отдельным состояни�
     expect(d.state).toBe("delegated");
   });
 
-  it("NS у регистратора не прочитаны", () => {
-    expect(reason(nsDelegation(input({ registrarNameservers: undefined })))).toBe(
-      "registrar-nameservers-unknown",
+  it("ответа реестра ещё нет", () => {
+    // Запрос летит. Действие — дождаться, и никакого другого: обвинять в этом
+    // домен или реестр не за что.
+    expect(reason(nsDelegation(input({ registryNameservers: undefined })))).toBe(
+      "registry-nameservers-unknown",
     );
   });
 
-  it("регистратор не назвал ни одного NS", () => {
-    expect(reason(nsDelegation(input({ registrarNameservers: [] })))).toBe(
-      "registrar-nameservers-unknown",
+  it("реестр говорит, что домена у него нет", () => {
+    // Утверждение реестра, а не наша неудача, и действие у него своё: разбираться
+    // с самим доменом (опечатка в имени, домен не продлён, ещё не
+    // зарегистрирован) — прописывать NS такому домену некуда.
+    expect(reason(nsDelegation(input({ registryNameservers: { state: "not_registered" } })))).toBe(
+      "not-in-registry",
     );
   });
 
-  it("неизвестная зона перебивает неизвестного регистратора", () => {
-    // Порядок проверок — порядок починки: пока сверять не с чем, ответ
-    // регистратора ничего не решает, и звать пользователя в настройки
-    // регистратора значило бы послать его не туда.
-    expect(reason(nsDelegation({ ...input(), zone: null, registrarAccountId: null }))).toBe("no-zone");
+  it("спросить реестр не удалось — и его слова доезжают до бейджа", () => {
+    // Отличать от «домена нет» обязательно: тут чинить нечего, надо повторить
+    // позже. А `detail` — то самое «чего не хватило»: серое «не знаем» без
+    // причины сообщает только, что мы чего-то не сделали.
+    const d = nsDelegation(
+      input({ registryNameservers: { state: "unavailable", reason: "no RDAP server for .xyz" } }),
+    );
+    expect(d).toEqual({
+      state: "unknown",
+      reason: "registry-unavailable",
+      detail: "no RDAP server for .xyz",
+    });
+  });
+
+  it("у причин, кроме отказа реестра, детали нет — и это не «пусто», а «нечего добавить»", () => {
+    const d = nsDelegation(input({ zone: null }));
+    expect(d).toEqual({ state: "unknown", reason: "no-zone", detail: null });
+  });
+
+  it("неизвестная зона перебивает неизвестный реестр", () => {
+    // Порядок проверок — порядок починки: пока сверять не с чем, ответ реестра
+    // ничего не решает, а звать пользователя разбираться с доменом значило бы
+    // послать его не туда.
+    expect(
+      reason(nsDelegation(input({ zone: null, registryNameservers: { state: "not_registered" } }))),
+    ).toBe("no-zone");
   });
 });
 

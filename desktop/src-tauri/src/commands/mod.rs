@@ -5,6 +5,7 @@ pub mod creds;
 pub mod domain_facts;
 pub mod full_setup;
 pub mod provision;
+pub mod rdap;
 pub mod registrars;
 pub mod ssh;
 pub mod sync_cmd;

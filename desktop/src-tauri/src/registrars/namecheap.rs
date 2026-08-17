@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use roxmltree::Document;
 
-use super::{normalize_ns, DomainInfo, RegistrarError, RegistrarService};
+use super::{DomainInfo, RegistrarError, RegistrarService};
 
 const NAMECHEAP_API: &str = "https://api.namecheap.com/xml.response";
 
@@ -187,6 +187,18 @@ impl RegistrarService for NamecheapService {
         }
     }
 
+    /// Домены аккаунта — ПЕРВАЯ СТРАНИЦА, и это надо знать вызывающему.
+    ///
+    /// `PageSize=100` без `Page`: пагинации здесь нет, хотя у `domains.getList`
+    /// она есть (`Page`, а в ответе — `Paging/TotalItems`). Поэтому на аккаунте в
+    /// 250 доменов отсутствие домена в ответе значит «страница кончилась» ничуть
+    /// не реже, чем «домена в аккаунте нет», — и делать по этому листингу выводы
+    /// ПРО ОТДЕЛЬНЫЙ домен нельзя. Раньше это обоснование стояло рядом с чтением
+    /// NS, которое из-за него и было заведено поимённой командой; чтение уехало в
+    /// реестр, а сама ловушка осталась здесь — и молчать о ней хуже, чем о ней
+    /// написать. Соседний клиент листает по-настоящему (`hostiq::all_domains`
+    /// идёт по `offset` до `total`), так что асимметрия эта — недоделка, а не
+    /// решение.
     async fn get_domains(&self) -> Result<Vec<DomainInfo>, RegistrarError> {
         let xml = self
             .call("namecheap.domains.getList", &[("PageSize", "100")])
@@ -208,7 +220,6 @@ impl RegistrarService for NamecheapService {
                 } else {
                     "active".into()
                 }),
-                nameservers: vec![],
             });
         }
         Ok(items)
@@ -231,70 +242,6 @@ impl RegistrarService for NamecheapService {
         }
         Ok(true)
     }
-
-    /// Какие nameservers сейчас стоят у домена.
-    ///
-    /// Команда — `namecheap.domains.dns.getList`, и это ИМЕННО она: элемент
-    /// `DomainDNSGetListResult`, который разбирается ниже, есть только в её
-    /// ответе. `domains.getInfo` отдаёт другое дерево (`DomainGetInfoResult` с
-    /// `DnsDetails`), так что разбор по нему не находил ничего и отдавал пустой
-    /// список — «у домена нет NS» вместо ответа.
-    ///
-    /// Namecheap перечисляет серверы ДЕТЬМИ `<Nameserver>`; атрибут
-    /// `Nameservers` со списком через запятую разбирается тоже — он встречается
-    /// у прокси и в старых ответах, и стоит он дешевле, чем ещё один способ
-    /// получить пустоту.
-    async fn get_nameservers(&self, domain: &str) -> Result<Vec<String>, RegistrarError> {
-        let (sld, tld) = split_domain(domain)?;
-        let xml = self
-            .call(
-                "namecheap.domains.dns.getList",
-                &[("SLD", sld), ("TLD", tld)],
-            )
-            .await?;
-        parse_dns_get_list(&xml)
-    }
-}
-
-/// Разбор ответа `namecheap.domains.dns.getList`.
-///
-/// Отдельной чистой функцией, потому что проверить её можно без сети — а
-/// именно разбор тут и ломается: у Namecheap ответы отличаются по форме от
-/// команды к команде, и промах даёт не ошибку, а пустой список, то есть
-/// молчаливое «NS у домена нет».
-fn parse_dns_get_list(xml: &str) -> Result<Vec<String>, RegistrarError> {
-    let doc = Document::parse(xml).map_err(|e| RegistrarError::Api(e.to_string()))?;
-    let mut children: Vec<String> = Vec::new();
-    let mut from_attribute: Vec<String> = Vec::new();
-    for n in doc.descendants() {
-        match strip_ns(n.tag_name().name()) {
-            "Nameserver" => {
-                if let Some(ns) = n.text().map(normalize_ns) {
-                    if !ns.is_empty() {
-                        children.push(ns);
-                    }
-                }
-            }
-            "DomainDNSGetListResult" => {
-                if let Some(raw) = n.attribute("Nameservers") {
-                    from_attribute
-                        .extend(raw.split(',').map(normalize_ns).filter(|s| !s.is_empty()));
-                }
-            }
-            _ => {}
-        }
-    }
-    // Формы РАВНОЗНАЧНЫ, а не дополняют друг друга: приди они обе (ответ через
-    // прокси, который дописал атрибут к настоящему дереву), сложенные вместе они
-    // дали бы каждый сервер дважды. Дедупликацией это не лечится — `Vec::dedup`
-    // снимает только СОСЕДНИЕ повторы, а тут списки идут подряд целиком
-    // (`[a,b,a,b]`), и повторы получаются несоседними. Поэтому не «склеить и
-    // почистить», а выбрать: дети — основная форма, атрибут — запасная.
-    Ok(if children.is_empty() {
-        from_attribute
-    } else {
-        children
-    })
 }
 
 fn command_response_ok(xml: &str) -> bool {
@@ -465,74 +412,5 @@ mod tests {
     fn empty_key_does_not_shred_the_text() {
         let svc = NamecheapService::new("", "user1", "1.2.3.4");
         assert_eq!(svc.scrub("Namecheap error: nope".into()), "Namecheap error: nope");
-    }
-
-    /// Ответ `namecheap.domains.dns.getList` в том виде, в каком его отдаёт
-    /// Namecheap: пространство имён, серверы — дочерними элементами.
-    #[test]
-    fn dns_get_list_reads_nameserver_elements() {
-        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
-<ApiResponse Status="OK" xmlns="http://api.namecheap.com/xml.response">
-  <CommandResponse Type="namecheap.domains.dns.getList">
-    <DomainDNSGetListResult Domain="example.com" IsUsingOurDNS="false">
-      <Nameserver>ADA.ns.cloudflare.com.</Nameserver>
-      <Nameserver> bob.ns.cloudflare.com </Nameserver>
-    </DomainDNSGetListResult>
-  </CommandResponse>
-</ApiResponse>"#;
-        // Регистр и завершающая точка схлопнуты здесь же: сравнивать наборы
-        // будет фронт, и приводить их к одному виду должны оба конца.
-        assert_eq!(
-            parse_dns_get_list(xml).unwrap(),
-            vec!["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]
-        );
-    }
-
-    #[test]
-    fn dns_get_list_reads_comma_attribute_form() {
-        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
-        <DomainDNSGetListResult Domain="example.com" Nameservers="ns1.hoster.net, ns2.hoster.net"/>
-        </CommandResponse></ApiResponse>"#;
-        assert_eq!(
-            parse_dns_get_list(xml).unwrap(),
-            vec!["ns1.hoster.net", "ns2.hoster.net"]
-        );
-    }
-
-    /// Домен на дефолтных NS Namecheap — это НЕ «нет ответа»: список приходит,
-    /// просто он не наш. Пустым его отдавать нельзя, иначе фронт объявит
-    /// делегирование неизвестным вместо расхождения.
-    #[test]
-    fn dns_get_list_returns_default_namecheap_servers() {
-        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
-        <DomainDNSGetListResult Domain="example.com" IsUsingOurDNS="true">
-          <Nameserver>dns1.registrar-servers.com</Nameserver>
-          <Nameserver>dns2.registrar-servers.com</Nameserver>
-        </DomainDNSGetListResult></CommandResponse></ApiResponse>"#;
-        assert_eq!(parse_dns_get_list(xml).unwrap().len(), 2);
-    }
-
-    /// Обе формы в одном ответе — то, что докстринг разбора объявляет
-    /// возможным (прокси дописал атрибут к настоящему дереву). Список серверов
-    /// от этого удваиваться не должен: `Vec::dedup` тут бессилен, потому что
-    /// повторы получаются НЕсоседними (`[a,b,a,b]`).
-    #[test]
-    fn dns_get_list_does_not_double_count_mixed_form() {
-        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
-        <DomainDNSGetListResult Domain="example.com" Nameservers="ada.ns.cloudflare.com,bob.ns.cloudflare.com">
-          <Nameserver>ada.ns.cloudflare.com</Nameserver>
-          <Nameserver>bob.ns.cloudflare.com</Nameserver>
-        </DomainDNSGetListResult></CommandResponse></ApiResponse>"#;
-        assert_eq!(
-            parse_dns_get_list(xml).unwrap(),
-            vec!["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]
-        );
-    }
-
-    #[test]
-    fn dns_get_list_survives_empty_result() {
-        let xml = r#"<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse>
-        <DomainDNSGetListResult Domain="example.com"/></CommandResponse></ApiResponse>"#;
-        assert!(parse_dns_get_list(xml).unwrap().is_empty());
     }
 }

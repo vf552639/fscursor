@@ -8,6 +8,7 @@ mod commands;
 mod crypto;
 mod keychain;
 mod provision;
+mod rdap;
 mod registrars;
 pub mod ssh;
 mod sync;
@@ -62,9 +63,9 @@ pub fn run() {
             commands::cloudflare::cf_update_dns_record,
             commands::cloudflare::cf_delete_dns_record,
             commands::cloudflare::cf_purge_cache,
+            commands::rdap::domain_registry_nameservers,
             commands::registrars::registrar_test_connection,
             commands::registrars::registrar_get_domains,
-            commands::registrars::registrar_get_nameservers,
             commands::registrars::registrar_set_nameservers,
             commands::full_setup::domain_full_setup,
         ])

@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => ({
   apiPost: vi.fn(),
   apiPut: vi.fn(),
   invokeSynced: vi.fn(),
+  /** Чтение реестра идёт мимо локального кэша — своим путём, см. `api/rdap.ts`. */
+  invokeIfTauri: vi.fn(),
   /** Только мутации: чтение зон разводит роутер в `mockInvoke`. */
   mutate: vi.fn(),
 }));
@@ -42,6 +44,11 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
+}));
+
+vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
 }));
 
 /** Аккаунт Cloudflare (7) и аккаунт регистратора (9) намеренно разные числа. */
@@ -100,18 +107,21 @@ function setTauri(on: boolean) {
   else delete w.__TAURI_INTERNALS__;
 }
 
-function mockInvoke(reads: { zones?: any[]; zonesError?: Error; registrarNs?: string[] } = {}) {
+function mockInvoke(reads: { zones?: any[]; zonesError?: Error } = {}) {
   mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) => {
     if (cmd === "cf_list_zones") {
       if (reads.zonesError) throw reads.zonesError;
       return reads.zones ?? [ZONE];
     }
-    // Карточка сверяет NS зоны с настоящими NS у регистратора; чтение — тоже
-    // Tauri-команда, и держать его в `mutate` нельзя: там мокаются ответы
-    // смены NS.
-    if (cmd === "registrar_get_nameservers") return reads.registrarNs ?? [];
     return mocks.mutate(cmd, args);
   });
+  // Карточка сверяет NS зоны с делегированием ИЗ РЕЕСТРА. Этот сценарий про
+  // кнопку, а не про бейдж, но без ответа карточка висела бы в «не знаем»:
+  // пустой список от реестра — состояние домена ДО пуша, то есть ровно то,
+  // с чего начинается сюжет.
+  mocks.invokeIfTauri.mockImplementation(async (cmd: string) =>
+    cmd === "domain_registry_nameservers" ? { state: "registered", nameservers: [] } : true,
+  );
 }
 
 /**
@@ -221,11 +231,7 @@ describe("Set NS — десктоп выполняет", () => {
     let releaseZones: (zones: any[]) => void = () => {};
     const zonesPromise = new Promise<any[]>((resolve) => { releaseZones = resolve; });
     mocks.invokeSynced.mockImplementation(async (cmd: string, args: any) =>
-      cmd === "cf_list_zones"
-        ? zonesPromise
-        : cmd === "registrar_get_nameservers"
-          ? []
-          : mocks.mutate(cmd, args)
+      cmd === "cf_list_zones" ? zonesPromise : mocks.mutate(cmd, args)
     );
 
     renderModal();

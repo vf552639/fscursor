@@ -14,20 +14,41 @@ pub enum RegistrarError {
     NotImplemented,
 }
 
+/// Строка листинга аккаунта регистратора (`get_domains`).
+///
+/// Поля с nameservers здесь НЕТ, и это утверждение, а не пробел: листинг их не
+/// знает НИ У ОДНОГО провайдера. `namecheap.domains.getList` не отдаёт NS вовсе
+/// (в ответе есть только атрибуты домена), а в `domain/list` у Hostiq нет ни
+/// одного поля с nameservers — проверено на всех 127 доменах боевого аккаунта
+/// (`docs/HOSTIQ_API.md` §5).
+///
+/// Поле раньше было и всегда содержало `vec![]` у обоих клиентов — то есть
+/// ловушка ровно того сорта, от которого построена лестница делегирования на
+/// фронте: пустой список неотличим от ответа «у домена нет NS». Отсутствующее
+/// поле такой подмены не допускает: за NS домена идут в реестр (`crate::rdap`),
+/// и только туда.
 #[derive(Debug, Clone, Serialize)]
 pub struct DomainInfo {
     pub domain: String,
     pub expiry_date: Option<String>,
     pub status: Option<String>,
-    pub nameservers: Vec<String>,
 }
 
+/// Что мы просим у API регистратора.
+///
+/// Чтения nameservers здесь НЕТ, и это решение, а не пробел. Источник «как есть»
+/// один на всех провайдеров — реестр (`crate::rdap`): у Hostiq чтения NS в API
+/// не существует вовсе (в `domain/list` нет такого поля — проверено на всех 127
+/// доменах боевого аккаунта, см. `docs/HOSTIQ_API.md` §5), а у ручных
+/// провайдеров вроде Dynadot нет и самого API. Метод в трейте означал бы, что
+/// путь есть, — и у двух провайдеров из двух он врал бы по-разному: у Hostiq
+/// отказом, у Namecheap правдой, которую всё равно никто не спрашивает.
+/// Регистратору остаётся то, чего реестр не умеет: ЗАПИСЬ (`set_nameservers`).
 #[async_trait]
 pub trait RegistrarService: Send + Sync {
     async fn test_connection(&self) -> Result<(bool, String), RegistrarError>;
     async fn get_domains(&self) -> Result<Vec<DomainInfo>, RegistrarError>;
     async fn set_nameservers(&self, domain: &str, ns: &[String]) -> Result<bool, RegistrarError>;
-    async fn get_nameservers(&self, domain: &str) -> Result<Vec<String>, RegistrarError>;
 }
 
 /// Имя nameserver'а в сравнимом виде: без пробелов по краям, без завершающей
@@ -67,7 +88,10 @@ pub fn make_service(
     api_secret: Option<&str>,
 ) -> Result<Box<dyn RegistrarService>, RegistrarError> {
     match provider.to_lowercase().as_str() {
-        "hostiq" => Ok(Box::new(hostiq::HostiqService::new(api_key))),
+        // `?`, а не `expect` внутри клиента: сборка HTTP-клиента может не
+        // удаться, и паника в async-команде оставила бы промис на фронте
+        // невыполненным (см. `HostiqService::with_base_url`).
+        "hostiq" => Ok(Box::new(hostiq::HostiqService::new(api_key)?)),
         "namecheap" => Ok(Box::new(namecheap::NamecheapService::new(
             api_key,
             api_user.unwrap_or(""),

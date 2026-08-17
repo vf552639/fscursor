@@ -94,6 +94,24 @@ const MANUAL = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+/**
+ * Аккаунт Hostiq в том виде, в каком его оставила прежняя форма: в колонке
+ * `api_user` лежит email, который DI-API v3 не использует. Именно на такой
+ * записи и проверяется правка — новых аккаунтов с email больше не заводится, а
+ * старые никуда не делись.
+ */
+const HOSTIQ = {
+  id: 5,
+  provider: "hostiq",
+  name: "hq-main",
+  api_user: "admin@hostiq.ua",
+  is_active: true,
+  api_key_blob_id: KEY_BLOB,
+  api_secret_blob_id: null,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
 function renderPage(accounts: any[] = [NAMECHEAP]) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/registrars/accounts") return accounts;
@@ -131,8 +149,13 @@ describe("Settings — ключ и секрет регистратора чер�
 
     renderPage([]);
     await openAddModal("namecheap");
+    // С пробелами по краям, как и оба поля секретов ниже: `api_user` их не
+    // тримит на вводе, а `" ncuser "` Namecheap не сматчит — отказ придёт от
+    // API, и связи с набранным у него не будет. Правка тримит логин с самого
+    // начала; создание — только с этой фичи, и половины обязаны совпадать (тот
+    // же аргумент, что у `name`).
     fireEvent.change(screen.getByPlaceholderText("your_namecheap_username"), {
-      target: { value: "ncuser" },
+      target: { value: "  ncuser  " },
     });
     // Оба поля — с пробелами по краям: ключ копируют из панели регистратора
     // вместе с `\n`, а Client IP с пробелом просто не совпадёт с whitelist.
@@ -159,6 +182,12 @@ describe("Settings — ключ и секрет регистратора чер�
 
     const [url, body] = mocks.apiPost.mock.calls[0];
     expect(url).toBe("/registrars/accounts");
+    // `ApiUser` уходит в КАЖДЫЙ запрос Namecheap: без него API отвечает ошибкой
+    // ещё до проверки ключа. Гейт `needsApiUser` снял это поле у Hostiq, и
+    // проверка здесь держит вторую половину — что он не снёс его заодно и тут.
+    // Без этой строки голое `api_user: null` в форме создания проходило все
+    // тесты: аккаунт заводился, а отказ приходил от Namecheap на каждой команде.
+    expect(body.api_user).toBe("ncuser");
     expect(body.api_key_blob_id).toBe(key.blobId);
     expect(body.api_secret_blob_id).toBe(secret.blobId);
     // Ради этих строк и затевался спринт: полей нет, а не «есть, но сервер их
@@ -175,15 +204,12 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(Math.max(...mocks.invokeIfTauri.mock.invocationCallOrder)).toBeLessThan(postAt);
   });
 
-  it("Hostiq: пишет только ключ, api_secret_blob_id не шлёт вовсе", async () => {
+  it("Hostiq: пишет только токен, api_secret_blob_id не шлёт вовсе", async () => {
     setTauri(true);
     mocks.apiPost.mockResolvedValue({ ...NAMECHEAP, provider: "hostiq" });
 
     renderPage([]);
     await openAddModal("hostiq");
-    fireEvent.change(screen.getByPlaceholderText("admin@hostiq.ua"), {
-      target: { value: "admin@hostiq.ua" },
-    });
     // У Hostiq поле ключа своё (другой плейсхолдер) и свой `trim` в onChange —
     // значит и пробелы по краям надо ловить отдельно от Namecheap.
     fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
@@ -198,6 +224,66 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
     expect(blobPlaintext(blobOfKind("registrar_api_key"))).toBe(API_KEY);
     expect(mocks.apiPost.mock.calls[0][1]).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("Hostiq: поля API User нет, а api_user уезжает null", async () => {
+    // Настоящий API Hostiq — DI-API v3: вся авторизация в одном заголовке
+    // `X-Authorization-Token`, email в запрос не уходит ни в каком виде. Пока
+    // поле стояло на форме, оно называло ложную причину отказа: человек с
+    // неработающим аккаунтом шёл перепроверять email вместо токена.
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ ...NAMECHEAP, provider: "hostiq", api_user: null });
+
+    renderPage([]);
+    await openAddModal("hostiq");
+
+    // Ловит поле сама подпись: она одна на обе формы и рисуется вместе с полем.
+    // Плейсхолдера здесь не проверяем — у Hostiq в каталоге он пустой, и
+    // утверждение про отсутствие `admin@hostiq.ua` не могло упасть никогда
+    // (такой строки в продакшн-коде нет вовсе); пустоту сторожит
+    // `registrarProviders.test.ts`, где ей и место.
+    expect(screen.queryByText(/API User/)).toBeNull();
+    // Подпись поля секрета — та, что стоит в личном кабинете Hostiq: «API key»
+    // там искать нечего, там токен.
+    expect(screen.getByText("API token")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
+      target: { value: API_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    // Жёсткий `null`, а не пустая строка: колонка nullable, и «поля нет» должно
+    // выглядеть в БД одинаково у Hostiq и у ручного провайдера.
+    expect(mocks.apiPost.mock.calls[0][1].api_user).toBeNull();
+  });
+
+  it("Namecheap: API User остаётся — без него его API не отвечает", async () => {
+    // Обратная половина: признак `needsApiUser` не должен был снести поле у
+    // всех подряд. У Namecheap `ApiUser` уходит в каждый запрос, и подпись
+    // секрета у него своя — «API key», а не токен.
+    setTauri(true);
+    renderPage([]);
+    await openAddModal("namecheap");
+
+    expect(screen.getByPlaceholderText("your_namecheap_username")).toBeTruthy();
+    expect(screen.getByText("API key")).toBeTruthy();
+    expect(screen.queryByText("API token")).toBeNull();
+  });
+
+  it("пустой ключ Hostiq: отказ называет поле так же, как метка над ним", async () => {
+    // Подписи полей вычисляются от провайдера и уходят в хук: разъедься они с
+    // разметкой — и форма отказывала бы, требуя «API key», которого на экране
+    // нет ни на поле, ни в личном кабинете регистратора.
+    setTauri(true);
+
+    renderPage([]);
+    await openAddModal("hostiq");
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "API token is required");
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
   it("ручной провайдер: без полей секретов, создаётся с null-блобами", async () => {
@@ -404,6 +490,10 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body.name).toBe("nc-renamed");
     expect(body).not.toHaveProperty("api_key_blob_id");
     expect(body).not.toHaveProperty("api_secret_blob_id");
+    // Обратная сторона чистки `api_user` у Hostiq: у Namecheap поле живое
+    // (`ApiUser` уходит в каждый запрос), показано на форме и уезжает в PATCH
+    // нетронутым — переименование логин не задевает.
+    expect(body.api_user).toBe("ncuser");
   });
 
   it("правка ручного провайдера: только имя, без полей секретов", async () => {
@@ -437,6 +527,97 @@ describe("Settings — ключ и секрет регистратора чер�
     // Ссылок на секреты в теле нет вовсе — их и не появлялось.
     expect(body).not.toHaveProperty("api_key_blob_id");
     expect(body).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("правка Hostiq: поля API User нет, а унаследованный email вычищается", async () => {
+    // Поле у Hostiq снято, и колонка чистится вместе с ним. Это НЕ «не
+    // показали — не трогаем»: `api_user` у Hostiq мёртв по контракту (DI-API v3
+    // авторизуется одним заголовком), то есть в колонке лежат не данные
+    // пользователя, а мусор от API, которого не существовало. Пока он там,
+    // карточка подписана «Hostiq · admin@…» и врёт про то, чем аккаунт
+    // настроен. Момент выбран не наугад: старый ключ нерабочий, и в правку за
+    // новым токеном обязан зайти владелец каждого существующего аккаунта.
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...HOSTIQ, name: "hq2", api_user: null });
+
+    renderPage([HOSTIQ]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    expect(screen.queryByText("API User")).toBeNull();
+    expect(screen.queryByDisplayValue("admin@hostiq.ua")).toBeNull();
+    // Поле секрета при этом на месте и подписано по-своему.
+    expect(screen.getByText("API token (optional)")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Leave empty to keep current key")).toBeTruthy();
+    // Client IP у Hostiq не бывает — это отдельный признак, и он не поехал.
+    expect(screen.queryByPlaceholderText("Leave empty to keep current IP")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("hq-main"), { target: { value: "hq2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/registrars/accounts/5");
+    expect(body.name).toBe("hq2");
+    expect(body.api_user).toBeNull();
+    // ГРАНИЦА: чистится только мёртвое поле. Ключ не тронут — значит «оставь
+    // текущий», и ни блоба, ни ссылки в теле не появляется. Распространи
+    // новое правило на секреты — и правка имени стирала бы рабочий ключ.
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(body).not.toHaveProperty("api_key_blob_id");
+  });
+
+  it("правка Namecheap: у поля API User тот же плейсхолдер, что в создании", async () => {
+    // Экран достижимый: `api_user` в колонке nullable, а форма создания логин не
+    // требует (кнопка гейтится только именем) — Namecheap с пустым логином
+    // правится с пустым полем, и без подсказки с него непонятно, чего от него
+    // хотят: это имя пользователя панели, а не email.
+    //
+    // Подсказка берётся из того же `apiUserField`, что и в форме создания
+    // (см. тест «Namecheap: API User остаётся»), и утверждение здесь ровно про
+    // то, что два экрана не разъехались. Разъезд уже был — в другую сторону: у
+    // поля жил суффикс подписи, которого правка не рисовала.
+    setTauri(true);
+    renderPage([{ ...NAMECHEAP, api_user: null }]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    const field = screen.getByPlaceholderText("your_namecheap_username") as HTMLInputElement;
+    expect(field.value).toBe("");
+    // И это именно поле логина, а не что-то похожее: рядом стоят два поля
+    // секретов со своими плейсхолдерами.
+    expect(screen.getByText("API User")).toBeTruthy();
+  });
+
+  it("правка неопознанного провайдера: чужой api_user НЕ стирается", async () => {
+    // Граница чистки проходит по «опознан ли провайдер», а не по «показываем ли
+    // поле»: `needsApiUser` ложен и у того, кого каталог не знает. Случай
+    // достижимый — `" namecheap "` с пробелами из чужого импорта (десктоп такую
+    // строку не признаёт) и рабочим логином панели в колонке. Поля на экране
+    // нет, на карточке `api_user` у не-API провайдера тоже не рисуется — стёртый
+    // логин пропал бы полностью незаметно, а понадобится он в ту же секунду,
+    // когда кто-то поправит `provider` в БД.
+    setTauri(true);
+    const SPACED = { ...MANUAL, id: 11, provider: "  namecheap  ", name: "nc-spaced", api_user: "ncuser" };
+    mocks.apiPut.mockResolvedValue({ ...SPACED, name: "nc-renamed" });
+
+    renderPage([SPACED]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    // Провайдер честно ручной: ни поля логина, ни полей секретов.
+    expect(screen.queryByText("API User")).toBeNull();
+    expect(screen.queryByDisplayValue("ncuser")).toBeNull();
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("nc-spaced"), { target: { value: "nc-renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/registrars/accounts/11");
+    expect(body.name).toBe("nc-renamed");
+    // Единственное утверждение, ради которого тест написан: переименование
+    // логина не касается. Про контракт неопознанного провайдера мы не знаем
+    // ничего — ни что поле мертво, ни что живо, — а значит не трогаем.
+    expect(body.api_user).toBe("ncuser");
   });
 
   it("правка ручного провайдера в вебе: заметки про секреты не прибавляется", async () => {

@@ -3,11 +3,12 @@ import React, { useMemo } from "react";
 import { Domain } from "../api/domains";
 import { Server } from "../api/servers";
 import { Zone, useCloudflareZones } from "../api/cloudflare";
-import { useRegistrarAccounts, useRegistrarNameservers } from "../api/registrars";
+import { RegistryNameservers, useRegistryNameservers } from "../api/rdap";
+import { useRegistrarAccounts } from "../api/registrars";
+import { errorText } from "../api/cfAutoBind";
+import { normalizeZoneName } from "../lib/cfZoneMatch";
 import { NO_VALUE, expiryState, expiryTextColor, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
 import { nsDelegation } from "../lib/nsDelegation";
-import { registrarSupportsNsApi } from "../lib/registrarCaps";
-import { isTauri } from "../lib/runtime";
 import DomainCloudflareField from "./domains/DomainCloudflareField";
 import DomainNsPanel from "./domains/DomainNsPanel";
 import DomainServerFacts from "./domains/DomainServerFacts";
@@ -132,31 +133,62 @@ export default function DomainDetailModal({
   const registrarProvider = registrarAccountsQ.data?.find((a) => a.id === domain.registrar_id)?.provider;
 
   /**
-   * Настоящие NS домена — у регистратора, поимённым запросом про ЭТОТ домен
-   * (`registrar_get_nameservers`), а не строкой из листинга аккаунта: листинг у
-   * Namecheap nameservers не отдаёт вовсе, а у обоих провайдеров он
-   * непагинирован — по нему «домена нет» и «страница кончилась» неразличимы.
+   * Настоящие NS домена — ИЗ РЕЕСТРА (RDAP), а не у регистратора.
    *
-   * Читаем только когда ответ на что-то влияет: в десктопе (в вебе команда
-   * обречена), у провайдера с NS-API (иначе `make_service` откажет ещё до сети)
-   * и при известных NS зоны — без эталона сверка всё равно даст «не знаем», а
-   * платить за неё пришлось бы запросом в чужой API на каждое открытие карточки.
+   * Единственный источник, который отвечает про любой домен: у Hostiq чтения NS
+   * в API нет вовсе, у ручных провайдеров нет и самого API — то есть у
+   * большинства доменов этой карточки сверять было не с чем, и бейдж был серым
+   * по построению. Реестр не спрашивает ни про аккаунт регистратора, ни про
+   * ключи, поэтому и запрос здесь не гейтится провайдером: домен у Dynadot
+   * получает такой же живой бейдж, как домен у Namecheap.
+   *
+   * Гейт остался один и он про эталон: спрашиваем, только если сверять БУДЕТ С
+   * ЧЕМ — у домена есть зона, названная его же именем, и у зоны есть NS. Без
+   * этого правило всё равно ответит «не знаем» (`no-zone`,
+   * `zone-name-mismatch`, `zone-nameservers-unknown`), а ответ реестра будет
+   * выброшен — то есть имя нашего домена уехало бы в сторонний RDAP-редиректор
+   * (`rdap.org`, названная цена компромисса) ни за чем, на каждое открытие
+   * карточки. В вебе гейт глушит запрос сам собой: зоны там не читаются вовсе
+   * (`useCloudflareZones`), так что до `requireDesktop` дело не доходит.
+   *
+   * ВАЖНО про соответствие правилу: гейт обязан быть НЕ УЖЕ, чем условия, при
+   * которых `nsDelegation` доходит до ответа реестра. Каждое лишнее условие тут
+   * (например «карточка в фокусе» или свой `isTauri()`) даёт бейдж, вечно
+   * обещающий ответ, которого не будет: правило скажет «ответа ещё нет — ждите»
+   * про запрос, который не запускался. Поэтому сверка имени — тем же
+   * `normalizeZoneName`, что и в правиле, а не своим сравнением; а `length > 0`
+   * здесь считается по СЫРОМУ списку зоны, тогда как правило — по
+   * нормализованному, и сойтись они могут только в одну сторону (нормализация
+   * лишь выбрасывает пустые имена, поэтому непустой нормализованный список
+   * невозможен при пустом сыром).
    */
-  const canReadRegistrarNs =
-    isTauri() && registrarSupportsNsApi(registrarProvider) && zoneNameservers.length > 0;
-  const registrarNsQ = useRegistrarNameservers(
-    canReadRegistrarNs ? domain.registrar_id : null,
-    domain.domain_name,
+  const canCompareWithZone =
+    zoneNameservers.length > 0 &&
+    !!zone &&
+    normalizeZoneName(zone.name) === normalizeZoneName(domain.domain_name);
+  const registryNsQ = useRegistryNameservers(
+    canCompareWithZone ? domain.domain_name : null,
   );
+  /**
+   * Провал самого запроса — это тоже «спросить не удалось», и приезжать он
+   * обязан тем же состоянием, что отказ реестра.
+   *
+   * Иначе на упавшем запросе бейдж говорил бы «ответа ещё нет» — то есть
+   * «подождите» про ответ, которого не будет. Команда в Rust отдаёт три исхода
+   * без `Result` (`commands/rdap.rs`), так что сюда попадает только поломка
+   * транспорта или запуск вне десктопа; и то и другое честно называется «не
+   * смогли спросить», а текст ошибки становится причиной под бейджем.
+   */
+  const registryAnswer: RegistryNameservers | undefined = registryNsQ.error
+    ? { state: "unavailable", reason: errorText(registryNsQ.error) }
+    : registryNsQ.data;
 
   const delegation = nsDelegation({
     domainName: domain.domain_name,
     zone: zone
       ? { name: zone.name, nameservers: zone.name_servers ?? [], status: zone.status }
       : zone,
-    registrarAccountId: domain.registrar_id,
-    registrarProvider,
-    registrarNameservers: registrarNsQ.data,
+    registryNameservers: registryAnswer,
   });
 
   return (
@@ -221,7 +253,6 @@ export default function DomainDetailModal({
         zonesError={zonesQ.error}
         delegation={delegation}
         registrarProvider={registrarProvider}
-        registrarNsError={registrarNsQ.error}
       />
     </Modal>
   );
