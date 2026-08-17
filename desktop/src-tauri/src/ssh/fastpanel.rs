@@ -196,7 +196,7 @@ pub async fn cert_exists(s: &mut impl Exec, domain: &str) -> Result<bool, SshErr
 /// Создать сайт. `impl Exec`, а не `SshSession`, ровно затем же, зачем у
 /// `create_ftp_account`: единственная защита от секрета в argv этой команды —
 /// тест, который видит УШЕДШУЮ на сервер строку (`create_site_argv_has_no_secret`).
-/// Её вывод, в отличие от `database create` и `ftp_account create`, уходит в
+/// Её вывод, в отличие от `databases create` и `ftp_account create`, уходит в
 /// текст ошибки целиком, и цена промаха здесь выше всего.
 pub async fn create_site(
     s: &mut impl Exec,
@@ -506,7 +506,7 @@ pub struct DbPresence {
 /// Команда проверки существования базы и её пользователя.
 ///
 /// Пароля в ней нет ни в argv, ни в самом запросе — поэтому её вывод, в отличие
-/// от `database create` и `CREATE USER ... IDENTIFIED BY`, читать безопасно
+/// от `databases create` и `CREATE USER ... IDENTIFIED BY`, читать безопасно
 /// (см. `opaque_exit`).
 ///
 /// Пользователя ищем именно `@'localhost'` — ровно того, кого создаём ниже.
@@ -629,6 +629,39 @@ fn build_create_db_sql(
     )
 }
 
+/// Числовой id единственного mysql-сервера из `databases servers list --json`.
+///
+/// `databases create --server` требует ЧИСЛОВОЙ id: имя `mysql(localhost)` даёт
+/// `invalid syntax`, а без флага команда не отрабатывает вовсе. Поэтому id
+/// приходится резолвить, а не хардкодить.
+///
+/// Возвращает `Some(id)` ТОЛЬКО когда mysql-сервер ровно один. Ноль или
+/// несколько → `None`: вызывающий тогда осознанно уходит в mysql-фоллбэк, а не
+/// выбирает наугад — выбор наугад создал бы базу не на том сервере. Недоступный
+/// или непарсящийся вывод — тоже `None` (не знаем → не угадываем).
+fn parse_db_server_id(output: &str) -> Option<i64> {
+    let value: serde_json::Value = serde_json::from_str(json_slice(output)).ok()?;
+    let servers = value.as_array()?;
+    let mut mysql = servers
+        .iter()
+        .filter(|srv| srv.get("type").and_then(|t| t.as_str()) == Some("mysql"));
+    let first = mysql.next()?;
+    if mysql.next().is_some() {
+        // Несколько mysql-серверов — какой из них «тот», по списку не понять.
+        return None;
+    }
+    first.get("id").and_then(|id| id.as_i64())
+}
+
+async fn fastpanel_db_server(s: &mut impl Exec, fp_path: &str) -> Result<Option<i64>, SshError> {
+    let cmd = format!("{} databases servers list --json", q(fp_path));
+    let (code, out) = s.run(&cmd, Duration::from_secs(30)).await?;
+    if code != 0 {
+        return Ok(None);
+    }
+    Ok(parse_db_server_id(&out))
+}
+
 pub async fn create_database(
     s: &mut impl Exec,
     fp_path: &str,
@@ -665,28 +698,41 @@ pub async fn create_database(
     // мусором, который модалка выдала бы за рабочий.
     let database_password = generate_password(18);
 
-    let fp_cmd = format!(
-        "{} database create --name={} --user={} --password={}",
-        q(fp_path),
-        q(&database_name),
-        q(&database_user),
-        q(&database_password),
-    );
-    let (code, _) = s.run(&fp_cmd, Duration::from_secs(60)).await?;
-    if code == 0 {
-        return Ok(DbCreation::Created(CreateDbResult {
-            db_name: database_name,
-            db_user: database_user,
-            db_password: database_password,
-        }));
+    // Каскад: `databases` (мн. ч.) → mysql-фоллбэк. Ступени с ед. ч. `database`
+    // НЕТ намеренно — её на живой версии не существует, и именно она роняла
+    // provision в фоллбэк (база создавалась без записи FastPanel). `--server`
+    // резолвим числовым id в той же сессии; `None` (ноль/несколько серверов или
+    // недоступный список) → сразу mysql-фоллбэк, без угадывания. `--site`
+    // обязателен: без него база не привязана к сайту (см.
+    // `docs/FASTPANEL_CLI.md` §3.5). Пароль в argv — под opaque_exit, вывод
+    // команды отбрасываем (`_`), наружу он не идёт.
+    if let Some(server_id) = fastpanel_db_server(s, fp_path).await? {
+        let fp_cmd = format!(
+            "{} databases create --server={} --name={} --username={} --password={} --site={}",
+            q(fp_path),
+            server_id,
+            q(&database_name),
+            q(&database_user),
+            q(&database_password),
+            q(domain),
+        );
+        let (code, _) = s.run(&fp_cmd, Duration::from_secs(60)).await?;
+        if code == 0 {
+            return Ok(DbCreation::Created(CreateDbResult {
+                db_name: database_name,
+                db_user: database_user,
+                db_password: database_password,
+            }));
+        }
     }
 
     let sql = build_create_db_sql(&database_name, &database_user, &database_password);
     let fallback_cmd = format!("mysql -e {}", q(&sql));
     let (fb_code, fb_out) = s.run(&fallback_cmd, Duration::from_secs(60)).await?;
     if fb_code != 0 {
-        // Ни `out` (вывод fastpanel с `--password=` в argv), ни `fb_out` (mysql
-        // повторяет в ошибке весь запрос, включая IDENTIFIED BY) наружу нельзя.
+        // Вывод FastPanel-команды (с `--password=` в argv) мы и не читаем вовсе —
+        // он отброшен ещё выше через `let (code, _)`. Наружу нельзя только
+        // `fb_out`: mysql повторяет в ошибке весь запрос, включая IDENTIFIED BY.
         // Но прочитать `fb_out` мы имеем право: сюда попадает и случай, когда
         // проверка выше не отработала (`None`), а пользователь на самом деле
         // есть, — и тогда это не ошибка, а «уже было».
@@ -1381,7 +1427,7 @@ mod tests {
             DbCreation::Created(_) => panic!("выдал пароль существующему пользователю"),
         }
         // Эффект, ради которого всё: ни одной создающей команды на сервере.
-        assert!(!s.ran("database create"), "{:?}", s.seen);
+        assert!(!s.ran("databases create"), "{:?}", s.seen);
         assert!(!s.ran("CREATE USER"), "{:?}", s.seen);
         // И ни одного пароля в argv — даже сгенерированного «на всякий случай».
         assert!(!s.ran("--password="), "{:?}", s.seen);
@@ -1391,7 +1437,12 @@ mod tests {
     async fn create_database_creates_when_neither_database_nor_user_exists() {
         let mut s = FakeServer::new(&[
             ("information_schema", 0, "0\t0"),
-            ("database create", 0, "ok"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 0, "database 'example_db' created successfully"),
         ]);
 
         let out = create_database(&mut s, FP, "example.com", None, None)
@@ -1408,6 +1459,224 @@ mod tests {
         }
     }
 
+    // ГЛАВНЫЙ тест-страж: разъезд ед./мн. ч. Живой FastPanel знает только
+    // `databases` (мн. ч.); ед. ч. `database` даёт `expected command but got
+    // "database"` и роняет provision в mysql-фоллбэк. FakeServer различает эти
+    // строки через `contains` (после `database` идёт `s`, а не пробел), поэтому
+    // возврат к ед. ч. немедленно красит сборку.
+    #[tokio::test]
+    async fn create_database_uses_plural_databases_not_singular_database() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            // Ловушка на ед. ч.: если код снова пошлёт `database create`, он
+            // совпадёт ЗДЕСЬ (код 1) и провалит ассерт ниже.
+            (
+                "database create",
+                1,
+                r#"error: expected command but got "database""#,
+            ),
+            (
+                "databases create",
+                0,
+                "database 'example_db' created successfully / ID: 1",
+            ),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, DbCreation::Created(_)), "{:?}", s.seen);
+
+        // Ушла мн. ч. ...
+        assert!(s.ran("databases create"), "{:?}", s.seen);
+        // ... и ни одной ед. ч. `database create` (подстрока без хвостового `s`).
+        assert!(
+            !s.seen
+                .iter()
+                .any(|c| c.contains("database create") && !c.contains("databases create")),
+            "ушла ед. ч. `database create`: {:?}",
+            s.seen
+        );
+    }
+
+    // Числовой id сервера читается из `databases servers list --json` (не
+    // хардкод — здесь он 7), и оба обязательных для привязки флага уходят в
+    // команду: `--server=<id>` и `--site=<domain>`. Без `--site` база создаётся
+    // с `site:null` и не привязана к сайту — исходный вред сохранился бы.
+    #[tokio::test]
+    async fn create_database_binds_server_id_and_site() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":7,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 0, "created"),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, DbCreation::Created(_)));
+
+        let create_cmd = s
+            .seen
+            .iter()
+            .find(|c| c.contains("databases create"))
+            .expect("нет команды создания БД");
+        assert!(create_cmd.contains("--server=7"), "{create_cmd}");
+        assert!(create_cmd.contains("--site=example.com"), "{create_cmd}");
+        assert!(create_cmd.contains("--username="), "{create_cmd}");
+        assert!(create_cmd.contains("--name="), "{create_cmd}");
+    }
+
+    // Несколько mysql-серверов → не угадываем: команду FastPanel не шлём вовсе,
+    // сразу mysql-фоллбэк (выбрать наугад значило бы создать базу не на том
+    // сервере).
+    #[tokio::test]
+    async fn create_database_skips_fastpanel_when_server_is_ambiguous() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"type":"mysql"},{"id":2,"type":"mysql"}]"#,
+            ),
+            ("mysql -e", 0, ""),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, DbCreation::Created(_)));
+        assert!(!s.ran("databases create"), "{:?}", s.seen);
+        assert!(s.ran("CREATE USER"), "{:?}", s.seen);
+    }
+
+    // Ноль серверов (пустой список или недоступный `servers list`) → тот же
+    // осознанный уход в mysql-фоллбэк, без FastPanel-команды.
+    #[tokio::test]
+    async fn create_database_skips_fastpanel_when_no_server_found() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            ("databases servers list", 0, "[]"),
+            ("mysql -e", 0, ""),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, DbCreation::Created(_)));
+        assert!(!s.ran("databases create"), "{:?}", s.seen);
+        assert!(s.ran("CREATE USER"), "{:?}", s.seen);
+    }
+
+    // Смешанный список (postgres + mysql) — фильтр `type=="mysql"` обязан выбрать
+    // ИМЕННО mysql-сервер, а не первый попавшийся. Без фильтра сюда уехал бы
+    // постгресовый id и база создалась бы не на том движке. Id намеренно разные
+    // (postgres:3, mysql:5), чтобы промах был виден.
+    #[tokio::test]
+    async fn create_database_picks_the_mysql_server_out_of_a_mixed_list() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":3,"name":"pg(localhost)","type":"postgres"},{"id":5,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 0, "created"),
+        ]);
+
+        let out = create_database(&mut s, FP, "example.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, DbCreation::Created(_)));
+
+        let create_cmd = s
+            .seen
+            .iter()
+            .find(|c| c.contains("databases create"))
+            .expect("нет команды создания БД");
+        assert!(create_cmd.contains("--server=5"), "{create_cmd}");
+        assert!(!create_cmd.contains("--server=3"), "{create_cmd}");
+    }
+
+    // Прямые ассерты на парсер: покрытие через `create_database` дороже и с
+    // дырами (напр. `type`-фильтр не отличить от «первый попавшийся», если id
+    // совпали). Здесь каждый краевой случай проверен адресно.
+    #[test]
+    fn parse_db_server_id_edge_cases() {
+        // Ровно один mysql → его id.
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#),
+            Some(1)
+        );
+        // Два mysql → не угадываем.
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":1,"type":"mysql"},{"id":2,"type":"mysql"}]"#),
+            None
+        );
+        // Ноль серверов (пустой массив) → None.
+        assert_eq!(parse_db_server_id("[]"), None);
+        // mysql + не-mysql → id именно mysql-а, а не первого.
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":3,"type":"postgres"},{"id":7,"type":"mysql"}]"#),
+            Some(7)
+        );
+        // `id` строкой — `as_i64` строку не парсит: фиксируем текущее поведение
+        // (тихий уход в фоллбэк, а не молчаливое приведение).
+        assert_eq!(
+            parse_db_server_id(r#"[{"id":"7","type":"mysql"}]"#),
+            None
+        );
+        // Нет поля `id` → None.
+        assert_eq!(parse_db_server_id(r#"[{"type":"mysql"}]"#), None);
+        // Не-массивный корень → None, без паники.
+        assert_eq!(parse_db_server_id(r#"{"id":1,"type":"mysql"}"#), None);
+        // Мусор вместо json → None, без паники.
+        assert_eq!(parse_db_server_id("not json at all"), None);
+    }
+
+    // Пароль стоит в argv `databases create` — это ОК, команда под opaque_exit.
+    // Но когда и она, и mysql-фоллбэк падают, ни эхо пароля из FastPanel-usage,
+    // ни `IDENTIFIED BY` из mysql наружу не выходят: fp-вывод отбрасывается
+    // (`let (code, _)`), mysql-вывод withheld в `opaque_exit`.
+    #[tokio::test]
+    async fn create_database_never_leaks_the_password_the_fastpanel_command_echoes() {
+        let mut s = FakeServer::new(&[
+            ("information_schema", 0, "0\t0"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            (
+                "databases create",
+                1,
+                "usage: databases create --password=SECRETpw ...",
+            ),
+            ("mysql -e", 1, "ERROR 1064: near \"IDENTIFIED BY 'leakedPassword'\""),
+        ]);
+
+        let msg = match create_database(&mut s, FP, "example.com", None, None).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("настоящий провал выдан за результат"),
+        };
+        // Пароль в argv отправленной команды — допустимо (opaque_exit),
+        // а вот наружу в тексте ошибки его быть не должно.
+        assert!(s.ran("--password="), "{:?}", s.seen);
+        assert!(!msg.contains("SECRETpw"), "{msg}");
+        assert!(!msg.contains("leakedPassword"), "{msg}");
+        assert!(!msg.contains("IDENTIFIED BY"), "{msg}");
+        assert!(msg.contains("create_database exit 1"), "{msg}");
+    }
+
     // База есть, пользователя нет — это недоделанная прошлым прогоном пара, и
     // отбить её значило бы оставить сайт без доступа к своей же базе навсегда.
     // Пароль здесь настоящий: пользователь создаётся именно сейчас.
@@ -1415,7 +1684,12 @@ mod tests {
     async fn create_database_finishes_a_half_made_pair() {
         let mut s = FakeServer::new(&[
             ("information_schema", 0, "1\t0"),
-            ("database create", 1, "database already exists"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 1, "error: 'database-already-exists'"),
             ("mysql -e", 0, ""),
         ]);
 
@@ -1434,7 +1708,12 @@ mod tests {
     async fn an_unverifiable_check_still_refuses_to_report_a_created_user() {
         let mut s = FakeServer::new(&[
             ("information_schema", 1, "ERROR 1045: Access denied"),
-            ("database create", 1, "failed"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 1, "failed"),
             (
                 "mysql -e",
                 1,
@@ -1458,7 +1737,12 @@ mod tests {
     async fn a_failed_grant_is_not_evidence_that_the_user_already_existed() {
         let mut s = FakeServer::new(&[
             ("information_schema", 1, "ERROR 1045: Access denied"),
-            ("database create", 1, "failed"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 1, "failed"),
             (
                 "mysql -e",
                 1,
@@ -1479,7 +1763,12 @@ mod tests {
     async fn a_genuine_database_failure_still_hides_its_output() {
         let mut s = FakeServer::new(&[
             ("information_schema", 0, "0\t0"),
-            ("database create", 1, "failed"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 1, "failed"),
             (
                 "mysql -e",
                 1,
@@ -1520,7 +1809,12 @@ mod tests {
     async fn an_unverified_duplicate_claims_nothing_about_the_database() {
         let mut s = FakeServer::new(&[
             ("information_schema", 1, "ERROR 1045: Access denied"),
-            ("database create", 1, "failed"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 1, "failed"),
             ("mysql -e", 1, "ERROR 1396 (HY000): Operation CREATE USER failed"),
         ]);
 
@@ -1540,7 +1834,12 @@ mod tests {
     async fn a_confident_no_outweighs_a_duplicate_looking_error() {
         let mut s = FakeServer::new(&[
             ("information_schema", 0, "0\t0"),
-            ("database create", 1, "failed"),
+            (
+                "databases servers list",
+                0,
+                r#"[{"id":1,"name":"mysql(localhost)","type":"mysql"}]"#,
+            ),
+            ("databases create", 1, "failed"),
             ("mysql -e", 1, "ERROR 1050: table 'x' already exists"),
         ]);
 
