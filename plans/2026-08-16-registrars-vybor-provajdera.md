@@ -190,203 +190,77 @@ export type RegistrarProvider = string;
 `registrarCaps.ts`, который цитировал устаревшую форму типа как обоснование сигнатуры.
 ---
 
-### Фаза 3 — Компонент `ProviderCombobox`  `[ ]`
+### Фаза 3 — Компонент `ProviderCombobox`  `[x]`
 
 Выпадашка с поиском: показывает выбранного провайдера, раскрывает список (поиск + бейджи),
-позволяет создать нового вводом имени. Выносим из `Settings.tsx`, чтобы не растить его.
+позволяет создать нового вводом имени. Вынесена из `Settings.tsx`, чтобы не растить его.
 
 **Files:**
 - Create: `frontend/src/components/settings/ProviderCombobox.tsx`
 - Test: `frontend/src/components/settings/ProviderCombobox.test.tsx`
 
-- [ ] **Шаг 1: Падающий тест на поведение селектора**
+- [x] **Шаг 1: Падающий тест на поведение селектора**
+- [x] **Шаг 2: Прогнать — падает (компонент не существует)**
+- [x] **Шаг 3: Реализация компонента**
+- [x] **Шаг 4: Прогнать — зелёный**
+- [x] **Шаг 5: Коммит** — `680153a`
 
-```tsx
-// frontend/src/components/settings/ProviderCombobox.test.tsx
-import React, { useState } from "react";
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { ProviderCombobox } from "./ProviderCombobox";
+Дословный код здесь не дублируется по той же причине, что в Фазе 1: он уже разошёлся с
+реализацией. Актуальный — в самих файлах; ниже только решения.
 
-function Harness({ accounts = [] as { provider: string }[], onChange = vi.fn() }) {
-  const [value, setValue] = useState("hostiq");
-  return (
-    <ProviderCombobox
-      value={value}
-      accounts={accounts}
-      onChange={(p) => { setValue(p); onChange(p); }}
-    />
-  );
-}
+#### Что уходит наружу в `onChange` — главный контракт компонента  `[x]`
 
-describe("ProviderCombobox", () => {
-  it("показывает выбранного провайдера и бейдж API", () => {
-    render(<Harness />);
-    expect(screen.getByText("Hostiq")).toBeTruthy();
-    expect(screen.getByText("API")).toBeTruthy();
-  });
+Три маршрута, и все три отдают строку **без пробелов по краям** — это требование Фазы 1
+(`hasApi` пробелы не срезает, и `" Namecheap "` завёл бы ручной ярлык, с виду
+неотличимый от настоящего Namecheap):
 
-  it("выбор существующего провайдера из списка зовёт onChange с ключом", () => {
-    const onChange = vi.fn();
-    render(<Harness onChange={onChange} />);
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
-    expect(onChange).toHaveBeenCalledWith("namecheap");
-  });
+- API-пункт → нормализованный ключ (`"namecheap"`);
+- ручной пункт → метка как записана (`"GoDaddy"`) — ярлык, а не ключ: в БД должно лечь
+  человеческое написание;
+- «＋ Создать» → `query.trim()`.
 
-  it("ранее использованный ручной провайдер попадает в список", () => {
-    render(<Harness accounts={[{ provider: "GoDaddy" }]} />);
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    expect(screen.getByRole("option", { name: /GoDaddy/ })).toBeTruthy();
-    // помечен manual, а не API
-    const opt = screen.getByRole("option", { name: /GoDaddy/ });
-    expect(opt.textContent).toContain("manual");
-  });
+Закреплено тестами, а не комментарием.
 
-  it("ввод неизвестного имени предлагает создать и отдаёт его как есть", () => {
-    const onChange = vi.fn();
-    render(<Harness onChange={onChange} />);
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "Porkbun" } });
-    fireEvent.click(screen.getByText(/Создать/));
-    expect(onChange).toHaveBeenCalledWith("Porkbun");
-  });
+#### Отклонения от исходного кода спеки  `[x]`
 
-  it("ввод существующего имени (в другом регистре) не предлагает создать", () => {
-    render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "HOSTIQ" } });
-    expect(screen.queryByText(/Создать/)).toBeNull();
-  });
-});
-```
+- **`rootRef` убран.** Он объявлялся, но нигде не читался. Клика-снаружи-закрывает в
+  требованиях нет, и оставленный ref был бы обещанием несуществующего поведения.
+- **ARIA-дерево починено.** В спеке `role="listbox"` висел на всплывашке, внутри которой
+  лежало ещё и поле поиска, — у listbox не может быть потомков, кроме `option`/`group`.
+  Роль перенесена на контейнер строго с опциями; пункт «＋ Создать» получил
+  `role="option"` (он и есть выбираемый пункт списка), заглушка «Ничего не найдено»
+  вынесена за listbox. На кнопке добавлены `aria-haspopup="listbox"` и `aria-expanded`.
+- **`listVisible = open && !disabled`** — именованное понятие вместо повтора условия в
+  двух местах; им же питается `aria-expanded`, иначе атрибут врал бы о раскрытости во
+  время сохранения. `open` при этом намеренно не сбрасывается: по возвращении из
+  `saving` пользователь видит ровно то, что открывал.
+- **`afterEach(cleanup)` в тесте.** В `frontend/vite.config.ts` нет `globals: true`, то
+  есть авто-очистки Testing Library нет — конвенция репозитория, так делают и соседние
+  тест-файлы. Без него второй `render` в файле ломал бы `getByText`.
+- **Ветка «Ничего не найдено» оставлена, но помечена как недостижимая.** Инвариант:
+  `providerMeta` строит `label` так, что `label.toLowerCase() === key` в обеих ветках,
+  поэтому совпавшая по ключу опция всегда проходит и подстрочный фильтр — пустой
+  `filtered` не бывает без `canCreate`. Три строки разметки оставлены страховкой от
+  тупика (пустая коробка без единого действия), а тест пришпилен к самому инварианту
+  («поиск без совпадений всегда оставляет пункт Создать»), а не к недостижимой ветке.
+- **Текущее значение включено в список опций** (правка по ревью, коммит ниже):
+  `buildProviderList([...accounts, { provider: value }])`. Без этого только что созданный
+  свой провайдер не имел `aria-selected` ни на одной опции, а поиск по его же имени
+  предлагал «Создать» то, что уже выбрано, — то есть первый же живой сценарий формы
+  Фазы 4 приводил в это состояние. Дедуп по нормализованному ключу гарантирует, что
+  каталожный `value` не задвоится.
 
-- [ ] **Шаг 2: Прогнать — падает (компонент не существует)**
+#### Долг, осознанно перенесённый в Фазу 5  `[ ]`
 
-Run: `cd frontend && npx vitest run src/components/settings/ProviderCombobox.test.tsx`
-Expected: FAIL — `Cannot find module './ProviderCombobox'`.
-
-- [ ] **Шаг 3: Реализация компонента**
-
-```tsx
-// frontend/src/components/settings/ProviderCombobox.tsx
-import React, { useMemo, useRef, useState } from "react";
-import {
-  buildProviderList,
-  providerMeta,
-  normalizeProvider,
-  type ProviderMeta,
-} from "../../lib/registrarProviders";
-
-interface Props {
-  value: string;
-  onChange: (provider: string) => void;
-  accounts: { provider: string }[];
-  /** Во время записи блобов/POST переключать провайдера нельзя (см. AddRegistrarModal). */
-  disabled?: boolean;
-}
-
-function Avatar({ m }: { m: ProviderMeta }) {
-  return (
-    <div style={{ width: 28, height: 28, borderRadius: 7, background: m.bg, color: m.color,
-      display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>
-      {m.icon}
-    </div>
-  );
-}
-
-function ApiTag({ api }: { api: boolean }) {
-  return api ? (
-    <span style={{ background: "#dcfce7", color: "#166534", fontSize: 10, padding: "1px 6px", borderRadius: 4 }}>API</span>
-  ) : (
-    <span style={{ color: "#9ca3af", fontSize: 11 }}>manual</span>
-  );
-}
-
-export function ProviderCombobox({ value, onChange, accounts, disabled }: Props) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  const options = useMemo(() => buildProviderList(accounts), [accounts]);
-  const selected = providerMeta(value);
-
-  const q = query.trim();
-  const filtered = q
-    ? options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase()))
-    : options;
-  // Предлагаем «создать», только если введённого имени нет среди опций по
-  // нормализованному ключу — иначе плодили бы дубль существующего провайдера.
-  const exists = options.some((o) => o.key === normalizeProvider(q));
-  const canCreate = q.length > 0 && !exists;
-
-  const pick = (provider: string) => {
-    onChange(provider);
-    setOpen(false);
-    setQuery("");
-  };
-
-  return (
-    <div ref={rootRef} style={{ position: "relative" }}>
-      <button
-        type="button"
-        aria-label="Provider"
-        disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
-        style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "9px 12px",
-          border: "2px solid #2563eb", borderRadius: 8, background: "#fff", cursor: disabled ? "default" : "pointer" }}
-      >
-        <Avatar m={selected} />
-        <span style={{ fontSize: 13.5, fontWeight: 600, color: "#111" }}>{selected.label}</span>
-        <ApiTag api={selected.api} />
-        <span style={{ marginLeft: "auto", color: "#9ca3af" }}>▾</span>
-      </button>
-
-      {open && !disabled && (
-        <div role="listbox" style={{ position: "absolute", zIndex: 20, top: "calc(100% + 4px)", left: 0, right: 0,
-          background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.08)", overflow: "hidden" }}>
-          <div style={{ padding: 8, borderBottom: "1px solid #f1f5f9" }}>
-            <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поиск провайдера…"
-              style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 6, padding: "7px 10px", fontSize: 13 }} />
-          </div>
-          <div style={{ maxHeight: 220, overflowY: "auto" }}>
-            {filtered.map((o) => (
-              <div key={o.key} role="option" aria-selected={o.key === selected.key} onClick={() => pick(o.api ? o.key : o.label)}
-                style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer",
-                  background: o.key === selected.key ? "#eff4ff" : "#fff" }}>
-                <Avatar m={o} />
-                <span style={{ fontSize: 13, color: "#111" }}>{o.label}</span>
-                <span style={{ marginLeft: "auto" }}><ApiTag api={o.api} /></span>
-              </div>
-            ))}
-            {canCreate && (
-              <div onClick={() => pick(q)} style={{ padding: "9px 12px", cursor: "pointer", color: "#2563eb",
-                fontSize: 13, borderTop: filtered.length ? "1px solid #f1f5f9" : "none" }}>
-                ＋ Создать «{q}»
-              </div>
-            )}
-            {!filtered.length && !canCreate && (
-              <div style={{ padding: "10px 12px", color: "#9ca3af", fontSize: 13 }}>Ничего не найдено</div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-```
-
-- [ ] **Шаг 4: Прогнать — зелёный**
-
-Run: `cd frontend && npx vitest run src/components/settings/ProviderCombobox.test.tsx`
-Expected: PASS.
-
-- [ ] **Шаг 5: Коммит**
-
-```bash
-git add frontend/src/components/settings/ProviderCombobox.tsx frontend/src/components/settings/ProviderCombobox.test.tsx
-git commit -m "feat(registrars): ProviderCombobox — выбор из списка или создание своего"
-```
+- **`ApiTag` дублирует примитив `Badge`** (`components/ui/Primitives.tsx`) — тот же
+  сигнал «API против manual» Фаза 5 рисует именно `Badge`, и в двух разных зелёных. Либо
+  перевести `ApiTag` на `Badge`, либо сознательно оставить голый тег в плотной строке
+  выпадашки и тогда использовать его же в карточке. Вразнобой оставлять нельзя.
+- **`Avatar` просится в общий `ProviderAvatar({ m, size })`** рядом, в
+  `components/settings/` (не импортом из комбобокса в страницу). Копий сегодня две, и
+  после Фазы 5 обе будут питаться одним `ProviderMeta`, но рисоваться разным кодом.
+- **Возврат фокуса на кнопку после выбора** — сейчас фокус приземляется на `body`. Одна
+  строка через `ref`; в объёме фазы этого не было.
 
 ---
 
