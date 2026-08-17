@@ -31,13 +31,13 @@
 
 ## Acceptance criteria (что значит «готово»)
 
-- [ ] В форме добавления аккаунта провайдер — одно поле-комбобокс: поиск, элементы с
+- [x] В форме добавления аккаунта провайдер — одно поле-комбобокс: поиск, элементы с
       бейджем `API`/`manual`, снизу «＋ Создать „<ввод>“» когда введённого имени нет в списке.
-- [ ] Список провайдеров = API-каталог (Hostiq, Namecheap) ∪ уникальные `provider` уже
+- [x] Список провайдеров = API-каталог (Hostiq, Namecheap) ∪ уникальные `provider` уже
       заведённых аккаунтов; дедуп без учёта регистра; API-провайдеры идут первыми.
-- [ ] Выбран провайдер с API (`hasApi`) → показываются API User + API Key (+ Client IP у
+- [x] Выбран провайдер с API (`hasApi`) → показываются API User + API Key (+ Client IP у
       Namecheap), вся прежняя логика секрет-блобов и валидации IP цела.
-- [ ] Выбран ручной провайдер → полей учётных данных нет; «Add Account» доступна при
+- [x] Выбран ручной провайдер → полей учётных данных нет; «Add Account» доступна при
       заполненном имени аккаунта и выбранном провайдере; аккаунт создаётся с обоими
       `*_blob_id = null`, `api_user = null`.
 - [ ] Карточка аккаунта: аватар/цвет из каталога (для кастомных — сгенерированные, без «?»),
@@ -264,206 +264,83 @@ export type RegistrarProvider = string;
 
 ---
 
-### Фаза 4 — `AddRegistrarModal` на новый селектор + условные поля  `[ ]`
+### Фаза 4 — `AddRegistrarModal` на новый селектор + условные поля  `[x]`
 
-Заменяем две карточки на `ProviderCombobox`; поля секретов показываем по `hasApi()`, а не по
-зашитому `provider==="hostiq"`. Ручной провайдер → полей нет, «Add Account» доступна по имени.
+Две карточки заменены на `ProviderCombobox`; поля секретов показываются по `hasApi()`, а не
+по зашитому `provider==="hostiq"`. Ручной провайдер → полей нет, «Add Account» доступна по
+имени аккаунта.
 
 **Files:**
-- Modify: `frontend/src/pages/Settings.tsx:31-36` (удаляем локальный `usesClientIp`),
-      `:246-371` (тело `AddRegistrarModal`).
-- Modify: `frontend/src/pages/Settings.registrarblob.test.tsx` (helper выбора провайдера).
+- Modify: `frontend/src/pages/Settings.tsx` (удалён локальный `usesClientIp`, переписано тело
+      `AddRegistrarModal`).
+- Modify: `frontend/src/pages/Settings.registrarblob.test.tsx` (helper выбора провайдера + три
+      новых кейса).
 
-- [ ] **Шаг 1: Обновить существующие тесты под новый выбор провайдера (сначала падают)**
+- [x] **Шаг 1: Обновить существующие тесты под новый выбор провайдера** — helper `openAddModal`
+      и веб-тест ходят через комбобокс (`role="button" name=/provider/i` → `role="option"`);
+      ассерты про блобы не тронуты.
+- [x] **Шаг 2: Прогнать — падает** (7 из 15 кейсов: формы-комбобокса ещё нет).
+- [x] **Шаг 3: Переписать `AddRegistrarModal`**
+- [x] **Шаг 4: Тесты на ручного провайдера**
+- [x] **Шаг 5: Прогнать — зелёный** (файл 15/15; весь набор 972/972, `tsc --noEmit` чист).
+- [x] **Шаг 6: Коммит**
 
-В `Settings.registrarblob.test.tsx` заменить helper `openAddModal` (строки 88-94) и
-прямой клик по карточке в веб-тесте (строка 320):
+Дословный код здесь не дублируется — по той же причине, что в фазах 1 и 3. Актуальный код в
+файлах; ниже только решения и отклонения от исходной спеки.
 
-```tsx
-async function openAddModal(provider: "hostiq" | "namecheap") {
-  fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
-  if (provider === "namecheap") {
-    // Комбобокс вместо карточек: открыть и выбрать опцию.
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
-  }
-  fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), {
-    target: { value: "reg-new" },
-  });
-}
-```
+#### Отклонение: ручной провайдер идёт ЧЕРЕЗ хук, а не мимо него  `[x]`
 
-В тесте «сама форма в вебе…» (строка ~320) заменить `fireEvent.click(screen.getByText("Namecheap"))` на:
+Спека предлагала для `!hasApi(provider)` раннюю ветку в обход `secrets.saveAll`
+(`createReg.mutateAsync` напрямую, `secrets.reset()` как guard на пустое имя). Реализовано
+**иначе**: `handleAdd` — одна ветка через `saveAll`, а от `hasApi` зависит только состав
+`secrets` (пустой объект у ручного) и тело POST.
 
-```tsx
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
-```
+Почему: ветка в обход теряла оба канала обратной связи на ту же кнопку — `saving` (кнопка не
+гаснет, двойной клик заводит два аккаунта) и `error` (упавший POST бросал бы необработанное
+исключение, пользователю не показывалось бы ничего). Ровно об этом предупреждает комментарий
+в `EditRegistrarModal`. `secrets.reset()` как проверка имени — вдобавок бессмыслица: он стирает
+плейнтексты, ничего не проверяя, и мёртв при выключенной кнопке.
 
-- [ ] **Шаг 2: Прогнать — часть тестов падает (форма ещё на карточках)**
+Пустой `secrets` — штатный путь `useMultiSecretSave`: `changing` пуст, блобы не пишутся,
+`persist` всё равно зовётся, `saving`/`error` работают как обычно. Тем же путём ходит
+«переименование без секретов» в правке (покрыто тестом).
 
-Run: `cd frontend && npx vitest run src/pages/Settings.registrarblob.test.tsx`
-Expected: FAIL на кейсах Namecheap (нет `role="option"`, т.к. форма ещё старая).
+#### Прочие решения фазы  `[x]`
 
-- [ ] **Шаг 3: Переписать `AddRegistrarModal`**
+- **`api_user` у ручного провайдера — жёсткий `null`** в `persist`: поля на экране нет, и
+      остаток от ранее выбранного API-провайдера не должен уезжать в аккаунт. Закреплено
+      ассертом в тесте.
+- **Обе ссылки на блобы уходят спредом** (`...(blobIds.apiKey ? {…} : {})`), а не значением:
+      серверная схема `extra="forbid"`, и ключ со значением `undefined` — это уже ключ. У
+      API-провайдера `apiKey` при этом есть всегда (объявлен на создании, пустой плейнтекст
+      хук отбивает до первой записи), так что поведение прежнее.
+- **`accounts` у `AddRegistrarModal` — необязательный проп с дефолтом `[]`.** Это обогащение
+      списка («ранее использованные»), а не входные данные формы; пустой список — законное
+      состояние (первый запуск). Веб-тест гвардов `isTauri()` рендерит форму НАПРЯМУЮ (иначе
+      его утверждения вакуумны) и остаётся про гварды, а не про списки.
+- **`switchProvider` сравнивает строго (`next === provider`), а не по `normalizeProvider`.**
+      Провайдер — свободная строка и уезжает в колонку как есть, поэтому «GoDaddy» при текущем
+      «godaddy» — другое значение, и записать надо новое. Отличаться регистром могут только
+      ручные ярлыки (у каталожных пунктов комбобокс отдаёт нормализованный ключ), а у них полей
+      секретов нет — лишний `secrets.reset()` стирать нечему.
+- **`apiUser` при смене провайдера НЕ сбрасывается.** Это не секрет, а логин: он всегда виден
+      в своём поле, когда поле показано, и незаметно утечь ему некуда (у ручного в POST уезжает
+      `null`). Сбрасывать его значило бы наказывать за переключение Hostiq↔Namecheap.
+- **`disabled={secrets.saving || !accName.trim()}`**: у ручного провайдера имя — единственное,
+      что отличает заполненную форму от пустой (секретов, которые отбил бы хук, у него нет).
+      Кнопка по-прежнему только под `isTauri()`: создание живёт в десктопе и для ручного тоже
+      (CLAUDE.md §3).
+- **`EditRegistrarModal` тронут одной строкой** — `usesClientIp` → `needsClientIp`: удалить
+      локальный предикат, оставив его единственного вызывающего, было нельзя. Поведение
+      идентично на всех входах; остальное тело правки — за Фазой 6.
+- **Два поля Namecheap (ключ + IP) больше не стоят в грид-колонках, а идут в столбец** — как
+      следствие единой ветки `hasApi`. Функционально ничего не меняет.
 
-Удалить локальный `usesClientIp` (строки 33-36) — используем `needsClientIp` из модуля.
-Заменить тело формы. Импорты в шапке `Settings.tsx`:
+Новые тесты (сверх спеки): упавшее создание ручного аккаунта показывает `role="alert"` и не
+закрывает форму (пришпиливает решение «через хук» — без него «упрощение» обратно в обход
+осталось бы зелёным), и «Add Account» выключена без имени аккаунта.
 
-```tsx
-import { hasApi, needsClientIp } from "../lib/registrarProviders";
-import { ProviderCombobox } from "../components/settings/ProviderCombobox";
-```
-
-Селектор провайдера (замена блока строк 302-314):
-
-```tsx
-      <div>
-        <label style={{ fontSize: 12, fontWeight: 500, color: "#374151", display: "block", marginBottom: 8 }}>Provider</label>
-        <ProviderCombobox value={provider} accounts={registrars} disabled={secrets.saving} onChange={switchProvider} />
-      </div>
-```
-
-`registrars` пробрасываем в `AddRegistrarModal` пропсом (список для «ранее использованных»).
-Сигнатура: `export function AddRegistrarModal({ onClose, accounts }: { onClose: () => void; accounts: { provider: string }[] })`.
-Вызов (строка 154) заменить на:
-
-```tsx
-      {showAdd && <AddRegistrarModal onClose={() => setSA(false)} accounts={registrars} />}
-```
-
-Внутри комбобокса источник списка — этот проп: `<ProviderCombobox ... accounts={accounts} />`.
-
-Условные поля (замена блока строк 315-355) — ветвление по `hasApi`, а не по имени:
-
-```tsx
-      {hasApi(provider) ? (
-        <>
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 500, color: "#374151", display: "block", marginBottom: 6 }}>API User{needsClientIp(provider) ? "" : " (email)"}</label>
-            <Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApiUser((e.target as any).value)} placeholder={needsClientIp(provider) ? "your_namecheap_username" : "admin@hostiq.ua"} />
-          </div>
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 500, color: "#374151", display: "block", marginBottom: 6 }}>API Key</label>
-            {isTauri() ? (
-              <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>) => secrets.setValue("apiKey", e.target.value.trim())} placeholder={needsClientIp(provider) ? "••••••••" : "••••••••••••••••"} />
-            ) : (
-              <DesktopOnlyNote what="Saving secrets" />
-            )}
-          </div>
-          {needsClientIp(provider) && (
-            <>
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 500, color: "#374151", display: "block", marginBottom: 6 }}>Client IP</label>
-                {isTauri() ? (
-                  <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>) => secrets.setValue("apiSecret", e.target.value.trim())} placeholder="127.0.0.1" />
-                ) : (
-                  <DesktopOnlyNote what="Saving secrets" />
-                )}
-              </div>
-              <div style={{ fontSize: 11.5, color: "#9ca3af", marginTop: -6 }}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
-            </>
-          )}
-        </>
-      ) : null}
-```
-
-> ВНИМАНИЕ на два плейсхолдера ключа: тесты `Settings.registrarblob.test.tsx` ищут поле по
-> `"••••••••"` (Namecheap) и `"••••••••••••••••"` (Hostiq). Сохрани ровно эти строки —
-> они различают два поля в тестах.
-
-`handleAdd` уже ветвит объявление блобов по `usesClientIp(provider)` — заменить на
-`needsClientIp(provider)` (строки 263, а также любые вхождения `usesClientIp`). Логика
-«ключ объявляется всегда» остаётся для API-провайдеров; для ручного `hasApi` = false, но
-секрет-полей нет — пользователь не наберёт ключ. Чтобы ручной аккаунт создавался с
-`null`-блобами, `handleAdd` для не-API идёт мимо секретов:
-
-```tsx
-  const handleAdd = async () => {
-    // Ручной провайдер: полей секретов нет, создаём ярлык с null-блобами. Мимо
-    // `saveAll` — иначе он потребовал бы объявленный `apiKey`, которого тут нет.
-    if (!hasApi(provider)) {
-      if (!accName.trim()) { secrets.reset(); return; } // имя обязательно
-      await createReg.mutateAsync({ provider, name: accName, api_user: null });
-      onClose();
-      return;
-    }
-    const ok = await secrets.saveAll({
-      secrets: {
-        apiKey: { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: null },
-        ...(needsClientIp(provider)
-          ? { apiSecret: { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: null } }
-          : {}),
-      },
-      persist: async (blobIds) => {
-        await createReg.mutateAsync({
-          provider,
-          name: accName,
-          api_user: apiUser,
-          api_key_blob_id: blobIds.apiKey,
-          ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
-        });
-      },
-    });
-    if (ok) onClose();
-  };
-```
-
-Кнопка «Add Account» сейчас видна только в `isTauri()`. Для ручного провайдера её надо
-показывать и без десктопа? — Нет: создание аккаунта живёт только в десктопе (веб read-only),
-как и для API. Оставляем условие `isTauri()` как есть; для ручного провайдера внутри Tauri
-кнопка активна по заполненному имени. Заменить `disabled={secrets.saving}` на
-`disabled={secrets.saving || !accName.trim()}`.
-
-`switchProvider` (строки 288-292) — тип аргумента уже `string` (алиас), логика цела:
-`setProvider(next); secrets.reset();`.
-
-- [ ] **Шаг 4: Тест на ручной провайдер (падающий → зелёный)**
-
-Добавить в `Settings.registrarblob.test.tsx`:
-
-```tsx
-  it("ручной провайдер: без полей секретов, создаётся с null-блобами", async () => {
-    setTauri(true);
-    mocks.apiPost.mockResolvedValue({ id: 9, provider: "GoDaddy", name: "gd", api_user: null,
-      is_active: true, api_key_blob_id: null, api_secret_blob_id: null,
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
-
-    renderPage([]);
-    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
-    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
-    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "GoDaddy" } });
-    fireEvent.click(screen.getByText(/Создать/));
-    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
-
-    // Полей секретов нет вовсе.
-    expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
-    expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
-
-    // Ни одного блоба; тело без ссылок на секреты.
-    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
-    const [url, body] = mocks.apiPost.mock.calls[0];
-    expect(url).toBe("/registrars/accounts");
-    expect(body.provider).toBe("GoDaddy");
-    expect(body).not.toHaveProperty("api_key_blob_id");
-    expect(body).not.toHaveProperty("api_secret_blob_id");
-  });
-```
-
-- [ ] **Шаг 5: Прогнать весь файл — зелёный**
-
-Run: `cd frontend && npx vitest run src/pages/Settings.registrarblob.test.tsx`
-Expected: PASS (старые кейсы через комбобокс + новый про ручного).
-
-- [ ] **Шаг 6: Коммит**
-
-```bash
-git add frontend/src/pages/Settings.tsx frontend/src/pages/Settings.registrarblob.test.tsx
-git commit -m "feat(registrars): комбобокс провайдера и условные поля секретов в AddRegistrarModal"
-```
+Коммит: `0ff7a50`.
 
 ---
 
