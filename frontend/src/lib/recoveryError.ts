@@ -1,6 +1,27 @@
 import { ApiError } from "../api/client";
 
 /**
+ * `CommandError::Keychain("locked")` — единственное значение этого варианта, которое
+ * означает не поломку связки ключей, а её штатное состояние: `load_vault_key` вернул
+ * `None`, то есть ключа хранилища в связке нет. Отдают его `auth_change_password` и
+ * `auth_recovery_setup` (`desktop/src-tauri/src/commands/auth.rs`) — обе читают VK
+ * оттуда, потому что оборачивать им нечего иначе.
+ *
+ * Дословный проброс дал бы под формой голое слово «locked»: ни что случилось, ни что
+ * делать. А делать надо ровно одно — пройти экран блокировки: `auth_login` кладёт VK
+ * в связку заново (`store_vault_key`), и после этого обе команды работают.
+ */
+const VAULT_LOCKED =
+  "The vault is locked: this needs the vault key, and it is not in the OS keychain right " +
+  "now. Lock the app and sign in with your master password, then try again.";
+
+function isVaultLocked(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const entries = Object.entries(err as Record<string, unknown>);
+  return entries.length === 1 && entries[0][0] === "Keychain" && entries[0][1] === "locked";
+}
+
+/**
  * A rejected Tauri command does not arrive as an `Error`. The Rust `CommandError` enum
  * derives `Serialize`, so serde's external tagging puts it on the wire as
  * `{ "Api": "…" }` / `{ "Recovery": "…" }`, and `String(e)` on that renders the useless
@@ -11,6 +32,9 @@ export function describeCommandError(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
   if (err && typeof err === "object") {
+    // Раньше остальных: дальше сработало бы общее правило «один ключ, строка внутри»
+    // и вернуло бы «locked» дословно.
+    if (isVaultLocked(err)) return VAULT_LOCKED;
     const values = Object.values(err as Record<string, unknown>);
     if (values.length === 1 && typeof values[0] === "string") return values[0];
     const message = (err as { message?: unknown }).message;

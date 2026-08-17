@@ -9,7 +9,7 @@ import Activity from "./Activity";
 import Notifications from "./Notifications";
 import Settings from "./Settings";
 import { useUnreadCount } from "../api/notifications";
-import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
+import { useAuthStore, bumpVaultKeyActivity } from "../store/auth";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { listenHostKeyPrompts } from "../lib/sshHostKey";
 import { isTauri } from "../lib/runtime";
@@ -159,7 +159,7 @@ const TWEAK_DEFAULTS = {
 
 export default function DesktopWorkspace() {
   const navigate = useNavigate();
-  const { userId, email, clear, masterKey } = useAuthStore();
+  const { userId, email, clear, vaultKey } = useAuthStore();
   const { data: unreadData } = useUnreadCount();
   const [page, setPage] = useState<string>(() => {
     try {
@@ -206,11 +206,11 @@ export default function DesktopWorkspace() {
   }, [page]);
 
   useEffect(() => {
-    if (!masterKey) return;
-    const onAct = () => bumpMasterKeyActivity();
+    if (!vaultKey) return;
+    const onAct = () => bumpVaultKeyActivity();
     window.addEventListener("pointerdown", onAct);
     return () => window.removeEventListener("pointerdown", onAct);
-  }, [masterKey]);
+  }, [vaultKey]);
 
   useEffect(() => {
     const h = (e: any) => {
@@ -408,8 +408,8 @@ export default function DesktopWorkspace() {
   const handleLogout = async () => {
     if (isTauri() && userId) {
       try {
-        // camelCase: с `user_id` команда падала, forget_master_key не вызывался
-        // и мастер-ключ оставался в OS-keychain после выхода.
+        // camelCase: с `user_id` команда падала, forget_vault_key не вызывался
+        // и ключ хранилища оставался в OS-keychain после выхода.
         await invokeIfTauri("auth_logout", { userId });
       } catch {
         /* still clear local session */
@@ -431,7 +431,7 @@ export default function DesktopWorkspace() {
 
   const handleLock = () => {
     if (!isTauri()) {
-      useAuthStore.getState().clearMasterKey();
+      useAuthStore.getState().clearVaultKey();
       return;
     }
     useAuthStore.getState().setUnlocked(false);

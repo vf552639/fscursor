@@ -13,6 +13,7 @@ import { ProviderCombobox } from "../components/settings/ProviderCombobox";
 import { ProviderAvatar, ProviderApiTag, ProviderLabel } from "../components/settings/ProviderVisuals";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 import RecoveryPhraseCard from "./RecoveryPhraseCard";
+import ChangePasswordCard from "./ChangePasswordCard";
 
 /**
  * Как поля секретов регистратора называются пользователю. Одни и те же на
@@ -260,6 +261,7 @@ export default function Settings(){
         ))}
       </CBo>
     </Card>
+    <ChangePasswordCard />
     <RecoveryPhraseCard />
     </>}
     {editingRegistrar && <EditRegistrarModal registrar={editingRegistrar} onClose={() => setEditingRegistrar(null)} />}

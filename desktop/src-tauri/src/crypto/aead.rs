@@ -94,4 +94,34 @@ mod tests {
         let b = encrypt(b"x", &key).unwrap();
         assert_ne!(a[..NONCE_LEN], b[..NONCE_LEN]);
     }
+
+    /// Вторая половина тест-вектора обёртки; первая — в `frontend/src/lib/crypto.test.ts`.
+    /// Keep in sync with it: те же байты, тот же KEK, тот же ожидаемый VK.
+    ///
+    /// Односторонний вектор сторожил бы только одну реализацию, а беда возможна ровно от
+    /// расхождения ДВУХ: браузер, разворачивающий обёртку иначе, чем десктоп, никуда не
+    /// падает — он молча отдаёт 32 байта мусора как ключ и показывает мусор там, где
+    /// должен быть пароль. Поэтому одни и те же фиксированные байты обязаны открываться
+    /// обеими сторонами, и обе стороны обязаны это проверять.
+    ///
+    /// KEK — фикстура `hunter2` + нулевая соль из `kdf.rs`
+    /// (`master_key_fixture_for_browser_tests`), VK — байты 00..1f.
+    #[test]
+    fn wrapped_vault_key_fixture_matches_the_browser() {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+        let wrapped = B64
+            .decode(
+                "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnb9WWEYFBWfrgYxJ9rQHFkE767KJCJ2xANXgOb/E4NJIVRoY3l7yuEYBeZ8jWxQ7k",
+            )
+            .expect("вектор должен быть валидным base64");
+        assert_eq!(wrapped.len(), NONCE_LEN + TAG_LEN + KEY_LEN, "ровно 72 байта");
+
+        let kek = crate::crypto::kdf::derive_master_key(b"hunter2", &[0u8; 16]).unwrap();
+        let vk = decrypt(&wrapped, &kek.0).expect("обёртка обязана открываться этим KEK");
+        assert_eq!(
+            hex::encode(&vk),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        );
+    }
 }

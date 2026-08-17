@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { apiGet } from "../api/client";
 import { decryptBlob } from "../lib/crypto";
 import { b64ToU8 } from "../lib/b64";
-import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
+import { useAuthStore, bumpVaultKeyActivity } from "../store/auth";
 import { Btn } from "./ui/Primitives";
 import { UnlockModal } from "./UnlockModal";
 
@@ -13,7 +13,7 @@ export function RevealSecret({
   blobId: string | null | undefined;
   label: string;
 }) {
-  const masterKey = useAuthStore((s) => s.masterKey);
+  const vaultKey = useAuthStore((s) => s.vaultKey);
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [showUnlock, setShowUnlock] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -32,16 +32,16 @@ export function RevealSecret({
 
   async function reveal() {
     setErr(null);
-    if (!masterKey) {
+    if (!vaultKey) {
       setShowUnlock(true);
       return;
     }
     setBusy(true);
     try {
-      bumpMasterKeyActivity();
+      bumpVaultKeyActivity();
       const blob = await apiGet<{ ciphertext_b64: string }>(`/blobs/${blobId}`);
       const framed = b64ToU8(blob.ciphertext_b64);
-      const keyCopy = new Uint8Array(masterKey);
+      const keyCopy = new Uint8Array(vaultKey);
       const pt = await decryptBlob(framed, keyCopy);
       keyCopy.fill(0);
       setPlaintext(new TextDecoder().decode(pt));
