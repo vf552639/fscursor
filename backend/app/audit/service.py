@@ -48,6 +48,9 @@ SAFE_ACTIONS = frozenset(
         "auth.password_change",
         "auth.recovery",
         "auth.recovery_setup",
+        # Ленивая миграция аккаунта на ключ хранилища (`POST /auth/vault-key/init`):
+        # запись, которая случается один раз за всю жизнь аккаунта.
+        "auth.vault_key_init",
         "auth.totp_enable",
         "blob.upsert",
         "blob.delete",
