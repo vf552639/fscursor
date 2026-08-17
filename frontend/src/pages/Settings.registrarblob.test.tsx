@@ -236,6 +236,34 @@ describe("Settings — ключ и секрет регистратора чер�
     );
     // Форма на экране: набранное имя цело, повтор не требует начинать заново.
     expect((screen.getByPlaceholderText("e.g., Hostiq Main") as HTMLInputElement).value).toBe("gd");
+    // И кнопка снова рабочая — вторая половина того же утверждения: канал ошибки
+    // без вернувшейся кнопки оставил бы форму, из которой видно отказ, но нельзя
+    // повторить. Само имя «Add Account» (а не «Adding...») уже говорит, что
+    // `saving` снят; `disabled` проверяем отдельно — гейт у кнопки не один.
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("имя аккаунта уезжает в POST без пробелов по краям", async () => {
+    // Создание и правка обязаны понимать имя одинаково: `EditRegistrarModal`
+    // тримит его в `patch`, и без trim здесь первая же правка такого аккаунта
+    // молча переименовала бы его — пользователь увидел бы изменение, которого не
+    // просил. Сервер имя не чистит (`name: str` без валидатора), а гейт кнопки уже
+    // считает пробельное имя пустым — значит и в тело POST оно идёт тримленным.
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ ...NAMECHEAP, provider: "hostiq" });
+
+    renderPage([]);
+    await openAddModal("hostiq");
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), {
+      target: { value: "  reg-new  " },
+    });
+    fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
+      target: { value: API_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPost.mock.calls[0][1].name).toBe("reg-new");
   });
 
   it("имя аккаунта обязательно: без него «Add Account» выключена", async () => {
