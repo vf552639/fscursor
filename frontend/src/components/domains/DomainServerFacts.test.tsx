@@ -250,3 +250,164 @@ describe("данные сайта", () => {
     expect(screen.getByText("/var/log/nginx/example.com.error.log")).toBeTruthy();
   });
 });
+
+/**
+ * Фаза 4: секция — единственный источник про сайт. Значением поля остаётся ФАКТ,
+ * наша запись из provision всплывает строкой «при развёртывании: X» ровно тогда,
+ * когда расходится с фактом, и становится приглушённым значением там, где факта
+ * нет. Само правило проверено отдельно (`lib/domainDrift.test.ts`) — здесь
+ * проверяется ПОКАЗ: что все три исхода долетают до экрана и что незнание не
+ * превращается в прочерк.
+ */
+describe("расхождение нашей записи с фактом", () => {
+  const fresh = { fp_facts: facts(), fp_facts_at: ago(HOUR) };
+
+  it("совпало — строки «при развёртывании» нет вовсе", () => {
+    show({
+      ...fresh,
+      php_version: "8.2",
+      site_path: "/var/www/example.com/", // хвостовой слэш — не расхождение
+      site_user: "example_usr",
+      db_name: "example_db",
+      ssl_issuer: "Let's Encrypt",
+    });
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("PHP разошёлся: значением остаётся факт, наша запись — серой строкой", () => {
+    show({ ...fresh, php_version: "7.4" });
+    expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
+    expect(screen.getByText(/при развёртывании: 7\.4/)).toBeTruthy();
+  });
+
+  it("путь, владелец, издатель и база расходятся каждый своей строкой", () => {
+    show({
+      ...fresh,
+      site_path: "/var/www/old.example.com",
+      site_user: "old_usr",
+      ssl_issuer: "ZeroSSL",
+      db_name: "old_db",
+    });
+    const notes = screen.getAllByText(/при развёртывании/).map((n) => n.textContent);
+    expect(notes).toEqual([
+      "при развёртывании: ZeroSSL",
+      "при развёртывании: /var/www/old.example.com",
+      "при развёртывании: old_usr",
+      "при развёртывании: old_db",
+    ]);
+  });
+
+  it("логин FTP: значение — живой аккаунт сервера, наш удалённый уходит в строку", () => {
+    // Регрессия, ради которой правка и сделана: раньше значением поля была НАША
+    // запись, и удалённый с сервера аккаунт печатался как живой.
+    show({
+      ...fresh,
+      fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }),
+      ftp_user: "example_ftp",
+    });
+    const login = screen.getByText("Login").parentElement;
+    expect(login?.textContent).toContain("server_ftp");
+    expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+  });
+
+  it("срок сертификата сверяется по дате, а наша запись печатается по-человечески", () => {
+    // Часы задаём ЛОКАЛЬНЫЕ: «тот же день» не должен зависеть от зоны CI.
+    const at = (days: number, hour: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      d.setHours(hour, 0, 0, 0);
+      return d;
+    };
+    const base = {
+      fp_facts: facts({
+        ssl: { has_certificate: true, expires_at: at(60, 9).toISOString(), issuer: "Let's Encrypt", is_letsencrypt: true },
+      }),
+      fp_facts_at: ago(HOUR),
+    };
+
+    // Тот же день, другое время — не расхождение (наша запись сделана в момент
+    // выпуска, сервер отдаёт то, что написано в сертификате).
+    show({ ...base, ssl_expires_at: at(60, 18).toISOString() });
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+
+    cleanup();
+    // Другой день — расхождение, и в строке стоит ДАТА, а не сырой ISO: иначе
+    // она читалась бы расхождением с форматированным значением над ней.
+    const other = at(62, 9);
+    show({ ...base, ssl_expires_at: other.toISOString() });
+    const note = screen.getByText(/при развёртывании/).textContent ?? "";
+    expect(note).toContain(other.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }));
+    expect(note).not.toContain("T");
+  });
+});
+
+describe("«Accounts on server»: home не дублирует путь сайта", () => {
+  it("home совпал с путём сайта (с точностью до хвостового слэша) — не печатается", () => {
+    show({
+      fp_facts: facts({ ftp_accounts: [{ login: "example_ftp", home: "/var/www/example.com/" }] }),
+      fp_facts_at: ago(HOUR),
+    });
+    expect(screen.getByText("Accounts on server")).toBeTruthy();
+    expect(screen.queryByText(/· \/var\/www\/example\.com/)).toBeNull();
+  });
+
+  it("home отличается от пути сайта — печатается", () => {
+    show({
+      fp_facts: facts({ ftp_accounts: [{ login: "example_ftp", home: "/home/example_usr" }] }),
+      fp_facts_at: ago(HOUR),
+    });
+    expect(screen.getByText(/· \/home\/example_usr/)).toBeTruthy();
+  });
+});
+
+describe("снимка не было ни разу", () => {
+  it("вместо решётки прочерков — одна строка словами", () => {
+    show({ ftp_user: null });
+    expect(screen.getByText("Never checked")).toBeTruthy();
+    expect(screen.getByText(/Сервер ещё не читали/)).toBeTruthy();
+    // Прочерков нет ни одного: Host берётся у сервера, Port — константа, а
+    // поля снимка спрятаны целиком, потому что прочерк в них читался бы как
+    // «спросили, там пусто».
+    expect(screen.queryAllByText("—")).toEqual([]);
+  });
+
+  it("известное из provision показано приглушённо и подписано", () => {
+    show({ ftp_user: "example_ftp", site_path: "/var/www/example.com", db_user: "example_dbu" });
+    // jsdom печатает inline-цвет то hex'ом, то rgb() — сверяем обе записи.
+    const muted = /color:\s*(#9ca3af|rgb\(156,\s*163,\s*175\))/i;
+    for (const v of ["example_ftp", "/var/www/example.com", "example_dbu"]) {
+      expect(screen.getByText(v).getAttribute("style")).toMatch(muted);
+    }
+    expect(screen.getAllByText("из provision, на сервере не проверено").length).toBe(3);
+    // И ни одно из них не выдано за расхождение: сверять было не с чем.
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("домен без сервера: Host остаётся прочерком", () => {
+    // Единственный прочерк, который тут законен: адрес FTP-хоста — это IP
+    // сервера, и его отсутствие значит «сервера у домена нет», а не «не читали».
+    // `show` подставляет сервер по умолчанию, поэтому рендерим напрямую.
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DomainServerFacts domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("Host").parentElement?.textContent).toContain("—");
+  });
+});
+
+describe("DB user", () => {
+  it("наша запись есть — поле показано с подписью «на сервере не проверено»", () => {
+    // Пользователей баз FastPanel CLI не отдаёт вовсе, поэтому исход всегда
+    // `recorded-only`, даже под свежим снимком.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR), db_user: "example_dbu" });
+    expect(screen.getByText("DB user")).toBeTruthy();
+    expect(screen.getByText("example_dbu")).toBeTruthy();
+    expect(screen.getByText("из provision, на сервере не проверено")).toBeTruthy();
+  });
+
+  it("записи нет — строки нет вовсе, а не прочерк: факта тут не бывает никогда", () => {
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(screen.queryByText("DB user")).toBeNull();
+  });
+});

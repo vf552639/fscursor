@@ -3,6 +3,18 @@ import React, { useState } from "react";
 import { Domain, useReadDomainFacts, useUpdateDomain } from "../../api/domains";
 import { Server } from "../../api/servers";
 import { SSL_BADGE, isFactsStale, sslState } from "../../lib/domainFacts";
+import {
+  type FieldSource,
+  dbNameSource,
+  dbUserSource,
+  ftpLoginSource,
+  phpVersionSource,
+  samePath,
+  siteOwnerSource,
+  sitePathSource,
+  sslExpiresSource,
+  sslIssuerSource,
+} from "../../lib/domainDrift";
 import { formatExpiryDate } from "../../lib/domainExpiry";
 import { BLOB_KIND } from "../../lib/secretBlob";
 import { isTauri } from "../../lib/runtime";
@@ -11,14 +23,26 @@ import { RevealSecret } from "../RevealSecret";
 import { Badge, Btn, Inp, formatAgoStale } from "../ui/Primitives";
 
 /**
- * Секция «состояние на сервере»: то, что десктоп прочитал по SSH, показанное с
- * честной свежестью (принцип №6 CLAUDE.md). Соседний двухколоночный блок
- * карточки — это НАША запись (снимок момента provision из колонок домена); эта
- * секция — живое чтение с сервера и его возраст, ровно как рядом уживаются «наш
- * ns_status» и живая сверка делегирования.
+ * Секция «состояние на сервере» — ЕДИНСТВЕННОЕ место карточки, отвечающее на
+ * вопрос «что с сайтом».
  *
- * Порог протухания и лестница SSL живут в `lib/domainFacts`, а не здесь: три
- * экрана про сервер уже разъезжались, когда правило жило в компоненте.
+ * Раньше на тот же вопрос отвечал и двухколоночный блок наверху: он печатал
+ * НАШУ запись (снимок момента provision из колонок домена), а секция — живое
+ * чтение с сервера, и восемь полей у них совпадали. Блок снят (фаза 3), а его
+ * значения приехали сюда — но не второй колонкой, а ответом `lib/domainDrift`:
+ * значением поля остаётся факт, наша запись всплывает строкой «при
+ * развёртывании: X» ровно тогда, когда РАСХОДИТСЯ с фактом, и становится
+ * значением (приглушённым, с честной подписью) там, где факта нет вовсе.
+ *
+ * Порог протухания и лестница SSL живут в `lib/domainFacts`, само правило
+ * расхождения — в `lib/domainDrift`, а не здесь: три экрана про сервер уже
+ * разъезжались, когда правило жило в компоненте.
+ *
+ * Про язык подписей: проза секции английская, но три строки этой фазы — «при
+ * развёртывании: X», «из provision, на сервере не проверено» и «Сервер ещё не
+ * читали» — оставлены по-русски дословно, как их задаёт план и повторяют его
+ * acceptance criteria. Они один смысловой блок и приезжают вместе; файл к тому
+ * же двуязычен и без них (кнопки «Проверить на сервере», «Задать пароль»).
  */
 
 /**
@@ -29,13 +53,98 @@ const FTP_PORT = 21;
 
 const NONE = "—";
 
+/** Приглушённый серый — им набраны и приписки, и значения «только из provision». */
+const MUTED = "#9ca3af";
+
+/** Ширина колонки подписи; приписка выравнивается под значение по ней же. */
+const KEY_WIDTH = 84;
+const KEY_GAP = 6;
+
 /** Строка «подпись: значение» в стиле карточки; пустое — прочерк, а не пустота. */
 function Row({ k, v }: { k: string; v: React.ReactNode }) {
   const empty = v === null || v === undefined || v === "";
   return (
-    <div style={{ display: "flex", gap: 6, fontSize: 13, color: "#374151" }}>
-      <b style={{ color: "#6b7280", fontWeight: 600, minWidth: 84 }}>{k}</b>
+    <div style={{ display: "flex", gap: KEY_GAP, fontSize: 13, color: "#374151" }}>
+      <b style={{ color: "#6b7280", fontWeight: 600, minWidth: KEY_WIDTH }}>{k}</b>
       <span style={{ wordBreak: "break-all" }}>{empty ? NONE : v}</span>
+    </div>
+  );
+}
+
+/** Серая приписка под значением поля (12px, #9ca3af — как задано планом). */
+function Note({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 12, color: MUTED, paddingLeft: KEY_WIDTH + KEY_GAP, wordBreak: "break-all" }}>
+      {children}
+    </div>
+  );
+}
+
+/** Значение поля и приписка под ним — то, что отличает три исхода `FieldSource`. */
+type Drawn = { value: React.ReactNode; note: React.ReactNode };
+
+/**
+ * Как выглядит поле при КАЖДОМ из трёх исходов — карта, а не ветвление по месту
+ * в JSX.
+ *
+ * Ветвление по месту здесь было бы дырой в семи экземплярах: `FieldSource` —
+ * размеченное объединение, но читателя ничто не заставляет разобрать все ветки,
+ * и `src.kind === "drift" ? … : null` компилируется молча, превращая незнание
+ * (`recorded-only`) в прочерк — ровно то, что запрещает принцип №6 CLAUDE.md.
+ * `Record<FieldSource["kind"], …>` же не даст завести четвёртый исход, забыв его
+ * нарисовать: пропуск станет ошибкой типов (тот же приём, что у `SSL_BADGE`).
+ */
+const DRAW: Record<FieldSource["kind"], (fact: React.ReactNode, recorded: React.ReactNode) => Drawn> = {
+  // Факт есть, наша запись с ним совпала — дорисовывать нечего.
+  agree: (fact) => ({ value: fact, note: null }),
+  // Факт есть, наша запись другая — значением остаётся факт (он измерен), а
+  // наша запись уходит вниз серой строкой.
+  drift: (fact, recorded) => ({ value: fact, note: <Note>при развёртывании: {recorded}</Note> }),
+  // Факта нет — значением становится наша запись, но приглушённо и с подписью:
+  // выдать её за прочитанное с сервера нельзя.
+  "recorded-only": (_fact, recorded) => ({
+    value: <span style={{ color: MUTED }}>{recorded}</span>,
+    note: <Note>из provision, на сервере не проверено</Note>,
+  }),
+};
+
+/** Печать нашей записи по умолчанию — как есть, без переформатирования. */
+const AS_IS = (recorded: string) => recorded;
+
+/**
+ * Поле секции: факт с сервера плюс то, что о нём говорит наша запись.
+ *
+ * @param fact         значение, прочитанное с сервера (уже готовое к показу).
+ * @param src          ответ `lib/domainDrift`; по умолчанию — «сказать нечего».
+ * @param showRecorded как печатать нашу запись (даты — по-человечески).
+ * @param hideEmpty    прятать строку целиком, когда показывать нечего. Нужно
+ *                     там, где прочерк соврал бы: снимка нет вовсе, либо факта
+ *                     у поля не бывает по построению (`DB user`).
+ */
+function FactRow({
+  k,
+  fact,
+  src = { kind: "agree" },
+  showRecorded,
+  hideEmpty = false,
+}: {
+  k: string;
+  fact?: React.ReactNode;
+  src?: FieldSource;
+  showRecorded?: (recorded: string) => React.ReactNode;
+  hideEmpty?: boolean;
+}) {
+  const recorded = src.kind === "agree" ? null : (showRecorded ?? AS_IS)(src.recorded);
+  const { value, note } = DRAW[src.kind](fact, recorded);
+  const empty = value === null || value === undefined || value === "";
+  // Прячем, только когда сказать нечего ВООБЩЕ: приписка без значения
+  // невозможна по построению правила, но если бы стала возможной, `hideEmpty`
+  // не должен уносить её вместе с пустотой.
+  if (hideEmpty && empty && note === null) return null;
+  return (
+    <div style={{ display: "grid", gap: 2 }}>
+      <Row k={k} v={value} />
+      {note}
     </div>
   );
 }
@@ -73,8 +182,53 @@ export default function DomainServerFacts({
   const ssl = sslState(facts?.ssl, domain.fp_facts_at, now);
   const sslBadge = SSL_BADGE[ssl];
 
-  // Основной логин FTP: наш (из provision), иначе первый прочитанный с сервера.
-  const mainFtpLogin = domain.ftp_user || facts?.ftp_accounts[0]?.login || null;
+  /**
+   * Удачного снимка не было ни разу. Тогда решётка прочерков — враньё: прочерк
+   * в поле читается как «сервер спросили, там пусто», а спрашивать мы ещё не
+   * ходили. Поэтому поля, которым нечего сказать, прячутся целиком, а вместо
+   * них секция говорит это ОДИН раз словами.
+   */
+  const noSnapshot = !domain.fp_facts_at;
+
+  /**
+   * Наша запись против факта — все восемь вопросов в ОДНОМ месте.
+   *
+   * Собраны сюда намеренно: вызовы почти одинаковы (`(recorded, facts)`), и
+   * подмена аргумента — `phpVersionSource(domain.site_user, facts)` — исправно
+   * компилируется. Здесь рассинхрон виден одним взглядом по столбику, а
+   * разбросанный по восьми точкам JSX его пришлось бы искать.
+   */
+  const src = {
+    ftpLogin: ftpLoginSource(domain.ftp_user, facts),
+    sslExpires: sslExpiresSource(domain.ssl_expires_at, facts),
+    sslIssuer: sslIssuerSource(domain.ssl_issuer, facts),
+    sitePath: sitePathSource(domain.site_path, facts),
+    siteOwner: siteOwnerSource(domain.site_user, facts),
+    php: phpVersionSource(domain.php_version, facts),
+    dbName: dbNameSource(domain.db_name, facts),
+    // Единственная функция без снимка: пользователей баз FastPanel CLI не
+    // отдаёт вовсе, сверять не с чем ни при каком чтении.
+    dbUser: dbUserSource(domain.db_user),
+  };
+
+  /**
+   * Логин FTP, прочитанный с СЕРВЕРА, — и это правка сути, а не формы.
+   *
+   * До фазы 4 здесь стояло `domain.ftp_user || facts[0]?.login`: наша запись
+   * заслоняла факт, и удалённый с сервера аккаунт печатался как живой — то
+   * есть поле отвечало «чем мы подключались», притворяясь ответом «что на
+   * сервере есть». Теперь значение — всегда факт, а наша запись приходит
+   * строкой расхождения от `ftpLoginSource`.
+   *
+   * Представителя списка выбираем так: если наш логин в списке ЕСТЬ (об этом и
+   * говорит `agree`), он и есть представитель — «да, тот самый»; иначе первый.
+   * Своего сравнения здесь нет намеренно — оно всё в `ftpLoginSource`, который
+   * смотрит ВЕСЬ список: «первый = основной» остаётся выбором показа и никогда
+   * не становится правилом сверки (`filter_ftp_by_domain` основного не
+   * размечает, порядок — просто порядок вывода CLI).
+   */
+  const factFtpLogin =
+    (src.ftpLogin.kind === "agree" ? domain.ftp_user : null) || facts?.ftp_accounts[0]?.login || null;
 
   return (
     <div style={{ marginTop: 20, borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
@@ -105,21 +259,39 @@ export default function DomainServerFacts({
         </div>
       ) : null}
 
+      {/* Снимка не было ни разу — говорим это словами один раз, вместо того
+          чтобы повторять прочерком в каждом поле. Кнопка чтения — в шапке
+          выше (и только в десктопе: в вебе SSH нет). */}
+      {noSnapshot ? (
+        <div style={{ fontSize: 12.5, color: "#6b7280", marginBottom: 8 }}>Сервер ещё не читали.</div>
+      ) : null}
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 8 }}>
         {/* ─── FTP ─────────────────────────────────────────────────────── */}
         <div style={{ display: "grid", gap: 6, alignContent: "start" }}>
           <SubTitle>FTP access</SubTitle>
+          {/* Host и Port — не про снимок: адрес берётся у сервера, порт
+              константа. У домена без сервера Host остаётся прочерком. */}
           <Row k="Host" v={server?.ip_address} />
           <Row k="Port" v={FTP_PORT} />
-          <Row k="Login" v={mainFtpLogin} />
+          <FactRow k="Login" fact={factFtpLogin} src={src.ftpLogin} hideEmpty={noSnapshot} />
           <FtpPassword domain={domain} desktop={desktop} />
           {facts && facts.ftp_accounts.length > 0 ? (
             <div style={{ marginTop: 6 }}>
-              <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 4 }}>Accounts on server</div>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Accounts on server</div>
               {facts.ftp_accounts.map((a) => (
                 <div key={a.login} style={{ fontSize: 12.5, color: "#374151" }}>
                   {a.login}
-                  {a.home ? <span style={{ color: "#9ca3af" }}> · {a.home}</span> : null}
+                  {/* `home` печатаем, только когда он ОТЛИЧАЕТСЯ от пути сайта:
+                      у типового аккаунта это тот же путь, и он уже стоит в
+                      Site → Path — третья его копия на экране ничего не
+                      добавляет. Вопрос «та же ли это папка» задаём тем же
+                      `samePath`, что и правило расхождения, а не своим
+                      сравнением строк: хвостовой слэш стороны пишут как
+                      придётся, и вторая нормализация разъехалась бы с первой. */}
+                  {a.home && !samePath(a.home, facts.site?.site_path) ? (
+                    <span style={{ color: MUTED }}> · {a.home}</span>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -143,41 +315,59 @@ export default function DomainServerFacts({
           {/* `ssl.expires_at` — полный datetime: печатаем в зоне ЧИТАТЕЛЯ
               (`formatExpiryDate` сам это решает по форме iso), не в UTC. Иначе
               далеко от UTC дата съедет на день и разойдётся с остальным кодом
-              (правило в `domainExpiry.ts`). */}
-          <Row k="Expires" v={facts?.ssl.expires_at ? formatExpiryDate(facts.ssl.expires_at) : null} />
-          <Row k="Issuer" v={facts?.ssl.issuer} />
+              (правило в `domainExpiry.ts`). Наша запись — тем же
+              `formatExpiryDate`: сырой ISO под человеческой датой читался бы
+              расхождением там, где его нет. */}
+          <FactRow
+            k="Expires"
+            fact={facts?.ssl.expires_at ? formatExpiryDate(facts.ssl.expires_at) : null}
+            src={src.sslExpires}
+            showRecorded={formatExpiryDate}
+            hideEmpty={noSnapshot}
+          />
+          <FactRow k="Issuer" fact={facts?.ssl.issuer} src={src.sslIssuer} hideEmpty={noSnapshot} />
         </div>
 
         {/* ─── Site ────────────────────────────────────────────────────── */}
         <div style={{ display: "grid", gap: 6, alignContent: "start", gridColumn: "1 / -1" }}>
           <SubTitle>Site</SubTitle>
-          <Row k="Path" v={facts?.site?.site_path} />
-          <Row k="Owner" v={facts?.site?.site_user} />
-          <Row
+          <FactRow k="Path" fact={facts?.site?.site_path} src={src.sitePath} hideEmpty={noSnapshot} />
+          <FactRow k="Owner" fact={facts?.site?.site_user} src={src.siteOwner} hideEmpty={noSnapshot} />
+          <FactRow
             k="PHP"
-            v={
+            fact={
               facts?.php_version
                 ? `${facts.php_version}${facts.php_handler ? ` · ${facts.php_handler}` : ""}`
                 : facts?.site?.php_version || null
             }
+            src={src.php}
+            hideEmpty={noSnapshot}
           />
-          <Row
+          <FactRow
             k="Databases"
-            v={facts && facts.databases.length > 0 ? facts.databases.join(", ") : null}
+            fact={facts && facts.databases.length > 0 ? facts.databases.join(", ") : null}
+            src={src.dbName}
+            hideEmpty={noSnapshot}
           />
-          <Row
+          {/* Пользователь базы — только наша запись, и `hideEmpty` тут стоит
+              ВСЕГДА, а не под `noSnapshot`: факта у этого поля не бывает ни при
+              каком чтении, поэтому прочерк в нём обещал бы измерение, которого
+              не будет никогда. Нет записи — нет и строки. */}
+          <FactRow k="DB user" src={src.dbUser} hideEmpty />
+          <FactRow
             k="Logs"
-            v={
+            fact={
               facts && facts.logs.length > 0 ? (
                 <span>
                   {facts.logs.map((l) => (
-                    <span key={l.path} style={{ display: "block", color: l.exists ? "#374151" : "#9ca3af" }}>
+                    <span key={l.path} style={{ display: "block", color: l.exists ? "#374151" : MUTED }}>
                       {l.path}
                     </span>
                   ))}
                 </span>
               ) : null
             }
+            hideEmpty={noSnapshot}
           />
         </div>
       </div>
