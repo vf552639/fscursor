@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
+
+import { registrarSupportsNsApi } from "./registrarCaps";
 import {
+  API_PROVIDERS,
   hasApi,
   needsClientIp,
   normalizeProvider,
@@ -8,21 +14,80 @@ import {
 } from "./registrarProviders";
 
 describe("registrarProviders — API-способность", () => {
-  it("hasApi: только каталожные провайдеры, без учёта регистра и пробелов", () => {
+  it("hasApi: только каталожные провайдеры, без учёта регистра", () => {
     expect(hasApi("hostiq")).toBe(true);
-    expect(hasApi("  Namecheap ")).toBe(true);
+    expect(hasApi("Namecheap")).toBe(true);
     expect(hasApi("godaddy")).toBe(false);
     expect(hasApi("")).toBe(false);
+  });
+
+  it("hasApi: пробелы НЕ схлопывает — их не срезает и десктоп", () => {
+    // `make_service` делает только `to_lowercase()`, поэтому `" Namecheap "` для
+    // него — `unknown provider`. Признай мы такую строку API-шной, Settings дал
+    // бы бейдж «API» и кнопку Test там, где карточка домена уже показывает
+    // выключенный «Set NS», а за кнопкой ждёт гарантированный отказ.
+    expect(hasApi("  Namecheap ")).toBe(false);
+    expect(hasApi(" hostiq")).toBe(false);
   });
 
   it("needsClientIp: только Namecheap", () => {
     expect(needsClientIp("namecheap")).toBe(true);
     expect(needsClientIp("HOSTIQ")).toBe(false);
     expect(needsClientIp("godaddy")).toBe(false);
+    expect(needsClientIp("")).toBe(false);
   });
 
-  it("normalizeProvider: нижний регистр и trim", () => {
+  it("needsClientIp: не спрашивает поле там, где hasApi говорит «нет»", () => {
+    expect(hasApi(" namecheap ")).toBe(false);
+    expect(needsClientIp(" namecheap ")).toBe(false);
+  });
+
+  it("normalizeProvider: нижний регистр и trim (ключ показа, не ответ десктопа)", () => {
     expect(normalizeProvider("  Hostiq ")).toBe("hostiq");
+  });
+});
+
+describe("registrarProviders — согласие с десктопом", () => {
+  /**
+   * Держит каталог от дрейфа так же, как `registrarCaps.test.ts` держит зеркало
+   * предиката: список `make_service` читается из исходника с диска. Без этого
+   * теста третий регистратор, добавленный в десктоп, покрасил бы только
+   * `registrarCaps.test.ts`, а `API_PROVIDERS` молча остался бы с двумя
+   * записями — и у нового провайдера не было бы ни полей секретов, ни «Test».
+   *
+   * Пути от файла теста, а не от `process.cwd()`, и через `fileURLToPath` —
+   * причины те же, что в `registrarCaps.test.ts`.
+   */
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const RUST_SOURCE = resolve(HERE, "../../../desktop/src-tauri/src/registrars/mod.rs");
+
+  function providersIn(source: string): string[] {
+    const text = readFileSync(source, "utf8");
+    const declaration = /NS_API_PROVIDERS[^=]*=\s*\[([^\]]*)\]/.exec(text);
+    if (!declaration) {
+      throw new Error(`NS_API_PROVIDERS не найден в ${source} — объявление переименовали?`);
+    }
+    return [...declaration[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  }
+
+  it("каждый провайдер десктопа имеет запись в каталоге показа", () => {
+    const rust = providersIn(RUST_SOURCE);
+    expect(rust.length).toBeGreaterThan(0);
+    for (const provider of rust) {
+      expect(
+        Object.prototype.hasOwnProperty.call(API_PROVIDERS, provider),
+        `провайдер ${provider} есть в make_service, но не в API_PROVIDERS`,
+      ).toBe(true);
+    }
+  });
+
+  it("каждый ключ каталога признаётся предикатом registrarCaps", () => {
+    // Обратная сторона: запись в каталоге без Rust-клиента дала бы поля секретов
+    // и кнопку Test под провайдером, которого десктоп не умеет.
+    for (const key of Object.keys(API_PROVIDERS)) {
+      expect(registrarSupportsNsApi(key), `провайдер ${key}`).toBe(true);
+      expect(hasApi(key), `провайдер ${key}`).toBe(true);
+    }
   });
 });
 
@@ -44,6 +109,46 @@ describe("registrarProviders — метаданные показа", () => {
   it("ручной провайдер: цвет детерминирован по имени", () => {
     expect(providerMeta("GoDaddy").bg).toBe(providerMeta("godaddy").bg);
   });
+
+  it("каталожное имя с пробелами — ручная ветка, как и у десктопа", () => {
+    // Не «сломано», а честно: `" hostiq "` десктоп не знает, поэтому ни бейджа
+    // «API», ни кнопки Test. Метка при этом подчищена — она про показ.
+    const m = providerMeta(" hostiq ");
+    expect(m.api).toBe(false);
+    expect(m.key).toBe("hostiq");
+    expect(m.label).toBe("hostiq");
+    expect(m.icon).toBe("H");
+  });
+
+  it("пустой ввод: фолбэк в '?', а не в undefined", () => {
+    for (const empty of ["", "   "]) {
+      const m = providerMeta(empty);
+      expect(m.api).toBe(false);
+      expect(m.key).toBe("");
+      expect(m.label).toBe("?");
+      expect(m.icon).toBe("?");
+      expect(m.bg).toBeTruthy();
+      expect(m.color).toBeTruthy();
+    }
+  });
+
+  it("имя из прототипа объекта не уходит в API-ветку", () => {
+    // `provider` — свободный ввод, а `"constructor"`/`"__proto__"`/`"valueOf"`
+    // есть у любого объектного литерала: обычная индексация вернула бы «запись»
+    // с `label: undefined` в аватаре.
+    for (const name of ["constructor", "__proto__", "valueOf", "toString"]) {
+      const m = providerMeta(name);
+      expect(m.api, name).toBe(false);
+      expect(m.label, name).toBe(name);
+      expect(m.icon, name).toBe(name[0].toUpperCase());
+      expect(needsClientIp(name), name).toBe(false);
+      expect(hasApi(name), name).toBe(false);
+    }
+  });
+
+  it("имя вне BMP: буква — целая кодовая точка, а не половина суррогата", () => {
+    expect(providerMeta("🚀Reg").icon).toBe("🚀");
+  });
 });
 
 describe("registrarProviders — список для выпадашки", () => {
@@ -61,5 +166,22 @@ describe("registrarProviders — список для выпадашки", () => 
 
   it("ноль аккаунтов: только API-каталог", () => {
     expect(buildProviderList([]).map((o) => o.key)).toEqual(["hostiq", "namecheap"]);
+  });
+
+  it("каталожная запись остаётся API-шной, даже если в аккаунтах она с пробелами", () => {
+    // Дедуп идёт по нормализованному ключу, поэтому `" hostiq "` из аккаунта
+    // схлопывается с каталожным `hostiq` и НЕ подменяет его ручной записью.
+    const list = buildProviderList([{ provider: " hostiq " }, { provider: "HOSTIQ" }]);
+    expect(list.map((o) => o.key)).toEqual(["hostiq", "namecheap"]);
+    expect(list[0].api).toBe(true);
+    expect(list[0].label).toBe("Hostiq");
+  });
+
+  it("у ручного провайдера побеждает метка первого встреченного аккаунта", () => {
+    // Написание в колонке произвольное; фиксируем правило, чтобы порядок списка
+    // не менял подпись пункта молча.
+    const list = buildProviderList([{ provider: "godaddy" }, { provider: "GoDaddy" }]);
+    const manual = list.filter((o) => !o.api);
+    expect(manual.map((o) => o.label)).toEqual(["godaddy"]);
   });
 });

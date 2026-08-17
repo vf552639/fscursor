@@ -18,7 +18,7 @@ export type RegistrarProvider = string;
 
 export interface RegistrarAccount {
   id: number;
-  provider: RegistrarProvider | string;
+  provider: RegistrarProvider;
   name: string;
   api_user: string | null;
   is_active: boolean;

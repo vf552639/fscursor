@@ -1,12 +1,19 @@
+import { registrarSupportsNsApi } from "./registrarCaps";
+
 /**
- * Провайдеры со встроенным Rust-клиентом в десктопе. Зеркалит
- * `registrars::make_service` (desktop/src-tauri/src/registrars/mod.rs): у кого
- * здесь есть запись — у того реально работают test_connection / get_domains /
- * set_nameservers. Всё остальное — «ручной» провайдер: хранится ярлыком, API нет.
+ * Каталог провайдеров, у которых в десктопе есть Rust-клиент: как их показывать
+ * (метка, буква, цвета) и нужен ли им Client IP. Всё остальное — «ручной»
+ * провайдер: хранится ярлыком, API нет.
  *
- * ЕДИНСТВЕННЫЙ источник правды об API-способности на фронте. Добавляя новый
- * Rust-клиент, добавь запись СЮДА — иначе форма не покажет ему поля секретов, а
- * карточка — кнопку Test.
+ * Источник правды здесь — про ПОКАЗ и про `needsClientIp`, и только про них.
+ * Ответ на вопрос «есть ли API» каталог не даёт сам, а НАСЛЕДУЕТ у
+ * `registrarCaps.registrarSupportsNsApi` (см. `hasApi` ниже): предикат в
+ * проекте должен быть один, иначе один и тот же аккаунт получает два разных
+ * ответа на разных экранах.
+ *
+ * Добавляя новый Rust-клиент, добавь запись СЮДА — иначе форма не покажет ему
+ * поля секретов, а карточка — кнопку Test. Забыть не даст тест согласия в
+ * `registrarProviders.test.ts`: он сверяет ключи с десктопным списком.
  */
 export const API_PROVIDERS = {
   hostiq: { label: "Hostiq", icon: "H", bg: "#fff7ed", color: "#ea580c", needsClientIp: false },
@@ -15,20 +22,53 @@ export const API_PROVIDERS = {
 
 export type ApiProviderKey = keyof typeof API_PROVIDERS;
 
-/** В БД `provider` — свободная строка; "Hostiq"/" hostiq " — один провайдер. */
+/** Читаем каталог только по собственным ключам: `provider` — свободный ввод, а
+ *  `"constructor"`/`"__proto__"`/`"valueOf"` есть у любого объектного литерала
+ *  по прототипу, и обычный `in`/индексация увели бы такое имя в API-ветку с
+ *  `label: undefined` в аватаре. */
+function catalogEntry(key: string): (typeof API_PROVIDERS)[ApiProviderKey] | undefined {
+  return Object.prototype.hasOwnProperty.call(API_PROVIDERS, key)
+    ? API_PROVIDERS[key as ApiProviderKey]
+    : undefined;
+}
+
+/**
+ * Ключ провайдера для списка: дедуп, сравнение, поиск записи в каталоге.
+ *
+ * Trim здесь НАМЕРЕННО, и это ДРУГОЙ вопрос, чем «понимает ли его десктоп»
+ * (`hasApi`, у которого trim нет). Для списка `" hostiq "` и `"Hostiq"` — одна
+ * строка в выпадашке: показывать их двумя пунктами незачем. Для десктопа же это
+ * разные строки, и вторую `make_service` не знает. Расхождение не опечатка:
+ * ключ показа схлопывает мусор, ответ о работоспособности — нет.
+ */
 export function normalizeProvider(provider: string): string {
   return provider.trim().toLowerCase();
 }
 
-/** Есть ли у провайдера рабочий API-клиент. Не в каталоге → ручной. */
+/**
+ * Есть ли у провайдера рабочий API-клиент. Не в каталоге → ручной.
+ *
+ * Делегирует `registrarSupportsNsApi` вместо собственной проверки: тот модуль —
+ * зеркало `make_service` (регистр схлопывает, пробелы НЕТ), и он уже отвечает на
+ * этот вопрос в карточке домена и мастере полной настройки. Свой предикат здесь
+ * означал бы, что `" hostiq "` из чужого импорта получает бейдж «API» и живую
+ * кнопку Test в Settings, а рядом — выключенный «Set NS» и `unknown provider` от
+ * десктопа за кнопкой. Один аккаунт, два ответа, и оптимистичный — ложный.
+ */
 export function hasApi(provider: string): boolean {
-  return normalizeProvider(provider) in API_PROVIDERS;
+  return registrarSupportsNsApi(provider);
 }
 
-/** Нужно ли поле Client IP (сегодня — только Namecheap). */
+/**
+ * Нужно ли поле Client IP (сегодня — только Namecheap).
+ *
+ * Сначала гейт по `hasApi`: у провайдера, которого десктоп не признаёт, полей
+ * API не спрашивают вовсе — иначе форма требовала бы Client IP там, где сама же
+ * не показывает API-способности.
+ */
 export function needsClientIp(provider: string): boolean {
-  const meta = API_PROVIDERS[normalizeProvider(provider) as ApiProviderKey];
-  return !!meta && meta.needsClientIp;
+  if (!hasApi(provider)) return false;
+  return catalogEntry(normalizeProvider(provider))?.needsClientIp ?? false;
 }
 
 export interface ProviderMeta {
@@ -60,16 +100,25 @@ function hashIndex(s: string, mod: number): number {
   return h % mod;
 }
 
-/** Метаданные показа: API — из каталога, ручной — из палитры по хешу имени. */
+/**
+ * Метаданные показа: API — из каталога, ручной — из палитры по хешу имени.
+ *
+ * Ветка выбирается тем же `hasApi`, что решает про кнопку Test: посчитай `api`
+ * здесь своей проверкой — и бейдж «API» разъедется с кнопкой внутри одного
+ * экрана. Поэтому `" hostiq "` рисуется ручным (метка `hostiq`, буква H, цвет из
+ * палитры) — честно: десктоп такую строку не знает.
+ */
 export function providerMeta(provider: string): ProviderMeta {
   const key = normalizeProvider(provider);
-  const api = API_PROVIDERS[key as ApiProviderKey];
+  const api = hasApi(provider) ? catalogEntry(key) : undefined;
   if (api) {
     return { key, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
   }
   const display = provider.trim() || "?";
   const pal = MANUAL_PALETTE[hashIndex(key || "?", MANUAL_PALETTE.length)];
-  return { key, label: display, icon: (display[0] || "?").toUpperCase(), bg: pal.bg, color: pal.color, api: false };
+  // По кодовым точкам, а не `display[0]`: имя с эмодзи или иным символом вне BMP
+  // дало бы в аватаре половину суррогатной пары («\u{FFFD}»).
+  return { key, label: display, icon: ([...display][0] || "?").toUpperCase(), bg: pal.bg, color: pal.color, api: false };
 }
 
 /**
