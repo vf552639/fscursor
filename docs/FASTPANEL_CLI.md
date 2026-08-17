@@ -238,15 +238,64 @@ error: expected command but got "database"
 ⚠️ **Имя БД НЕ выводится из имени домена** (усечение/хеш: боевые имена не совпадают с
 префиксом домена). Поэтому **фильтровать по `site.domain`**, а не по префиксу имени БД.
 
-Прочие подкоманды группы (из `--help`, отдельно не сверялись): `databases servers list`,
-`databases list`, `databases sync`, `databases create --server --name --username
-[--password]`.
+Прочие подкоманды группы: `databases servers list`, `databases list`, `databases sync`,
+`databases create` — их живое поведение сверено в §3.5. Команды удаления БД (`remove`/`delete`)
+в группе **нет**.
 
 ### 3.3 Смены пароля БД через CLI нет
 
 В группе `databases` только `servers list` / `list` / `sync` / `create`. Команды
 обновления/смены пароля БД **нет**. Сменить пароль БД можно только напрямую через `mysql`
 (`ALTER USER ... IDENTIFIED BY ...`), это мутация вне скоупа чтения.
+
+### 3.5 `databases servers list` / `databases create` — **сверено вживую (2026-08-17)** · МУТАЦИЯ
+
+> **Провенанс.** Снято ручным прогоном пробы под root 2026-08-17: одноразовая БД
+> `sdmp_probe_db` создана и убрана в том же прогоне (mysql `DROP` + `databases sync`). Формы
+> ошибок и флаги — фактические.
+
+**`databases servers list --json` · exit 0** — список mysql-серверов (обезличено):
+
+```json
+[{"id":1,"name":"mysql(localhost)","type":"mysql","host":"","port":0,"username":"...","local":true,"avail":true,"use_as_default":false}]
+```
+
+На живой установке сервер **ровно один**, `id:1`. Это и есть значение для `--server`.
+
+**`databases create --help`** — полный набор флагов (важны `--server`, `--site`):
+
+```
+databases create --server=SERVER --name=NAME --username=USERNAME [<flags>]
+  --server=SERVER      database server ID          ← ЧИСЛОВОЙ id, не имя; обязателен
+  -o, --owner="fastuser"  account owner (ignored if --site is provided)
+  -c, --charset="utf8mb4"
+  -u, --username=USERNAME  database user username
+  -p, --password=PASSWORD
+  -s, --site=SITE      website domain to bind database (overrides --owner)
+```
+
+**Успех:** `databases create --server=1 --name=<db> --username=<user> --password=<pwd> --site=<domain>`
+→ exit 0, `database '<db>' created successfully / ID: <n>`.
+
+⚠️ **`--server` принимает только числовой id.** Имя (`mysql(localhost)`) даёт
+`error: parsing "mysql(localhost)": invalid syntax` (exit 1).
+
+⚠️ **`--server` обязателен.** Без него — `error: required flag --server not provided` (exit 1).
+
+⚠️ **Привязка к сайту — только через `--site`.** Без `--site` база создаётся с `site:null` и
+`owner:"fastuser"` (дефолт) — то есть панели формально известна, но НЕ привязана к сайту, не
+попадёт в его бэкапы и `databases_size`. С `--site=<domain>` объект в `databases list` несёт
+`site:{id,domain}` и владельца сайта. **Поэтому фикс обязан передавать `--site=<domain>`**, а
+не только исправить имя команды.
+
+**Повтор (идемпотентность):** та же `databases create` на существующую БД →
+`error: 'database-already-exists'` (exit 1). Это ровно тот маркер, по которому «уже есть» ≠ отказ.
+
+**Удаления БД в CLI нет** (`databases remove`/`delete` отсутствуют). БД, созданную через
+FastPanel, из его учёта убирает `databases sync` после того, как сама база удалена в mysql:
+sync снимает записи, чьей mysql-базы больше нет. Проверено: `sync` тронул только висящую
+пробную запись, боевые не задел. (Обратная сторона исходного бага: mysql-фоллбэк создаёт базу
+БЕЗ записи в FastPanel — её `sync` бы, наоборот, импортировал, но без `site`/`owner`.)
 
 ### 3.4 `database create` — **баг существующего provision** · МУТАЦИЯ
 
