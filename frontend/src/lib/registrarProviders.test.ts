@@ -98,16 +98,20 @@ describe("registrarProviders — состав учётки: API User и подп
 
 describe("registrarProviders — подсказки поля API User", () => {
   /**
-   * Последнее место, где страница знала регистраторов по именам: подпись и
-   * плейсхолдер поля выбирались тернарником по `needsClientIp` — то есть
-   * «нужен ли Client IP» работало прокси для «это Namecheap». Сегодня это не
-   * врёт (в каталоге ровно два провайдера, Client IP ровно у одного), но третий
-   * Rust-клиент с whitelist получил бы чужой `your_namecheap_username`, а без
-   * whitelist — чужой `admin@hostiq.ua`. Подсказки живут в каталоге, рядом с
-   * остальным показом.
+   * Последнее место, где страница знала регистраторов по именам: плейсхолдер
+   * поля выбирался тернарником по `needsClientIp` — то есть «нужен ли Client
+   * IP» работало прокси для «это Namecheap». Сегодня это не врёт (в каталоге
+   * ровно два провайдера, Client IP ровно у одного), но третий Rust-клиент с
+   * whitelist получил бы чужой `your_namecheap_username`. Подсказки живут в
+   * каталоге, рядом с остальным показом.
+   *
+   * Суффикс подписи из возврата убран: у обоих провайдеров он стал пустой
+   * строкой, а потребителей у него было два и РАЗНЫХ — форма создания рисовала
+   * `API User{suffix}`, форма правки просто `API User`. Первый же провайдер,
+   * которому суффикс вернули бы, получил две разные подписи в двух формах.
    */
   it("подсказки берутся у провайдера, а не выводятся из другой способности", () => {
-    expect(apiUserField("Namecheap")).toEqual({ suffix: "", placeholder: "your_namecheap_username" });
+    expect(apiUserField("Namecheap")).toEqual({ placeholder: "your_namecheap_username" });
   });
 
   it("у кого поля нет — у того нет и подсказок: Hostiq, ручной, битый ввод", () => {
@@ -116,7 +120,7 @@ describe("registrarProviders — подсказки поля API User", () => {
     // прежний `admin@hostiq.ua` — и первый читатель принял бы живой плейсхолдер
     // за указание вернуть поле, которого у DI-API v3 не бывает.
     for (const noField of ["hostiq", "HOSTIQ", "GoDaddy", " hostiq ", "", null, undefined]) {
-      expect(apiUserField(noField), String(noField)).toEqual({ suffix: "", placeholder: "" });
+      expect(apiUserField(noField), String(noField)).toEqual({ placeholder: "" });
     }
   });
 });

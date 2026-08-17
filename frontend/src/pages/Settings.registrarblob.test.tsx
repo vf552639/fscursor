@@ -149,8 +149,13 @@ describe("Settings — ключ и секрет регистратора чер�
 
     renderPage([]);
     await openAddModal("namecheap");
+    // С пробелами по краям, как и оба поля секретов ниже: `api_user` их не
+    // тримит на вводе, а `" ncuser "` Namecheap не сматчит — отказ придёт от
+    // API, и связи с набранным у него не будет. Правка тримит логин с самого
+    // начала; создание — только с этой фичи, и половины обязаны совпадать (тот
+    // же аргумент, что у `name`).
     fireEvent.change(screen.getByPlaceholderText("your_namecheap_username"), {
-      target: { value: "ncuser" },
+      target: { value: "  ncuser  " },
     });
     // Оба поля — с пробелами по краям: ключ копируют из панели регистратора
     // вместе с `\n`, а Client IP с пробелом просто не совпадёт с whitelist.
@@ -177,6 +182,12 @@ describe("Settings — ключ и секрет регистратора чер�
 
     const [url, body] = mocks.apiPost.mock.calls[0];
     expect(url).toBe("/registrars/accounts");
+    // `ApiUser` уходит в КАЖДЫЙ запрос Namecheap: без него API отвечает ошибкой
+    // ещё до проверки ключа. Гейт `needsApiUser` снял это поле у Hostiq, и
+    // проверка здесь держит вторую половину — что он не снёс его заодно и тут.
+    // Без этой строки голое `api_user: null` в форме создания проходило все
+    // тесты: аккаунт заводился, а отказ приходил от Namecheap на каждой команде.
+    expect(body.api_user).toBe("ncuser");
     expect(body.api_key_blob_id).toBe(key.blobId);
     expect(body.api_secret_blob_id).toBe(secret.blobId);
     // Ради этих строк и затевался спринт: полей нет, а не «есть, но сервер их
@@ -549,6 +560,39 @@ describe("Settings — ключ и секрет регистратора чер�
     // новое правило на секреты — и правка имени стирала бы рабочий ключ.
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
     expect(body).not.toHaveProperty("api_key_blob_id");
+  });
+
+  it("правка неопознанного провайдера: чужой api_user НЕ стирается", async () => {
+    // Граница чистки проходит по «опознан ли провайдер», а не по «показываем ли
+    // поле»: `needsApiUser` ложен и у того, кого каталог не знает. Случай
+    // достижимый — `" namecheap "` с пробелами из чужого импорта (десктоп такую
+    // строку не признаёт) и рабочим логином панели в колонке. Поля на экране
+    // нет, на карточке `api_user` у не-API провайдера тоже не рисуется — стёртый
+    // логин пропал бы полностью незаметно, а понадобится он в ту же секунду,
+    // когда кто-то поправит `provider` в БД.
+    setTauri(true);
+    const SPACED = { ...MANUAL, id: 11, provider: "  namecheap  ", name: "nc-spaced", api_user: "ncuser" };
+    mocks.apiPut.mockResolvedValue({ ...SPACED, name: "nc-renamed" });
+
+    renderPage([SPACED]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    // Провайдер честно ручной: ни поля логина, ни полей секретов.
+    expect(screen.queryByText("API User")).toBeNull();
+    expect(screen.queryByDisplayValue("ncuser")).toBeNull();
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("nc-spaced"), { target: { value: "nc-renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/registrars/accounts/11");
+    expect(body.name).toBe("nc-renamed");
+    // Единственное утверждение, ради которого тест написан: переименование
+    // логина не касается. Про контракт неопознанного провайдера мы не знаем
+    // ничего — ни что поле мертво, ни что живо, — а значит не трогаем.
+    expect(body.api_user).toBe("ncuser");
   });
 
   it("правка ручного провайдера в вебе: заметки про секреты не прибавляется", async () => {
