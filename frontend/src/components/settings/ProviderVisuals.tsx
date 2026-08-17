@@ -69,3 +69,32 @@ export function ProviderAvatar({ m, size = 28 }: { m: ProviderMeta; size?: numbe
 export function ProviderApiTag({ api }: { api: boolean }) {
   return <Badge variant={api ? "green" : "gray"}>{api ? "API" : "manual"}</Badge>;
 }
+
+/**
+ * Имя провайдера так, как его надо ПОКАЗАТЬ, — и это не всегда `m.label`.
+ *
+ * Обычно это ровно метка, и в разметку не добавляется ни одного лишнего узла
+ * (фрагмент с текстом). Исключение одно: строка в колонке отличается от
+ * тримленной — `"  hostiq  "` после чужого импорта или ручной правки БД. Такую
+ * строку десктоп не знает (`make_service` пробелы не срезает), поэтому аккаунт
+ * честно ручной: ни Test, ни полей секретов, провайдер в правке read-only.
+ * Беда была не в этом, а в том, что `label` тримлен для списка и дедупа — и на
+ * экране оставался опрятный `hostiq` с серым чипом «manual». Со стороны это
+ * читается не как «в данных мусор», а как «приложение не узнало мой Hostiq»:
+ * человек идёт искать баг в приложении, а не строку в базе.
+ *
+ * Поэтому сырая строка показывается в кавычках и с сохранённым пробелом
+ * (`white-space: pre`) — она объясняет себя сама. `label` при этом не тронут:
+ * список, дедуп и поиск по-прежнему видят чистое имя.
+ */
+export function ProviderLabel({ m }: { m: ProviderMeta }) {
+  if (m.raw === m.raw.trim()) return <>{m.label}</>;
+  return (
+    <span
+      title="Stored with spaces around the name. The desktop does not recognise such a provider, so this account counts as manual — fix the value in the database."
+      style={{ whiteSpace: "pre", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
+    >
+      «{m.raw}»
+    </span>
+  );
+}

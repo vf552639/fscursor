@@ -10,7 +10,7 @@ import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave } from "../hooks/useSecretSave";
 import { hasApi, needsClientIp, providerMeta } from "../lib/registrarProviders";
 import { ProviderCombobox } from "../components/settings/ProviderCombobox";
-import { ProviderAvatar, ProviderApiTag } from "../components/settings/ProviderVisuals";
+import { ProviderAvatar, ProviderApiTag, ProviderLabel } from "../components/settings/ProviderVisuals";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 import RecoveryPhraseCard from "./RecoveryPhraseCard";
 
@@ -175,7 +175,10 @@ export default function Settings(){
                   учётку показывает Test своим «✕ Failed». Чинить это надо в форме
                   (обязательность поля), а не в подписи. */}
               <div style={{fontSize:12.5,color:"#6b7280"}}>
-                {m.label}
+                {/* Не `m.label`: у провайдера с мусором в колонке (`"  hostiq  "`)
+                    метка тримлена, и признак поломки исчезал с экрана — см. JSDoc
+                    `ProviderLabel`. В обычном случае это ровно метка. */}
+                <ProviderLabel m={m} />
                 {m.api
                   ? (r.api_user ? <> · <span style={{fontFamily:"monospace"}}>{r.api_user}</span></> : null)
                   : " · manual"}
@@ -560,7 +563,7 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
         <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Provider</label>
         <div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8}}>
           <ProviderAvatar m={m} />
-          <span style={{fontSize:13.5,fontWeight:600,color:"#6b7280"}}>{m.label}</span>
+          <span style={{fontSize:13.5,fontWeight:600,color:"#6b7280"}}><ProviderLabel m={m} /></span>
           <ProviderApiTag api={m.api} />
         </div>
       </div>

@@ -507,6 +507,29 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(screen.getByRole("button", { name: "✕" })).toBeTruthy();
   });
 
+  it("провайдер с пробелами в колонке: сырая строка видна и на карточке, и в правке", async () => {
+    // Случай из жизни: `"  hostiq  "` попал в колонку чужим импортом или ручной
+    // правкой БД. Десктоп такую строку не знает (`unknown provider`), поэтому
+    // аккаунт честно ручной — без Test и без полей секретов. Но метка тримится
+    // для показа, и раньше на экране стоял `hostiq` с чипом manual: символ,
+    // из-за которого аккаунт понижен, был вырезан из UI, и человек шёл искать
+    // баг в приложении вместо строки в БД. Сырая строка в кавычках объясняет
+    // себя сама.
+    setTauri(true);
+    renderPage([{ ...MANUAL, provider: "  hostiq  " }]);
+
+    const exact = { normalizer: (s: string) => s };
+    expect(await screen.findByText("«  hostiq  »", exact)).toBeTruthy();
+    expect(screen.getByText(/· manual/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "🔌 Test" })).toBeNull();
+
+    // В правке — тот же показ: read-only строка провайдера объясняет то же самое
+    // (изнутри UI это не чинится, провайдер там неизменяем осознанно).
+    fireEvent.click(screen.getByRole("button", { name: "✎ Edit" }));
+    expect(screen.getAllByText("«  hostiq  »", exact).length).toBe(2); // карточка + модалка
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+  });
+
   it("карточка API-провайдера сохраняет кнопку Test и api_user", async () => {
     setTauri(true);
     renderPage(); // NAMECHEAP по умолчанию

@@ -132,6 +132,17 @@ describe("registrarProviders — метаданные показа", () => {
     }
   });
 
+  it("raw: строка как она пришла — чтобы показ мог объяснить, почему провайдер ручной", () => {
+    // Метка тримлена (она идёт в список и в дедуп), и из-за этого символ, из-за
+    // которого аккаунт понижен в правах, из UI исчезал: на карточке стояло
+    // `hostiq` с чипом manual, и это читалось как «приложение неправильно
+    // определило мой Hostiq». `raw` держит исходник для показа причины.
+    expect(providerMeta(" hostiq ").raw).toBe(" hostiq ");
+    expect(providerMeta(" hostiq ").label).toBe("hostiq"); // метка чистая, как была
+    expect(providerMeta("namecheap").raw).toBe("namecheap");
+    expect(providerMeta(null).raw).toBe("");
+  });
+
   it("null/undefined: та же '?'-мета, что у пустой строки — функция показа обязана вернуть", () => {
     // `provider` приходит из ответа сервера, где колонка nullable, а зовут
     // `providerMeta` внутри `map` по списку аккаунтов — без error boundary.

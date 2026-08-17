@@ -87,6 +87,17 @@ export interface ProviderMeta {
   bg: string;    // фон аватара
   color: string; // цвет буквы
   api: boolean;  // есть ли API-клиент
+  /**
+   * Строка ровно как она пришла (у `null`/`undefined` — `""`). Нужна ровно для
+   * одного: показать причину, когда она отличается от `label`.
+   *
+   * `label` тримлен — иначе `" hostiq "` и `"Hostiq"` были бы в выпадашке двумя
+   * пунктами. Но у аккаунта с пробелами в колонке из-за этого пропадал с экрана
+   * ЕДИНСТВЕННЫЙ видимый признак поломки: стоял `hostiq` с серым чипом «manual»,
+   * то есть UI выглядел так, будто это приложение не узнало обычный Hostiq.
+   * Показ (`ProviderLabel`) берёт `raw`, список и дедуп — `label`/`key`.
+   */
+  raw: string;
 }
 
 /**
@@ -136,13 +147,13 @@ export function providerMeta(provider: string | null | undefined): ProviderMeta 
   const key = normalizeProvider(raw);
   const api = hasApi(raw) ? catalogEntry(key) : undefined;
   if (api) {
-    return { key, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
+    return { key, raw, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
   }
   const display = raw.trim() || "?";
   const pal = MANUAL_PALETTE[hashIndex(key || "?", MANUAL_PALETTE.length)];
   // По кодовым точкам, а не `display[0]`: имя с эмодзи или иным символом вне BMP
   // дало бы в аватаре половину суррогатной пары («\u{FFFD}»).
-  return { key, label: display, icon: ([...display][0] || "?").toUpperCase(), bg: pal.bg, color: pal.color, api: false };
+  return { key, raw, label: display, icon: ([...display][0] || "?").toUpperCase(), bg: pal.bg, color: pal.color, api: false };
 }
 
 /**
