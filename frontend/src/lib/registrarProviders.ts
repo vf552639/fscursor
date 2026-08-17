@@ -62,10 +62,15 @@ export function normalizeProvider(provider: string): string {
  * десктопа за кнопкой. Один аккаунт, два ответа, и оптимистичный — ложный.
  *
  * Аргумент допускает `null`/`undefined` по той же мотивировке, что у
- * `registrarSupportsNsApi`: колонка `provider` nullable, и «не знаем провайдера»
- * — это ответ «не умеет», а не повод вызывающему писать свой `String(... || "")`.
- * Каждая такая страховка на месте вызова — ещё одна нормализация, которая может
- * разойтись с соседней.
+ * `registrarSupportsNsApi`: «не знаем провайдера» — это ответ «не умеет», а не
+ * повод вызывающему писать свой `String(... || "")`. Каждая такая страховка на
+ * месте вызова — ещё одна нормализация, которая может разойтись с соседней.
+ *
+ * Оговорка, чтобы её не цитировали неверно: колонка `provider` НЕ nullable
+ * (`registrar_account.py`: `nullable=False`, схема ответа — `provider: str`).
+ * Терпимость здесь не про штатный `null` от сервера, а про битый или частичный
+ * ответ и про `undefined` у не до конца собранных объектов — то есть про то,
+ * чтобы одна порченая строка не уносила экран.
  */
 export function hasApi(provider: string | null | undefined): boolean {
   return registrarSupportsNsApi(provider);
@@ -128,7 +133,7 @@ export interface ProviderMeta {
   color: string; // цвет буквы
   api: boolean;  // есть ли API-клиент
   /**
-   * Строка ровно как она пришла (у `null`/`undefined` — `""`). Нужна ровно для
+   * Строка ровно как она пришла (у битого входа — `""`). Нужна ровно для
    * одного: показать причину, когда она отличается от `label`.
    *
    * `label` тримлен — иначе `" hostiq "` и `"Hostiq"` были бы в выпадашке двумя
@@ -176,16 +181,22 @@ function hashIndex(s: string, mod: number): number {
  * экрана. Поэтому `" hostiq "` рисуется ручным (метка `hostiq`, буква H, цвет из
  * палитры) — честно: десктоп такую строку не знает.
  *
- * `null`/`undefined` — законный вход, а не ошибка вызывающего: колонка
- * `provider` nullable, и зовут эту функцию в `map` по списку аккаунтов, где
- * брошенное исключение уносит всю вкладку, а не одну карточку. Функция ПОКАЗА
- * обязана что-то показать на любом входе; «не знаем» показывается как `?` с
- * чипом «manual» — ровно то, что рисовал старый `plMap[provider]`.
+ * `null`/`undefined` — законный вход, а не ошибка вызывающего. Не потому, что
+ * сервер шлёт `null` (колонка `provider` — `nullable=False`, схема ответа
+ * `provider: str`), а потому, что зовут эту функцию в `map` по списку аккаунтов
+ * без error boundary: битый или частичный ответ, `undefined` в недособранном
+ * объекте — и брошенное исключение уносит всю вкладку, а не одну карточку.
+ * Функция ПОКАЗА обязана что-то показать на любом входе; «не знаем»
+ * показывается как `?` с чипом «manual» — ровно то, что рисовал старый
+ * `plMap[provider]`.
  */
 export function providerMeta(provider: string | null | undefined): ProviderMeta {
   const raw = provider ?? "";
   const key = normalizeProvider(raw);
-  const api = hasApi(raw) ? catalogEntry(key) : undefined;
+  // Через собственный `apiEntry`, а не связкой руками: он считает тот же ключ
+  // тем же `normalizeProvider` за тем же гейтом — расписанная копия была бы
+  // третьей репликой паттерна, ради которого хелпер и заведён.
+  const api = apiEntry(raw);
   if (api) {
     return { key, raw, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
   }
@@ -202,7 +213,7 @@ export function providerMeta(provider: string | null | undefined): ProviderMeta 
  * нормализованному ключу. Отдельной таблицы провайдеров нет — «ранее
  * использованные» выводятся из списка аккаунтов, который и так грузится на вкладке.
  */
-export function buildProviderList(accounts: { provider: string }[]): ProviderMeta[] {
+export function buildProviderList(accounts: { provider: string | null | undefined }[]): ProviderMeta[] {
   const seen = new Set<string>();
   const out: ProviderMeta[] = [];
   for (const key of Object.keys(API_PROVIDERS)) {
@@ -210,7 +221,16 @@ export function buildProviderList(accounts: { provider: string }[]): ProviderMet
     seen.add(key);
   }
   for (const acc of accounts) {
-    const key = normalizeProvider(acc.provider);
+    // Терпимость к битой записи — здесь, а не у вызывающего, и по той же
+    // причине, что у `providerMeta`: список строит форма добавления, и одна
+    // порченая строка в чужом аккаунте иначе не даёт открыть форму вовсе
+    // (`normalizeProvider` начинается с `.trim()`). Пустой ключ отсеивается
+    // строкой ниже вместе с пустыми строками — пункта-призрака не появляется.
+    //
+    // Ослаблена сигнатура, а не только выражение: тип «список аккаунтов» здесь
+    // описывает ЧУЖИЕ данные (ответ сервера), и обещать в нём заполненность
+    // поля — то же самое обещание, из-за которого падение и случилось.
+    const key = normalizeProvider(acc.provider ?? "");
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(providerMeta(acc.provider));

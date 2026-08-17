@@ -86,12 +86,17 @@ export function ProviderApiTag({ api }: { api: boolean }) {
  * Поэтому сырая строка показывается в кавычках и с сохранённым пробелом
  * (`white-space: pre`) — она объясняет себя сама. `label` при этом не тронут:
  * список, дедуп и поиск по-прежнему видят чистое имя.
+ *
+ * Тултип по-русски, хотя вокруг английские `Active`/`manual`: это единственное
+ * место фичи, которое даёт ИНСТРУКЦИЮ, а не подпись, и адресат у неё ровно
+ * один — тот, кто пришёл выяснять, почему его Hostiq считается ручным.
+ * Инструкцию читают на языке интерфейса, а он у пользователя русский.
  */
 export function ProviderLabel({ m }: { m: ProviderMeta }) {
   if (m.raw === m.raw.trim()) return <>{m.label}</>;
   return (
     <span
-      title="Stored with spaces around the name. The desktop does not recognise such a provider, so this account counts as manual — fix the value in the database."
+      title="В базе имя провайдера сохранено с пробелами по краям. Такую строку десктоп не распознаёт, поэтому аккаунт считается ручным: ни проверки соединения, ни полей ключа у него нет. Чинится только правкой значения в базе или пересозданием аккаунта."
       style={{ whiteSpace: "pre", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
     >
       «{m.raw}»
