@@ -21,14 +21,23 @@ const WARN_TEXT = "#b45309";
  * умолчанию равна ширине содержимого: без этого длинное имя аккаунта в селекте
  * распирало бы колонку, а не упиралось в неё.
  *
- * Своего заголовка у плашки нет намеренно. Заголовок ей уже даёт первое слово
- * содержимого — `Registrar:` / `Cloudflare:` / `Server:`, — и второй такой же
- * над ним печатал бы одно слово дважды в каждой из трёх плашек. Ровно тот дубль,
- * ради снятия которого карточка и пересобрана.
+ * Своего ВИДИМОГО заголовка у плашки нет намеренно. Заголовок ей уже даёт первое
+ * слово содержимого — `Registrar:` / `Cloudflare:` / `Server:`, — и второй такой
+ * же над ним печатал бы одно слово дважды в каждой из трёх плашек. Ровно тот
+ * дубль, ради снятия которого карточка и пересобрана.
+ *
+ * А вот `role="group"` с тем же именем плашка получает: глазами границу задаёт
+ * фон с рамкой, для скринридера же ряд без ролей — сплошная лента из трёх
+ * селектов и пяти подписей, по которой нельзя ни перескочить связь целиком, ни
+ * понять, к какой из них относится строка-диагноз под селектом. Имя здесь
+ * ДУБЛИРУЕТ видимый ярлык намеренно: это не вторая подпись на экране, а та же
+ * самая, поднятая до имени группы.
  */
-function Plate({ children }: { children: React.ReactNode }) {
+function Plate({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div
+      role="group"
+      aria-label={label}
       style={{
         minWidth: 0,
         background: "#f9fafb",
@@ -64,7 +73,18 @@ function ServerLink({ serverId, server }: { serverId: number | null; server: Ser
   );
   return (
     <div>
-      <b>Server:</b> {serverId == null ? "— Not assigned —" : (server?.name ?? serverId)}
+      {/* Значение — своим узлом, а не голым текстом рядом с ярлыком, по двум
+          причинам сразу. `overflowWrap` ему нужен так же, как ноте под ним:
+          имя сервера пишет пользователь, и «prod-cluster-eu-central-1-web-07»
+          без единого пробела вылезло бы из плашки шириной в треть модалки. А
+          отдельный узел даёт спросить ЗНАЧЕНИЕ отдельно от подписи — иначе
+          проверка «печатаем сырой id вместо молчаливого прочерка» читает весь
+          `textContent` строки вместе с нотой, где тот же id уже назван, и
+          проходит, даже если значение подменить прочерком. */}
+      <b>Server:</b>{" "}
+      <span style={{ overflowWrap: "anywhere" }}>
+        {serverId == null ? "— Not assigned —" : (server?.name ?? serverId)}
+      </span>
       {serverId == null
         ? note(NOTE_TEXT, "A domain gets its server when it is deployed.")
         : server
@@ -114,13 +134,13 @@ export default function DomainLinks({ domain, server, zone, zones, zonesError }:
         marginTop: 14,
       }}
     >
-      <Plate>
+      <Plate label="Registrar">
         <DomainRegistrarField domain={domain} />
       </Plate>
-      <Plate>
+      <Plate label="Cloudflare">
         <DomainCloudflareField domain={domain} zone={zone} zones={zones} zonesError={zonesError} />
       </Plate>
-      <Plate>
+      <Plate label="Server">
         <ServerLink serverId={domain.server_id} server={server} />
       </Plate>
     </div>

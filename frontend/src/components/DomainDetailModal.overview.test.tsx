@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainDetailModal from "./DomainDetailModal";
@@ -119,11 +119,23 @@ function show(over: Record<string, unknown> = {}, servers: any[] = SERVERS) {
   );
 }
 
-/** Значение строки карточки без её подписи. */
+/**
+ * Текст строки карточки без её подписи.
+ *
+ * Именно ВЕСЬ текст строки: у строк простых (`Expires`, `NS`, `Last error`) это
+ * и есть значение, а у плашки ряда связей в тот же узел входит и подпись под
+ * значением. Поэтому спрашивать плашку этим хелпером нельзя — для неё есть
+ * `plate()` ниже.
+ */
 function field(label: string): string {
   const row = screen.getByText(`${label}:`).parentElement;
   if (!row) throw new Error(`строки «${label}» на карточке нет`);
   return (row.textContent ?? "").replace(`${label}:`, "").trim();
+}
+
+/** Плашка ряда связей целиком — чтобы спрашивать внутри неё адресно. */
+function plate(name: string): HTMLElement {
+  return screen.getByRole("group", { name });
 }
 
 function registrarSelect() {
@@ -211,7 +223,7 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
 
   it("сервер назван именем и адресом", () => {
     show();
-    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(within(plate("Server")).getByText("web-01")).toBeTruthy();
     // Тот же адрес секция фактов показывает как FTP Host — и берётся он из
     // того же объекта, а не из второго чтения.
     expect(screen.getAllByText("10.0.0.3").length).toBeGreaterThan(0);
@@ -227,7 +239,11 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
     // Домен на сервере, которого в списке нет (исчез, под фильтром). Прочерк
     // тут выдавал бы существующую связь за её отсутствие.
     show({}, []);
-    expect(field("Server")).toContain("3");
+    // Спрашиваем ЗНАЧЕНИЕ, а не текст всей плашки: id назван и в ноте строкой
+    // ниже, так что проверка по `textContent` плашки прошла бы и на значении,
+    // подменённом прочерком, — то есть не запирала бы ровно то поведение,
+    // ради которого этот тест и написан.
+    expect(within(plate("Server")).getByText("3")).toBeTruthy();
     expect(screen.getByText(/Server #3 is not in the loaded list/)).toBeTruthy();
   });
 
