@@ -439,10 +439,6 @@ impl RegistrarService for HostiqService {
                     .get("status")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                // Пусто не «не разобрали», а «их тут нет»: в `domain/list` нет
-                // ни одного поля с nameservers — проверено на всех 127 доменах
-                // боевого аккаунта.
-                nameservers: vec![],
             });
         }
         Ok(out)
@@ -599,9 +595,6 @@ mod tests {
         assert_eq!(names, vec!["betify2.com", "second.com", "third.com"]);
         assert_eq!(domains[0].expiry_date.as_deref(), Some("2027-01-15"));
         assert_eq!(domains[2].status.as_deref(), Some("Expired"));
-        // NS у Hostiq не отдаёт ни один эндпоинт: пусто здесь — утверждение
-        // «их тут нет», а не потерянный разбор.
-        assert!(domains[0].nameservers.is_empty());
     }
 
     /// Смена NS целиком: имя домена → `domainid` из листинга → тело запроса.

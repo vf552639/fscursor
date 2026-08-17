@@ -6,6 +6,7 @@ import { Zone, useCloudflareZones } from "../api/cloudflare";
 import { RegistryNameservers, useRegistryNameservers } from "../api/rdap";
 import { useRegistrarAccounts } from "../api/registrars";
 import { errorText } from "../api/cfAutoBind";
+import { normalizeZoneName } from "../lib/cfZoneMatch";
 import { NO_VALUE, expiryState, expiryTextColor, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
 import { nsDelegation } from "../lib/nsDelegation";
 import DomainCloudflareField from "./domains/DomainCloudflareField";
@@ -141,13 +142,32 @@ export default function DomainDetailModal({
    * ключи, поэтому и запрос здесь не гейтится провайдером: домен у Dynadot
    * получает такой же живой бейдж, как домен у Namecheap.
    *
-   * Гейт остался один — известные NS зоны: без эталона сверка всё равно даст «не
-   * знаем», а платить за неё пришлось бы походом в чужой публичный сервис на
-   * каждое открытие карточки. В вебе он же и глушит запрос: зоны там не читаются
-   * вовсе (`useCloudflareZones`), так что до `requireDesktop` дело не доходит.
+   * Гейт остался один и он про эталон: спрашиваем, только если сверять БУДЕТ С
+   * ЧЕМ — у домена есть зона, названная его же именем, и у зоны есть NS. Без
+   * этого правило всё равно ответит «не знаем» (`no-zone`,
+   * `zone-name-mismatch`, `zone-nameservers-unknown`), а ответ реестра будет
+   * выброшен — то есть имя нашего домена уехало бы в сторонний RDAP-редиректор
+   * (`rdap.org`, названная цена компромисса) ни за чем, на каждое открытие
+   * карточки. В вебе гейт глушит запрос сам собой: зоны там не читаются вовсе
+   * (`useCloudflareZones`), так что до `requireDesktop` дело не доходит.
+   *
+   * ВАЖНО про соответствие правилу: гейт обязан быть НЕ УЖЕ, чем условия, при
+   * которых `nsDelegation` доходит до ответа реестра. Каждое лишнее условие тут
+   * (например «карточка в фокусе» или свой `isTauri()`) даёт бейдж, вечно
+   * обещающий ответ, которого не будет: правило скажет «ответа ещё нет — ждите»
+   * про запрос, который не запускался. Поэтому сверка имени — тем же
+   * `normalizeZoneName`, что и в правиле, а не своим сравнением; а `length > 0`
+   * здесь считается по СЫРОМУ списку зоны, тогда как правило — по
+   * нормализованному, и сойтись они могут только в одну сторону (нормализация
+   * лишь выбрасывает пустые имена, поэтому непустой нормализованный список
+   * невозможен при пустом сыром).
    */
+  const canCompareWithZone =
+    zoneNameservers.length > 0 &&
+    !!zone &&
+    normalizeZoneName(zone.name) === normalizeZoneName(domain.domain_name);
   const registryNsQ = useRegistryNameservers(
-    zoneNameservers.length > 0 ? domain.domain_name : null,
+    canCompareWithZone ? domain.domain_name : null,
   );
   /**
    * Провал самого запроса — это тоже «спросить не удалось», и приезжать он

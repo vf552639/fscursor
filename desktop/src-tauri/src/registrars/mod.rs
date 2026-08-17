@@ -14,12 +14,24 @@ pub enum RegistrarError {
     NotImplemented,
 }
 
+/// Строка листинга аккаунта регистратора (`get_domains`).
+///
+/// Поля с nameservers здесь НЕТ, и это утверждение, а не пробел: листинг их не
+/// знает НИ У ОДНОГО провайдера. `namecheap.domains.getList` не отдаёт NS вовсе
+/// (в ответе есть только атрибуты домена), а в `domain/list` у Hostiq нет ни
+/// одного поля с nameservers — проверено на всех 127 доменах боевого аккаунта
+/// (`docs/HOSTIQ_API.md` §5).
+///
+/// Поле раньше было и всегда содержало `vec![]` у обоих клиентов — то есть
+/// ловушка ровно того сорта, от которого построена лестница делегирования на
+/// фронте: пустой список неотличим от ответа «у домена нет NS». Отсутствующее
+/// поле такой подмены не допускает: за NS домена идут в реестр (`crate::rdap`),
+/// и только туда.
 #[derive(Debug, Clone, Serialize)]
 pub struct DomainInfo {
     pub domain: String,
     pub expiry_date: Option<String>,
     pub status: Option<String>,
-    pub nameservers: Vec<String>,
 }
 
 /// Что мы просим у API регистратора.

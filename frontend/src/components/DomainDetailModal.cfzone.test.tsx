@@ -438,8 +438,15 @@ describe("делегирование — три состояния и «не з�
     // нашу учётку, — на этом и держится бейдж у провайдеров без API.
     expect(askedRegistry()[0][1]).toEqual({ domain: "example.com" });
     // И ни одной команды с ключами регистратора: чтения NS через его API больше
-    // не существует, выкачки аккаунта — тем более.
-    expect(invoked("registrar_get_nameservers")).toEqual([]);
+    // не существует. Утверждение НЕ про конкретное имя `registrar_get_nameservers`
+    // (такое ловило бы только буквальный возврат удалённой команды и проспало бы
+    // новый путь чтения под другим именем), а про весь канал: карточка ходит с
+    // ключами ровно за зонами Cloudflare и больше ни за чем.
+    expect(new Set(mocks.invokeSynced.mock.calls.map((c: any[]) => c[0]))).toEqual(
+      new Set(["cf_list_zones"]),
+    );
+    // Выкачки аккаунта регистратора — тем более: команда жива, но карточке не
+    // нужна, и вернуть её сюда значило бы платить листингом за один домен.
     expect(invoked("registrar_get_domains")).toEqual([]);
   });
 
@@ -459,6 +466,10 @@ describe("делегирование — три состояния и «не з�
     expect(delegationBadge().textContent).toBe("UNKNOWN");
     // И там, где это чинится, сказано тоже.
     expect(screen.getByText(/Zone other.com is not this domain's zone/)).toBeTruthy();
+    // Реестр при этом не спрашивают: сверять всё равно не с чем, а имя нашего
+    // домена ушло бы в сторонний RDAP-редиректор на каждое открытие карточки.
+    await act(async () => {});
+    expect(askedRegistry()).toEqual([]);
   });
 
   it("pending, пока Cloudflare не подтвердил зону", async () => {
@@ -481,6 +492,40 @@ describe("делегирование — три состояния и «не з�
     await waitFor(() => expect(delegationBadge().textContent).toBe("MISMATCH"));
     expect(screen.getByText(/in registry: ns1.hoster.net, ns2.hoster.net/)).toBeTruthy();
     expect(screen.getByText(/zone: ada.ns.cloudflare.com, bob.ns.cloudflare.com/)).toBeTruthy();
+  });
+
+  it("после удавшегося пуша не велит пушить снова", async () => {
+    setTauri(true);
+    // Домен на дефолтных NS регистратора — состояние ДО пуша.
+    mockReads({ registry: { state: "registered", nameservers: ["dns1.registrar-servers.com", "dns2.registrar-servers.com"] } });
+    show();
+
+    await waitFor(() => expect(delegationBadge().textContent).toBe("MISMATCH"));
+    expect(screen.getByText(/Push the zone's nameservers below/)).toBeTruthy();
+
+    // Пуш удался (мок `registrar_set_nameservers` отвечает `true`), но реестр
+    // отдаёт ВСЁ ЕЩЁ старые NS: распространение занимает минуты-часы.
+    fireEvent.click(nsButton());
+
+    // Бейдж остаётся красным — и это правда, делегирование ещё не сменилось.
+    // Меняться обязан СОВЕТ: единственное, что подпись предлагала, пользователь
+    // только что сделал.
+    expect(await screen.findByText(/has just sent this zone's nameservers to the registrar/)).toBeTruthy();
+    expect(delegationBadge().textContent).toBe("MISMATCH");
+    expect(screen.queryByText(/Push the zone's nameservers below/)).toBeNull();
+  });
+
+  it("удавшийся пуш гасит кэш реестра, а не оставляет бейдж на ответе ДО пуша", async () => {
+    setTauri(true);
+    mockReads({ registry: { state: "registered", nameservers: ["ns1.hoster.net", "ns2.hoster.net"] } });
+    show();
+
+    await waitFor(() => expect(askedRegistry().length).toBe(1));
+    fireEvent.click(nsButton());
+
+    // Без инвалидации `rdapKeys` ответ реестра лежал бы в кэше ещё пять минут
+    // (`staleTime`), и бейдж всё это время показывал бы состояние ДО пуша.
+    await waitFor(() => expect(askedRegistry().length).toBe(2));
   });
 
   it("домен есть в реестре, а NS у него нет — красное «не делегирован никуда», а не серое", async () => {

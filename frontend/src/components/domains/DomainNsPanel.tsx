@@ -56,7 +56,7 @@ export interface DomainNsPanelProps {
   zoneNameservers: string[];
   /** Отказ чтения зон аккаунта — причина, по которой подстановка пуста. */
   zonesError: unknown;
-  /** Итог сверки «NS зоны против NS у регистратора» (`lib/nsDelegation`). */
+  /** Итог сверки «NS зоны против NS домена В РЕЕСТРЕ» (`lib/nsDelegation`). */
   delegation: NsDelegation;
   /**
    * `provider` аккаунта регистратора; `undefined` — аккаунт ещё не прочитан.
@@ -69,7 +69,8 @@ export interface DomainNsPanelProps {
 }
 
 /**
- * Nameservers домена: что у зоны, что у регистратора и чем их свести.
+ * Nameservers домена: что у зоны, куда домен смотрит по данным реестра и чем их
+ * свести.
  *
  * Стоит на том же экране, что и аккаунт Cloudflare, потому что отвечает на ту
  * же половину вопроса: пустое поле NS и погасшая кнопка — это почти всегда
@@ -107,6 +108,21 @@ export default function DomainNsPanel({
     lastSetNs?.status === "error"
       ? String((lastSetNs.error as any)?.message || "Set NS failed")
       : null;
+  /**
+   * Пуш по этому домену только что удался — и это меняет не диагноз, а СОВЕТ под
+   * бейджем.
+   *
+   * Реестр узнаёт о смене NS не сразу (на Hostiq мерили ~20 секунд, у других TLD
+   * это часы), поэтому сразу после удавшегося пуша сверка честно остаётся
+   * `MISMATCH`: делегирование действительно ещё не сменилось, и зелёный бейдж
+   * обещал бы работающий домен. А вот подпись «пропишите NS зоны ниже» велела бы
+   * сделать то, что пользователь только что сделал.
+   *
+   * Читается из той же записи MutationCache, что и `setNsError`: per-call
+   * `onSuccess` умер бы вместе с размонтированием карточки, а ответ регистратора
+   * может прийти уже после её закрытия.
+   */
+  const nsJustPushed = lastSetNs?.status === "success";
 
   const [nsText, setNsText] = useState("");
   /**
@@ -188,7 +204,7 @@ export default function DomainNsPanel({
 
   return (
     <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 10, marginTop: 18, borderTop: "1px solid #f3f4f6", paddingTop: 14 }}>
-      <NsDelegationLine delegation={delegation} />
+      <NsDelegationLine delegation={delegation} nsJustPushed={nsJustPushed} />
       <div style={{ display: "grid", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
@@ -324,8 +340,17 @@ export default function DomainNsPanel({
  * всех провайдеров, поэтому у бейджа нет ни аккаунта, ни провайдера, ни отдельного
  * канала для ошибки чтения — слова реестра приезжают в самом состоянии
  * (`NsDelegation.detail`).
+ *
+ * Единственное, что он знает помимо состояния, — сделал ли пользователь пуш
+ * только что (`nsJustPushed`). Это про СОВЕТ, а не про диагноз: см. ниже.
  */
-function NsDelegationLine({ delegation }: { delegation: NsDelegation }) {
+function NsDelegationLine({
+  delegation,
+  nsJustPushed,
+}: {
+  delegation: NsDelegation;
+  nsJustPushed: boolean;
+}) {
   const label =
     delegation.state === "delegated"
       ? "DELEGATED"
@@ -340,7 +365,7 @@ function NsDelegationLine({ delegation }: { delegation: NsDelegation }) {
         <b>Delegation:</b>
         <Badge variant={nsDelegationVariant(delegation.state)}>{label}</Badge>
         <span style={{ fontSize: 12, color: "#6b7280" }}>
-          {delegationText(delegation)}
+          {delegationText(delegation, nsJustPushed)}
           {/* Слова источника приписываются к причине, а не заменяют её: «не
               знаем» отвечает на вопрос пользователя, а текст реестра («no RDAP
               server for .xyz», «timeout») говорит, ждать ли ответа вообще. */}
@@ -364,8 +389,12 @@ function NsDelegationLine({ delegation }: { delegation: NsDelegation }) {
   );
 }
 
-/** Фраза под бейджем: что именно известно и, для незнания, чего не хватило. */
-function delegationText(d: NsDelegation): string {
+/**
+ * Фраза под бейджем: что именно известно и, для незнания, чего не хватило.
+ *
+ * `justPushed` меняет только совет при расхождении — см. там же, почему.
+ */
+function delegationText(d: NsDelegation, justPushed: boolean): string {
   if (d.state === "delegated") {
     return "The registry points at this zone's nameservers and Cloudflare has confirmed it.";
   }
@@ -373,12 +402,24 @@ function delegationText(d: NsDelegation): string {
     return `The registry points at this zone's nameservers; Cloudflare has not confirmed the delegation yet (zone status: ${d.zoneStatus ?? "unknown"}).`;
   }
   if (d.state === "mismatch") {
-    // Пустой «как есть» — тот же диагноз («не туда») и то же действие («прописать
-    // NS»), но называть его «points somewhere else» было бы неправдой: домен не
-    // делегирован никуда, то есть не работает вовсе.
-    return d.actual.length === 0
-      ? "The registry has no nameservers for this domain — it is not delegated anywhere. Push the zone's nameservers below."
-      : "The registry points somewhere else — push the zone's nameservers below.";
+    // Диагноз и совет собираются отдельно, потому что зависят от разного: первый
+    // — от ответа реестра, второй — от того, что пользователь уже успел сделать.
+    //
+    // Пустой «как есть» — тот же диагноз «не туда», но называть его «points
+    // somewhere else» было бы неправдой: домен не делегирован НИКУДА, то есть не
+    // работает вовсе.
+    const diagnosis =
+      d.actual.length === 0
+        ? "The registry has no nameservers for this domain — it is not delegated anywhere."
+        : "The registry points somewhere else.";
+    // Сразу после удавшегося пуша «Push the zone's nameservers below» велело бы
+    // сделать то, что только что сделано: реестр узнаёт о смене не сразу, а
+    // бейдж честно остаётся красным (делегирование ДЕЙСТВИТЕЛЬНО ещё не
+    // сменилось — зелёный обещал бы работающий домен). Врал бы здесь не цвет, а
+    // единственное действие, которое подпись умеет предложить.
+    return justPushed
+      ? `${diagnosis} SDMP has just sent this zone's nameservers to the registrar — the registry can take a while to catch up.`
+      : `${diagnosis} Push the zone's nameservers below.`;
   }
   switch (d.reason) {
     case "no-zone":
