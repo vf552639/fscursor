@@ -184,7 +184,7 @@ export type FieldSource =
 
 Файлы: `DomainRegistrarField.tsx` (новый), `DomainRegistrarField.test.tsx` (новый).
 
-### Фаза 3 — сводка и ряд связей, пересборка модалки  `[ ]`
+### Фаза 3 — сводка и ряд связей, пересборка модалки  `[x]`
 
 **Новый `frontend/src/components/domains/DomainSummaryBar.tsx`:**
 бейдж `domain.status`, срок домена через существующий `expiryValue`

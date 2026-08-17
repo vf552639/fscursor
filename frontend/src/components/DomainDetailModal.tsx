@@ -7,58 +7,25 @@ import { RegistryNameservers, useRegistryNameservers } from "../api/rdap";
 import { useRegistrarAccounts } from "../api/registrars";
 import { errorText } from "../api/cfAutoBind";
 import { normalizeZoneName } from "../lib/cfZoneMatch";
-import { NO_VALUE, expiryState, expiryTextColor, formatExpiry, formatExpiryDate } from "../lib/domainExpiry";
 import { nsDelegation } from "../lib/nsDelegation";
-import DomainCloudflareField from "./domains/DomainCloudflareField";
+import DomainLinks from "./domains/DomainLinks";
 import DomainNsPanel from "./domains/DomainNsPanel";
 import DomainServerFacts from "./domains/DomainServerFacts";
+import DomainSummaryBar from "./domains/DomainSummaryBar";
 import { Modal } from "./ui/Primitives";
 
 /**
- * Строка карточки. Пустое значение рисуется прочерком, а не пустым местом:
- * незаполненное поле должно читаться как «не знаем», иначе строка «PHP:» без
- * ничего выглядит как обрезанная вёрстка, а не как ответ.
+ * Карточка домена — один экран без вкладок, собранный сверху вниз как ответ на
+ * вопрос «почему домен не работает».
  *
- * Значения `null`, `undefined` и `""` уравнены намеренно: бэкенд отдаёт пустое
- * поле и так и эдак, и разница между «NULL» и «пустая строка» — наша, а не
- * пользователя.
- */
-function Field({ k, v }: { k: string; v: React.ReactNode }) {
-  const empty = v === null || v === undefined || v === "";
-  return (
-    <div>
-      <b>{k}:</b> {empty ? NO_VALUE : v}
-    </div>
-  );
-}
-
-/**
- * Значение поля со сроком: дата и «сколько осталось» рядом, цветом состояния.
- * Дата без остатка требует считать в уме, остаток без даты нечем сверить с
- * письмом регистратора.
- *
- * Неизвестный срок отдаёт `null`, а не прочерк: его дорисует `Field`, и он
- * будет ТЕМ ЖЕ прочерком, что у остальных пустых полей карточки, а не вторым,
- * похожим. Сам символ приходит из `lib/domainExpiry` (`NO_VALUE`) — там он
- * объявлен ответом «мы не знаем», и три копии этого литерала по файлам уже
- * начинали жить своей жизнью.
- *
- * Дата — оттуда же (`formatExpiryDate`), а не из общего `fmtDate`: `expiry_date`
- * приходит датой без времени, и печатать её надо в UTC, иначе западнее UTC
- * карточка называет вчерашний день.
- */
-function expiryValue(iso: string | null | undefined, now: number): React.ReactNode {
-  const state = expiryState(iso, now);
-  if (state === "unknown") return null;
-  return (
-    <span style={{ color: expiryTextColor(state) }}>
-      {formatExpiryDate(iso)} · {formatExpiry(iso, now)}
-    </span>
-  );
-}
-
-/**
- * Карточка домена — один экран без вкладок.
+ * Сначала сводка (статус, срок, SSL), затем ряд связей Registrar → Cloudflare →
+ * Server — это путь запроса к домену, — затем живое состояние сервера и, ниже,
+ * делегирование с полем nameservers. Раньше верх карточки был двумя колонками
+ * «слева чем домен является, справа что развёрнуто на сервере»: колонки не
+ * означали ничего (просто перенос строки посреди списка), а правая ПОВТОРЯЛА
+ * восемь полей секции «Server state» — по нашей записи из provision, тогда как
+ * секция читает те же поля с сервера вживую. Теперь всё про сайт живёт только
+ * там, где оно измерено.
  *
  * Вкладок нет по двум разным причинам. `db`, `ssl` и `nginx` (и кнопка «Create
  * Site») здесь невозможны: их действия бьют в роуты, которых на бэкенде не
@@ -69,6 +36,11 @@ function expiryValue(iso: string | null | undefined, now: number): React.ReactNo
  * и почему не туда»), и разведённые по двум экранам они заставляют собирать
  * ответ из двух мест: зона резолвится на одном, а следствие — пустое поле NS и
  * погасшая кнопка — видно на другом.
+ *
+ * Паролей здесь нет и быть не может: сервер их не знает (FTP и БД показываются
+ * один раз сразу после provision и нигде не хранятся). Пустых полей под них
+ * тоже нет — пустое поле «FTP password: —» обещало бы, что значение
+ * когда-нибудь появится.
  */
 export default function DomainDetailModal({
   domain,
@@ -129,6 +101,14 @@ export default function DomainDetailModal({
   // Провайдер аккаунта регистратора: строка домена знает только его id, а
   // «умеет ли этот регистратор менять NS через API» — вопрос к провайдеру
   // (`lib/registrarCaps`, зеркало `make_service` в десктопе).
+  //
+  // Тот же список читает и `DomainRegistrarField` в ряду связей — дубль ЗДЕСЬ
+  // осознанный, а не недосмотр. Запись кэша у обоих одна (`registrarsKeys
+  // .accounts`), поэтому ни второго похода в сеть, ни расхождения ответов
+  // случиться не может; а пропсом провайдер сюда не приезжает потому, что
+  // ходил бы он снизу вверх — от поля к панели через модалку, — то есть поле
+  // отвечало бы за чужой вопрос («умеет ли регистратор писать NS»), от
+  // которого само отказывается намеренно.
   const registrarAccountsQ = useRegistrarAccounts();
   const registrarProvider = registrarAccountsQ.data?.find((a) => a.id === domain.registrar_id)?.provider;
 
@@ -193,54 +173,36 @@ export default function DomainDetailModal({
 
   return (
     <Modal title={`Domain: ${domain.domain_name}`} onClose={onClose} width={760}>
-      {/* Два столбца: слева — чем домен является (учётки, статус, сроки),
-          справа — что развёрнуто на сервере. В один столбец полтора десятка
-          строк уезжали бы под сгиб модалки.
+      {/* Сводка и ряд связей. Срок домена и бейдж SSL считают те же модули, что
+          и колонки списка (`lib/domainExpiry`, `lib/domainFacts`): два разных
+          ответа про один домен на двух поверхностях хуже, чем отсутствие
+          одного из них. */}
+      <DomainSummaryBar domain={domain} now={now} />
+      <DomainLinks
+        domain={domain}
+        server={server}
+        zone={zone}
+        zones={zones}
+        zonesError={zonesQ.error}
+      />
 
-          Server теперь ИМЯ (проп `servers` доехал — заодно нужен секции фактов
-          для IP FTP-хоста). Registrar остаётся числом: список аккаунтов тут
-          читается ради провайдера, но подставить из него имя — отдельная
-          правка, а не побочный эффект этой. У Cloudflare имя нужно самой
-          функции (выбрать аккаунт и дорезолвить зону), а не только читателю.
-
-          Паролей здесь нет и быть не может: сервер их не знает (FTP и БД
-          показываются один раз сразу после provision и нигде не хранятся).
-          Пустых полей под них тоже нет — пустое поле «FTP password: —» обещало
-          бы, что значение когда-нибудь появится. */}
-      <div style={{ fontSize: 13, color: "#374151", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
-          <Field k="Status" v={domain.status} />
-          {/* Имя сервера, если он найден в списке; иначе — сырой id резервом
-              (домен без сервера или сервер исчез из списка). */}
-          <Field k="Server" v={server?.name ?? domain.server_id} />
-          <Field k="Registrar" v={domain.registrar_id} />
-          <DomainCloudflareField
-            domain={domain}
-            zone={zone}
-            zones={zones}
-            zonesError={zonesQ.error}
-          />
-          {/* Наша запись о последней попытке смены NS — не то же самое, что
-              живая сверка делегирования ниже: одна говорит, что мы делали,
-              вторая — что там на самом деле. */}
-          <Field k="NS" v={`${domain.ns_status ?? "pending"} (${domain.ns_check_mode ?? "auto"})`} />
-          {/* Срок — тем же модулем, что и колонка списка: два разных ответа
-              про один домен на двух поверхностях хуже, чем отсутствие
-              одного из них. */}
-          <Field k="Expires" v={expiryValue(domain.expiry_date, now)} />
-          <Field k="Last error" v={domain.last_provision_error} />
+      <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 6, marginTop: 12 }}>
+        {/* Наша запись о последней попытке смены NS — не то же самое, что
+            живая сверка делегирования внизу карточки: одна говорит, что мы
+            делали, вторая — что там на самом деле. Поэтому она и осталась
+            строкой, а не бейджем: бейджей делегирования на одном экране может
+            быть только один. */}
+        <div>
+          <b>NS:</b> {`${domain.ns_status ?? "pending"} (${domain.ns_check_mode ?? "auto"})`}
         </div>
-        <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
-          <Field k="SSL" v={domain.ssl_status} />
-          <Field k="SSL expires" v={expiryValue(domain.ssl_expires_at, now)} />
-          <Field k="SSL issuer" v={domain.ssl_issuer} />
-          <Field k="PHP" v={domain.php_version} />
-          <Field k="Site user" v={domain.site_user} />
-          <Field k="Site path" v={domain.site_path} />
-          <Field k="FTP user" v={domain.ftp_user} />
-          <Field k="DB name" v={domain.db_name} />
-          <Field k="DB user" v={domain.db_user} />
-        </div>
+        {/* Только когда он есть. Пустая строка «Last error: —» обещает
+            поломку, которой нет, — а прочерк здесь ещё и не отличить от
+            «ошибку мы потеряли». */}
+        {domain.last_provision_error ? (
+          <div>
+            <b>Last error:</b> {domain.last_provision_error}
+          </div>
+        ) : null}
       </div>
 
       {/* Живое чтение с сервера с честной свежестью — отдельно от нашей записи
