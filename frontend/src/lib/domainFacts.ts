@@ -131,3 +131,28 @@ export function sslState(
   // — зелёное утверждение о здоровом сертификате: только под свежий снимок.
   return stale ? "unchecked" : "valid";
 }
+
+/**
+ * Ярлык и цвет бейджа состояния SSL. `unchecked` — серый, зелёный только под
+ * `valid`.
+ *
+ * Живёт рядом с `sslState`, который её и питает, а не в компоненте: читателей у
+ * карты СТАНЕТ двое (секция «Server state» и сводка карточки, которая её
+ * получит), а два экрана, считающих состояние сервера по своей копии правила, в
+ * этом проекте уже разъезжались (принцип №6 CLAUDE.md). Заодно
+ * `Record<SslState, …>` не даст добавить шестое состояние, забыв его
+ * нарисовать: пропуск станет ошибкой типов, а не серым пятном на экране.
+ *
+ * Оговорка: вместе с состоянием сюда уехала и англоязычная ПОДПИСЬ — у соседних
+ * модулей `lib` наружу выходит только токен, а слова остаются у показа. Здесь
+ * иначе ровно затем, чтобы два места не назвали одно состояние по-разному;
+ * появится словарь интерфейса — подписи уйдут в него.
+ */
+export const SSL_BADGE: Record<SslState, { label: string; variant: string }> = {
+  unchecked: { label: "Not checked", variant: "gray" },
+  missing: { label: "No certificate", variant: "red" },
+  expired: { label: "Expired", variant: "red" },
+  expiring: { label: "Expiring soon", variant: "yellow" },
+  valid: { label: "Valid", variant: "green" },
+  error: { label: "Read error", variant: "red" },
+};

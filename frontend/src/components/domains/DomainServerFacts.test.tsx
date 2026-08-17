@@ -10,12 +10,26 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
 
 /**
  * Секция «Server state» карточки домена: витрина прочитанного с сервера с
- * честной свежестью. Проверяем ровно продуктовые правила фазы 3:
+ * честной свежестью — и, после фазы 4, ЕДИНСТВЕННОЕ место карточки, отвечающее
+ * на вопрос «что с сайтом». Проверяем продуктовые правила обеих фаз.
+ *
+ * Фаза 3 (свежесть и секреты):
  *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
  *  - свежесть считается от `fp_facts_at`, «never checked» — отдельное слово;
  *  - провал последней попытки виден, но снимок остаётся;
  *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет;
  *  - лестница SSL: протухший снимок не зелёный, «нет сертификата» отличимо.
+ *
+ * Фаза 4 (наша запись против факта):
+ *  - строка «при развёртывании: X» есть при расхождении и отсутствует при
+ *    совпадении, значением поля остаётся факт;
+ *  - `home` FTP-аккаунта не дублирует путь сайта;
+ *  - домен без снимка не показывает решётки прочерков;
+ *  - пустой список фактов — «не прочитали», а не измеренная пустота.
+ *
+ * Исход правила проверяется по атрибуту `data-source`, а не по инлайн-цвету:
+ * цвет уедет в токены вместе с редизайном, а вопрос «показано как факт или как
+ * наша запись» останется тем же.
  */
 
 const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn(), invokeIfTauri: vi.fn(), apiPut: vi.fn() }));
@@ -89,6 +103,16 @@ function otherMockCalls(): { name: string; blob: string }[] {
     out.push({ name: "apiPut", blob: JSON.stringify(c) });
   }
   return out;
+}
+
+/** Исход правила, которым нарисовано поле с этой подписью. */
+function sourceOf(label: string): string | null {
+  return screen.getByText(label).closest("[data-source]")?.getAttribute("data-source") ?? null;
+}
+
+/** Текст всей строки поля (подпись + значение) — без опоры на вёрстку `Row`. */
+function rowText(label: string): string {
+  return screen.getByText(label).closest("[data-source]")?.textContent ?? "";
 }
 
 function show(over: Record<string, unknown> = {}, server = SERVER) {
@@ -248,5 +272,269 @@ describe("данные сайта", () => {
     expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
     expect(screen.getByText("example_db")).toBeTruthy();
     expect(screen.getByText("/var/log/nginx/example.com.error.log")).toBeTruthy();
+  });
+});
+
+/**
+ * Фаза 4: секция — единственный источник про сайт. Значением поля остаётся ФАКТ,
+ * наша запись из provision всплывает строкой «при развёртывании: X» ровно тогда,
+ * когда расходится с фактом, и становится приглушённым значением там, где факта
+ * нет. Само правило проверено отдельно (`lib/domainDrift.test.ts`) — здесь
+ * проверяется ПОКАЗ: что все три исхода долетают до экрана и что незнание не
+ * превращается в прочерк.
+ */
+describe("расхождение нашей записи с фактом", () => {
+  const fresh = { fp_facts: facts(), fp_facts_at: ago(HOUR) };
+
+  it("совпало — строки «при развёртывании» нет вовсе", () => {
+    show({
+      ...fresh,
+      php_version: "8.2",
+      site_path: "/var/www/example.com/", // хвостовой слэш — не расхождение
+      site_user: "example_usr",
+      db_name: "example_db",
+      ssl_issuer: "Let's Encrypt",
+    });
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("PHP разошёлся: значением остаётся факт, наша запись — серой строкой", () => {
+    show({ ...fresh, php_version: "7.4" });
+    expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
+    expect(screen.getByText(/при развёртывании: 7\.4/)).toBeTruthy();
+  });
+
+  it("путь, владелец, издатель и база расходятся каждый своей строкой", () => {
+    show({
+      ...fresh,
+      site_path: "/var/www/old.example.com",
+      site_user: "old_usr",
+      ssl_issuer: "ZeroSSL",
+      db_name: "old_db",
+    });
+    // Множеством, а не списком в DOM-порядке: перестановка колонок — вопрос
+    // вёрстки, и красить ею тест про поведение незачем.
+    const notes = screen.getAllByText(/при развёртывании/).map((n) => n.textContent);
+    expect(notes).toHaveLength(4);
+    expect(new Set(notes)).toEqual(
+      new Set([
+        "при развёртывании: ZeroSSL",
+        "при развёртывании: /var/www/old.example.com",
+        "при развёртывании: old_usr",
+        "при развёртывании: old_db",
+      ]),
+    );
+  });
+
+  it("логин FTP: значение — живой аккаунт сервера, наш удалённый уходит в строку", () => {
+    // Регрессия, ради которой правка и сделана: раньше значением поля была НАША
+    // запись, и удалённый с сервера аккаунт печатался как живой.
+    show({
+      ...fresh,
+      fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }),
+      ftp_user: "example_ftp",
+    });
+    expect(rowText("Login")).toContain("server_ftp");
+    expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+  });
+
+  it("пробельная запись не заслоняет живой аккаунт сервера", () => {
+    // `ftp_user` из одних пробелов правило чистит и отвечает `agree`, а сырая
+    // строка при этом truthy: наивное `domain.ftp_user || facts[0]` напечатало
+    // бы пустоту вместо реального логина — тот же дефект, только незаметнее.
+    show({ ...fresh, fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }), ftp_user: "   " });
+    expect(rowText("Login")).toContain("server_ftp");
+    expect(sourceOf("Login")).toBe("agree");
+  });
+
+  it("срок сертификата сверяется по дате, а наша запись печатается по-человечески", () => {
+    // Часы задаём ЛОКАЛЬНЫЕ: «тот же день» не должен зависеть от зоны CI.
+    const at = (days: number, hour: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      d.setHours(hour, 0, 0, 0);
+      return d;
+    };
+    const base = {
+      fp_facts: facts({
+        ssl: { has_certificate: true, expires_at: at(60, 9).toISOString(), issuer: "Let's Encrypt", is_letsencrypt: true },
+      }),
+      fp_facts_at: ago(HOUR),
+    };
+
+    // Тот же день, другое время — не расхождение (наша запись сделана в момент
+    // выпуска, сервер отдаёт то, что написано в сертификате).
+    show({ ...base, ssl_expires_at: at(60, 18).toISOString() });
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+
+    cleanup();
+    // Другой день — расхождение, и в строке стоит ДАТА, а не сырой ISO: иначе
+    // она читалась бы расхождением с форматированным значением над ней.
+    const other = at(62, 9);
+    show({ ...base, ssl_expires_at: other.toISOString() });
+    const note = screen.getByText(/при развёртывании/).textContent ?? "";
+    expect(note).toContain(other.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }));
+    expect(note).not.toContain("T");
+  });
+});
+
+describe("«Accounts on server»: перечень не повторяет уже сказанного", () => {
+  it("home совпал с путём сайта (с точностью до хвостового слэша) — не печатается", () => {
+    // Второй аккаунт — чтобы перечень вообще рисовался: проверяем именно
+    // гашение `home`, а не гашение блока.
+    show({
+      fp_facts: facts({
+        ftp_accounts: [
+          { login: "example_ftp", home: "/var/www/example.com/" },
+          { login: "second_ftp", home: "/home/second" },
+        ],
+      }),
+      fp_facts_at: ago(HOUR),
+    });
+    expect(screen.getByText("Accounts on server")).toBeTruthy();
+    expect(screen.queryByText(/· \/var\/www\/example\.com/)).toBeNull();
+    expect(screen.getByText(/· \/home\/second/)).toBeTruthy();
+  });
+
+  it("home отличается от пути сайта — печатается", () => {
+    show({
+      fp_facts: facts({ ftp_accounts: [{ login: "example_ftp", home: "/home/example_usr" }] }),
+      fp_facts_at: ago(HOUR),
+    });
+    expect(screen.getByText(/· \/home\/example_usr/)).toBeTruthy();
+  });
+
+  it("единственный аккаунт уже напечатан полем Login — блока нет вовсе", () => {
+    // Иначе перечень — это одна строка, дословно повторяющая строку над собой
+    // в той же колонке: логин тот же, `home` погашен как копия пути сайта.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(rowText("Login")).toContain("example_ftp");
+    expect(screen.queryByText("Accounts on server")).toBeNull();
+  });
+
+  it("рядом есть второй аккаунт — печатается ВЕСЬ перечень, включая основной", () => {
+    // Блок гасится целиком или показывается целиком: список, из которого молча
+    // изъят основной логин, врал бы своему заголовку «Accounts on server».
+    show({
+      fp_facts: facts({
+        ftp_accounts: [
+          { login: "example_ftp", home: "/var/www/example.com" },
+          { login: "second_ftp", home: "/var/www/example.com" },
+        ],
+      }),
+      fp_facts_at: ago(HOUR),
+    });
+    const roster = screen.getByText("Accounts on server").parentElement?.textContent ?? "";
+    expect(roster).toContain("example_ftp");
+    expect(roster).toContain("second_ftp");
+  });
+
+  it("гашение считается против ПОКАЗАННОГО логина, а не против нашей записи", () => {
+    // Наша запись `example_ftp` разошлась с сервером, поэтому полем `Login`
+    // показан факт `server_ftp` — и перечень из него одного ничего не
+    // добавляет, хотя с нашей записью он и не совпадает.
+    show({
+      fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: "/var/www/example.com" }] }),
+      fp_facts_at: ago(HOUR),
+      ftp_user: "example_ftp",
+    });
+    expect(rowText("Login")).toContain("server_ftp");
+    expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+    expect(screen.queryByText("Accounts on server")).toBeNull();
+  });
+});
+
+describe("снимка не было ни разу", () => {
+  it("вместо решётки прочерков — одна строка словами", () => {
+    show({ ftp_user: null });
+    expect(screen.getByText("Never checked")).toBeTruthy();
+    expect(screen.getByText(/Сервер ещё не читали/)).toBeTruthy();
+    // Прочерков нет ни одного: Host берётся у сервера, Port — константа, а
+    // поля снимка спрятаны целиком, потому что прочерк в них читался бы как
+    // «спросили, там пусто».
+    expect(screen.queryAllByText("—")).toEqual([]);
+  });
+
+  it("известное из provision показано как наша запись, а подпись дана легендой один раз", () => {
+    show({ ftp_user: "example_ftp", site_path: "/var/www/example.com", db_user: "example_dbu" });
+    expect(sourceOf("Login")).toBe("recorded-only");
+    expect(sourceOf("Path")).toBe("recorded-only");
+    expect(sourceOf("DB user")).toBe("recorded-only");
+    for (const v of ["example_ftp", "/var/www/example.com", "example_dbu"]) {
+      expect(screen.getByText(v)).toBeTruthy();
+    }
+    // Подпись плана дана дословно, но ОДИН раз — легендой над сеткой, а не
+    // восемью одинаковыми строками под каждым полем (принцип №2).
+    expect(screen.getAllByText(/из provision, на сервере не проверено/)).toHaveLength(1);
+    // И ни одно значение не выдано за расхождение: сверять было не с чем.
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("факты без отметки времени не печатаются вопреки легенде", () => {
+    // Пара «`fp_facts` есть, `fp_facts_at` нет» бэкендом не производится (обе
+    // колонки пишутся одной транзакцией), но если разъедется — секция не должна
+    // сказать «ещё не читали» и тут же напечатать список аккаунтов сервера.
+    show({ fp_facts: facts(), fp_facts_at: null });
+    expect(screen.getByText(/Сервер ещё не читали/)).toBeTruthy();
+    expect(screen.queryByText("Accounts on server")).toBeNull();
+    expect(screen.queryByText("8.2 · php-fpm")).toBeNull();
+  });
+
+  it("домен без сервера: Host остаётся прочерком", () => {
+    // Единственный прочерк, который тут законен: адрес FTP-хоста — это IP
+    // сервера, и его отсутствие значит «сервера у домена нет», а не «не читали».
+    // `show` подставляет сервер по умолчанию, поэтому рендерим напрямую.
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DomainServerFacts domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("Host").parentElement?.textContent).toContain("—");
+  });
+});
+
+describe("пустой список фактов — незнание, а не измеренная пустота", () => {
+  // Тот же вердикт, что выносит `compareInList` в `lib/domainDrift`: провод
+  // схлопывает в `[]` и «на сервере правда пусто», и упавшую команду, и слабый
+  // mysql-фолбэк. Прочерк читался бы как «спросили, там пусто» — то есть один
+  // и тот же ответ сервера получал бы на экране и в правиле разные вердикты.
+  const empty = { fp_facts: facts({ databases: [], ftp_accounts: [] }), fp_facts_at: ago(HOUR) };
+
+  it("баз не прочитали и своей записи нет — «not read», а не прочерк", () => {
+    show(empty);
+    expect(rowText("Databases")).toContain("not read");
+    expect(rowText("Databases")).not.toContain("—");
+  });
+
+  it("аккаунтов FTP не прочитали и своей записи нет — «not read», а не прочерк", () => {
+    show({ ...empty, ftp_user: null });
+    expect(rowText("Login")).toContain("not read");
+    expect(rowText("Login")).not.toContain("—");
+  });
+
+  it("своя запись есть — она и становится значением, расхождением её не объявляют", () => {
+    show({ ...empty, db_name: "example_db", ftp_user: "example_ftp" });
+    expect(sourceOf("Databases")).toBe("recorded-only");
+    expect(sourceOf("Login")).toBe("recorded-only");
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    // Здесь подпись печатается у поля: снимок ЕСТЬ, легенды над сеткой нет, и
+    // сказать «этого мы не прочитали» больше негде.
+    expect(screen.getAllByText("из provision, на сервере не проверено")).toHaveLength(2);
+  });
+});
+
+describe("DB user", () => {
+  it("наша запись есть — поле показано с подписью «на сервере не проверено»", () => {
+    // Пользователей баз FastPanel CLI не отдаёт вовсе, поэтому исход всегда
+    // `recorded-only`, даже под свежим снимком.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR), db_user: "example_dbu" });
+    expect(screen.getByText("DB user")).toBeTruthy();
+    expect(screen.getByText("example_dbu")).toBeTruthy();
+    expect(screen.getByText("из provision, на сервере не проверено")).toBeTruthy();
+  });
+
+  it("записи нет — строки нет вовсе, а не прочерк: факта тут не бывает никогда", () => {
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(screen.queryByText("DB user")).toBeNull();
   });
 });

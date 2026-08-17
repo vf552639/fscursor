@@ -121,7 +121,14 @@ export default function DomainCloudflareField({
         value={accountId == null ? "" : String(accountId)}
         onChange={(e: ChangeEvent<HTMLSelectElement>) => pickAccount(e.target.value)}
         disabled={update.isPending}
-        style={{ padding: "4px 8px", fontSize: 12.5 }}
+        // `maxWidth` — поле стоит в плашке ряда связей шириной в треть модалки
+        // (~200px), а `<select>` тянется по самой широкой опции и наружу из
+        // своей колонки: grid-элемент содержимое не клипует. Без ограничения
+        // длинное имя аккаунта наезжало бы на соседнюю плашку, а `overflowY`
+        // модалки (он превращает `overflow-x` из `visible` в `auto`) добавлял
+        // бы к этому горизонтальный скролл всей карточки. То же лечение, что у
+        // соседнего поля регистратора.
+        style={{ padding: "4px 8px", fontSize: 12.5, maxWidth: "100%" }}
       >
         <option value="">— No Cloudflare account —</option>
         {accounts.map((a) => (
@@ -131,7 +138,12 @@ export default function DomainCloudflareField({
         ))}
       </Sel>
       {update.isError ? (
-        <div role="alert" style={{ fontSize: 12, color: ERROR_TEXT, marginTop: 4 }}>
+        // `overflowWrap` — чужая ошибка приезжает телом ответа: URL или JSON без
+        // единого пробела не перенесётся сам и уедет за край плашки.
+        <div
+          role="alert"
+          style={{ fontSize: 12, color: ERROR_TEXT, marginTop: 4, overflowWrap: "anywhere" }}
+        >
           Could not save: {clip(errorText(update.error))}
         </div>
       ) : null}
@@ -181,8 +193,12 @@ function ZoneNote({
   accountName: string | undefined;
   saveFailed: boolean;
 }) {
+  // `overflowWrap` — в текстах ниже сидят неразрывные токены: 32-символьный id
+  // зоны («Saved zone {zoneId} is not in this account») и имя домена. В плашке
+  // ряда связей (~200px) такая строка вылезала бы за её край; у обеих соседних
+  // плашек их подписи уже переносятся по любому месту.
   const note = (color: string, text: React.ReactNode) => (
-    <div style={{ fontSize: 12, color, marginTop: 3 }}>{text}</div>
+    <div style={{ fontSize: 12, color, marginTop: 3, overflowWrap: "anywhere" }}>{text}</div>
   );
   // Аккаунта нет — говорить про зону нечего: сообщение «зона не найдена» под
   // пустым селектом читалось бы как поломка, а это просто непривязанный домен.
