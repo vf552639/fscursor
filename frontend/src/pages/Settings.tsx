@@ -8,6 +8,8 @@ import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave } from "../hooks/useSecretSave";
+import { hasApi, needsClientIp } from "../lib/registrarProviders";
+import { ProviderCombobox } from "../components/settings/ProviderCombobox";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
 import RecoveryPhraseCard from "./RecoveryPhraseCard";
 
@@ -26,14 +28,11 @@ import RecoveryPhraseCard from "./RecoveryPhraseCard";
  * чего Namecheap отбивал вызовы по whitelist. Отказ формы честнее, чем
  * заведённый аккаунт, который не работает и не говорит почему. У Hostiq поля
  * нет, ключ не объявляется, `api_secret_blob_id` остаётся NULL — и это верно:
- * этот параметр Hostiq не получает вовсе.
+ * этот параметр Hostiq не получает вовсе. У ручного провайдера (`hasApi` = false)
+ * не объявляется НИ ОДИН из двух: полей секретов у него нет, и оба `*_blob_id`
+ * остаются NULL — ярлык, по которому раскладывают домены, а не учётка.
  */
 const REGISTRAR_SECRETS = { apiKey: "API key", apiSecret: "Client IP" } as const;
-
-/** Client IP получает только Namecheap: Hostiq этот параметр не читает вовсе. */
-function usesClientIp(provider: string): boolean {
-  return provider.toLowerCase() === "namecheap";
-}
 
 export default function Settings(){
   const { data: registrarsData, isPending, isError, error } = useRegistrarAccounts();
@@ -151,7 +150,7 @@ export default function Settings(){
           </div>
         </Card>;
       })}
-      {showAdd && <AddRegistrarModal onClose={()=>setSA(false)} />}
+      {showAdd && <AddRegistrarModal onClose={()=>setSA(false)} accounts={registrars} />}
     </>}
     {tab==="system"&&<Card>
       <CHd><CTi>⚙ System Configuration</CTi></CHd>
@@ -234,16 +233,23 @@ export default function Settings(){
 /**
  * Добавление аккаунта регистратора. Отдельный экспортируемый компонент, а не
  * блок внутри страницы, ровно по той же причине, что и `AddServerModal`:
- * гварды `isTauri()` на трёх полях секретов и кнопке сохранения — это
- * последний рубеж на случай второго вызывающего, и проверить его можно, только
- * отрендерив форму НАПРЯМУЮ. Пока она была инлайном, веб-тест мог лишь кликнуть
- * кнопку, которой в вебе нет, и все утверждения о содержимом выполнялись
- * вакуумно — мутация «все гварды в `true`» проходила зелёной.
+ * гварды `isTauri()` на полях секретов и кнопке сохранения — это последний
+ * рубеж на случай второго вызывающего, и проверить его можно, только отрендерив
+ * форму НАПРЯМУЮ. Пока она была инлайном, веб-тест мог лишь кликнуть кнопку,
+ * которой в вебе нет, и все утверждения о содержимом выполнялись вакуумно —
+ * мутация «все гварды в `true`» проходила зелёной.
  *
  * Плейнтексты стирать при закрытии больше не нужно: страница монтирует форму
  * условно, и `useMultiSecretSave` уезжает вместе с ней.
+ *
+ * `accounts` — заведённые аккаунты, из них выпадашка достаёт «ранее
+ * использованных» провайдеров. Проп НЕобязателен намеренно: это обогащение
+ * списка, а не входные данные формы. Пустой список — законное состояние (первый
+ * запуск, ноль аккаунтов: в выпадашке остаётся API-каталог и «создать своего»),
+ * поэтому дефолт `[]` ничего не прячет; зато прямой рендер формы — тот самый
+ * веб-тест гвардов выше — остаётся про гварды, а не про списки.
  */
-export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
+export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => void; accounts?: { provider: string }[] }) {
   const [provider,setProvider]=useState<RegistrarProvider>("hostiq");
   const [accName, setAccName] = useState("");
   const [apiUser, setApiUser] = useState("");
@@ -252,26 +258,44 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
   const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
   const createReg = useCreateRegistrarAccount();
 
+  // Есть ли у провайдера рабочий API-клиент в десктопе. От этого зависит ВСЁ
+  // остальное в форме: набор полей, состав объявленных секретов и тело POST.
+  const api = hasApi(provider);
+
   const handleAdd = async () => {
     // На СОЗДАНИИ ключи объявляются всегда: пропущенный ключ значит
     // `*_blob_id = NULL` — тот самый 200 OK и «registrar account has no
     // api_key_blob_id» в каждой команде. «Не меняем» бывает только на правке.
     // Client IP объявляем ровно тогда, когда у формы есть его поле.
+    //
+    // Ручной провайдер идёт ТЕМ ЖЕ путём, с пустым `secrets`, а не отдельной
+    // веткой мимо хука. Пустой набор — рабочий путь `saveAll` (им же ходит
+    // «переименование без секретов» в правке): записывать нечего, `persist`
+    // всё равно зовётся. Ветка в обход стоила бы обоих каналов обратной связи
+    // на ту же кнопку — `saving` (не гаснет → двойной клик заводит два
+    // аккаунта) и `error` (упавший POST не показать некуда).
     const ok = await secrets.saveAll({
-      secrets: {
-        apiKey: { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: null },
-        ...(usesClientIp(provider)
-          ? { apiSecret: { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: null } }
-          : {}),
-      },
+      secrets: api
+        ? {
+            apiKey: { blobKind: BLOB_KIND.registrarApiKey, existingBlobId: null },
+            ...(needsClientIp(provider)
+              ? { apiSecret: { blobKind: BLOB_KIND.registrarApiSecret, existingBlobId: null } }
+              : {}),
+          }
+        : {},
       persist: async (blobIds) => {
         await createReg.mutateAsync({
           provider,
           name: accName,
-          api_user: apiUser,
-          api_key_blob_id: blobIds.apiKey,
-          // Спредом, а не `api_secret_blob_id: undefined`: у Hostiq поля быть
-          // не должно вовсе, а ключ со значением undefined — это уже поле.
+          // У ручного провайдера учётных полей нет вовсе: `api_user` уезжает
+          // жёстким `null`, а не остатком от провайдера, выбранного до него.
+          api_user: api ? apiUser : null,
+          // Спредом, а не `*_blob_id: undefined`: полей, которых у провайдера
+          // быть не должно, в теле быть не должно тоже, а ключ со значением
+          // undefined — это уже ключ (серверная схема `extra="forbid"`).
+          // У API-провайдера `apiKey` здесь есть всегда: он объявлен выше, а
+          // пустой плейнтекст хук отбивает до первой записи.
+          ...(blobIds.apiKey ? { api_key_blob_id: blobIds.apiKey } : {}),
           ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
         });
       },
@@ -282,9 +306,21 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
   // Провайдер меняет НАБОР полей — и поэтому сбрасывает набранное: Client IP,
   // набранный для Namecheap, на Hostiq в сохранение уже не попадёт, а плейнтекст
   // жил бы до размонтирования; ошибка «Client IP is required» после переключения
-  // ссылалась бы на поле, которого на экране нет. Во время записи блоба не
-  // пускаем вовсе: `setError` упавшей записи приземлился бы на форму с другим
-  // набором полей.
+  // ссылалась бы на поле, которого на экране нет. Переход на ручного провайдера —
+  // тот же случай, только резче: полей секретов у него нет вовсе, и набранный
+  // ключ иначе лежал бы в форме невидимым до её закрытия. Во время записи блоба
+  // не пускаем вовсе: `setError` упавшей записи приземлился бы на форму с другим
+  // набором полей (сам комбобокс на это время тоже погашен — это второй рубеж).
+  //
+  // Сравнение строгое, а не по `normalizeProvider`: провайдер теперь свободная
+  // строка и в колонку уезжает как есть, так что «GoDaddy» при текущем «godaddy» —
+  // другое значение, и записать надо именно новое. Отличаться регистром при этом
+  // могут только ручные ярлыки (у каталожных пунктов наружу уходит нормализованный
+  // ключ, см. `ProviderCombobox`), а у них полей секретов нет — сбрасывать нечего.
+  //
+  // `apiUser` намеренно НЕ сбрасываем: это не секрет, а логин, и он всегда виден
+  // в своём поле, когда поле показано. У ручного провайдера в POST вместо него
+  // уезжает жёсткий `null` (см. `handleAdd`) — незаметно утечь ему некуда.
   const switchProvider = (next: RegistrarProvider) => {
     if (secrets.saving || next === provider) return;
     setProvider(next);
@@ -299,45 +335,35 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
   return <Modal title="Add Registrar Account" onClose={closeIfIdle} width={480}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Account Name</label><Inp value={accName} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setAccName((e.target as any).value)} placeholder="e.g., Hostiq Main"/></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          {[
-            ["hostiq","Hostiq","H","#fff7ed","#ea580c"],
-            ["namecheap","Namecheap","N","#fef2f2","#dc2626"]
-          ].map(([k,l,ic,bg,c])=>(
-            <div key={k} onClick={()=>switchProvider(k as RegistrarProvider)} style={{padding:"12px 16px",border:`2px solid ${provider===k?"#2563eb":"#e5e7eb"}`,borderRadius:9,cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"all 0.15s",background:provider===k?"#eff4ff":"#fff"}}>
-              <div style={{width:32,height:32,borderRadius:7,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:c,fontSize:14}}>{ic}</div>
-              <span style={{fontSize:13.5,fontWeight:600,color:provider===k?"#2563eb":"#374151"}}>{l}</span>
-            </div>
-          ))}
-        </div>
+      <div>
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:8}}>Provider</label>
+        {/* Список, а не две карточки: провайдером может быть любой — у Hostiq и
+            Namecheap есть Rust-клиент, остальные заводятся ярлыком. Что уходит
+            наружу (ключ каталога против ярлыка) и почему всё тримится — JSDoc
+            `ProviderCombobox`. */}
+        <ProviderCombobox value={provider} accounts={accounts} disabled={secrets.saving} onChange={switchProvider} />
       </div>
-      {/* Почему в вебе полей нет вовсе — JSDoc `DesktopOnlyNote`.
+      {/* Поля учётных данных — только у провайдера с рабочим API-клиентом
+          (`hasApi`), а не у зашитого имени: ручному ярлыку набирать нечего, его
+          ключ никто не прочитает, и лишний блоб был бы секретом, который не
+          используется никогда.
+
+          Почему в вебе полей нет вовсе — JSDoc `DesktopOnlyNote`.
           `trim` на вводе: ключ копируют из панели регистратора, и `\n` в
           хвосте иначе зашифруется как часть секрета — «сохранено» и отказ
           API без всякой связи с формой. Client IP с пробелом просто не
           совпадёт с whitelist. */}
-      {provider==="hostiq"?<>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User (email)</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder="admin@hostiq.ua"/></div>
+      {api ? <>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User{needsClientIp(provider) ? "" : " (email)"}</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={needsClientIp(provider) ? "your_namecheap_username" : "admin@hostiq.ua"}/></div>
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
           {isTauri() ? (
-            <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="••••••••••••••••"/>
+            <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder={needsClientIp(provider) ? "••••••••" : "••••••••••••••••"}/>
           ) : (
             <DesktopOnlyNote what="Saving secrets" />
           )}
         </div>
-      </>:<>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder="your_namecheap_username"/></div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-          <div>
-            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
-            {isTauri() ? (
-              <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="••••••••"/>
-            ) : (
-              <DesktopOnlyNote what="Saving secrets" />
-            )}
-          </div>
+        {needsClientIp(provider) && <>
           <div>
             {/* Поле было нарисовано, но ни к чему не подключено: набранный
                 IP никуда не уезжал, и аккаунт Namecheap нельзя было
@@ -350,18 +376,25 @@ export function AddRegistrarModal({ onClose }: { onClose: () => void }) {
               <DesktopOnlyNote what="Saving secrets" />
             )}
           </div>
-        </div>
-        <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
-      </>}
+          <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
+        </>}
+      </> : null}
     </div>
     {secrets.error && (
       <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
     )}
     {/* Страница в вебе сюда не пускает (на месте кнопки заметка) — но это
-        ПЕРВЫЙ рубеж, а этот последний: он переживёт второго вызывающего. */}
+        ПЕРВЫЙ рубеж, а этот последний: он переживёт второго вызывающего.
+        Создание живёт только в десктопе и для ручного провайдера тоже: веб
+        «только смотрит» (CLAUDE.md §3), и исключение из этого правила по
+        признаку «тут нет секретов» разошлось бы с остальными формами.
+
+        Имя аккаунта обязательно: у ручного провайдера оно ЕДИНСТВЕННОЕ, что
+        отличает заполненную форму от пустой (секретов, которые отбил бы хук,
+        у него нет), и без этой проверки клик заводил бы безымянный ярлык. */}
     {isTauri() && (
       <div style={{display:"flex",gap:8,marginTop:22}}>
-        <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>
+        <Btn variant="primary" onClick={handleAdd} disabled={secrets.saving || !accName.trim()} style={{flex:1,justifyContent:"center"}}>{secrets.saving ? "Adding..." : "Add Account"}</Btn>
       </div>
     )}
     {/* Cancel есть всегда (форма обязана иметь выход), но гаснет на время
@@ -375,7 +408,9 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   const [apiUser, setApiUser] = useState(registrar.api_user || "");
   const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
   const update = useUpdateRegistrarAccount(registrar.id);
-  const hasClientIp = usesClientIp(String(registrar.provider || ""));
+  // Тот же предикат, что у формы создания и у карточки: два ответа на вопрос
+  // «нужен ли этому провайдеру Client IP» уже разъезжались (см. Фазу 1 плана).
+  const hasClientIp = needsClientIp(String(registrar.provider || ""));
 
   const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
     name: name.trim(),

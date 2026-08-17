@@ -87,7 +87,11 @@ function renderPage(accounts: any[] = [NAMECHEAP]) {
 
 async function openAddModal(provider: "hostiq" | "namecheap") {
   fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
-  if (provider === "namecheap") fireEvent.click(screen.getByText("Namecheap"));
+  if (provider === "namecheap") {
+    // Комбобокс вместо карточек: открыть и выбрать опцию.
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
+  }
   fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), {
     target: { value: "reg-new" },
   });
@@ -176,6 +180,77 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
     expect(blobPlaintext(blobOfKind("registrar_api_key"))).toBe(API_KEY);
     expect(mocks.apiPost.mock.calls[0][1]).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("ручной провайдер: без полей секретов, создаётся с null-блобами", async () => {
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ id: 9, provider: "GoDaddy", name: "gd", api_user: null,
+      is_active: true, api_key_blob_id: null, api_secret_blob_id: null,
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
+
+    renderPage([]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "GoDaddy" } });
+    fireEvent.click(screen.getByText(/Создать/));
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
+
+    // Полей секретов нет вовсе.
+    expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
+    expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+
+    // Ни одного блоба; тело без ссылок на секреты.
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    const [url, body] = mocks.apiPost.mock.calls[0];
+    expect(url).toBe("/registrars/accounts");
+    expect(body.provider).toBe("GoDaddy");
+    expect(body).not.toHaveProperty("api_key_blob_id");
+    expect(body).not.toHaveProperty("api_secret_blob_id");
+    // Поле API User у ручного провайдера не показано — значит и уехать в аккаунт
+    // ему нечем: `null`, а не пустая строка и не остаток от прошлого провайдера.
+    expect(body.api_user).toBeNull();
+  });
+
+  it("ручной провайдер: упавшее создание показывает ошибку и не закрывает форму", async () => {
+    // Ради этого теста ручной провайдер и идёт ЧЕРЕЗ `saveAll` с пустым
+    // `secrets`, а не мимо хука: ветка в обход осталась бы без единственного
+    // канала ошибки (`secrets.error`) и без `saving` на кнопке — упавший POST
+    // не показал бы пользователю ничего.
+    setTauri(true);
+    mocks.apiPost.mockRejectedValue(new Error("provider name already taken"));
+
+    renderPage([]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "GoDaddy" } });
+    fireEvent.click(screen.getByText(/Создать/));
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "provider name already taken",
+    );
+    // Форма на экране: набранное имя цело, повтор не требует начинать заново.
+    expect((screen.getByPlaceholderText("e.g., Hostiq Main") as HTMLInputElement).value).toBe("gd");
+  });
+
+  it("имя аккаунта обязательно: без него «Add Account» выключена", async () => {
+    setTauri(true);
+    renderPage([]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
+
+    // Пустое имя — единственное, что отличает форму ручного провайдера от
+    // готовой к отправке: секретов у него нет, и без этой проверки клик завёл бы
+    // безымянный аккаунт.
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "  " } });
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("объявленный, но пустой Client IP отказывает ДО первой записи блоба", async () => {
@@ -317,7 +392,8 @@ describe("Settings — ключ и секрет регистратора чер�
     });
     expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
 
-    fireEvent.click(screen.getByText("Namecheap"));
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
     expect(screen.queryByPlaceholderText("127.0.0.1")).toBeNull();
 
