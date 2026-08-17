@@ -15,6 +15,14 @@ pub enum AeadError {
     TooShort,
 }
 
+/// A fresh random key. This is how a vault key is born: it is chosen, never derived,
+/// which is exactly what lets the password change without touching a single blob.
+pub fn random_key() -> Key {
+    let mut key = Key::default();
+    dryoc::rng::copy_randombytes(&mut key);
+    key
+}
+
 /// Layout: nonce (24) || libsodium secretbox easy blob (mac || ciphertext).
 pub fn encrypt(plaintext: &[u8], key: &Key) -> Result<Vec<u8>, AeadError> {
     let mut nonce = Nonce::default();
@@ -69,6 +77,14 @@ mod tests {
         let pt = b"data";
         let ct = encrypt(pt, &[1u8; KEY_LEN]).unwrap();
         assert!(matches!(decrypt(&ct, &[2u8; KEY_LEN]), Err(AeadError::Decrypt)));
+    }
+
+    /// Не «ключи разные» ради разности: одинаковые VK у двух аккаунтов означали бы,
+    /// что обёртка одного открывает блобы другого.
+    #[test]
+    fn random_key_is_not_a_constant() {
+        assert_ne!(random_key(), random_key());
+        assert_ne!(random_key(), [0u8; KEY_LEN]);
     }
 
     #[test]

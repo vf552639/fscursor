@@ -23,7 +23,7 @@ async fn reg_service(
     handle: &State<'_, SyncHandle>,
     account_id: &str,
 ) -> Result<(Box<dyn RegistrarService>, Option<Uuid>), CommandError> {
-    let mut key = keychain::load_master_key(user_id)
+    let mut key = keychain::load_vault_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let path = cache_path(handle)?;
@@ -101,7 +101,7 @@ pub(crate) fn registrar_provider(
     handle: &State<'_, SyncHandle>,
     account_id: &str,
 ) -> Result<String, CommandError> {
-    let mut key = keychain::load_master_key(user_id)
+    let mut key = keychain::load_vault_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let path = cache_path(handle)?;

@@ -37,6 +37,13 @@ pub struct LoginStartResponse {
 #[derive(Debug, Deserialize)]
 pub struct LoginFinishResponse {
     pub user_id: String,
+    /// `aead(VK, KEK)`, 72 байта в base64. `None` — аккаунт заведён до перехода на
+    /// ключ хранилища: у него VK == KEK, и обёртку клиенту предстоит проставить
+    /// самому через `/auth/vault-key/init`. `serde(default)` тут не удобство, а
+    /// та же ветка: сервер отдаёт `null` явно, но старый бэкенд поля не пришлёт
+    /// вовсе, и оба случая означают ровно одно.
+    #[serde(default)]
+    pub wrapped_vault_key_b64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +69,11 @@ pub struct UserMeResponse {
     /// ту, что уже записана на бумаге.
     #[serde(default)]
     pub recovery_configured: Option<bool>,
+    /// Та же обёртка, что и в `LoginFinishResponse`. Нужна ровно на одной развилке:
+    /// `/auth/vault-key/init` ответил 409, гонку выиграло другое устройство, и
+    /// правильная обёртка теперь та, что лежит на сервере, а не своя.
+    #[serde(default)]
+    pub wrapped_vault_key_b64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +110,9 @@ struct RegisterBody<'a> {
     recovery_blob_b64: String,
     /// Argon2id(phrase, salt=b"sdmp-recovery-v1", ctx="sdmp-recovery-key-v1"); required.
     recovery_auth_key_b64: String,
+    /// `aead(VK, KEK)`; required. A new account is born with a vault key — NULL in that
+    /// column means something else entirely ("registered before the migration").
+    wrapped_vault_key_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,9 +136,30 @@ struct RecoveryFinishBody<'a> {
     new_salt_b64: String,
     new_auth_key_b64: String,
     new_recovery_blob_b64: String,
+    /// The unchanged VK, rewrapped under the new password's KEK. Required: without it
+    /// the rotated salt and password would cut the owner off from their own blobs.
+    new_wrapped_vault_key_b64: String,
     /// Only when recovery issued a NEW phrase; null keeps the stored hash. Sending the
     /// wrong thing here (or nothing, after a rotation) makes the account unrecoverable.
     new_recovery_auth_key_b64: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VaultKeyInitBody {
+    wrapped_vault_key_b64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChangePasswordBody {
+    /// Step-up: the server verifies this against the stored hash, so a stolen cookie
+    /// alone cannot rotate the password.
+    old_auth_key_b64: String,
+    new_salt_b64: String,
+    new_auth_key_b64: String,
+    /// The same VK as before, wrapped under the new password. There is no
+    /// `re_encrypted_blobs` field any more, and no re-encryption behind it: blobs are
+    /// keyed by the VK, and the VK is what a password change deliberately leaves alone.
+    new_wrapped_vault_key_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,6 +279,7 @@ impl ApiClient {
         auth_key: &[u8; 32],
         recovery_blob: &[u8],
         recovery_auth_key: &[u8; 32],
+        wrapped_vault_key: &[u8],
     ) -> Result<RegisterResponse, ApiError> {
         let body = RegisterBody {
             email,
@@ -250,6 +287,7 @@ impl ApiClient {
             auth_key_b64: B64.encode(auth_key),
             recovery_blob_b64: B64.encode(recovery_blob),
             recovery_auth_key_b64: B64.encode(recovery_auth_key),
+            wrapped_vault_key_b64: B64.encode(wrapped_vault_key),
         };
         let resp = self
             .http
@@ -359,6 +397,7 @@ impl ApiClient {
         new_salt: &[u8; 16],
         new_auth_key: &[u8; 32],
         new_recovery_blob: &[u8],
+        new_wrapped_vault_key: &[u8],
         new_recovery_auth_key: Option<&[u8; 32]>,
     ) -> Result<RecoveryFinishResponse, ApiError> {
         let body = RecoveryFinishBody {
@@ -367,6 +406,7 @@ impl ApiClient {
             new_salt_b64: B64.encode(new_salt),
             new_auth_key_b64: B64.encode(new_auth_key),
             new_recovery_blob_b64: B64.encode(new_recovery_blob),
+            new_wrapped_vault_key_b64: B64.encode(new_wrapped_vault_key),
             new_recovery_auth_key_b64: new_recovery_auth_key.map(|k| B64.encode(k)),
         };
         let resp = self
@@ -384,6 +424,49 @@ impl ApiClient {
             });
         }
         Ok(serde_json::from_str(&text)?)
+    }
+
+    /// Pin the VK wrapper onto an account registered before the vault-key migration
+    /// (the column is still NULL). Session cookie required.
+    ///
+    /// 409 is not a failure to shout about: it means another device won the race and
+    /// wrote its own wrapper first. Before the migration VK == KEK, so both wrappers
+    /// open into the same key — the caller re-reads `/auth/me` and keeps the stored one.
+    pub async fn vault_key_init(&self, wrapped_vault_key: &[u8]) -> Result<(), ApiError> {
+        let body = VaultKeyInitBody {
+            wrapped_vault_key_b64: B64.encode(wrapped_vault_key),
+        };
+        let resp = self
+            .http
+            .post(self.url("auth/vault-key/init"))
+            .json(&body)
+            .send()
+            .await?;
+        self.expect_ok(resp).await
+    }
+
+    /// Rotate the password: new salt, new auth key, and the same VK under a new wrapper.
+    /// Blobs are not part of this request and never were meant to be.
+    pub async fn password_change(
+        &self,
+        old_auth_key: &[u8; 32],
+        new_salt: &[u8; 16],
+        new_auth_key: &[u8; 32],
+        new_wrapped_vault_key: &[u8],
+    ) -> Result<(), ApiError> {
+        let body = ChangePasswordBody {
+            old_auth_key_b64: B64.encode(old_auth_key),
+            new_salt_b64: B64.encode(new_salt),
+            new_auth_key_b64: B64.encode(new_auth_key),
+            new_wrapped_vault_key_b64: B64.encode(new_wrapped_vault_key),
+        };
+        let resp = self
+            .http
+            .post(self.url("auth/password/change"))
+            .json(&body)
+            .send()
+            .await?;
+        self.expect_ok(resp).await
     }
 
     /// (Re)configure recovery from a live session. The only way an account whose
@@ -625,6 +708,7 @@ mod tests {
                 "auth_key_b64": B64.encode([2u8;32]),
                 "recovery_blob_b64": B64.encode(b"blob"),
                 "recovery_auth_key_b64": B64.encode([3u8;32]),
+                "wrapped_vault_key_b64": B64.encode([7u8;72]),
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"user_id": "u-1"})))
             .mount(&srv)
@@ -632,14 +716,15 @@ mod tests {
 
         let c = ApiClient::new(format!("{}/api", srv.uri()));
         let r = c
-            .register("a@b.c", &[1u8; 16], &[2u8; 32], b"blob", &[3u8; 32])
+            .register("a@b.c", &[1u8; 16], &[2u8; 32], b"blob", &[3u8; 32], &[7u8; 72])
             .await
             .unwrap();
         assert_eq!(r.user_id, "u-1");
     }
 
     /// The proof key must be on the wire; without it the backend answers 422 and
-    /// recovery is dead. The exact-body matcher makes a dropped field a 404 -> failure.
+    /// recovery is dead. Same for the rewrapped vault key: the backend requires it, and
+    /// the exact-body matcher makes a dropped field a 404 -> failure.
     #[tokio::test]
     async fn recovery_finish_sends_proof_and_no_rotation_by_default() {
         let srv = MockServer::start().await;
@@ -651,6 +736,7 @@ mod tests {
                 "new_salt_b64": B64.encode([1u8;16]),
                 "new_auth_key_b64": B64.encode([2u8;32]),
                 "new_recovery_blob_b64": B64.encode(b"blob"),
+                "new_wrapped_vault_key_b64": B64.encode([6u8;72]),
                 "new_recovery_auth_key_b64": null,
             })))
             .respond_with(
@@ -661,7 +747,15 @@ mod tests {
 
         let c = ApiClient::new(format!("{}/api", srv.uri()));
         let r = c
-            .recovery_finish("a@b.c", &[4u8; 32], &[1u8; 16], &[2u8; 32], b"blob", None)
+            .recovery_finish(
+                "a@b.c",
+                &[4u8; 32],
+                &[1u8; 16],
+                &[2u8; 32],
+                b"blob",
+                &[6u8; 72],
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(r.user_id.as_deref(), Some("u-1"));
@@ -678,6 +772,7 @@ mod tests {
                 "new_salt_b64": B64.encode([1u8;16]),
                 "new_auth_key_b64": B64.encode([2u8;32]),
                 "new_recovery_blob_b64": B64.encode(b"blob"),
+                "new_wrapped_vault_key_b64": B64.encode([6u8;72]),
                 "new_recovery_auth_key_b64": B64.encode([5u8;32]),
             })))
             .respond_with(
@@ -693,6 +788,7 @@ mod tests {
             &[1u8; 16],
             &[2u8; 32],
             b"blob",
+            &[6u8; 72],
             Some(&[5u8; 32]),
         )
         .await
@@ -712,10 +808,124 @@ mod tests {
 
         let c = ApiClient::new(format!("{}/api", srv.uri()));
         let err = c
-            .recovery_finish("a@b.c", &[4u8; 32], &[1u8; 16], &[2u8; 32], b"blob", None)
+            .recovery_finish(
+                "a@b.c",
+                &[4u8; 32],
+                &[1u8; 16],
+                &[2u8; 32],
+                b"blob",
+                &[6u8; 72],
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::Status { status: 401, .. }));
+    }
+
+    /// Обёртка VK из ответа входа — то, чем десктоп открывает всё остальное.
+    #[tokio::test]
+    async fn login_finish_reads_the_vault_key_wrapper() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/login/finish"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "u-1",
+                "wrapped_vault_key_b64": B64.encode([8u8;72]),
+            })))
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let r = c.login_finish("a@b.c", &[9u8; 32], None).await.unwrap();
+        assert_eq!(
+            r.wrapped_vault_key_b64.as_deref(),
+            Some(B64.encode([8u8; 72]).as_str())
+        );
+    }
+
+    /// `null` и отсутствие поля — одно и то же состояние: «аккаунт заведён до
+    /// перехода», по которому идёт ленивая миграция. Споткнись разбор здесь — ни один
+    /// старый аккаунт не смог бы войти вовсе, поэтому проверяются обе формы ответа.
+    #[tokio::test]
+    async fn login_finish_without_a_wrapper_reads_as_none() {
+        for body in [
+            json!({"user_id": "u-1"}),
+            json!({"user_id": "u-1", "wrapped_vault_key_b64": null}),
+        ] {
+            let srv = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/auth/login/finish"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+                .mount(&srv)
+                .await;
+
+            let c = ApiClient::new(format!("{}/api", srv.uri()));
+            let r = c.login_finish("a@b.c", &[9u8; 32], None).await.unwrap();
+            assert_eq!(r.user_id, "u-1");
+            assert_eq!(r.wrapped_vault_key_b64, None, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn vault_key_init_sends_the_wrapper() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/vault-key/init"))
+            .and(body_json(&json!({
+                "wrapped_vault_key_b64": B64.encode([6u8;72]),
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.vault_key_init(&[6u8; 72]).await.unwrap();
+    }
+
+    /// 409 обязан доехать до вызывающего как статус, а не как «api error»-строка:
+    /// именно по нему он решает перечитать `/auth/me` и взять чужую обёртку вместо
+    /// своей. Схлопни это в общую ошибку — вход у проигравшего гонку встанет.
+    #[tokio::test]
+    async fn vault_key_init_surfaces_the_409_of_a_lost_race() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/vault-key/init"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(json!({"detail": "vault key already initialized"})),
+            )
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        let err = c.vault_key_init(&[6u8; 72]).await.unwrap_err();
+        assert!(matches!(err, ApiError::Status { status: 409, .. }));
+    }
+
+    /// Точный матчер тела здесь держит главное свойство смены пароля: в запросе
+    /// ровно четыре поля и ни одного блоба. Поле `re_encrypted_blobs` из контракта
+    /// исчезло вместе с необходимостью что-либо перешифровывать.
+    #[tokio::test]
+    async fn password_change_sends_the_new_wrapper_and_nothing_about_blobs() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/password/change"))
+            .and(body_json(&json!({
+                "old_auth_key_b64": B64.encode([1u8;32]),
+                "new_salt_b64": B64.encode([2u8;16]),
+                "new_auth_key_b64": B64.encode([3u8;32]),
+                "new_wrapped_vault_key_b64": B64.encode([4u8;72]),
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let c = ApiClient::new(format!("{}/api", srv.uri()));
+        c.password_change(&[1u8; 32], &[2u8; 16], &[3u8; 32], &[4u8; 72])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -42,6 +42,7 @@ pub fn run() {
             commands::auth::auth_recovery,
             commands::auth::auth_recovery_setup,
             commands::auth::auth_recovery_status,
+            commands::auth::auth_change_password,
             commands::vault::vault_decrypt_blob,
             commands::vault::vault_put_blob,
             commands::vault::vault_delete_blob,

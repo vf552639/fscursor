@@ -11,7 +11,7 @@ use crate::commands::sync_cmd::SyncHandle;
 use crate::crypto::aead;
 use crate::sync::http::ApiClient;
 
-/// Забрать зашифрованный blob по id и расшифровать его master-key'ом.
+/// Забрать зашифрованный blob по id и расшифровать его ключом хранилища (VK).
 pub(crate) async fn blob_plaintext(
     api: &ApiClient,
     key: &[u8; 32],

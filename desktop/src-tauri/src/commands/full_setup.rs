@@ -312,7 +312,7 @@ async fn save_zone_id(
 /// это формат `thiserror`, а не контракт).
 fn preflight(user_id: &str, handle: &State<'_, SyncHandle>) -> Result<(), CommandError> {
     cache_path(handle)?;
-    let mut key = keychain::load_master_key(user_id)
+    let mut key = keychain::load_vault_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     // Ключ нужен был только как ответ на «сейф открыт?»: работать им будут

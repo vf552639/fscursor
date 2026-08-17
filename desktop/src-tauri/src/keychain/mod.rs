@@ -2,6 +2,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use keyring::Entry;
 use zeroize::Zeroize;
 
+/// Имя записи в связке ключей: сервис + `user_id`. Переименование функций вокруг
+/// (master key → vault key) его НЕ касается — сменить эту строку значит потерять
+/// ключ на всех уже установленных копиях.
 const SERVICE: &str = "com.sdmp.desktop";
 
 #[derive(Debug, thiserror::Error)]
@@ -16,7 +19,7 @@ fn entry_for(user_id: &str) -> Result<Entry, KeychainError> {
     Ok(Entry::new(SERVICE, user_id)?)
 }
 
-/// Сохранить мастер-ключ пользователя. Это UPSERT — и собран он вручную,
+/// Сохранить ключ хранилища (VK) пользователя. Это UPSERT — и собран он вручную,
 /// потому что `set_password` перестаёт быть upsert'ом при первой же осечке
 /// ЧТЕНИЯ. Под капотом (`security-framework`, `SecKeychain::set_generic_password`):
 ///
@@ -42,10 +45,15 @@ fn entry_for(user_id: &str) -> Result<Entry, KeychainError> {
 /// пор `mdat` записи не двигался — ни один вход не проходил.
 ///
 /// ПОЧЕМУ СНЕСТИ И ЗАПИСАТЬ ЗАНОВО — ЭТО ВЕРНО, А НЕ ОБХОД. Запись наша (сервис
-/// = наш bundle id, аккаунт = наш `user_id`), а значение — ДЕТЕРМИНИРОВАННЫЙ
-/// вывод из пароля и соли (`kdf::derive_master_key`), который мы держим в руках
-/// прямо сейчас. Это перезапись своего кеша тем же значением, а не потеря
-/// секрета: терять нечего.
+/// = наш bundle id, аккаунт = наш `user_id`), а значение мы держим в руках прямо
+/// сейчас и умеем добыть заново: VK лежит на сервере обёрнутым в KEK
+/// (`users.wrapped_vault_key`), а KEK выводится из пароля и соли. Связка ключей
+/// здесь — кеш, а не единственный экземпляр секрета, поэтому её перезапись
+/// ничего не теряет.
+///
+/// Единственная копия VK — не здесь, а в recovery-блобе и серверной обёртке;
+/// если когда-нибудь появится путь, кладущий сюда ключ, которого больше нигде
+/// нет, эта ветка перестанет быть безопасной, и пересматривать придётся её.
 ///
 /// ПОЧЕМУ ПОВТОР ГЕЙТИТСЯ УДАЛЕНИЕМ, А НЕ РАЗБОРОМ КОДА ОШИБКИ. Код
 /// `errSecDuplicateItem` наружу не выходит: `keyring` прячет причину в
@@ -54,7 +62,7 @@ fn entry_for(user_id: &str) -> Result<Entry, KeychainError> {
 /// достаточный гейт: оно проходит ровно тогда, когда запись есть и снять её нам
 /// разрешено. Не прошло — возвращаем ИСХОДНУЮ ошибку записи, а не ошибку
 /// удаления: спрашивали-то мы про запись, и подмена увела бы диагноз второй раз.
-pub fn store_master_key(user_id: &str, key: &[u8; 32]) -> Result<(), KeychainError> {
+pub fn store_vault_key(user_id: &str, key: &[u8; 32]) -> Result<(), KeychainError> {
     let encoded = B64.encode(key);
     let first = match entry_for(user_id)?.set_password(&encoded) {
         Ok(()) => return Ok(()),
@@ -68,7 +76,7 @@ pub fn store_master_key(user_id: &str, key: &[u8; 32]) -> Result<(), KeychainErr
     }
 }
 
-pub fn load_master_key(user_id: &str) -> Result<Option<[u8; 32]>, KeychainError> {
+pub fn load_vault_key(user_id: &str) -> Result<Option<[u8; 32]>, KeychainError> {
     match entry_for(user_id)?.get_password() {
         Ok(s) => {
             let mut bytes = B64.decode(s.as_bytes()).map_err(|_| KeychainError::Decode)?;
@@ -86,7 +94,7 @@ pub fn load_master_key(user_id: &str) -> Result<Option<[u8; 32]>, KeychainError>
     }
 }
 
-pub fn forget_master_key(user_id: &str) -> Result<(), KeychainError> {
+pub fn forget_vault_key(user_id: &str) -> Result<(), KeychainError> {
     match entry_for(user_id)?.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
@@ -103,7 +111,7 @@ mod tests {
     ///
     /// Пока он был отключён, `keyring` стоял в `Cargo.toml` без платформенной
     /// фичи и собирался с mock-стором: `set_password` отвечал `Ok(())`, ничего
-    /// не сохранив, а `get_password` — всегда `NoEntry`. Мастер-ключ не
+    /// не сохранив, а `get_password` — всегда `NoEntry`. Ключ хранилища не
     /// сохранялся ни разу, `vault_put_blob` падал на `keychain: locked`, и
     /// **ни один секрет нельзя было записать** — при 191 зелёном тесте.
     /// Единственный тест, который бы это поймал, стоял с `#[ignore]`.
@@ -114,7 +122,7 @@ mod tests {
     /// Сторож обычного пути upsert'а: повторная запись поверх существующей
     /// обязана положить НОВОЕ значение, а не упасть и не оставить старое.
     ///
-    /// Честно про границы: тот отказ, ради которого `store_master_key` переписан
+    /// Честно про границы: тот отказ, ради которого `store_vault_key` переписан
     /// (запись есть, но ACL не отдаёт её на чтение), этим тестом НЕ
     /// воспроизводится и воспроизведён быть не может — ACL привязан к подписи
     /// бинарника, а тестовый бинарник подписан иначе, чем `.app`, и подделать
@@ -124,21 +132,21 @@ mod tests {
     #[test]
     fn store_overwrites_existing_entry() {
         let user = "test_user_id_for_overwrite_test";
-        store_master_key(user, &[1u8; 32]).unwrap();
-        store_master_key(user, &[2u8; 32]).unwrap();
-        assert_eq!(load_master_key(user).unwrap().unwrap(), [2u8; 32]);
-        forget_master_key(user).unwrap();
-        assert!(load_master_key(user).unwrap().is_none());
+        store_vault_key(user, &[1u8; 32]).unwrap();
+        store_vault_key(user, &[2u8; 32]).unwrap();
+        assert_eq!(load_vault_key(user).unwrap().unwrap(), [2u8; 32]);
+        forget_vault_key(user).unwrap();
+        assert!(load_vault_key(user).unwrap().is_none());
     }
 
     #[test]
     fn keychain_roundtrip() {
         let user = "test_user_id_for_unit_tests";
         let key = [13u8; 32];
-        store_master_key(user, &key).unwrap();
-        let loaded = load_master_key(user).unwrap().unwrap();
+        store_vault_key(user, &key).unwrap();
+        let loaded = load_vault_key(user).unwrap().unwrap();
         assert_eq!(loaded, key);
-        forget_master_key(user).unwrap();
-        assert!(load_master_key(user).unwrap().is_none());
+        forget_vault_key(user).unwrap();
+        assert!(load_vault_key(user).unwrap().is_none());
     }
 }
