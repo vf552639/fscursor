@@ -2,7 +2,7 @@ import React, { useState } from "react";
 
 import { Domain, useReadDomainFacts, useUpdateDomain } from "../../api/domains";
 import { Server } from "../../api/servers";
-import { SslState, isFactsStale, sslState } from "../../lib/domainFacts";
+import { SSL_BADGE, isFactsStale, sslState } from "../../lib/domainFacts";
 import { formatExpiryDate } from "../../lib/domainExpiry";
 import { BLOB_KIND } from "../../lib/secretBlob";
 import { isTauri } from "../../lib/runtime";
@@ -48,16 +48,6 @@ function SubTitle({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-
-/** Ярлык и цвет бейджа состояния SSL. `unchecked` — серый, зелёный только под `valid`. */
-const SSL_BADGE: Record<SslState, { label: string; variant: string }> = {
-  unchecked: { label: "Not checked", variant: "gray" },
-  missing: { label: "No certificate", variant: "red" },
-  expired: { label: "Expired", variant: "red" },
-  expiring: { label: "Expiring soon", variant: "yellow" },
-  valid: { label: "Valid", variant: "green" },
-  error: { label: "Read error", variant: "red" },
-};
 
 export default function DomainServerFacts({
   domain,
