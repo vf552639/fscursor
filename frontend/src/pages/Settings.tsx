@@ -146,7 +146,12 @@ export default function Settings(){
         // `m.api` — тот же предикат `hasApi`, что решает про поля формы: отдельный
         // вызов рядом с `providerMeta` был бы вторым ответом на один вопрос, и
         // бейдж «API» однажды разъехался бы с кнопкой Test внутри одной строки.
-        const m = providerMeta(r.provider);
+        //
+        // `String(... || "")` — та же страховка, что у `EditRegistrarModal`: строка
+        // приходит из ответа сервера, а `providerMeta` начинает с `.trim()`. Старый
+        // рендер на `null` просто показывал «?», новый упал бы вместе со всей
+        // страницей; пустое имя даёт ровно тот же честный «?» и подпись manual.
+        const m = providerMeta(String(r.provider || ""));
         return <Card key={r.id} style={{marginBottom:12}}>
           <div style={{padding:"16px 20px",display:"flex",alignItems:"center",gap:14}}>
             <ProviderAvatar m={m} size={38} />
