@@ -80,28 +80,41 @@ mysql `DROP` + `databases sync`; боевые БД не задеты). Форм�
 - **Удаления БД в CLI нет.** FastPanel-запись реконсилится `databases sync` после mysql `DROP`.
   Обратная сторона исходного бага: mysql-фоллбэк создаёт базу вообще без записи FastPanel.
 
-### Фаза 2 — Починка `create_database`  `[ ]`
+### Фаза 2 — Починка `create_database`  `[x]`
 
-Решения приняты по итогам фазы 1:
+**Реализовано (2026-08-17).** Команда в `create_database` заменена на
+`<fp> databases create --server=<id> --name=<db> --username=<user> --password=<pass> --site=<domain>`.
+Добавлена `fastpanel_db_server(s, fp_path) -> Option<i64>` (+ чистый парсер `parse_db_server_id`):
+читает `databases servers list --json`, отдаёт id ТОЛЬКО при ровно одном mysql-сервере; ноль/несколько/
+недоступно → `None` → сразу mysql-фоллбэк без угадывания. Ступень с ед. ч. `database` удалена (каскад
+`databases` → mysql). Сохранены: `opaque_exit`, `CreateDbResult` без `output`, `db_exists` до генерации
+пароля, ветка `presence.is_none() && db_user_already_taken`, генерация пароля после проверки. Флаг
+`--user` → `--username`, добавлен `--site=<domain>`. Файл: `desktop/src-tauri/src/ssh/fastpanel.rs`.
 
-- **Целевая команда:** `databases create --server=<id> --name=<db> --username=<user>
-  --password=<pass> --site=<domain>`. `--site` обязателен — без него привязки к сайту нет
-  (см. фазу 1). Домен в `create_database` уже есть (аргумент `domain`).
-- **`--server`:** резолвим числовой id из `databases servers list --json` в той же сессии
-  (новая `fastpanel_db_server`). **Ровно один** mysql-сервер → берём его id. Ноль или несколько
-  → НЕ угадываем, уходим в mysql-фоллбэк (выбрать наугад = создать базу не на том сервере).
-- **Каскад:** `databases` → mysql-фоллбэк, **без** ступени с ед. ч. `database`. Мёртвая ступень
-  и породила баг; версии панели с ед. ч. у нас нет. Появится — добавим по факту.
-- **Флаг `--user` → `--username`** (у `databases create` только `--username`).
-- Сохранить `opaque_exit("create_database", code)`, `CreateDbResult` без `output`,
-  идемпотентность (`db_exists` до генерации пароля — как есть), ветку
-  `presence.is_none() && db_user_already_taken(&fb_out)`.
-- Файл: `desktop/src-tauri/src/ssh/fastpanel.rs` (`create_database` + `fastpanel_db_server`).
+Форма итоговой команды (дословно):
+`{fp} databases create --server={id} --name={db} --username={user} --password={pass} --site={domain}`.
 
-### Фаза 3 — Тесты и приёмка  `[ ]`
-- Тест на разъезд имени команды (фейк-сервер различает ед./мн. ч.).
-- Тест «пароль не в argv-результате» (по образцу `issue_ssl_argv_has_no_secret`).
-- Живая приёмка: provision домена с БД на реальном сервере, вход в созданную базу.
+### Фаза 3 — Тесты и приёмка  `[~]` (юнит-тесты `[x]`, живая приёмка `[ ]`)
+
+**Юнит-тесты (2026-08-17, зелёные).** Всего в `src-tauri` 261 тест (было 256, +5):
+- `create_database_uses_plural_databases_not_singular_database` — страж разъезда ед./мн. ч.;
+  FakeServer различает строки через `contains`, откат к `database create` (ед. ч.) роняет тест
+  (проверено вживую: временный откат → FAILED exit 127).
+- `create_database_binds_server_id_and_site` — `--server=<id>` читается из json (id 7, не хардкод),
+  в команде есть `--site`, `--username`, `--name`.
+- `create_database_skips_fastpanel_when_server_is_ambiguous` / `..._when_no_server_found` —
+  несколько/ноль серверов → FastPanel-команда НЕ шлётся, уход в mysql-фоллбэк.
+- `create_database_never_leaks_the_password_the_fastpanel_command_echoes` — argv-без-секрета:
+  `--password=` в argv (ОК, opaque_exit), но эхо пароля из FastPanel-usage и `IDENTIFIED BY` из
+  mysql наружу не выходят.
+- Существующие `create_database_*` переписаны под мн. ч. (заряжают `databases servers list` +
+  `databases create`), поведение идемпотентности/opaque_exit сохранено.
+
+`cargo test` — 261 passed. `cargo clippy` — в `fastpanel.rs` чисто (warnings только в чужом
+предсуществующем тестовом коде). `cargo build` — ок.
+
+- [ ] Живая приёмка: provision домена с БД на реальном сервере, вход в созданную базу (финальная
+  приёмка контроллера, в этой сессии не запускалась).
 
 ## Смежная находка (тот же класс — дрейф версии FastPanel)
 
