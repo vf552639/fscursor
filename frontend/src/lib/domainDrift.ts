@@ -86,21 +86,56 @@ function compare(
 const exact = (a: string, b: string) => a === b;
 
 /**
- * Логин FTP.
+ * Правило для полей, где факт — СПИСОК (аккаунты FTP, базы): совпадение — это
+ * вхождение в список, а ПУСТОЙ список — незнание, а не измерение.
+ *
+ * Пустой список приходится читать как «не прочитали», потому что в проводе
+ * различить два положения нечем. Производитель (`ssh/fastpanel_facts.rs`)
+ * схлопывает в `[]` и «на сервере правда пусто», и «команда упала»: у баз —
+ * `Ok(vec![])` в самом конце `list_site_databases` плюс слабый mysql-фолбэк, про
+ * который его же комментарий говорит, что префикс скорее всего не поймает
+ * ничего; у FTP — `unwrap_or_default()` над `Option`. Показательно, что
+ * `databases_from_json` различие держит явно (`None` против `Some(vec![])`), а
+ * до типа `Vec<String>` оно не доезжает.
+ *
+ * Пока провод такой, выбираем сторону незнания (принцип №6 CLAUDE.md): иначе на
+ * сервере, где список просто не прочитался, строку «при развёртывании: X»
+ * получил бы КАЖДЫЙ домен — то есть подпись обесценилась бы там, где нам нечего
+ * сказать. Развести эти случаи можно только в Rust, отдельным «не прочитано» в
+ * самом wire-типе.
+ */
+function compareInList(
+  recorded: string | null | undefined,
+  list: string[] | null | undefined,
+): FieldSource {
+  const rec = clean(recorded);
+  if (!rec) return AGREE;
+  if (!list || list.length === 0) return { kind: "recorded-only", recorded: rec };
+  return list.some((v) => v.trim() === rec) ? AGREE : { kind: "drift", recorded: rec };
+}
+
+/**
+ * Логин FTP — совпадение по ВХОЖДЕНИЮ в список аккаунтов домена.
+ *
+ * Не по первому аккаунту, хотя карточка одно значение и печатает: «первый =
+ * основной» ничем не подкреплено — `filter_ftp_by_domain` сохраняет порядок
+ * вывода CLI и никакого основного не размечает, а сам список уже отфильтрован
+ * по `home_dir` ЭТОГО домена, то есть каждый его аккаунт — аккаунт нашего сайта.
+ * Сравнение с `[0]` подписывало бы расхождение всякий раз, когда рядом с нашим
+ * логином завели второй (а FastPanel отдал его раньше), — то есть врало бы про
+ * порядок, выдавая это за правду про логин.
+ *
+ * Настоящая подмена от этого не прячется: логин меняют, удаляя старый аккаунт,
+ * а удалённый из списка выпадает — и вхождения не будет.
  *
  * Регистр учитываем: логины на linux регистрозависимы, и `Example_ftp` — это
  * другой аккаунт, а не то же слово.
- *
- * Сверяемся с ПЕРВЫМ аккаунтом списка — тем же, который секция «Server state»
- * уже показывает как основной. Аккаунтов на сайте может быть несколько, но
- * основной у provision ровно один, и выбирать «наш где-то в списке есть»
- * означало бы прятать настоящую подмену основного логина.
  */
 export function ftpLoginSource(
   recorded: string | null | undefined,
   facts: DomainFacts | null | undefined,
 ): FieldSource {
-  return compare(recorded, facts?.ftp_accounts[0]?.login, exact);
+  return compareInList(recorded, facts?.ftp_accounts.map((a) => a.login));
 }
 
 /**
@@ -129,27 +164,38 @@ export function siteOwnerSource(
 }
 
 /**
- * Версия PHP — сравнение ТОЛЬКО по цифрам: `8.1` ≡ `81` ≡ `php8.1`.
+ * Версия PHP — сравнение по ДВУМ первым числам: `8.1` ≡ `81` ≡ `php8.1` ≡ `8.1.33`.
  *
  * Это самая дорогая ловушка из всех восьми: provision пишет версию человеческим
  * `8.1`, а FastPanel отдаёт свой идентификатор `81`, и наивное сравнение строк
  * подписывало бы расхождение КАЖДОМУ домену — то есть обесценивало бы саму
  * идею подписи.
  *
+ * Отсюда же обрезка до двух чисел, а не «все цифры подряд»: patch-компонент
+ * достижим (`coerce_php_version` в `ssh/fastpanel.rs` разбирает регекспом
+ * `\d+(?:\.\d+){0,2}`, то есть до трёх компонентов), а `8.1` против `8.1.33`
+ * склейкой цифр дало бы `81` ≠ `8133`. Продукт же переключает сайту именно
+ * major.minor — patch приезжает с обновлением системы и расхождением не
+ * является.
+ *
  * Факт берём из верхнего `php_version` (версия, которой сайт исполняется
- * сейчас), а при его отсутствии — из `site.php_version`; ровно этот же порядок
- * уже печатает секция «Server state», и разойтись с ней здесь значило бы
- * сверяться не с тем, что человек видит рядом.
+ * сейчас), а при его отсутствии — из `site.php_version`. Тот же порядок
+ * предпочтения печатает секция «Server state»; расходимся с ней только в
+ * мелочи: пустое (в том числе из пробелов) верхнее поле у нас не заслоняет
+ * `site.php_version`, а у неё непустая строка из пробелов заслонила бы.
  */
 export function phpVersionSource(
   recorded: string | null | undefined,
   facts: DomainFacts | null | undefined,
 ): FieldSource {
-  const fact = facts?.php_version ?? facts?.site?.php_version;
-  return compare(recorded, fact, (a, b) => digits(a) === digits(b));
+  const fact = clean(facts?.php_version) || facts?.site?.php_version;
+  return compare(recorded, fact, (a, b) => phpKey(a) === phpKey(b));
 }
 
-const digits = (v: string) => v.replace(/\D+/g, "");
+/** Первые два числа версии слитно: `8.1.33` → `81`, `81` → `81`, `php7.4` → `74`. */
+function phpKey(v: string): string {
+  return (v.match(/\d+/g) ?? []).slice(0, 2).join("");
+}
 
 /**
  * Срок сертификата — сравнение по КАЛЕНДАРНОЙ ДАТЕ.
@@ -181,11 +227,17 @@ export function sslExpiresSource(
   });
 }
 
-/** Календарный день в зоне читателя; `null` — строку разобрать не удалось. */
+/**
+ * Календарный день в зоне читателя (`2026-11-01`); `null` — строку разобрать не
+ * удалось. Месяц с единицы и с ведущими нулями, хотя сравнивается только
+ * равенство: значение, которое врёт своему виду, однажды попадёт в лог или в
+ * подпись, и там `2026-10-1` будет прочитано как первое ноября.
+ */
 function localDay(iso: string): string | null {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** Издатель сертификата. Сравниваем как есть, с точностью до пробелов. */
@@ -197,12 +249,8 @@ export function sslIssuerSource(
 }
 
 /**
- * Имя базы. Факт здесь — СПИСОК баз сервера, а не одно значение: расхождение,
- * если нашего имени в списке нет.
- *
- * Поэтому же поле не проходит через `compare`: пустой список — это измерение
- * («баз не нашли»), а не отсутствие измерения, и он даёт расхождение. Незнание
- * тут выражено иначе — отсутствием самого снимка.
+ * Имя базы — вхождение в список баз домена (см. `compareInList`, там же про
+ * пустой список).
  *
  * Регистр значим: под linux имена баз MySQL регистрозависимы.
  */
@@ -210,10 +258,7 @@ export function dbNameSource(
   recorded: string | null | undefined,
   facts: DomainFacts | null | undefined,
 ): FieldSource {
-  const rec = clean(recorded);
-  if (!rec) return AGREE;
-  if (!facts) return { kind: "recorded-only", recorded: rec };
-  return facts.databases.some((db) => db.trim() === rec) ? AGREE : { kind: "drift", recorded: rec };
+  return compareInList(recorded, facts?.databases);
 }
 
 /**

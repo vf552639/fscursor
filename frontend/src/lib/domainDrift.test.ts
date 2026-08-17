@@ -76,7 +76,9 @@ describe("общие правила на все поля", () => {
 
   it("снимок есть, но поле в нём пустое → recorded-only, а не расхождение", () => {
     // Пустое поле снимка — не измерение «там ничего нет», а «мы это не
-    // прочитали». Объявлять расхождение против незнания нельзя (принцип №6).
+    // прочитали»: провод (`ssh/fastpanel_facts.rs`) схлопывает в пустоту и
+    // «правда пусто», и «команда упала». Объявлять расхождение против незнания
+    // нельзя (принцип №6).
     expect(ftpLoginSource("example_ftp", facts({ ftp_accounts: [] }))).toEqual({
       kind: "recorded-only",
       recorded: "example_ftp",
@@ -113,13 +115,21 @@ describe("ftpLoginSource — trim, регистр учитываем", () => {
     });
   });
 
-  it("сверяемся с ПЕРВЫМ аккаунтом — тем же, который печатает секция как основной", () => {
+  it("наш логин где-то в списке → agree: «первый» у CLI не значит «основной»", () => {
+    // Список уже отфильтрован по `home_dir` этого домена, а порядок — просто
+    // порядок вывода CLI. Сравнение с `[0]` объявляло бы расхождение всякий
+    // раз, когда рядом с нашим логином завели второй аккаунт.
     const f = facts({
       ftp_accounts: [
         { login: "first_ftp", home: null },
         { login: "example_ftp", home: null },
       ],
     });
+    expect(ftpLoginSource("example_ftp", f)).toEqual({ kind: "agree" });
+  });
+
+  it("нашего логина в списке нет → drift (аккаунт подменили, старый удалён)", () => {
+    const f = facts({ ftp_accounts: [{ login: "first_ftp", home: null }] });
     expect(ftpLoginSource("example_ftp", f)).toEqual({ kind: "drift", recorded: "example_ftp" });
   });
 });
@@ -174,10 +184,24 @@ describe("phpVersionSource — только цифры", () => {
     expect(phpVersionSource("7.4", facts())).toEqual({ kind: "drift", recorded: "7.4" });
   });
 
-  it("версия снимка берётся из `site`, если верхнего поля нет", () => {
+  it("patch-компонент не расхождение: `8.1` ≡ `8.1.33`", () => {
+    // `coerce_php_version` (`ssh/fastpanel.rs`) допускает три компонента, а
+    // склейка всех цифр дала бы `81` ≠ `8133` — ложное расхождение на каждом
+    // сервере, который отдаёт версию полностью. Продукт переключает major.minor.
+    expect(phpVersionSource("8.1", facts({ php_version: "8.1.33" }))).toEqual({ kind: "agree" });
+    expect(phpVersionSource("8.1", facts({ php_version: "8.2.5" }))).toEqual({
+      kind: "drift",
+      recorded: "8.1",
+    });
+  });
+
+  it("версия снимка берётся из `site`, если верхнего поля нет или оно пустое", () => {
     const f = facts({ php_version: null });
     expect(phpVersionSource("8.1", f)).toEqual({ kind: "agree" });
     expect(phpVersionSource("7.4", f)).toEqual({ kind: "drift", recorded: "7.4" });
+    // Пустая строка тоже не заслоняет `site`: заслонив, она превратила бы
+    // прочитанную версию в «не проверено».
+    expect(phpVersionSource("8.1", facts({ php_version: "  " }))).toEqual({ kind: "agree" });
   });
 
   it("версии нет ни там, ни там → recorded-only", () => {
@@ -250,9 +274,14 @@ describe("dbNameSource — ищем имя в списке баз", () => {
     });
   });
 
-  it("список пуст, но снимок есть → drift: базу мы искали и не нашли", () => {
+  it("список пуст → recorded-only, а не drift: пустота в проводе не значит «баз нет»", () => {
+    // `list_site_databases` (`ssh/fastpanel_facts.rs`) отдаёт `[]` и когда баз
+    // правда нет, и когда обе команды упали, и когда сработал слабый
+    // mysql-фолбэк по префиксу, который «скорее всего не поймает ничего» (его
+    // же комментарий). Читая такую пустоту как измерение, мы подписывали бы
+    // «при развёртывании: X» КАЖДОМУ домену сервера, где список не прочитался.
     expect(dbNameSource("example_db", facts({ databases: [] }))).toEqual({
-      kind: "drift",
+      kind: "recorded-only",
       recorded: "example_db",
     });
   });
