@@ -132,6 +132,27 @@ describe("registrarProviders — метаданные показа", () => {
     }
   });
 
+  it("null/undefined: та же '?'-мета, что у пустой строки — функция показа обязана вернуть", () => {
+    // `provider` приходит из ответа сервера, где колонка nullable, а зовут
+    // `providerMeta` внутри `map` по списку аккаунтов — без error boundary.
+    // Брось она здесь, и одна строка в ответе уносила бы всю вкладку Registrars,
+    // а не одну карточку. Терпимость к «не знаем провайдера» у предиката
+    // (`registrarSupportsNsApi`) уже есть по той же причине; страховка на каждом
+    // месте вызова — это её отсутствие, размазанное по вызывающим.
+    const blank = providerMeta("");
+    for (const empty of [null, undefined]) {
+      expect(() => providerMeta(empty)).not.toThrow();
+      expect(providerMeta(empty)).toEqual(blank);
+    }
+  });
+
+  it("hasApi/needsClientIp тоже принимают null/undefined — и это «не умеет»", () => {
+    for (const empty of [null, undefined]) {
+      expect(hasApi(empty)).toBe(false);
+      expect(needsClientIp(empty)).toBe(false);
+    }
+  });
+
   it("имя из прототипа объекта не уходит в API-ветку", () => {
     // `provider` — свободный ввод, а `"constructor"`/`"__proto__"`/`"valueOf"`
     // есть у любого объектного литерала: обычная индексация вернула бы «запись»

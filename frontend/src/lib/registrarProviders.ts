@@ -54,8 +54,14 @@ export function normalizeProvider(provider: string): string {
  * означал бы, что `" hostiq "` из чужого импорта получает бейдж «API» и живую
  * кнопку Test в Settings, а рядом — выключенный «Set NS» и `unknown provider` от
  * десктопа за кнопкой. Один аккаунт, два ответа, и оптимистичный — ложный.
+ *
+ * Аргумент допускает `null`/`undefined` по той же мотивировке, что у
+ * `registrarSupportsNsApi`: колонка `provider` nullable, и «не знаем провайдера»
+ * — это ответ «не умеет», а не повод вызывающему писать свой `String(... || "")`.
+ * Каждая такая страховка на месте вызова — ещё одна нормализация, которая может
+ * разойтись с соседней.
  */
-export function hasApi(provider: string): boolean {
+export function hasApi(provider: string | null | undefined): boolean {
   return registrarSupportsNsApi(provider);
 }
 
@@ -66,9 +72,12 @@ export function hasApi(provider: string): boolean {
  * API не спрашивают вовсе — иначе форма требовала бы Client IP там, где сама же
  * не показывает API-способности.
  */
-export function needsClientIp(provider: string): boolean {
+export function needsClientIp(provider: string | null | undefined): boolean {
   if (!hasApi(provider)) return false;
-  return catalogEntry(normalizeProvider(provider))?.needsClientIp ?? false;
+  // `?? ""` недостижим: гейт выше пропускает только строку из каталога. Он здесь
+  // ради типа — `normalizeProvider` остаётся строгим намеренно, это ключ показа,
+  // и «ключ от ничего» не бывает.
+  return catalogEntry(normalizeProvider(provider ?? ""))?.needsClientIp ?? false;
 }
 
 export interface ProviderMeta {
@@ -115,14 +124,21 @@ function hashIndex(s: string, mod: number): number {
  * здесь своей проверкой — и бейдж «API» разъедется с кнопкой внутри одного
  * экрана. Поэтому `" hostiq "` рисуется ручным (метка `hostiq`, буква H, цвет из
  * палитры) — честно: десктоп такую строку не знает.
+ *
+ * `null`/`undefined` — законный вход, а не ошибка вызывающего: колонка
+ * `provider` nullable, и зовут эту функцию в `map` по списку аккаунтов, где
+ * брошенное исключение уносит всю вкладку, а не одну карточку. Функция ПОКАЗА
+ * обязана что-то показать на любом входе; «не знаем» показывается как `?` с
+ * чипом «manual» — ровно то, что рисовал старый `plMap[provider]`.
  */
-export function providerMeta(provider: string): ProviderMeta {
-  const key = normalizeProvider(provider);
-  const api = hasApi(provider) ? catalogEntry(key) : undefined;
+export function providerMeta(provider: string | null | undefined): ProviderMeta {
+  const raw = provider ?? "";
+  const key = normalizeProvider(raw);
+  const api = hasApi(raw) ? catalogEntry(key) : undefined;
   if (api) {
     return { key, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
   }
-  const display = provider.trim() || "?";
+  const display = raw.trim() || "?";
   const pal = MANUAL_PALETTE[hashIndex(key || "?", MANUAL_PALETTE.length)];
   // По кодовым точкам, а не `display[0]`: имя с эмодзи или иным символом вне BMP
   // дало бы в аватаре половину суррогатной пары («\u{FFFD}»).

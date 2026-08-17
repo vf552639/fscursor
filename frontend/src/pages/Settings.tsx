@@ -147,11 +147,10 @@ export default function Settings(){
         // вызов рядом с `providerMeta` был бы вторым ответом на один вопрос, и
         // бейдж «API» однажды разъехался бы с кнопкой Test внутри одной строки.
         //
-        // `String(... || "")` — та же страховка, что у `EditRegistrarModal`: строка
-        // приходит из ответа сервера, а `providerMeta` начинает с `.trim()`. Старый
-        // рендер на `null` просто показывал «?», новый упал бы вместе со всей
-        // страницей; пустое имя даёт ровно тот же честный «?» и подпись manual.
-        const m = providerMeta(String(r.provider || ""));
+        // `null` из ответа сервера страховать здесь не надо: `providerMeta` его
+        // принимает сама и отвечает «?» с чипом manual. Страховка стояла на трёх
+        // местах вызова — три нормализации одного значения, каждая своя.
+        const m = providerMeta(r.provider);
         return <Card key={r.id} style={{marginBottom:12}}>
           <div style={{padding:"16px 20px",display:"flex",alignItems:"center",gap:14}}>
             <ProviderAvatar m={m} size={38} />
@@ -470,13 +469,13 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   // учётных данных. Отдельный вызов `hasApi` рядом был бы вторым ответом на тот
   // же вопрос — на этой ветке такое расхождение уже ловили дважды.
   //
-  // `String(... || "")` — страховка на пустой/`null` provider из ответа сервера:
-  // `providerMeta` начинает с `.trim()` и на `null` уронила бы модалку.
-  const m = providerMeta(String(registrar.provider || ""));
+  // Пустой/`null` provider из ответа сервера обе функции принимают сами (см. их
+  // сигнатуры) — своей нормализации здесь нет намеренно.
+  const m = providerMeta(registrar.provider);
   // Тот же предикат, что у формы создания и у карточки: два ответа на вопрос
   // «нужен ли этому провайдеру Client IP» уже разъезжались (см. Фазу 1 плана).
   // Сам он уже гейтится по `hasApi`, то есть у ручного провайдера всегда false.
-  const hasClientIp = needsClientIp(String(registrar.provider || ""));
+  const hasClientIp = needsClientIp(registrar.provider);
 
   const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
     name: name.trim(),
