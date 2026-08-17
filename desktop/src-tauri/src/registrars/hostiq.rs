@@ -140,7 +140,10 @@ impl HostiqService {
         if status.as_u16() >= 400 {
             return Err(RegistrarError::Api(failure_text(status, &text)));
         }
-        // Пустое тело — законный ответ, у `changeNameServer` он допустим.
+        // Пустое тело здесь не объявляется ни успехом, ни отказом: `call` не
+        // знает, чего ждал вызывающий. Решает вызывающий — у `set_nameservers`
+        // ниже пустота отказ (успех задокументирован непустым), у листинга её
+        // ловит сверка с `total`.
         if text.is_empty() {
             return Ok(serde_json::json!({}));
         }
@@ -161,9 +164,17 @@ impl HostiqService {
         // назван ошибкой. Сторону компромисса выбираем осознанно: объявить
         // неуверенность дешевле, чем записать несостоявшуюся смену как
         // состоявшуюся.
-        match serde_json::from_str(&text) {
-            Ok(v) if error_message(&text).is_none() => Ok(v),
-            _ => Err(RegistrarError::Api(failure_text(status, &text))),
+        //
+        // Тело разбирается РОВНО ОДИН раз: на самом большом ответе в файле
+        // (страница листинга в 1000 доменов) второй проход стоил бы дороже
+        // всего остального в этой функции, поэтому конверт ошибки читается из
+        // уже разобранного `Value`, а не из строки.
+        let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+            return Err(RegistrarError::Api(unrecognised_text(status)));
+        };
+        match error_message_value(&parsed) {
+            Some(m) => Err(RegistrarError::Api(reason_text(&m))),
+            None => Ok(parsed),
         }
     }
 
@@ -206,6 +217,32 @@ impl HostiqService {
                 .cloned()
                 .unwrap_or_default();
             if items.is_empty() {
+                // Пусто — конец списка только если тело с этим согласно.
+                // Записей не нашлось, а `total`/`count` в том же теле говорят,
+                // что они есть, — значит мы не нашли КЛЮЧ, а не записи:
+                // переименуйся конверт `domains` (имена полей у этого API уже
+                // расходятся между эндпоинтами — `id` в листинге против
+                // `domainid` в записи), и клиент объявлял бы аккаунт пустым, а
+                // `set_nameservers` обвинял бы аккаунт в отсутствии домена,
+                // который в нём есть.
+                //
+                // Ложной тревоги не будет: настоящий пустой аккаунт отдаёт
+                // `total: 0`. Заодно закрыт случай уже, но того же рода —
+                // пустая страница ПОСРЕДИ листинга при недобранном `total`:
+                // молча вернуть добранное значило бы выдать часть за всё.
+                let claimed = page
+                    .get("total")
+                    .and_then(as_i64)
+                    .or_else(|| page.get("count").and_then(as_i64))
+                    .unwrap_or(0);
+                if claimed > out.len() as i64 {
+                    // Числа здесь наши собственные, а не пересказ чужого тела:
+                    // они и есть содержание ошибки.
+                    return Err(RegistrarError::Api(format!(
+                        "Hostiq listing claims {claimed} domains but {} were recognised in the response",
+                        out.len()
+                    )));
+                }
                 return Ok(out);
             }
             offset += items.len();
@@ -249,7 +286,10 @@ impl HostiqService {
         // обвиняет аккаунт пользователя в отсутствии домена, который в нём есть.
         if index.is_empty() && !listed.is_empty() {
             return Err(RegistrarError::Api(format!(
-                "Hostiq listed {} domains but none carried a usable id field",
+                // «id/name», а не «id»: индекс требует ОБА поля
+                // (`domain_index`), и уверенно винить одно из них значило бы
+                // угадывать, какое именно переименовалось.
+                "Hostiq listed {} domains but none carried a usable id/name pair",
                 listed.len()
             )));
         }
@@ -284,9 +324,21 @@ impl HostiqService {
 /// теле нет (токен уходит заголовком), но и мусору там не место.
 fn failure_text(status: reqwest::StatusCode, body: &str) -> String {
     match error_message(body) {
-        Some(m) => format!("Hostiq error: {m}"),
-        None => format!("Hostiq returned an unrecognised response (HTTP {status})"),
+        Some(m) => reason_text(&m),
+        None => unrecognised_text(status),
     }
+}
+
+/// Отказ, причину которого мы прочитали.
+fn reason_text(reason: &str) -> String {
+    format!("Hostiq error: {reason}")
+}
+
+/// Ответ, который мы не берёмся пересказывать. Одна формулировка на оба пути
+/// (≥400 без узнаваемой причины и нераспознанное 2xx-тело): пользователю в
+/// обоих случаях сказать нечего, кроме этого.
+fn unrecognised_text(status: reqwest::StatusCode) -> String {
+    format!("Hostiq returned an unrecognised response (HTTP {status})")
 }
 
 /// Человекочитаемая причина из тела ошибки Hostiq, если она там есть.
@@ -298,7 +350,12 @@ fn failure_text(status: reqwest::StatusCode, body: &str) -> String {
 /// `detail`, список `errors`) оставлены рядом: они встречались у Hostiq и стоят
 /// дешевле, чем ещё один способ получить «нераспознанный ответ».
 fn error_message(body: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(body).ok()?;
+    error_message_value(&serde_json::from_str::<Value>(body).ok()?)
+}
+
+/// То же самое из уже разобранного тела — чтобы успешный путь `call` не парсил
+/// ответ второй раз (см. комментарий там же).
+fn error_message_value(v: &Value) -> Option<String> {
     for key in ["message", "error", "detail"] {
         if let Some(s) = non_empty(v.get(key)) {
             return Some(s);
@@ -430,13 +487,39 @@ impl RegistrarService for HostiqService {
         for (i, host) in servers.iter().enumerate() {
             body.insert(format!("ns{}", i + 1), Value::from(host.clone()));
         }
-        self.call(
-            reqwest::Method::POST,
-            "/domain/changeNameServer",
-            Some(Value::Object(body)),
-        )
-        .await?;
-        Ok(true)
+        let resp = self
+            .call(
+                reqwest::Method::POST,
+                "/domain/changeNameServer",
+                Some(Value::Object(body)),
+            )
+            .await?;
+        // Успех распознаётся ПОЛОЖИТЕЛЬНО, и это не изобретение семантики: на
+        // успешной смене DI-API v3 живьём ответил `{"result":"success"}`
+        // (`docs/HOSTIQ_API.md` §3). Раз маркер наблюдаем, его и требуем.
+        //
+        // Отрицательное правило («ошибкой считаем то, что похоже на ошибку»)
+        // оставляло два прохода для чужого 200 прямиком в audit log: тело без
+        // узнаваемого сообщения (`{"result":"error"}`) и пустое тело от WAF.
+        // Цена промаха тут выше, чем на чтении: `ns_outcome_plan` пишет по
+        // `Ok(true)` статус `ok` в строку домена и строчку `registrar.ns_set` в
+        // историю — то есть неправда закрепляется навсегда.
+        //
+        // Соседний клиент устроен так же (`namecheap.rs`: без
+        // `ApiResponse Status="OK"` ответ считается отказом), и асимметрия здесь
+        // была бы ничем не оправдана.
+        match resp.get("result").and_then(|v| v.as_str()) {
+            Some("success") => Ok(true),
+            // Значение поля печатаем, потому что в нём и лежит отказ; длину
+            // режем, чтобы JSON-страница прокси с полем `result` не уехала в
+            // интерфейс целиком.
+            Some(other) => Err(RegistrarError::Api(reason_text(
+                &other.chars().take(60).collect::<String>(),
+            ))),
+            None => Err(RegistrarError::Api(
+                "Hostiq did not confirm the nameserver change (no result in the response)".into(),
+            )),
+        }
     }
 
     /// Чтения nameservers у Hostiq НЕ СУЩЕСТВУЕТ.
@@ -700,6 +783,101 @@ mod tests {
         assert_eq!(srv.received_requests().await.unwrap().len(), MAX_PAGES);
     }
 
+    /// Тело само говорит, что записи есть, а распознали мы ноль — значит не
+    /// нашли КЛЮЧ конверта, а не записи. Молча отдать «аккаунт пуст» здесь
+    /// хуже всего: `get_domains` показал бы пустой список как факт, а
+    /// `set_nameservers` обвинил бы аккаунт в отсутствии домена, который в нём
+    /// есть.
+    #[tokio::test]
+    async fn a_listing_that_contradicts_its_own_total_is_not_an_empty_account() {
+        // Ключ конверта переименован — как это уже случилось между эндпоинтами
+        // с `id`/`domainid`. Второе тело — тот же случай, но счётчик в нём
+        // остался только один: `total` тоже переименовался, а `count` нет.
+        let records = serde_json::json!([{"id": 1, "domainname": "one.com"},
+                                         {"id": 2, "domainname": "two.com"}]);
+        for body in [
+            serde_json::json!({"count": 2, "total": 2, "domainList": records}),
+            serde_json::json!({"count": 2, "domainList": records}),
+        ] {
+            let srv = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/domain/list"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+                .mount(&srv)
+                .await;
+
+            let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+            let text = svc
+                .get_domains()
+                .await
+                .expect_err("тело сообщило про две записи — это не пустой аккаунт")
+                .to_string();
+            assert!(text.contains("claims 2 domains"), "{body} → {text}");
+
+            // И аккаунт пользователя при этом не обвинён: смена NS падает на
+            // нераспознанном ответе, а не на «домена нет в аккаунте».
+            let ns = vec![
+                "ada.ns.cloudflare.com".to_string(),
+                "bob.ns.cloudflare.com".to_string(),
+            ];
+            let text = svc
+                .set_nameservers("one.com", &ns)
+                .await
+                .expect_err("аккаунт не пуст — обвинять его нельзя")
+                .to_string();
+            assert!(!text.contains("is not in this account"), "{body} → {text}");
+        }
+    }
+
+    /// Пустая страница ПОСРЕДИ листинга при недобранном `total` — тот же род
+    /// вранья, только уже: молча вернуть добранное значило бы выдать часть
+    /// аккаунта за весь. Счётчик здесь спрашивается именно `total` (весь
+    /// список), а не `count` (эта страница): у пустой страницы `count` равен
+    /// нулю и согласился бы с любым усечением.
+    #[tokio::test]
+    async fn a_listing_cut_short_mid_way_is_an_error_not_a_short_list() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .and(query_param("offset", "0"))
+            .respond_with(page(
+                serde_json::json!([{"id": 1, "domainname": "one.com"},
+                                   {"id": 2, "domainname": "two.com"}]),
+                3,
+            ))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .and(query_param("offset", "2"))
+            .respond_with(page(serde_json::json!([]), 3))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let text = svc
+            .get_domains()
+            .await
+            .expect_err("третий домен потерян — это не список из двух")
+            .to_string();
+        assert!(text.contains("claims 3 domains but 2"), "{text}");
+    }
+
+    /// Пустой аккаунт — законный ответ, а не поломка: `total: 0` подтверждает
+    /// пустоту, и тревоги быть не должно.
+    #[tokio::test]
+    async fn a_genuinely_empty_account_is_not_an_error() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(page(serde_json::json!([]), 0))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        assert!(svc.get_domains().await.unwrap().is_empty());
+    }
+
     /// Записи есть, а `id` не добыт ни у одной — это про формат ответа, и
     /// сказать надо именно это. Свалившись в ветку «домена нет в аккаунте»,
     /// клиент обвинял бы аккаунт пользователя при переименованном поле.
@@ -728,7 +906,7 @@ mod tests {
             .await
             .expect_err("без id смену NS не собрать")
             .to_string();
-        assert!(text.contains("usable id field"), "{text}");
+        assert!(text.contains("usable id/name pair"), "{text}");
         assert!(!text.contains("is not in this account"), "{text}");
     }
 
@@ -926,6 +1104,52 @@ mod tests {
             .to_string();
         assert!(text.contains("unrecognised response (HTTP 200"), "{text}");
         assert!(!text.contains("captive portal"), "{text}");
+    }
+
+    /// Успех на записи распознаётся ПОЛОЖИТЕЛЬНО: живой API отвечает
+    /// `{"result":"success"}`, и всё остальное — не успех. Три тела, каждое из
+    /// которых прошло бы отрицательное правило («ошибкой считаем похожее на
+    /// ошибку») насквозь и стало бы строчкой `registrar.ns_set` в audit log.
+    #[tokio::test]
+    async fn only_result_success_counts_as_a_completed_ns_change() {
+        for body in [
+            // Отказ без узнаваемого сообщения.
+            Some(serde_json::json!({"result": "error"})),
+            // JSON, в котором подтверждения нет вовсе.
+            Some(serde_json::json!({"whatever": 1})),
+            // Пустое тело: так отвечают WAF и балансировщики.
+            None,
+        ] {
+            let srv = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/domain/list"))
+                .respond_with(page(
+                    serde_json::json!([{"id": 42, "domainname": "betify2.com"}]),
+                    1,
+                ))
+                .mount(&srv)
+                .await;
+            let response = match &body {
+                Some(json) => ResponseTemplate::new(200).set_body_json(json),
+                None => ResponseTemplate::new(200).set_body_string(""),
+            };
+            Mock::given(method("POST"))
+                .and(path("/domain/changeNameServer"))
+                .respond_with(response)
+                .mount(&srv)
+                .await;
+
+            let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+            let ns = vec![
+                "ada.ns.cloudflare.com".to_string(),
+                "bob.ns.cloudflare.com".to_string(),
+            ];
+            let outcome = svc.set_nameservers("betify2.com", &ns).await;
+            assert!(
+                outcome.is_err(),
+                "тело {body:?} принято за состоявшуюся смену NS"
+            );
+        }
     }
 
     /// Тот же чужой ответ на листинге: пустой список означал бы «у аккаунта нет
