@@ -7,7 +7,7 @@
 - Alembic (migration-driven schema updates)
 - Celery 5 + Redis (worker + beat; the only periodic jobs are the daily renewal check and the 6-hourly server reachability probe)
 - **No SSH library.** Paramiko was removed with the zero-knowledge migration: SSH passwords are opaque blobs the backend cannot decrypt, so every SSH-driven flow (metrics collection, FastPanel lifecycle, domain sync) lives in the desktop (`russh`). What the backend still does about servers is a plain `asyncio` TCP connect to port 22 — `app/services/server_monitor.py`, see `docs/ARCHITECTURE.md` § Server signals
-- dnspython (`NS` resolver fallback in nameserver verification flow)
+- **No DNS/registry lookups in the backend.** `dnspython` was listed here as an "`NS` resolver fallback" but no line of Python ever imported it — the dependency was dropped. Reading a domain's nameservers **as the registry has them** lives in the desktop instead: `desktop/src-tauri/src/rdap.rs` asks RDAP over plain HTTP+JSON (`reqwest`), because registrar APIs either cannot answer it (Hostiq DI-API v3 has no nameserver field at all — `docs/HOSTIQ_API.md`) or do not exist (manual providers). RDAP answers "where is this domain delegated", not "does the zone respond" — which is exactly what the delegation badge claims
 - `python-dateutil` (renewal threshold calculation)
 - `cryptography` (encrypted secrets at rest)
 - **Staged for auth / email (Stage 1+):** `argon2-cffi`, `bcrypt`, `itsdangerous`, `slowapi`, `pyotp`, `email-validator`, `resend` (see `backend/requirements.txt`)
