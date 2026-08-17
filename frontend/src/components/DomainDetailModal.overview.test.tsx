@@ -261,6 +261,41 @@ describe("наша запись — то, что не потерялось пр�
     expect(field("NS")).toBe("ok (manual)");
   });
 
+  it("тревожный итог выпуска сертификата назван, спокойный — нет", () => {
+    // Список красит такой домен красным «SSL error», а карточка про провал не
+    // говорила ни слова: `ssl_expires_at`/`ssl_issuer` у него пусты (секции
+    // нечего показать), бейдж сводки считает снимок с сервера и говорит «Not
+    // checked», а `last_provision_error` write-back провижининга явно гасит в
+    // `null`. Человек кликал по красной строке — и не находил даже упоминания.
+    show({ ssl_status: "error" });
+    expect(field("SSL at provision")).toContain("error");
+    expect(screen.getByText(/did not issue a certificate/)).toBeTruthy();
+
+    cleanup();
+    // «Выпуск идёт» без того, кто его завершит, — застрявший прогон, а не
+    // процесс: список красит его жёлтым, значит и карточка обязана назвать.
+    show({ ssl_status: "pending" });
+    expect(field("SSL at provision")).toContain("pending");
+
+    cleanup();
+    // А вот успех прошлого прогона строкой не дублируется: он уже стоит в
+    // «Server state» сроком и издателем с подписью «из provision, на сервере не
+    // проверено». Третье утверждение о том же — и рядом с серым бейджем сводки,
+    // который отвечает про ИЗМЕРЕНИЕ, — только сбивало бы.
+    show({ ssl_status: "active", ssl_expires_at: at(60 * DAY + HOUR) });
+    expect(screen.queryByText("SSL at provision:")).toBeNull();
+
+    cleanup();
+    // «Сертификата нет» списка и «не проверяли» карточки не спорят — объяснять
+    // нечего.
+    show({ ssl_status: "none" });
+    expect(screen.queryByText("SSL at provision:")).toBeNull();
+
+    cleanup();
+    show();
+    expect(screen.queryByText("SSL at provision:")).toBeNull();
+  });
+
   it("Last error печатается, только когда он есть", () => {
     show();
     // Пустая строка «Last error: —» обещает поломку, которой нет.
