@@ -61,18 +61,42 @@ Discovery на живом FastPanel 2 под root показал: команды
 
 ## Фазы
 
-### Фаза 1 — Живая диагностика  `[ ]`
-- Под root на тестовом сервере: воспроизвести текущий provision БД, снять фактическое
-  поведение (`database create` ед. ч. — код возврата; создаётся ли БД mysql-фоллбэком).
-- Снять точную форму `databases create` (успех, «уже существует», отсутствие `--server`),
-  дописать в `docs/FASTPANEL_CLI.md` §3 с пометкой «сверено вживую».
+### Фаза 1 — Живая диагностика  `[x]`
+
+Проведена под root 2026-08-17 (пробная БД `sdmp_probe_db` создана и убрана в том же прогоне,
+mysql `DROP` + `databases sync`; боевые БД не задеты). Формы — в `docs/FASTPANEL_CLI.md` §3.5
+с пометкой «сверено вживую». Что выяснилось:
+
+- **`databases servers list --json`**: mysql-сервер ровно один, `id:1`. `--server` принимает
+  **числовой id** (`mysql(localhost)` → `error: parsing ... invalid syntax`); обязателен
+  (без него `error: required flag --server not provided`).
+- **`databases create` привязывает БД к сайту только через `--site=<domain>`.** Без `--site`
+  результат `site:null, owner:"fastuser"` — панели формально известна, но НЕ привязана к сайту,
+  не в его бэкапах/`databases_size`. То есть исправить одно имя команды мало: **фикс обязан
+  передавать `--site=<domain>`**, иначе исходный вред остаётся.
+- **Успех:** `databases create --server=1 --name --username --password --site=<domain>` →
+  exit 0, `database '<db>' created successfully / ID: n`.
+- **Повтор:** `error: 'database-already-exists'` (exit 1) — чистый маркер для идемпотентности.
+- **Удаления БД в CLI нет.** FastPanel-запись реконсилится `databases sync` после mysql `DROP`.
+  Обратная сторона исходного бага: mysql-фоллбэк создаёт базу вообще без записи FastPanel.
 
 ### Фаза 2 — Починка `create_database`  `[ ]`
-- Перевести на `databases create` (мн. ч.) с верными флагами (`--server`/`--name`/
-  `--username`), либо решить в пользу mysql-пути с обоснованием.
-- Сохранить `opaque_exit`, отсутствие `output` в результате, идемпотентность.
-- Файлы: `desktop/src-tauri/src/ssh/fastpanel.rs` (`create_database`), возможно
-  `commands/provision.rs`.
+
+Решения приняты по итогам фазы 1:
+
+- **Целевая команда:** `databases create --server=<id> --name=<db> --username=<user>
+  --password=<pass> --site=<domain>`. `--site` обязателен — без него привязки к сайту нет
+  (см. фазу 1). Домен в `create_database` уже есть (аргумент `domain`).
+- **`--server`:** резолвим числовой id из `databases servers list --json` в той же сессии
+  (новая `fastpanel_db_server`). **Ровно один** mysql-сервер → берём его id. Ноль или несколько
+  → НЕ угадываем, уходим в mysql-фоллбэк (выбрать наугад = создать базу не на том сервере).
+- **Каскад:** `databases` → mysql-фоллбэк, **без** ступени с ед. ч. `database`. Мёртвая ступень
+  и породила баг; версии панели с ед. ч. у нас нет. Появится — добавим по факту.
+- **Флаг `--user` → `--username`** (у `databases create` только `--username`).
+- Сохранить `opaque_exit("create_database", code)`, `CreateDbResult` без `output`,
+  идемпотентность (`db_exists` до генерации пароля — как есть), ветку
+  `presence.is_none() && db_user_already_taken(&fb_out)`.
+- Файл: `desktop/src-tauri/src/ssh/fastpanel.rs` (`create_database` + `fastpanel_db_server`).
 
 ### Фаза 3 — Тесты и приёмка  `[ ]`
 - Тест на разъезд имени команды (фейк-сервер различает ед./мн. ч.).
