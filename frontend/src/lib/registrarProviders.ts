@@ -16,8 +16,14 @@ import { registrarSupportsNsApi } from "./registrarCaps";
  * `registrarProviders.test.ts`: он сверяет ключи с десктопным списком.
  */
 export const API_PROVIDERS = {
-  hostiq: { label: "Hostiq", icon: "H", bg: "#fff7ed", color: "#ea580c", needsClientIp: false },
-  namecheap: { label: "Namecheap", icon: "N", bg: "#fef2f2", color: "#dc2626", needsClientIp: true },
+  hostiq: {
+    label: "Hostiq", icon: "H", bg: "#fff7ed", color: "#ea580c", needsClientIp: false,
+    apiUserSuffix: " (email)", apiUserPlaceholder: "admin@hostiq.ua",
+  },
+  namecheap: {
+    label: "Namecheap", icon: "N", bg: "#fef2f2", color: "#dc2626", needsClientIp: true,
+    apiUserSuffix: "", apiUserPlaceholder: "your_namecheap_username",
+  },
 } as const;
 
 export type ApiProviderKey = keyof typeof API_PROVIDERS;
@@ -78,6 +84,26 @@ export function needsClientIp(provider: string | null | undefined): boolean {
   // ради типа — `normalizeProvider` остаётся строгим намеренно, это ключ показа,
   // и «ключ от ничего» не бывает.
   return catalogEntry(normalizeProvider(provider ?? ""))?.needsClientIp ?? false;
+}
+
+/**
+ * Подпись и плейсхолдер поля «API User» — они у каждого провайдера свои: Hostiq
+ * ждёт email, Namecheap — имя пользователя панели.
+ *
+ * Отдельной функцией, а не полями `ProviderMeta`: это метаданные ФОРМЫ, а
+ * рисовать провайдера (аватар, метка, чип) умеют и там, где никакой формы нет.
+ *
+ * Заведена, чтобы страница не выбирала подсказки тернарником по `needsClientIp`:
+ * «нужен ли Client IP» работало там прокси для «это Namecheap», и совпадение это
+ * случайное. Третий Rust-клиент с whitelist получил бы чужой
+ * `your_namecheap_username`, а без него — чужой `admin@hostiq.ua`; заметили бы
+ * это не раньше, чем кто-то пожаловался бы на подсказку.
+ *
+ * У провайдера без API — пустые строки: поля «API User» ему не показывают вовсе.
+ */
+export function apiUserField(provider: string | null | undefined): { suffix: string; placeholder: string } {
+  const entry = hasApi(provider) ? catalogEntry(normalizeProvider(provider ?? "")) : undefined;
+  return { suffix: entry?.apiUserSuffix ?? "", placeholder: entry?.apiUserPlaceholder ?? "" };
 }
 
 export interface ProviderMeta {

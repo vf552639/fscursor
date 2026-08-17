@@ -8,7 +8,7 @@ import { isTauri } from "../lib/runtime";
 import { confirmAction } from "../lib/confirmDialog";
 import { BLOB_KIND } from "../lib/secretBlob";
 import { useMultiSecretSave } from "../hooks/useSecretSave";
-import { hasApi, needsClientIp, providerMeta } from "../lib/registrarProviders";
+import { apiUserField, hasApi, needsClientIp, providerMeta } from "../lib/registrarProviders";
 import { ProviderCombobox } from "../components/settings/ProviderCombobox";
 import { ProviderAvatar, ProviderApiTag, ProviderLabel } from "../components/settings/ProviderVisuals";
 import { ENCRYPTION_BANNER, ENCRYPTION_INFO } from "./settingsEncryptionInfo";
@@ -309,6 +309,9 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
   // Есть ли у провайдера рабочий API-клиент в десктопе. От этого зависит ВСЁ
   // остальное в форме: набор полей, состав объявленных секретов и тело POST.
   const api = hasApi(provider);
+  // Подсказки поля «API User» — свойство провайдера, и лежат они в каталоге
+  // рядом с остальным его показом (у ручного — пустые: поля у него нет).
+  const userField = apiUserField(provider);
 
   const handleAdd = async () => {
     // На СОЗДАНИИ ключи объявляются всегда: пропущенный ключ значит
@@ -413,7 +416,11 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
           API без всякой связи с формой. Client IP с пробелом просто не
           совпадёт с whitelist. */}
       {api ? <>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User{needsClientIp(provider) ? "" : " (email)"}</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={needsClientIp(provider) ? "your_namecheap_username" : "admin@hostiq.ua"}/></div>
+        {/* Подпись и плейсхолдер — из каталога, а не тернарником по
+            `needsClientIp`: Hostiq ждёт email, Namecheap — имя пользователя
+            панели, и это свойство провайдера, а не следствие его whitelist'а.
+            Совпадение сегодня точное, но случайное (см. `apiUserField`). */}
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User{userField.suffix}</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} placeholder={userField.placeholder}/></div>
         <div>
           <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key</label>
           {isTauri() ? (
@@ -435,7 +442,10 @@ export function AddRegistrarModal({ onClose, accounts = [] }: { onClose: () => v
               <DesktopOnlyNote what="Saving secrets" />
             )}
           </div>
-          <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>Namecheap accepts API calls only from IPs whitelisted in your account.</div>
+          {/* Провайдер назван меткой из каталога, а не строкой в разметке: поле
+              показывается по `needsClientIp`, и второй провайдер с whitelist
+              иначе получил бы подпись про Namecheap. */}
+          <div style={{fontSize:11.5,color:"#9ca3af",marginTop:-6}}>{providerMeta(provider).label} accepts API calls only from IPs whitelisted in your account.</div>
         </>}
       </> : null}
     </div>

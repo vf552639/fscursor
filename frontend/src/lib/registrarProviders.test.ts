@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import { registrarSupportsNsApi } from "./registrarCaps";
 import {
   API_PROVIDERS,
+  apiUserField,
   hasApi,
   needsClientIp,
   normalizeProvider,
@@ -44,6 +45,28 @@ describe("registrarProviders — API-способность", () => {
 
   it("normalizeProvider: нижний регистр и trim (ключ показа, не ответ десктопа)", () => {
     expect(normalizeProvider("  Hostiq ")).toBe("hostiq");
+  });
+});
+
+describe("registrarProviders — подсказки поля API User", () => {
+  /**
+   * Последнее место, где страница знала регистраторов по именам: подпись и
+   * плейсхолдер поля выбирались тернарником по `needsClientIp` — то есть
+   * «нужен ли Client IP» работало прокси для «это Namecheap». Сегодня это не
+   * врёт (в каталоге ровно два провайдера, Client IP ровно у одного), но третий
+   * Rust-клиент с whitelist получил бы чужой `your_namecheap_username`, а без
+   * whitelist — чужой `admin@hostiq.ua`. Подсказки живут в каталоге, рядом с
+   * остальным показом.
+   */
+  it("подсказки берутся у провайдера, а не выводятся из другой способности", () => {
+    expect(apiUserField("hostiq")).toEqual({ suffix: " (email)", placeholder: "admin@hostiq.ua" });
+    expect(apiUserField("Namecheap")).toEqual({ suffix: "", placeholder: "your_namecheap_username" });
+  });
+
+  it("у провайдера без API подсказок нет — поля ему не показывают вовсе", () => {
+    for (const manual of ["GoDaddy", " hostiq ", "", null, undefined]) {
+      expect(apiUserField(manual)).toEqual({ suffix: "", placeholder: "" });
+    }
   });
 });
 
