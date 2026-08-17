@@ -79,11 +79,25 @@ export function hasApi(provider: string | null | undefined): boolean {
  * не показывает API-способности.
  */
 export function needsClientIp(provider: string | null | undefined): boolean {
-  if (!hasApi(provider)) return false;
-  // `?? ""` недостижим: гейт выше пропускает только строку из каталога. Он здесь
-  // ради типа — `normalizeProvider` остаётся строгим намеренно, это ключ показа,
-  // и «ключ от ничего» не бывает.
-  return catalogEntry(normalizeProvider(provider ?? ""))?.needsClientIp ?? false;
+  return apiEntry(provider)?.needsClientIp ?? false;
+}
+
+/**
+ * Запись каталога — но только если провайдера признаёт `hasApi`.
+ *
+ * Гейт здесь, а не у каждого спрашивающего: у провайдера, которого десктоп не
+ * знает, не бывает НИ ОДНОГО свойства API — ни Client IP, ни подписи поля. Без
+ * общего гейта `" hostiq "` (пробелы десктоп не срезает) доставал бы из каталога
+ * свойства настоящего Hostiq, и форма спрашивала бы учётные данные у аккаунта,
+ * которому сама же отказала в бейдже «API».
+ *
+ * `?? ""` недостижим: гейт пропускает только непустую строку. Он ради типа —
+ * `normalizeProvider` остаётся строгим намеренно, это ключ, а «ключа от ничего»
+ * не бывает.
+ */
+function apiEntry(provider: string | null | undefined) {
+  if (!hasApi(provider)) return undefined;
+  return catalogEntry(normalizeProvider(provider ?? ""));
 }
 
 /**
@@ -102,7 +116,7 @@ export function needsClientIp(provider: string | null | undefined): boolean {
  * У провайдера без API — пустые строки: поля «API User» ему не показывают вовсе.
  */
 export function apiUserField(provider: string | null | undefined): { suffix: string; placeholder: string } {
-  const entry = hasApi(provider) ? catalogEntry(normalizeProvider(provider ?? "")) : undefined;
+  const entry = apiEntry(provider);
   return { suffix: entry?.apiUserSuffix ?? "", placeholder: entry?.apiUserPlaceholder ?? "" };
 }
 
