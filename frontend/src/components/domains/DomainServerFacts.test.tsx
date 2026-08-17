@@ -10,12 +10,26 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
 
 /**
  * Секция «Server state» карточки домена: витрина прочитанного с сервера с
- * честной свежестью. Проверяем ровно продуктовые правила фазы 3:
+ * честной свежестью — и, после фазы 4, ЕДИНСТВЕННОЕ место карточки, отвечающее
+ * на вопрос «что с сайтом». Проверяем продуктовые правила обеих фаз.
+ *
+ * Фаза 3 (свежесть и секреты):
  *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
  *  - свежесть считается от `fp_facts_at`, «never checked» — отдельное слово;
  *  - провал последней попытки виден, но снимок остаётся;
  *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет;
  *  - лестница SSL: протухший снимок не зелёный, «нет сертификата» отличимо.
+ *
+ * Фаза 4 (наша запись против факта):
+ *  - строка «при развёртывании: X» есть при расхождении и отсутствует при
+ *    совпадении, значением поля остаётся факт;
+ *  - `home` FTP-аккаунта не дублирует путь сайта;
+ *  - домен без снимка не показывает решётки прочерков;
+ *  - пустой список фактов — «не прочитали», а не измеренная пустота.
+ *
+ * Исход правила проверяется по атрибуту `data-source`, а не по инлайн-цвету:
+ * цвет уедет в токены вместе с редизайном, а вопрос «показано как факт или как
+ * наша запись» останется тем же.
  */
 
 const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn(), invokeIfTauri: vi.fn(), apiPut: vi.fn() }));
@@ -89,6 +103,16 @@ function otherMockCalls(): { name: string; blob: string }[] {
     out.push({ name: "apiPut", blob: JSON.stringify(c) });
   }
   return out;
+}
+
+/** Исход правила, которым нарисовано поле с этой подписью. */
+function sourceOf(label: string): string | null {
+  return screen.getByText(label).closest("[data-source]")?.getAttribute("data-source") ?? null;
+}
+
+/** Текст всей строки поля (подпись + значение) — без опоры на вёрстку `Row`. */
+function rowText(label: string): string {
+  return screen.getByText(label).closest("[data-source]")?.textContent ?? "";
 }
 
 function show(over: Record<string, unknown> = {}, server = SERVER) {
@@ -288,13 +312,18 @@ describe("расхождение нашей записи с фактом", () =>
       ssl_issuer: "ZeroSSL",
       db_name: "old_db",
     });
+    // Множеством, а не списком в DOM-порядке: перестановка колонок — вопрос
+    // вёрстки, и красить ею тест про поведение незачем.
     const notes = screen.getAllByText(/при развёртывании/).map((n) => n.textContent);
-    expect(notes).toEqual([
-      "при развёртывании: ZeroSSL",
-      "при развёртывании: /var/www/old.example.com",
-      "при развёртывании: old_usr",
-      "при развёртывании: old_db",
-    ]);
+    expect(notes).toHaveLength(4);
+    expect(new Set(notes)).toEqual(
+      new Set([
+        "при развёртывании: ZeroSSL",
+        "при развёртывании: /var/www/old.example.com",
+        "при развёртывании: old_usr",
+        "при развёртывании: old_db",
+      ]),
+    );
   });
 
   it("логин FTP: значение — живой аккаунт сервера, наш удалённый уходит в строку", () => {
@@ -305,9 +334,17 @@ describe("расхождение нашей записи с фактом", () =>
       fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }),
       ftp_user: "example_ftp",
     });
-    const login = screen.getByText("Login").parentElement;
-    expect(login?.textContent).toContain("server_ftp");
+    expect(rowText("Login")).toContain("server_ftp");
     expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+  });
+
+  it("пробельная запись не заслоняет живой аккаунт сервера", () => {
+    // `ftp_user` из одних пробелов правило чистит и отвечает `agree`, а сырая
+    // строка при этом truthy: наивное `domain.ftp_user || facts[0]` напечатало
+    // бы пустоту вместо реального логина — тот же дефект, только незаметнее.
+    show({ ...fresh, fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }), ftp_user: "   " });
+    expect(rowText("Login")).toContain("server_ftp");
+    expect(sourceOf("Login")).toBe("agree");
   });
 
   it("срок сертификата сверяется по дате, а наша запись печатается по-человечески", () => {
@@ -371,16 +408,29 @@ describe("снимка не было ни разу", () => {
     expect(screen.queryAllByText("—")).toEqual([]);
   });
 
-  it("известное из provision показано приглушённо и подписано", () => {
+  it("известное из provision показано как наша запись, а подпись дана легендой один раз", () => {
     show({ ftp_user: "example_ftp", site_path: "/var/www/example.com", db_user: "example_dbu" });
-    // jsdom печатает inline-цвет то hex'ом, то rgb() — сверяем обе записи.
-    const muted = /color:\s*(#9ca3af|rgb\(156,\s*163,\s*175\))/i;
+    expect(sourceOf("Login")).toBe("recorded-only");
+    expect(sourceOf("Path")).toBe("recorded-only");
+    expect(sourceOf("DB user")).toBe("recorded-only");
     for (const v of ["example_ftp", "/var/www/example.com", "example_dbu"]) {
-      expect(screen.getByText(v).getAttribute("style")).toMatch(muted);
+      expect(screen.getByText(v)).toBeTruthy();
     }
-    expect(screen.getAllByText("из provision, на сервере не проверено").length).toBe(3);
-    // И ни одно из них не выдано за расхождение: сверять было не с чем.
+    // Подпись плана дана дословно, но ОДИН раз — легендой над сеткой, а не
+    // восемью одинаковыми строками под каждым полем (принцип №2).
+    expect(screen.getAllByText(/из provision, на сервере не проверено/)).toHaveLength(1);
+    // И ни одно значение не выдано за расхождение: сверять было не с чем.
     expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("факты без отметки времени не печатаются вопреки легенде", () => {
+    // Пара «`fp_facts` есть, `fp_facts_at` нет» бэкендом не производится (обе
+    // колонки пишутся одной транзакцией), но если разъедется — секция не должна
+    // сказать «ещё не читали» и тут же напечатать список аккаунтов сервера.
+    show({ fp_facts: facts(), fp_facts_at: null });
+    expect(screen.getByText(/Сервер ещё не читали/)).toBeTruthy();
+    expect(screen.queryByText("Accounts on server")).toBeNull();
+    expect(screen.queryByText("8.2 · php-fpm")).toBeNull();
   });
 
   it("домен без сервера: Host остаётся прочерком", () => {
@@ -393,6 +443,36 @@ describe("снимка не было ни разу", () => {
       </QueryClientProvider>,
     );
     expect(screen.getByText("Host").parentElement?.textContent).toContain("—");
+  });
+});
+
+describe("пустой список фактов — незнание, а не измеренная пустота", () => {
+  // Тот же вердикт, что выносит `compareInList` в `lib/domainDrift`: провод
+  // схлопывает в `[]` и «на сервере правда пусто», и упавшую команду, и слабый
+  // mysql-фолбэк. Прочерк читался бы как «спросили, там пусто» — то есть один
+  // и тот же ответ сервера получал бы на экране и в правиле разные вердикты.
+  const empty = { fp_facts: facts({ databases: [], ftp_accounts: [] }), fp_facts_at: ago(HOUR) };
+
+  it("баз не прочитали и своей записи нет — «not read», а не прочерк", () => {
+    show(empty);
+    expect(rowText("Databases")).toContain("not read");
+    expect(rowText("Databases")).not.toContain("—");
+  });
+
+  it("аккаунтов FTP не прочитали и своей записи нет — «not read», а не прочерк", () => {
+    show({ ...empty, ftp_user: null });
+    expect(rowText("Login")).toContain("not read");
+    expect(rowText("Login")).not.toContain("—");
+  });
+
+  it("своя запись есть — она и становится значением, расхождением её не объявляют", () => {
+    show({ ...empty, db_name: "example_db", ftp_user: "example_ftp" });
+    expect(sourceOf("Databases")).toBe("recorded-only");
+    expect(sourceOf("Login")).toBe("recorded-only");
+    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    // Здесь подпись печатается у поля: снимок ЕСТЬ, легенды над сеткой нет, и
+    // сказать «этого мы не прочитали» больше негде.
+    expect(screen.getAllByText("из provision, на сервере не проверено")).toHaveLength(2);
   });
 });
 
