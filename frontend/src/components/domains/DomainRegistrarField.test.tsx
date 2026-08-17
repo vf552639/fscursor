@@ -84,7 +84,11 @@ beforeEach(() => {
     mutations: { ...base.mutations, retry: false },
   });
   mockAccounts();
-  mocks.apiPut.mockResolvedValue(domain());
+  // Ответ сервера — строка домена С УЧЁТОМ отправленного тела: `mockResolvedValue`
+  // с фиксированным `registrar_id` отвечал бы «сохранён Hostiq» на любую запись,
+  // и первое же утверждение про состояние после сохранения было бы проверено об
+  // заведомо верный ответ.
+  mocks.apiPut.mockImplementation(async (_path: string, body: any) => domain(body));
 });
 
 afterEach(() => {
@@ -143,10 +147,66 @@ describe("незнание не рисуется «связи нет»", () => {
   it("домен без регистратора: сказано и что не назначен, и чем это грозит", async () => {
     show({ registrar_id: null });
 
-    await waitFor(() => expect(sel().value).toBe(""));
+    // Диагноз готов сразу: он читается из строки домена и чужого списка не ждёт.
+    expect(sel().value).toBe("");
     // Тот же диагноз, что печатает панель NS внизу, но здесь у него есть
     // лекарство — селект в двух сантиметрах.
     expect(screen.getByText(/nowhere to push nameservers/i)).toBeTruthy();
+
+    // И после приезда списка он тот же: пункты появились, утверждение не
+    // изменилось (проверяем оба момента — иначе тест закрепляет только первый
+    // тик, на котором значение пусто по любой причине).
+    await screen.findByText("Hostiq main");
+    expect(screen.getByText(/nowhere to push nameservers/i)).toBeTruthy();
+    expect(sel().value).toBe("");
+    expect(sel().disabled).toBe(false);
+  });
+
+  it("не назначен И список не прочитался — названы обе половины", async () => {
+    // Самая тупиковая комбинация: диагноз «назначь аккаунт» стоит, а лекарство
+    // рядом мёртвое (выбирать не из чего). Без второй строки экран велит сделать
+    // то, чего в нём сделать нельзя, и молчит о причине.
+    mocks.apiGet.mockRejectedValue(new Error("401 Unauthorized"));
+    show({ registrar_id: null });
+
+    expect(await screen.findByText(/401 Unauthorized/)).toBeTruthy();
+    expect(screen.getByText(/nowhere to push nameservers/i)).toBeTruthy();
+    expect(sel().disabled).toBe(true);
+  });
+
+  it("пока запись идёт, под погасшим селектом не висит прежний диагноз", async () => {
+    // Ответ не приходит: селект выключен и стоит в СТАРОМ значении (свежую строку
+    // домена карточка получит после инвалидации). Прежнее «не назначен» под ним
+    // читалось бы как отказ на только что сделанный выбор.
+    mocks.apiPut.mockImplementation(() => new Promise(() => {}));
+    show({ registrar_id: null });
+
+    await screen.findByText("Hostiq main");
+    fireEvent.change(sel(), { target: { value: String(HOSTIQ) } });
+
+    expect(await screen.findByText("Saving…")).toBeTruthy();
+    expect(screen.queryByText(/nowhere to push nameservers/i)).toBeNull();
+    expect(sel().disabled).toBe(true);
+  });
+
+  it("список устарел, а рефетч отказал — не утверждаем, что аккаунт удалили", async () => {
+    // TanStack при провале рефетча оставляет прежние `data` и ставит `error`.
+    // Обычная причина — протухший токен, а не удалённая учётка: «probably
+    // deleted» про живой аккаунт отправляет чинить не то.
+    show({ registrar_id: GONE });
+    await screen.findByText(/account not found/i);
+
+    mocks.apiGet.mockRejectedValue(new Error("401 Unauthorized"));
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ["registrars", "accounts"] });
+    });
+
+    expect(await screen.findByText(/401 Unauthorized/)).toBeTruthy();
+    // Список при этом никуда не делся (TanStack хранит прежние `data`), и
+    // «#9 · account not found» в селекте остаётся — снимается только УТВЕРЖДЕНИЕ
+    // про удаление.
+    expect(screen.getByText(/account not found/i)).toBeTruthy();
+    expect(screen.queryByText(/probably deleted/i)).toBeNull();
   });
 
   it("аккаунт удалён, а id в домене остался — селект не встаёт в «не назначен»", async () => {
@@ -170,6 +230,10 @@ describe("незнание не рисуется «связи нет»", () => {
     expect(screen.getByText(/Loading accounts/i)).toBeTruthy();
     expect(sel().value).toBe(String(HOSTIQ));
     expect(sel().disabled).toBe(true);
+    // Причина состояния селекта связана с ним явно: выключенный селект фокуса не
+    // получает, и без `aria-describedby` подпись существует только визуально.
+    const described = document.getElementById(sel().getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toMatch(/Loading accounts/i);
     // И «аккаунт не найден» тоже рано: мы его ещё не искали.
     expect(screen.queryByText(/account not found/i)).toBeNull();
   });
