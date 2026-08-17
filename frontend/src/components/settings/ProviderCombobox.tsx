@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 import {
   buildProviderList,
@@ -62,10 +62,19 @@ export function ProviderCombobox({ value, onChange, accounts, disabled }: Props)
   const exists = options.some((o) => o.key === normalizeProvider(q));
   const canCreate = q.length > 0 && !exists;
 
+  /**
+   * Кнопка, на которую возвращается фокус после выбора. `autoFocus` уводит его в
+   * поле поиска, а выбор размонтирует всплывашку вместе с этим полем — без
+   * возврата фокус приземляется на `document.body`, и следующий `Tab` начинает
+   * обход с начала документа, а не со следующего поля формы.
+   */
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
   const pick = (provider: string) => {
     onChange(provider);
     setOpen(false);
     setQuery("");
+    buttonRef.current?.focus();
   };
 
   // Список гасится вместе с полем: если `disabled` пришёл, пока выпадашка была
@@ -77,6 +86,7 @@ export function ProviderCombobox({ value, onChange, accounts, disabled }: Props)
   return (
     <div style={{ position: "relative" }}>
       <button
+        ref={buttonRef}
         type="button"
         aria-label="Provider"
         aria-haspopup="listbox"

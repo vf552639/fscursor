@@ -118,6 +118,33 @@ describe("ProviderCombobox", () => {
     expect(onChange).toHaveBeenCalledWith("Porkbun");
   });
 
+  /**
+   * Фокус после выбора обязан вернуться на кнопку. `autoFocus` уводит его в поле
+   * поиска, а выбор размонтирует всплывашку — и без возврата фокус приземляется
+   * на `document.body`: следующий `Tab` начинается с начала документа, а не со
+   * следующего поля формы. Речь именно про возврат, не про навигацию по списку
+   * с клавиатуры (её здесь нет).
+   */
+  it("после выбора фокус возвращается на кнопку провайдера", () => {
+    render(<Harness />);
+    const button = screen.getByRole("button", { name: /provider/i });
+    fireEvent.click(button);
+    expect(document.activeElement).toBe(screen.getByPlaceholderText(/Поиск/));
+    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("создание нового провайдера тоже возвращает фокус на кнопку", () => {
+    render(<Harness />);
+    const button = screen.getByRole("button", { name: /provider/i });
+    fireEvent.click(button);
+    fireEvent.change(screen.getByPlaceholderText(/Поиск/), {
+      target: { value: "Porkbun" },
+    });
+    fireEvent.click(screen.getByText(/Создать/));
+    expect(document.activeElement).toBe(button);
+  });
+
   it("выбор закрывает список и сбрасывает поиск", () => {
     render(<Harness />);
     openList();
