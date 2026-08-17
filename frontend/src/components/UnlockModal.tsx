@@ -1,30 +1,76 @@
 import React, { useState } from "react";
-import { apiPost } from "../api/client";
-import { deriveMasterKey } from "../lib/crypto";
+import { apiGet, ApiError } from "../api/client";
+import { deriveMasterKey, unwrapVaultKey } from "../lib/crypto";
 import { b64ToU8 } from "../lib/b64";
-import { useAuthStore, bumpMasterKeyActivity } from "../store/auth";
+import { useAuthStore, bumpVaultKeyActivity } from "../store/auth";
 import { Btn, Inp, Modal } from "./ui/Primitives";
 
+/** Ровно те поля `/auth/me`, которые нужны для разблокировки. */
+interface MeCryptoFields {
+  salt_b64: string;
+  /** `null` — аккаунт заведён до перехода на ключ хранилища: обёртки ещё нет. */
+  wrapped_vault_key_b64: string | null;
+}
+
+/**
+ * Сессия кончилась, пока модалка была открыта (или её открыли на протухшей вкладке).
+ * `/auth/me` отвечает 401, и без этой ветки его `detail` рисуется под полем пароля —
+ * то есть ошибка сессии читается как «пароль не тот». Раньше пути не было вовсе:
+ * соль брали анонимным `POST /auth/login/start`, и 401 здесь взяться было неоткуда.
+ */
+const SESSION_EXPIRED = "Your session has expired. Sign in again, then unlock.";
+
+/**
+ * Password → KEK → vault key. Two steps, and the second is the whole point: the password
+ * only unwraps the key the blobs are encrypted with, so changing the password (or running
+ * recovery) rewraps that key and leaves every stored secret readable.
+ *
+ * Salt and wrapper both come from `/auth/me` — one authenticated call. The old anonymous
+ * `POST /auth/login/start` handed out a salt for any email, and this screen is opened by a
+ * user who is already signed in; there was never a reason to ask unauthenticated.
+ */
 export function UnlockModal({ onClose }: { onClose: () => void }) {
-  const email = useAuthStore((s) => s.email);
-  const setMasterKey = useAuthStore((s) => s.setMasterKey);
+  const setVaultKey = useAuthStore((s) => s.setVaultKey);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function unlock() {
-    if (!email) return;
     setLoading(true);
     setError(null);
     try {
-      const { salt_b64 } = await apiPost<{ salt_b64: string }>("/auth/login/start", { email });
-      const salt = b64ToU8(salt_b64);
-      const key = await deriveMasterKey(password, salt);
-      setMasterKey(key);
-      bumpMasterKeyActivity();
+      const me = await apiGet<MeCryptoFields>("/auth/me");
+      const kek = await deriveMasterKey(password, b64ToU8(me.salt_b64));
+      if (!me.wrapped_vault_key_b64) {
+        // До перехода VK := KEK, и блобы такого аккаунта зашифрованы именно им.
+        // Обёртку заведёт десктоп (`/auth/vault-key/init`) — веб ничего не мутирует.
+        //
+        // Сверять здесь не с чем: обёртки нет, а значит нет и проверки пароля. Неверный
+        // пароль «разблокирует» успешно, модалка закроется, а провал всплывёт позже в
+        // `RevealSecret` сырым «decrypt failed» — про пароль там не будет ни слова, и
+        // посоветовать фразу восстановления оттуда нельзя (мы не знаем, что виноват
+        // пароль). Криптографически иначе и не выйдет: пока сервер не хранит ничего,
+        // что открывается ключом, отличить верный ключ от неверного не по чему.
+        // Лечится это не здесь, а первым запуском десктопа: он заводит обёртку, после
+        // чего аккаунт попадает в ветку ниже — с диагностикой.
+        setVaultKey(kek);
+      } else {
+        try {
+          setVaultKey(await unwrapVaultKey(b64ToU8(me.wrapped_vault_key_b64), kek));
+        } finally {
+          // KEK своё отработал — гасим копию, которую вернул `deriveMasterKey`. Это
+          // дешёвая гигиена, а НЕ «в памяти вкладки остался только VK»: оригинал лежит
+          // в линейной памяти argon2-WASM, буфер `combinePasswordContext` с байтами
+          // пароля не гасится, да и сам пароль живёт JS-строкой в стейте React до
+          // размонтирования. Одну копию из четырёх убрать всё же дешевле, чем не убрать.
+          kek.fill(0);
+        }
+      }
+      bumpVaultKeyActivity();
       onClose();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof ApiError && e.status === 401) setError(SESSION_EXPIRED);
+      else setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }

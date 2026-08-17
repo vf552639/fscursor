@@ -110,6 +110,7 @@ async def _register_and_login(client: AsyncClient, email: str, key: bytes = b"\x
             "auth_key_b64": b64(key),
             "recovery_blob_b64": b64(b"\x02" * 96),
             "recovery_auth_key_b64": b64(b"\x03" * 32),
+            "wrapped_vault_key_b64": b64(b"\x04" * 72),
         },
     )
     # 409 — почта уже занята: тесты берут случайные адреса, так что это

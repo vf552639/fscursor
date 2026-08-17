@@ -30,7 +30,7 @@ from app.audit.models import AuditLog
 from app.core.database import AsyncSessionLocal
 from app.main import app
 from app.models.domain import Domain
-from tests.conftest import register_and_login
+from conftest import register_and_login
 
 pytestmark = pytest.mark.usefixtures("purge_test_users")
 

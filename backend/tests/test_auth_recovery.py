@@ -7,6 +7,13 @@ auth_key_hash и recovery-блоб — владелец терял вход, а 
 восстанавливал уже никто. Теперь клиент обязан предъявить `recovery_auth_key`
 (Argon2id от фразы, контекст "sdmp-recovery-key-v1"), сервер держит его
 bcrypt-хеш в `recovery_blob.recovery_auth_key_hash` и сверяет ДО любой мутации.
+
+Второй слой — ключ хранилища (VK). Блобы шифруются им, а пароль лишь
+оборачивает его (`users.wrapped_vault_key` = aead(VK, KEK)), поэтому
+восстановление обязано принести обёртку VK на новом пароле: без неё поворот
+соли и пароля по-прежнему отрезал бы владельца от собственных секретов. Отсюда
+и требование, и его форма — поле обязательное, чтобы клиент, который о нём не
+знает, получил 422, а не тихо добил аккаунт.
 """
 
 import base64
@@ -21,6 +28,16 @@ from app.auth.models import RecoveryBlob, Session as DbSession, User
 from app.core.database import AsyncSessionLocal
 from app.main import app
 
+from conftest import _REGISTERED_EMAILS
+
+# База тестов общая с dev-окружением, поэтому за собой убирают все файлы. Свой
+# `register_and_login` из conftest тут не подходит: половине случаев нужен
+# пользователь БЕЗ живой сессии (они сами считают сессии до и после), поэтому
+# заведение осталось локальным, а в общий реестр уборки оно только дописывается.
+# Импорт именно `from conftest`, не `from tests.conftest` — иначе реестр будет
+# второй копией и уборка не выполнится (подробности — в шапке `conftest.py`).
+pytestmark = pytest.mark.usefixtures("purge_test_users")
+
 
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
@@ -30,9 +47,13 @@ AUTH_KEY = b"\x01" * 32
 BLOB = b"\x02" * 96
 REC_KEY = b"\x03" * 32
 WRONG_REC_KEY = b"\x99" * 32
+# aead(VK, KEK): nonce 24 + тег 16 + ключ 32.
+WRAPPED_VK = b"\x04" * 72
+NEW_WRAPPED_VK = b"\x13" * 72
 
 
 async def _register_and_confirm(c: AsyncClient, email: str, rec_key: bytes = REC_KEY) -> None:
+    _REGISTERED_EMAILS.append(email)
     r = await c.post(
         "/api/auth/register",
         json={
@@ -41,6 +62,7 @@ async def _register_and_confirm(c: AsyncClient, email: str, rec_key: bytes = REC
             "auth_key_b64": b64(AUTH_KEY),
             "recovery_blob_b64": b64(BLOB),
             "recovery_auth_key_b64": b64(rec_key),
+            "wrapped_vault_key_b64": b64(WRAPPED_VK),
         },
     )
     assert r.status_code == 201, r.text
@@ -69,9 +91,12 @@ async def _snapshot(email: str) -> dict:
         return {
             "salt": bytes(user.salt),
             "auth_key_hash": bytes(user.auth_key_hash),
+            "wrapped_vault_key": (
+                bytes(user.wrapped_vault_key) if user.wrapped_vault_key is not None else None
+            ),
             "ciphertext": bytes(rb.ciphertext),
             "recovery_auth_key_hash": (
-                bytes(rb.recovery_auth_key_hash) if rb.recovery_auth_key_hash else None
+                bytes(rb.recovery_auth_key_hash) if rb.recovery_auth_key_hash is not None else None
             ),
             "session_ids": sorted(str(x) for x in sessions),
         }
@@ -89,6 +114,19 @@ async def _clear_recovery_hash(email: str) -> None:
         await s.commit()
 
 
+async def _clear_wrapped_vault_key(email: str) -> None:
+    """Состояние аккаунта, заведённого до перехода на ключ хранилища."""
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(User).where(User.email == email).values(wrapped_vault_key=None))
+        await s.commit()
+
+
+async def _wrapped_vault_key(email: str) -> bytes | None:
+    async with AsyncSessionLocal() as s:
+        user = (await s.execute(select(User).where(User.email == email))).scalar_one()
+        return bytes(user.wrapped_vault_key) if user.wrapped_vault_key is not None else None
+
+
 def _finish_body(email: str, rec_key: bytes, **extra) -> dict:
     body = {
         "email": email,
@@ -96,6 +134,7 @@ def _finish_body(email: str, rec_key: bytes, **extra) -> dict:
         "new_salt_b64": b64(b"\x10" * 16),
         "new_auth_key_b64": b64(b"\x11" * 32),
         "new_recovery_blob_b64": b64(b"\x12" * 96),
+        "new_wrapped_vault_key_b64": b64(NEW_WRAPPED_VK),
     }
     body.update(extra)
     return body
@@ -156,6 +195,13 @@ async def test_recovery_finish_wrong_key_rejected_and_mutates_nothing():
 
 @pytest.mark.asyncio
 async def test_recovery_finish_without_key_is_rejected():
+    """`recovery_auth_key_b64` обязателен — и забор стоит вокруг схемы.
+
+    Снимок «до» тут не мог измениться: Pydantic отбивает запрос до хендлера. Тест
+    и сторожит не хендлер, а обязательность поля: сделай его опциональным — и
+    вернётся ровно та дыра, с которой начата шапка файла (кто знает email, тот
+    поворачивает пароль).
+    """
     email = f"recnokey-{uuid.uuid4().hex[:10]}@example.com"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         await _register_and_confirm(c, email)
@@ -310,6 +356,164 @@ async def test_successful_recovery_kills_sessions_and_rewrites_blob():
         assert after["recovery_auth_key_hash"] is not None
         r = await c.get("/api/auth/me")
         assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_recovery_finish_rewraps_vault_key_for_the_new_password():
+    """Обёртка VK едет на новый пароль — иначе блобы после восстановления мертвы."""
+    email = f"recvk-{uuid.uuid4().hex[:10]}@example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        assert await _wrapped_vault_key(email) == WRAPPED_VK
+
+        r = await c.post("/api/auth/recovery/finish", json=_finish_body(email, REC_KEY))
+        assert r.status_code == 200, r.text
+        assert await _wrapped_vault_key(email) == NEW_WRAPPED_VK
+
+
+@pytest.mark.asyncio
+async def test_recovery_finish_without_wrapped_vault_key_is_rejected():
+    """Обёртка обязательна — и забор стоит вокруг схемы, а не вокруг хендлера.
+
+    Снимок «до» измениться и не мог: Pydantic отбивает запрос раньше хендлера.
+    Ценность теста в другом — дай `new_wrapped_vault_key_b64` значение по
+    умолчанию, и билд, не знающий про VK, вместо 422 молча повернёт соль с
+    паролем и оставит владельца с блобами, которые больше нечем открыть.
+    """
+    email = f"recnovk-{uuid.uuid4().hex[:10]}@example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        before = await _snapshot(email)
+
+        body = _finish_body(email, REC_KEY)
+        del body["new_wrapped_vault_key_b64"]
+        r = await c.post("/api/auth/recovery/finish", json=body)
+        assert r.status_code == 422, r.text
+        assert await _snapshot(email) == before
+
+
+@pytest.mark.asyncio
+async def test_vault_key_init_fills_null_column_and_never_overwrites():
+    """Ленивая миграция срабатывает один раз, и второй вызов ничего не портит.
+
+    Перезапись обёртки — это потеря всех секретов аккаунта: VK достаётся только
+    из неё. Поэтому пришедший с ДРУГИМИ байтами (проигравший гонку двух устройств
+    или чужая сессия) обязан получить 409, а лежащая в колонке обёртка —
+    остаться прежней; проверяется именно значение, код ответа тут ничего не
+    гарантирует.
+    """
+    email = f"vkinit-{uuid.uuid4().hex[:10]}@example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        await _clear_wrapped_vault_key(email)
+        r = await c.post(
+            "/api/auth/login/finish",
+            json={"email": email, "auth_key_b64": b64(AUTH_KEY)},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["wrapped_vault_key_b64"] is None
+
+        r = await c.post(
+            "/api/auth/vault-key/init", json={"wrapped_vault_key_b64": b64(WRAPPED_VK)}
+        )
+        assert r.status_code == 200, r.text
+        assert await _wrapped_vault_key(email) == WRAPPED_VK
+
+        r = await c.post(
+            "/api/auth/vault-key/init", json={"wrapped_vault_key_b64": b64(NEW_WRAPPED_VK)}
+        )
+        assert r.status_code == 409, r.text
+        assert await _wrapped_vault_key(email) == WRAPPED_VK
+
+
+@pytest.mark.asyncio
+async def test_vault_key_init_retried_with_the_same_wrapper_is_ok():
+    """Ретрай теми же байтами — не конфликт, а потерянный ответ.
+
+    Самый частый повтор этого вызова — не гонка двух устройств, а первый запрос,
+    который дошёл до сервера, но чей ответ не вернулся: клиент шлёт ровно те же
+    байты. Состояние уже целевое, и 409 тут отправил бы его чинить несломанное —
+    в худшем случае заводить второй VK поверх рабочего.
+    """
+    email = f"vkretry-{uuid.uuid4().hex[:10]}@example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        await _clear_wrapped_vault_key(email)
+        r = await c.post(
+            "/api/auth/login/finish",
+            json={"email": email, "auth_key_b64": b64(AUTH_KEY)},
+        )
+        assert r.status_code == 200, r.text
+
+        for _ in range(2):
+            r = await c.post(
+                "/api/auth/vault-key/init", json={"wrapped_vault_key_b64": b64(WRAPPED_VK)}
+            )
+            assert r.status_code == 200, r.text
+            assert await _wrapped_vault_key(email) == WRAPPED_VK
+
+        # Идемпотентность — только для совпадающих байтов: чужая обёртка
+        # по-прежнему упирается в 409.
+        r = await c.post(
+            "/api/auth/vault-key/init", json={"wrapped_vault_key_b64": b64(NEW_WRAPPED_VK)}
+        )
+        assert r.status_code == 409, r.text
+        assert await _wrapped_vault_key(email) == WRAPPED_VK
+
+
+@pytest.mark.asyncio
+async def test_login_and_me_hand_out_the_wrapper():
+    """Клиенту нужен `wrapped_vault_key`, иначе он не развернёт VK.
+
+    `/auth/me` отдаёт вместе с обёрткой и соль: вебу этого хватает одним
+    аутентифицированным вызовом, без анонимного `/auth/login/start`.
+    """
+    email = f"vkme-{uuid.uuid4().hex[:10]}@example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        r = await c.post(
+            "/api/auth/login/finish",
+            json={"email": email, "auth_key_b64": b64(AUTH_KEY)},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["wrapped_vault_key_b64"] == b64(WRAPPED_VK)
+
+        me = (await c.get("/api/auth/me")).json()
+        assert me["wrapped_vault_key_b64"] == b64(WRAPPED_VK)
+        assert me["salt_b64"] == b64(b"\x00" * 16)
+
+
+@pytest.mark.asyncio
+async def test_recovery_start_never_hands_out_the_wrapper():
+    """Анонимный эндпоинт обёртку не отдаёт — иначе это оракул для перебора пароля.
+
+    `recovery/start` спрашивают, зная один лишь email. Отдай он `wrapped_vault_key`
+    — и любой желающий получил бы возможность подбирать пароль оффлайн: угадал KEK,
+    развернулась обёртка, значит пароль верный. Проверять же нечего: VK и так
+    достаётся законному владельцу из recovery-блоба, который здесь и лежит.
+
+    Инвариант отрицательный, и потому его легко потерять, добавляя поле «за
+    компанию» с `/auth/me` — этот тест и есть тот гвоздь.
+    """
+    email = f"recstart-{uuid.uuid4().hex[:10]}@example.com"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await _register_and_confirm(c, email)
+        r = await c.post("/api/auth/recovery/start", json={"email": email})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "wrapped_vault_key_b64" not in body
+        # Не только по имени поля: самих байтов обёртки в ответе быть не должно
+        # ни под каким ключом.
+        assert b64(WRAPPED_VK) not in r.text
+
+
+@pytest.mark.asyncio
+async def test_vault_key_init_requires_session():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(
+            "/api/auth/vault-key/init", json={"wrapped_vault_key_b64": b64(WRAPPED_VK)}
+        )
+        assert r.status_code == 401, r.text
 
 
 @pytest.mark.asyncio

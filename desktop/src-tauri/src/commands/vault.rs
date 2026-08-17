@@ -12,7 +12,7 @@ pub async fn vault_decrypt_blob(
     blob_id: String,
     api: State<'_, ApiClient>,
 ) -> Result<String, CommandError> {
-    let key = keychain::load_master_key(&user_id)
+    let key = keychain::load_vault_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let blob = api
@@ -55,7 +55,7 @@ pub async fn vault_put_blob(
     plaintext_b64: String,
     api: State<'_, ApiClient>,
 ) -> Result<(), CommandError> {
-    let key = keychain::load_master_key(&user_id)
+    let key = keychain::load_vault_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let pt = B64

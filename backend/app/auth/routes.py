@@ -4,11 +4,11 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-import uuid
+from typing import Optional
 
 import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import delete as sa_delete, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import service as audit_service
@@ -17,7 +17,6 @@ from app.auth.crypto import hash_auth_key, sign_session_token, verify_auth_key
 from app.auth.dependencies import get_current_user_or_401
 from app.auth.email import send_confirmation_email
 from app.auth.models import RecoveryBlob, Session as DbSession, User
-from app.blobs.models import BlobStorage
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import limiter
@@ -34,6 +33,16 @@ def _b64decode_or_400(s: str, field: str) -> bytes:
         return base64.b64decode(s.encode("utf-8"), validate=True)
     except (binascii.Error, ValueError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid base64 in {field}")
+
+
+def _b64encode_or_none(b: Optional[bytes]) -> Optional[str]:
+    """None остаётся None — и только None.
+
+    Проверка по истинности смешала бы NULL с `b""`, а гард записи обёртки стоит
+    на `IS NULL`: пустые байты в колонке дали бы тупик, где клиенту говорят
+    «не мигрирован», а /auth/vault-key/init вечно отвечает 409.
+    """
+    return base64.b64encode(b).decode() if b is not None else None
 
 
 # Сравнение по времени с несуществующим пользователем: без этого recovery/finish
@@ -70,11 +79,13 @@ async def register(
     auth_key = _b64decode(body.auth_key_b64)
     recovery_blob = _b64decode(body.recovery_blob_b64)
     recovery_auth_key = _b64decode_or_400(body.recovery_auth_key_b64, "recovery_auth_key_b64")
+    wrapped_vault_key = _b64decode_or_400(body.wrapped_vault_key_b64, "wrapped_vault_key_b64")
     confirm_token = secrets.token_urlsafe(32)
     user = User(
         email=body.email,
         salt=salt,
         auth_key_hash=hash_auth_key(auth_key),
+        wrapped_vault_key=wrapped_vault_key,
         email_confirm_token_hash=hashlib.sha256(confirm_token.encode("utf-8")).digest(),
     )
     db.add(user)
@@ -120,14 +131,14 @@ async def login_start(
     return schemas.LoginStartResponse(salt_b64=base64.b64encode(user.salt).decode())
 
 
-@router.post("/login/finish")
+@router.post("/login/finish", response_model=schemas.LoginFinishResponse)
 @limiter.limit("10/minute")
 async def login_finish(
     request: Request,
     body: schemas.LoginFinishRequest,
     response: Response,
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> schemas.LoginFinishResponse:
     user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
@@ -160,7 +171,10 @@ async def login_finish(
     )
     await db.commit()
     _set_session_cookie(response, token)
-    return {"user_id": str(user.id)}
+    return schemas.LoginFinishResponse(
+        user_id=user.id,
+        wrapped_vault_key_b64=_b64encode_or_none(user.wrapped_vault_key),
+    )
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -202,7 +216,64 @@ async def me(
         # заведённый до миграции 014, восстановиться не может, и узнать об этом
         # он должен заранее, а не в момент, когда пароль уже потерян.
         recovery_configured=rb is not None and rb.recovery_auth_key_hash is not None,
+        salt_b64=base64.b64encode(user.salt).decode(),
+        wrapped_vault_key_b64=_b64encode_or_none(user.wrapped_vault_key),
     )
+
+
+@router.post("/vault-key/init", status_code=status.HTTP_200_OK)
+async def vault_key_init(
+    request: Request,
+    body: schemas.VaultKeyInitRequest,
+    user: User = Depends(get_current_user_or_401),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Закрепить обёртку VK за аккаунтом, заведённым до перехода (колонка NULL).
+
+    Пишет условным UPDATE, а не проверкой с последующим присваиванием: этот
+    эндпоинт заполняет колонку ровно один раз за жизнь аккаунта и перезаписывать
+    её не вправе никогда — чужая обёртка здесь означала бы потерю доступа ко всем
+    секретам. Перезапись существующей обёртки — законная работа `recovery_finish`
+    и `change_password`: там VK остаётся прежним, меняется лишь ключ, которым он
+    обёрнут, и колонка пишется безусловно. Асимметрия намеренная.
+
+    Ответы на повторный вызов:
+
+    * те же байты, что уже лежат в колонке — 200. Это не гонка, а ретрай после
+      потерянного ответа: состояние уже целевое, и врать клиенту конфликтом,
+      которого нет, значит толкать его чинить несломанное;
+    * другие байты — 409. Гонку выиграло другое устройство. Клиенту полагается
+      перечитать `/auth/me`, взять сохранённую там обёртку и выбросить свою: до
+      перехода VK == KEK, обе обёртки разворачиваются в один и тот же ключ, так
+      что терять ему нечего. Настаивать на своей — единственный способ сделать
+      себе плохо.
+    """
+    wrapped = _b64decode_or_400(body.wrapped_vault_key_b64, "wrapped_vault_key_b64")
+    result = await db.execute(
+        sa_update(User)
+        .where(User.id == user.id, User.wrapped_vault_key.is_(None))
+        .values(wrapped_vault_key=wrapped)
+    )
+    if result.rowcount == 0:
+        # Гонку разрешил сам UPDATE; читаем уже после него только чтобы отличить
+        # ретрай от конфликта. Значение к этому моменту окончательное: соперник
+        # либо успел закоммититься раньше, либо держал блокировку строки, и наш
+        # UPDATE его дождался.
+        stored = (
+            await db.execute(select(User.wrapped_vault_key).where(User.id == user.id))
+        ).scalar_one_or_none()
+        if stored is None or bytes(stored) != wrapped:
+            raise HTTPException(status.HTTP_409_CONFLICT, "vault key already initialized")
+        # Ничего не изменилось — нечего и коммитить, и нечего писать в аудит.
+        return {"ok": True}
+    await audit_service.log(
+        db,
+        user_id=user.id,
+        action="auth.vault_key_init",
+        ip=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"ok": True}
 
 
 @router.post("/recovery/setup", status_code=status.HTTP_200_OK)
@@ -273,6 +344,9 @@ async def recovery_finish(
     new_salt = _b64decode_or_400(body.new_salt_b64, "new_salt_b64")
     new_auth_key = _b64decode_or_400(body.new_auth_key_b64, "new_auth_key_b64")
     new_blob = _b64decode_or_400(body.new_recovery_blob_b64, "new_recovery_blob_b64")
+    new_wrapped_vk = _b64decode_or_400(
+        body.new_wrapped_vault_key_b64, "new_wrapped_vault_key_b64"
+    )
     rotated_key = (
         _b64decode_or_400(body.new_recovery_auth_key_b64, "new_recovery_auth_key_b64")
         if body.new_recovery_auth_key_b64 is not None
@@ -298,6 +372,9 @@ async def recovery_finish(
     # --- Ниже — первая мутация. Всё, что выше, ничего не меняет. ---
     user.salt = new_salt
     user.auth_key_hash = hash_auth_key(new_auth_key)
+    # VK прежний — меняется только ключ, которым он обёрнут. Блобы не трогаются
+    # и после восстановления читаются тем же ключом, что и до него.
+    user.wrapped_vault_key = new_wrapped_vk
     rb.ciphertext = new_blob
     if rotated_key is not None:
         rb.recovery_auth_key_hash = hash_auth_key(rotated_key)
@@ -319,15 +396,22 @@ async def change_password(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    if not verify_auth_key(_b64decode(body.old_auth_key_b64), user.auth_key_hash):
+    # --- Только чтение и валидация: кривой base64 обязан дать 400 до мутаций. ---
+    old_auth_key = _b64decode_or_400(body.old_auth_key_b64, "old_auth_key_b64")
+    new_salt = _b64decode_or_400(body.new_salt_b64, "new_salt_b64")
+    new_auth_key = _b64decode_or_400(body.new_auth_key_b64, "new_auth_key_b64")
+    new_wrapped_vk = _b64decode_or_400(
+        body.new_wrapped_vault_key_b64, "new_wrapped_vault_key_b64"
+    )
+    if not verify_auth_key(old_auth_key, user.auth_key_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid current password")
-    user.salt = _b64decode(body.new_salt_b64)
-    user.auth_key_hash = hash_auth_key(_b64decode(body.new_auth_key_b64))
-    for entry in body.re_encrypted_blobs:
-        blob = await db.get(BlobStorage, uuid.UUID(entry["id"]))
-        if blob is None or blob.user_id != user.id:
-            continue
-        blob.ciphertext = _b64decode(entry["ciphertext_b64"])
+
+    # --- Ниже — первая мутация. Всё, что выше, ничего не меняет. ---
+    user.salt = new_salt
+    user.auth_key_hash = hash_auth_key(new_auth_key)
+    # Блобы остаются как лежали: они зашифрованы VK, а сменился лишь ключ,
+    # которым он обёрнут.
+    user.wrapped_vault_key = new_wrapped_vk
     await audit_service.log(
         db,
         user_id=user.id,

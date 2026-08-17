@@ -7,7 +7,7 @@ use crate::crypto::aead::{decrypt, encrypt, KEY_LEN};
 pub enum RecoveryError {
     #[error("invalid mnemonic phrase")]
     InvalidPhrase,
-    #[error("invalid wrapped master length")]
+    #[error("invalid wrapped vault key length")]
     BadPlaintextLength,
     #[error(transparent)]
     Aead(#[from] crate::crypto::aead::AeadError),
@@ -27,23 +27,33 @@ pub fn derive_recovery_key(phrase: &str) -> Result<[u8; KEY_LEN], RecoveryError>
     Ok(key)
 }
 
-pub fn wrap_master_key(master_key: &[u8; KEY_LEN], phrase: &str) -> Result<Vec<u8>, RecoveryError> {
+/// Оборачивает КЛЮЧ ХРАНИЛИЩА (VK): именно им зашифрованы блобы, и именно он обязан
+/// выйти из блоба при восстановлении.
+///
+/// Переименовано из `wrap_master_key` вместе со сменой смысла: мастер-ключ (KEK) сюда
+/// больше не попадает. Формат на диске от переименования не зависит — имя Rust-функции
+/// в блоб не входит, в отличие от `SERVICE` в связке ключей и метки контекста
+/// `sdmp-master-key-v1`, которые поэтому и остались как были.
+pub fn wrap_vault_key(vault_key: &[u8; KEY_LEN], phrase: &str) -> Result<Vec<u8>, RecoveryError> {
     let mut rec = derive_recovery_key(phrase)?;
-    let result = encrypt(master_key, &rec)?;
+    let result = encrypt(vault_key, &rec)?;
     rec.zeroize();
     Ok(result)
 }
 
-pub fn unwrap_master_key(recovery_blob: &[u8], phrase: &str) -> Result<[u8; KEY_LEN], RecoveryError> {
+pub fn unwrap_vault_key(recovery_blob: &[u8], phrase: &str) -> Result<[u8; KEY_LEN], RecoveryError> {
     let mut rec = derive_recovery_key(phrase)?;
-    let plaintext = decrypt(recovery_blob, &rec)?;
+    let mut plaintext = decrypt(recovery_blob, &rec)?;
     rec.zeroize();
     if plaintext.len() != KEY_LEN {
+        plaintext.zeroize();
         return Err(RecoveryError::BadPlaintextLength);
     }
-    let mut master = [0u8; KEY_LEN];
-    master.copy_from_slice(&plaintext);
-    Ok(master)
+    let mut vault_key = [0u8; KEY_LEN];
+    vault_key.copy_from_slice(&plaintext);
+    // Куча под расшифровку — вторая копия VK; освобождать её как есть нельзя.
+    plaintext.zeroize();
+    Ok(vault_key)
 }
 
 #[cfg(test)]
@@ -58,20 +68,20 @@ mod tests {
 
     #[test]
     fn wrap_unwrap_roundtrip() {
-        let master = [42u8; KEY_LEN];
+        let vault_key = [42u8; KEY_LEN];
         let phrase = generate_phrase();
-        let blob = wrap_master_key(&master, &phrase).unwrap();
-        let recovered = unwrap_master_key(&blob, &phrase).unwrap();
-        assert_eq!(master, recovered);
+        let blob = wrap_vault_key(&vault_key, &phrase).unwrap();
+        let recovered = unwrap_vault_key(&blob, &phrase).unwrap();
+        assert_eq!(vault_key, recovered);
     }
 
     #[test]
     fn wrong_phrase_fails_to_unwrap() {
-        let master = [1u8; KEY_LEN];
+        let vault_key = [1u8; KEY_LEN];
         let phrase = generate_phrase();
-        let blob = wrap_master_key(&master, &phrase).unwrap();
+        let blob = wrap_vault_key(&vault_key, &phrase).unwrap();
         let other = generate_phrase();
-        assert!(unwrap_master_key(&blob, &other).is_err());
+        assert!(unwrap_vault_key(&blob, &other).is_err());
     }
 
     #[test]

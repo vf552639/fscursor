@@ -5,12 +5,18 @@ interface AuthState {
   email: string | null;
   /** Desktop vault unlocked (Tauri); ignored for web session gating. */
   unlocked: boolean;
-  /** Ephemeral web-only key for decrypting blobs; cleared on lock / idle. */
-  masterKey: Uint8Array | null;
+  /**
+   * Ephemeral web-only vault key (VK) — the 32 bytes the blobs are actually encrypted
+   * with. `UnlockModal` derives a KEK from the password, unwraps the VK with it and puts
+   * the result here; cleared on lock / idle. For an account created before the vault-key
+   * change the server reports no wrapper and VK == KEK, which changes what the bytes are,
+   * not what this field means.
+   */
+  vaultKey: Uint8Array | null;
   setUser: (userId: string, email: string) => void;
   setUnlocked: (v: boolean) => void;
-  setMasterKey: (key: Uint8Array) => void;
-  clearMasterKey: () => void;
+  setVaultKey: (key: Uint8Array) => void;
+  clearVaultKey: () => void;
   clear: () => void;
 }
 
@@ -18,27 +24,35 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   userId: null,
   email: null,
   unlocked: false,
-  masterKey: null,
+  vaultKey: null,
   setUser: (userId, email) => set({ userId, email }),
   setUnlocked: (v) => {
     if (!v) {
-      const k = get().masterKey;
+      const k = get().vaultKey;
       if (k) k.fill(0);
-      set({ unlocked: false, masterKey: null });
+      set({ unlocked: false, vaultKey: null });
     } else {
       set({ unlocked: true });
     }
   },
-  setMasterKey: (key) => set({ masterKey: key }),
-  clearMasterKey: () => {
-    const k = get().masterKey;
+  setVaultKey: (key) => {
+    // Тот же порядок «сначала погасить», что и у остальных мутаторов: ключ, который
+    // просто отпустили ссылкой, остаётся лежать в куче до сборки мусора. Сейчас сюда
+    // дважды подряд не приходят, но исключение из правила, которое сам файл и заводит,
+    // — это ровно то, что потом никто не заметит.
+    const prev = get().vaultKey;
+    if (prev && prev !== key) prev.fill(0);
+    set({ vaultKey: key });
+  },
+  clearVaultKey: () => {
+    const k = get().vaultKey;
     if (k) k.fill(0);
-    set({ masterKey: null });
+    set({ vaultKey: null });
   },
   clear: () => {
-    const k = get().masterKey;
+    const k = get().vaultKey;
     if (k) k.fill(0);
-    set({ userId: null, email: null, unlocked: false, masterKey: null });
+    set({ userId: null, email: null, unlocked: false, vaultKey: null });
   },
 }));
 
@@ -48,11 +62,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 // still resolves to (and returns) the DOM overload's `number`.
 let idleTimer: number | null = null;
 
-/** Reset the 5-minute idle timer that clears `masterKey` (web secrets). */
-export function bumpMasterKeyActivity(): void {
+/** Reset the 5-minute idle timer that clears `vaultKey` (web secrets). */
+export function bumpVaultKeyActivity(): void {
   if (typeof window === "undefined") return;
   if (idleTimer) window.clearTimeout(idleTimer);
   idleTimer = window.setTimeout(() => {
-    useAuthStore.getState().clearMasterKey();
+    useAuthStore.getState().clearVaultKey();
   }, 5 * 60 * 1000);
 }

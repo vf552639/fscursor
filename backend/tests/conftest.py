@@ -115,6 +115,13 @@ def published_tasks(monkeypatch) -> list[PublishedTask]:
 #
 # Уборка обязательна: база тестов общая с dev-окружением, а `domains.domain_name`
 # уникален глобально — брошенные строки мешают не только глазам.
+#
+# ВАЖНО про импорт: тащить эти помощники надо `from conftest import ...`, а не
+# `from tests.conftest import ...`. У каталога нет `__init__.py`, поэтому pytest
+# грузит этот файл как модуль `conftest`, а второе написание заводит ЕЩЁ ОДИН
+# модуль `tests.conftest` — со своим, отдельным `_REGISTERED_EMAILS`. Реестр
+# тогда наполняет одна копия, а фикстура ниже читает другую, пустую: уборка
+# молча превращается в ничто, и тесты об этом, разумеется, не падают.
 
 _REGISTERED_EMAILS: list[str] = []
 
@@ -182,6 +189,7 @@ async def register_and_login(client, prefix: str, key: bytes = b"\x01" * 32) -> 
             "auth_key_b64": b64(key),
             "recovery_blob_b64": b64(b"\x02" * 96),
             "recovery_auth_key_b64": b64(b"\x03" * 32),
+            "wrapped_vault_key_b64": b64(b"\x04" * 72),
         },
     )
     assert r.status_code == 201, r.text

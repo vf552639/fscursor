@@ -18,6 +18,13 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     auth_key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # aead(VK, KEK): ключ хранилища, которым зашифрованы блобы, обёрнутый ключом
+    # из пароля. Сервер видит только байты.
+    # NULL = аккаунт до перехода на VK: у него VK == выведенный из пароля ключ,
+    # поэтому блобы и recovery-блоб остаются верными как есть, а обёртка
+    # появится на первом входе клиента (`POST /auth/vault-key/init`). Бэкфилить
+    # нечем — сервер не знает ни VK, ни KEK.
+    wrapped_vault_key: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     # NOTE: плейнтекст — осознанный временный компромисс (фаза «для себя»), см.
     # docs/security/TOTP_STORAGE.md. Зашифровать перед продуктовой фазой.
     totp_secret: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

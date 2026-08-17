@@ -16,9 +16,9 @@ impl SyncClient {
     }
 
     pub async fn pull(&self, user_id: &str) -> anyhow::Result<u64> {
-        let key = crate::keychain::load_master_key(user_id)
+        let key = crate::keychain::load_vault_key(user_id)
             .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("master key not in keychain"))?;
+            .ok_or_else(|| anyhow::anyhow!("vault key not in keychain"))?;
         self.pull_with_key(&key).await
     }
 

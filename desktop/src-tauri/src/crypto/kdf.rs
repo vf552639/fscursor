@@ -32,6 +32,11 @@ pub fn derive_auth_key(password: &[u8], salt: &[u8]) -> Result<DerivedKey, KdfEr
     derive_with_context(password, salt, CONTEXT_AUTH)
 }
 
+/// The key-encryption key (KEK). Despite the name it no longer encrypts anything but
+/// the vault key: blobs and the local cache are keyed by the VK, and this only wraps it
+/// (`users.wrapped_vault_key`). The name and the `sdmp-master-key-v1` context label stay
+/// as they are — the label is part of the wire format shared with the browser, and
+/// renaming the function would say nothing the doc comment does not.
 pub fn derive_master_key(password: &[u8], salt: &[u8]) -> Result<DerivedKey, KdfError> {
     derive_with_context(password, salt, CONTEXT_ENC)
 }

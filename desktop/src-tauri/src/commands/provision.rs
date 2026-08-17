@@ -324,7 +324,9 @@ fn ssh_cause(msg: &str) -> &'static str {
 /// Класс ошибки шага по её `CommandError`.
 fn failure_cause(e: &CommandError) -> Option<&'static str> {
     match e {
-        CommandError::Keychain(_) => Some(CAUSE_VAULT),
+        // `VaultKey` сюда не приходит (её место — вход и восстановление), но смысл у
+        // неё тот же, что у `Keychain`: ключа хранилища на руках нет.
+        CommandError::Keychain(_) | CommandError::VaultKey(_) => Some(CAUSE_VAULT),
         CommandError::Kdf(_) | CommandError::Aead(_) | CommandError::Recovery(_) => {
             Some(CAUSE_DECRYPT)
         }
@@ -1057,7 +1059,7 @@ async fn provision_domain_inner(
     cache_path: &Path,
     api: &ApiClient,
 ) -> Result<ProvisionResultOut, ProvisionFailure> {
-    let mut key = keychain::load_master_key(user_id)
+    let mut key = keychain::load_vault_key(user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let conn = cache::open(cache_path, &key).map_err(|e| CommandError::Api(e.to_string()))?;
@@ -1476,17 +1478,17 @@ pub async fn provision_bulk(
 ) -> Result<BulkProvisionOut, CommandError> {
     let key = idempotency_key("provision_bulk", &domain_ids);
     let cache_path = cache_path(&handle)?;
-    let mut mk = keychain::load_master_key(&user_id)
+    let mut vk = keychain::load_vault_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     // `mut` и передача по `&mut` — не стиль: `&Connection` не `Send`, а фьючер
     // Tauri-команды обязан быть `Send`. `&mut Connection` — `Send`, потому что
     // `Connection: Send`.
-    let mut conn = cache::open(&cache_path, &mk).map_err(|e| CommandError::Api(e.to_string()))?;
+    let mut conn = cache::open(&cache_path, &vk).map_err(|e| CommandError::Api(e.to_string()))?;
     // Ключ нужен ровно на открытие кэша. Дальше идёт цикл на N × минуты (для
     // настоящего bulk — часы), а `run_provision_domain` внутри гасит свою копию
     // за секунды — держать здесь ещё одну всё это время бессмысленно.
-    mk.zeroize();
+    vk.zeroize();
 
     let app_ref = &app;
     let user_ref = user_id.as_str();
@@ -1625,7 +1627,7 @@ pub async fn install_fastpanel(
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<InstallFastpanelResult, CommandError> {
-    let mut key = keychain::load_master_key(&user_id)
+    let mut key = keychain::load_vault_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let path = cache_path(&handle)?;
@@ -1790,7 +1792,7 @@ pub async fn server_list_sites(
     handle: State<'_, SyncHandle>,
     api: State<'_, ApiClient>,
 ) -> Result<Vec<fastpanel::SiteInfo>, CommandError> {
-    let mut key = keychain::load_master_key(&user_id)
+    let mut key = keychain::load_vault_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     let path = cache_path(&handle)?;

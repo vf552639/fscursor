@@ -17,6 +17,23 @@ describe("describeCommandError", () => {
     expect(describeCommandError("boom")).toBe("boom");
     expect(describeCommandError(new ApiError(409, "nope"))).toBe("HTTP 409: nope");
   });
+
+  it("turns a locked vault into an instruction, not the bare word «locked»", () => {
+    // Так падают `auth_change_password` и `auth_recovery_setup`, когда VK нет в связке:
+    // общее правило «один ключ, строка внутри» вернуло бы «locked» дословно.
+    const text = describeCommandError({ Keychain: "locked" });
+    expect(text).not.toBe("locked");
+    expect(text).toMatch(/vault key/i);
+    expect(text).toMatch(/sign in with your master password/i);
+  });
+
+  it("does not swallow other keychain failures into the same advice", () => {
+    // «Связка недоступна» — не «ключа в ней нет»: советовать перелогиниться бессмысленно,
+    // и настоящую причину пользователь должен увидеть дословно.
+    expect(describeCommandError({ Keychain: "platform secure storage failure" })).toBe(
+      "platform secure storage failure"
+    );
+  });
 });
 
 describe("describeRecoveryError", () => {

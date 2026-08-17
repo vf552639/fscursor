@@ -40,6 +40,7 @@ async def test_recovery_finish_rate_limited():
                     "new_salt_b64": _b64(b"\x10" * 16),
                     "new_auth_key_b64": _b64(b"\x11" * 32),
                     "new_recovery_blob_b64": _b64(b"\x12" * 96),
+                    "new_wrapped_vault_key_b64": _b64(b"\x04" * 72),
                 },
             )
         assert last is not None

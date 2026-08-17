@@ -111,6 +111,60 @@ export async function decryptBlob(framed: Uint8Array, key: Uint8Array): Promise<
   return pt;
 }
 
+/**
+ * What to say when the wrapper does not open under a key derived from the password the
+ * user has just typed. The browser cannot repair this: it does not know the vault key, so
+ * it has nothing to re-encrypt the blobs with, and the recovery blob wraps that very key —
+ * the phrase is the only way back, and only the desktop app can walk it.
+ *
+ * Parallel to `WRAPPER_MISMATCH` in `desktop/src-tauri/src/commands/auth.rs`; the advice
+ * differs only in pointing at the desktop app, because the web panel cannot run recovery.
+ */
+export const VAULT_KEY_MISMATCH =
+  "This password does not open the vault key stored for this account: the password and " +
+  "the stored key wrapper are out of step. Use your recovery phrase in the desktop app " +
+  "to restore access.";
+
+/**
+ * Unwrap the server-side `aead(VK, KEK)` — the `wrapped_vault_key_b64` from `/auth/me`.
+ *
+ * Framing is the ordinary blob framing (nonce 24 || secretbox), so this is `decryptBlob`
+ * with two extra duties: the failure message (see above), and the length check.
+ *
+ * Every DECRYPT failure maps to the same message, including "ciphertext too short" —
+ * deliberately, and identically to desktop: from the user's seat there is nothing to tell
+ * apart, either way the wrapper on the server does not match the password in hand.
+ *
+ * What must NOT be swallowed by that message is everything the decrypt itself did not
+ * cause. libsodium failing to start (CSP without `wasm-unsafe-eval`, a corporate proxy, a
+ * wrong MIME type on the `.wasm`) is not a wrong password, and neither is a KEK of the
+ * wrong length — that one is a bug in the caller. Both are raised before the `try`, so
+ * they travel as themselves. The stake is not tidiness: unlocking is the first crypto call
+ * the web panel makes, so this message is the only one the user ever gets, and it sends
+ * them to run recovery — which rotates the salt, the password AND the recovery blob. A
+ * phrase written down on paper can stop working after that. Burning it over a `.wasm` that
+ * did not load is exactly the damage this whole change was made to prevent.
+ *
+ * The length check on the unwrapped VK is not pedantry either. A wrapper that opens but
+ * holds, say, 8 bytes would otherwise become "the key": every reveal would then fail on
+ * the blob, and the password would look guilty for a wrapper that is simply not a key.
+ */
+export async function unwrapVaultKey(wrapped: Uint8Array, kek: Uint8Array): Promise<Uint8Array> {
+  await ensureSodium();
+  if (kek.length !== KEY_LEN) throw new Error("KEK must be 32 bytes");
+  let vk: Uint8Array;
+  try {
+    vk = await decryptBlob(wrapped, kek);
+  } catch {
+    throw new Error(VAULT_KEY_MISMATCH);
+  }
+  if (vk.length !== KEY_LEN) {
+    vk.fill(0);
+    throw new Error("The stored key wrapper holds a key of the wrong length.");
+  }
+  return vk;
+}
+
 /** @internal Encrypt for tests / local roundtrip parity with desktop. */
 export async function encryptBlob(plaintext: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
   await ensureSodium();

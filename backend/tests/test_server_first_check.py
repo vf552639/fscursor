@@ -89,6 +89,7 @@ async def _register_and_login(client: AsyncClient, prefix: str) -> uuid.UUID:
             "auth_key_b64": _b64(b"\x01" * 32),
             "recovery_blob_b64": _b64(b"\x02" * 96),
             "recovery_auth_key_b64": _b64(b"\x03" * 32),
+            "wrapped_vault_key_b64": _b64(b"\x04" * 72),
         },
     )
     assert r.status_code in (201, 409), r.text

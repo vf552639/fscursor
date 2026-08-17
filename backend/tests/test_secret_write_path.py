@@ -144,6 +144,7 @@ async def _register_and_login(client: AsyncClient, email: str) -> None:
             "auth_key_b64": b64(b"\x01" * 32),
             "recovery_blob_b64": b64(b"\x02" * 96),
             "recovery_auth_key_b64": b64(b"\x03" * 32),
+            "wrapped_vault_key_b64": b64(b"\x04" * 72),
         },
     )
     assert r.status_code in (201, 409), r.text
@@ -628,6 +629,7 @@ DECLARED_SECRET_FIELD_CASES = [
             "auth_key_b64": secret,
             "recovery_blob_b64": b64(b"\x02" * 96),
             "recovery_auth_key_b64": b64(b"\x03" * 32),
+            "wrapped_vault_key_b64": b64(b"\x04" * 72),
         },
         ["body", "auth_key_b64"],
         "string_too_short",
@@ -641,6 +643,7 @@ DECLARED_SECRET_FIELD_CASES = [
             "auth_key_b64": b64(b"\x01" * 32),
             "recovery_blob_b64": secret,
             "recovery_auth_key_b64": b64(b"\x03" * 32),
+            "wrapped_vault_key_b64": b64(b"\x04" * 72),
         },
         ["body", "recovery_blob_b64"],
         "string_too_short",

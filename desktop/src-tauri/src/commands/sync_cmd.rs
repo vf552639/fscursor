@@ -38,7 +38,7 @@ pub fn sync_init(
         .map_err(|e| CommandError::Api(e.to_string()))?;
     std::fs::create_dir_all(&dir).map_err(|e| CommandError::Api(e.to_string()))?;
     let cache_path = dir.join("cache.db");
-    let key = keychain::load_master_key(&user_id)
+    let key = keychain::load_vault_key(&user_id)
         .map_err(|e| CommandError::Keychain(e.to_string()))?
         .ok_or_else(|| CommandError::Keychain("locked".into()))?;
     cache::open(&cache_path, &key).map_err(|e| CommandError::Api(e.to_string()))?;
