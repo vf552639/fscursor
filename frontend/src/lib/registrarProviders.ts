@@ -1,0 +1,239 @@
+import { registrarSupportsNsApi } from "./registrarCaps";
+
+/**
+ * Каталог провайдеров, у которых в десктопе есть Rust-клиент: как их показывать
+ * (метка, буква, цвета) и нужен ли им Client IP. Всё остальное — «ручной»
+ * провайдер: хранится ярлыком, API нет.
+ *
+ * Источник правды здесь — про ПОКАЗ и про `needsClientIp`, и только про них.
+ * Ответ на вопрос «есть ли API» каталог не даёт сам, а НАСЛЕДУЕТ у
+ * `registrarCaps.registrarSupportsNsApi` (см. `hasApi` ниже): предикат в
+ * проекте должен быть один, иначе один и тот же аккаунт получает два разных
+ * ответа на разных экранах.
+ *
+ * Добавляя новый Rust-клиент, добавь запись СЮДА — иначе форма не покажет ему
+ * поля секретов, а карточка — кнопку Test. Забыть не даст тест согласия в
+ * `registrarProviders.test.ts`: он сверяет ключи с десктопным списком.
+ */
+export const API_PROVIDERS = {
+  hostiq: {
+    label: "Hostiq", icon: "H", bg: "#fff7ed", color: "#ea580c", needsClientIp: false,
+    apiUserSuffix: " (email)", apiUserPlaceholder: "admin@hostiq.ua",
+  },
+  namecheap: {
+    label: "Namecheap", icon: "N", bg: "#fef2f2", color: "#dc2626", needsClientIp: true,
+    apiUserSuffix: "", apiUserPlaceholder: "your_namecheap_username",
+  },
+} as const;
+
+export type ApiProviderKey = keyof typeof API_PROVIDERS;
+
+/** Читаем каталог только по собственным ключам: `provider` — свободный ввод, а
+ *  `"constructor"`/`"__proto__"`/`"valueOf"` есть у любого объектного литерала
+ *  по прототипу, и обычный `in`/индексация увели бы такое имя в API-ветку с
+ *  `label: undefined` в аватаре. */
+function catalogEntry(key: string): (typeof API_PROVIDERS)[ApiProviderKey] | undefined {
+  return Object.prototype.hasOwnProperty.call(API_PROVIDERS, key)
+    ? API_PROVIDERS[key as ApiProviderKey]
+    : undefined;
+}
+
+/**
+ * Ключ провайдера для списка: дедуп, сравнение, поиск записи в каталоге.
+ *
+ * Trim здесь НАМЕРЕННО, и это ДРУГОЙ вопрос, чем «понимает ли его десктоп»
+ * (`hasApi`, у которого trim нет). Для списка `" hostiq "` и `"Hostiq"` — одна
+ * строка в выпадашке: показывать их двумя пунктами незачем. Для десктопа же это
+ * разные строки, и вторую `make_service` не знает. Расхождение не опечатка:
+ * ключ показа схлопывает мусор, ответ о работоспособности — нет.
+ */
+export function normalizeProvider(provider: string): string {
+  return provider.trim().toLowerCase();
+}
+
+/**
+ * Есть ли у провайдера рабочий API-клиент. Не в каталоге → ручной.
+ *
+ * Делегирует `registrarSupportsNsApi` вместо собственной проверки: тот модуль —
+ * зеркало `make_service` (регистр схлопывает, пробелы НЕТ), и он уже отвечает на
+ * этот вопрос в карточке домена и мастере полной настройки. Свой предикат здесь
+ * означал бы, что `" hostiq "` из чужого импорта получает бейдж «API» и живую
+ * кнопку Test в Settings, а рядом — выключенный «Set NS» и `unknown provider` от
+ * десктопа за кнопкой. Один аккаунт, два ответа, и оптимистичный — ложный.
+ *
+ * Аргумент допускает `null`/`undefined` по той же мотивировке, что у
+ * `registrarSupportsNsApi`: «не знаем провайдера» — это ответ «не умеет», а не
+ * повод вызывающему писать свой `String(... || "")`. Каждая такая страховка на
+ * месте вызова — ещё одна нормализация, которая может разойтись с соседней.
+ *
+ * Оговорка, чтобы её не цитировали неверно: колонка `provider` НЕ nullable
+ * (`registrar_account.py`: `nullable=False`, схема ответа — `provider: str`).
+ * Терпимость здесь не про штатный `null` от сервера, а про битый или частичный
+ * ответ и про `undefined` у не до конца собранных объектов — то есть про то,
+ * чтобы одна порченая строка не уносила экран.
+ */
+export function hasApi(provider: string | null | undefined): boolean {
+  return registrarSupportsNsApi(provider);
+}
+
+/**
+ * Нужно ли поле Client IP (сегодня — только Namecheap).
+ *
+ * Сначала гейт по `hasApi`: у провайдера, которого десктоп не признаёт, полей
+ * API не спрашивают вовсе — иначе форма требовала бы Client IP там, где сама же
+ * не показывает API-способности.
+ */
+export function needsClientIp(provider: string | null | undefined): boolean {
+  return apiEntry(provider)?.needsClientIp ?? false;
+}
+
+/**
+ * Запись каталога — но только если провайдера признаёт `hasApi`.
+ *
+ * Гейт здесь, а не у каждого спрашивающего: у провайдера, которого десктоп не
+ * знает, не бывает НИ ОДНОГО свойства API — ни Client IP, ни подписи поля. Без
+ * общего гейта `" hostiq "` (пробелы десктоп не срезает) доставал бы из каталога
+ * свойства настоящего Hostiq, и форма спрашивала бы учётные данные у аккаунта,
+ * которому сама же отказала в бейдже «API».
+ *
+ * `?? ""` недостижим: гейт пропускает только непустую строку. Он ради типа —
+ * `normalizeProvider` остаётся строгим намеренно, это ключ, а «ключа от ничего»
+ * не бывает.
+ */
+function apiEntry(provider: string | null | undefined) {
+  if (!hasApi(provider)) return undefined;
+  return catalogEntry(normalizeProvider(provider ?? ""));
+}
+
+/**
+ * Подпись и плейсхолдер поля «API User» — они у каждого провайдера свои: Hostiq
+ * ждёт email, Namecheap — имя пользователя панели.
+ *
+ * Отдельной функцией, а не полями `ProviderMeta`: это метаданные ФОРМЫ, а
+ * рисовать провайдера (аватар, метка, чип) умеют и там, где никакой формы нет.
+ *
+ * Заведена, чтобы страница не выбирала подсказки тернарником по `needsClientIp`:
+ * «нужен ли Client IP» работало там прокси для «это Namecheap», и совпадение это
+ * случайное. Третий Rust-клиент с whitelist получил бы чужой
+ * `your_namecheap_username`, а без него — чужой `admin@hostiq.ua`; заметили бы
+ * это не раньше, чем кто-то пожаловался бы на подсказку.
+ *
+ * У провайдера без API — пустые строки: поля «API User» ему не показывают вовсе.
+ */
+export function apiUserField(provider: string | null | undefined): { suffix: string; placeholder: string } {
+  const entry = apiEntry(provider);
+  return { suffix: entry?.apiUserSuffix ?? "", placeholder: entry?.apiUserPlaceholder ?? "" };
+}
+
+export interface ProviderMeta {
+  key: string;   // нормализованный ключ (для дедупа и сравнения)
+  label: string; // человекочитаемое имя
+  icon: string;  // одна буква для аватара
+  bg: string;    // фон аватара
+  color: string; // цвет буквы
+  api: boolean;  // есть ли API-клиент
+  /**
+   * Строка ровно как она пришла (у битого входа — `""`). Нужна ровно для
+   * одного: показать причину, когда она отличается от `label`.
+   *
+   * `label` тримлен — иначе `" hostiq "` и `"Hostiq"` были бы в выпадашке двумя
+   * пунктами. Но у аккаунта с пробелами в колонке из-за этого пропадал с экрана
+   * ЕДИНСТВЕННЫЙ видимый признак поломки: стоял `hostiq` с серым чипом «manual»,
+   * то есть UI выглядел так, будто это приложение не узнало обычный Hostiq.
+   * Показ (`ProviderLabel`) берёт `raw`, список и дедуп — `label`/`key`.
+   */
+  raw: string;
+}
+
+/**
+ * Палитра для ручных провайдеров: детерминированный цвет по имени, чтобы список
+ * не был серым и один провайдер всегда красился одинаково (а не «?» на сером,
+ * как раньше давал неизвестный provider на карточке).
+ *
+ * Цвет здесь — ИДЕНТИЧНОСТЬ («это всегда GoDaddy»), а не состояние. Поэтому из
+ * палитры убраны две краски примитива `Badge`, которые на тех же строках уже
+ * означают состояние: зелёный `#f0fdf4/#16a34a` («Active», «API») и серый
+ * `#f3f4f6/#374151` («Inactive», «manual»). Аватар и чип стоят в 40 пикселях
+ * друг от друга, и зелёный аватар рядом с серым чипом «manual» — два
+ * противоположных сигнала об одном аккаунте (на «GoDaddy» это и выпадало).
+ * Оставшиеся оттенки на этих экранах состояний не обозначают.
+ */
+const MANUAL_PALETTE = [
+  { bg: "#eef2ff", color: "#4f46e5" },
+  { bg: "#ecfeff", color: "#0891b2" },
+  { bg: "#f5f3ff", color: "#6d28d9" },
+  { bg: "#fef3c7", color: "#b45309" },
+  { bg: "#fce7f3", color: "#be185d" },
+  { bg: "#f0f9ff", color: "#0284c7" },
+];
+
+function hashIndex(s: string, mod: number): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h % mod;
+}
+
+/**
+ * Метаданные показа: API — из каталога, ручной — из палитры по хешу имени.
+ *
+ * Ветка выбирается тем же `hasApi`, что решает про кнопку Test: посчитай `api`
+ * здесь своей проверкой — и бейдж «API» разъедется с кнопкой внутри одного
+ * экрана. Поэтому `" hostiq "` рисуется ручным (метка `hostiq`, буква H, цвет из
+ * палитры) — честно: десктоп такую строку не знает.
+ *
+ * `null`/`undefined` — законный вход, а не ошибка вызывающего. Не потому, что
+ * сервер шлёт `null` (колонка `provider` — `nullable=False`, схема ответа
+ * `provider: str`), а потому, что зовут эту функцию в `map` по списку аккаунтов
+ * без error boundary: битый или частичный ответ, `undefined` в недособранном
+ * объекте — и брошенное исключение уносит всю вкладку, а не одну карточку.
+ * Функция ПОКАЗА обязана что-то показать на любом входе; «не знаем»
+ * показывается как `?` с чипом «manual» — ровно то, что рисовал старый
+ * `plMap[provider]`.
+ */
+export function providerMeta(provider: string | null | undefined): ProviderMeta {
+  const raw = provider ?? "";
+  const key = normalizeProvider(raw);
+  // Через собственный `apiEntry`, а не связкой руками: он считает тот же ключ
+  // тем же `normalizeProvider` за тем же гейтом — расписанная копия была бы
+  // третьей репликой паттерна, ради которого хелпер и заведён.
+  const api = apiEntry(raw);
+  if (api) {
+    return { key, raw, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
+  }
+  const display = raw.trim() || "?";
+  const pal = MANUAL_PALETTE[hashIndex(key || "?", MANUAL_PALETTE.length)];
+  // По кодовым точкам, а не `display[0]`: имя с эмодзи или иным символом вне BMP
+  // дало бы в аватаре половину суррогатной пары («\u{FFFD}»).
+  return { key, raw, label: display, icon: ([...display][0] || "?").toUpperCase(), bg: pal.bg, color: pal.color, api: false };
+}
+
+/**
+ * Список для выпадашки: сначала API-каталог (частый кейс сверху), затем
+ * уникальные провайдеры уже заведённых аккаунтов (ручные). Без повторов по
+ * нормализованному ключу. Отдельной таблицы провайдеров нет — «ранее
+ * использованные» выводятся из списка аккаунтов, который и так грузится на вкладке.
+ */
+export function buildProviderList(accounts: { provider: string | null | undefined }[]): ProviderMeta[] {
+  const seen = new Set<string>();
+  const out: ProviderMeta[] = [];
+  for (const key of Object.keys(API_PROVIDERS)) {
+    out.push(providerMeta(key));
+    seen.add(key);
+  }
+  for (const acc of accounts) {
+    // Терпимость к битой записи — здесь, а не у вызывающего, и по той же
+    // причине, что у `providerMeta`: список строит форма добавления, и одна
+    // порченая строка в чужом аккаунте иначе не даёт открыть форму вовсе
+    // (`normalizeProvider` начинается с `.trim()`). Пустой ключ отсеивается
+    // строкой ниже вместе с пустыми строками — пункта-призрака не появляется.
+    //
+    // Ослаблена сигнатура, а не только выражение: тип «список аккаунтов» здесь
+    // описывает ЧУЖИЕ данные (ответ сервера), и обещать в нём заполненность
+    // поля — то же самое обещание, из-за которого падение и случилось.
+    const key = normalizeProvider(acc.provider ?? "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(providerMeta(acc.provider));
+  }
+  return out;
+}

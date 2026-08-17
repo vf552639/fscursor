@@ -1,6 +1,6 @@
 {
   "name": "sdmp-desktop-shell",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "private": true,
   "scripts": {
     "tauri": "tauri",

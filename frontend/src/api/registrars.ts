@@ -11,11 +11,14 @@ import { forgetSecretBlobs } from "../lib/secretBlob";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 
-export type RegistrarProvider = "hostiq" | "namecheap";
+// Провайдер — свободная строка: у Hostiq/Namecheap есть API-клиент, любой другой
+// заводится как ручной ярлык. Способность к API проверяет `hasApi()` из
+// `lib/registrarProviders`, а не этот тип. Алиас оставлен для читаемости сигнатур.
+export type RegistrarProvider = string;
 
 export interface RegistrarAccount {
   id: number;
-  provider: RegistrarProvider | string;
+  provider: RegistrarProvider;
   name: string;
   api_user: string | null;
   is_active: boolean;

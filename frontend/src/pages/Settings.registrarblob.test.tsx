@@ -76,6 +76,24 @@ const NAMECHEAP = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+/**
+ * Ручной аккаунт: провайдера нет в каталоге, поэтому оба `*_blob_id` и
+ * `api_user` — NULL. Ровно это состояние заводит форма создания, и ровно его
+ * получают карточка и правка; один фикстур на всех, чтобы «ручной» значил в
+ * тестах одно и то же.
+ */
+const MANUAL = {
+  id: 9,
+  provider: "GoDaddy",
+  name: "gd",
+  api_user: null,
+  is_active: true,
+  api_key_blob_id: null,
+  api_secret_blob_id: null,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
 function renderPage(accounts: any[] = [NAMECHEAP]) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/registrars/accounts") return accounts;
@@ -87,7 +105,11 @@ function renderPage(accounts: any[] = [NAMECHEAP]) {
 
 async function openAddModal(provider: "hostiq" | "namecheap") {
   fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
-  if (provider === "namecheap") fireEvent.click(screen.getByText("Namecheap"));
+  if (provider === "namecheap") {
+    // Комбобокс вместо карточек: открыть и выбрать опцию.
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
+  }
   fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), {
     target: { value: "reg-new" },
   });
@@ -176,6 +198,103 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(1);
     expect(blobPlaintext(blobOfKind("registrar_api_key"))).toBe(API_KEY);
     expect(mocks.apiPost.mock.calls[0][1]).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("ручной провайдер: без полей секретов, создаётся с null-блобами", async () => {
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ ...MANUAL });
+
+    renderPage([]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "GoDaddy" } });
+    fireEvent.click(screen.getByText(/Создать/));
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
+
+    // Полей секретов нет вовсе.
+    expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
+    expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+
+    // Ни одного блоба; тело без ссылок на секреты.
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    const [url, body] = mocks.apiPost.mock.calls[0];
+    expect(url).toBe("/registrars/accounts");
+    expect(body.provider).toBe("GoDaddy");
+    expect(body).not.toHaveProperty("api_key_blob_id");
+    expect(body).not.toHaveProperty("api_secret_blob_id");
+    // Поле API User у ручного провайдера не показано — значит и уехать в аккаунт
+    // ему нечем: `null`, а не пустая строка и не остаток от прошлого провайдера.
+    expect(body.api_user).toBeNull();
+  });
+
+  it("ручной провайдер: упавшее создание показывает ошибку и не закрывает форму", async () => {
+    // Ради этого теста ручной провайдер и идёт ЧЕРЕЗ `saveAll` с пустым
+    // `secrets`, а не мимо хука: ветка в обход осталась бы без единственного
+    // канала ошибки (`secrets.error`) и без `saving` на кнопке — упавший POST
+    // не показал бы пользователю ничего.
+    setTauri(true);
+    mocks.apiPost.mockRejectedValue(new Error("provider name already taken"));
+
+    renderPage([]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Поиск/), { target: { value: "GoDaddy" } });
+    fireEvent.click(screen.getByText(/Создать/));
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "provider name already taken",
+    );
+    // Форма на экране: набранное имя цело, повтор не требует начинать заново.
+    expect((screen.getByPlaceholderText("e.g., Hostiq Main") as HTMLInputElement).value).toBe("gd");
+    // И кнопка снова рабочая — вторая половина того же утверждения: канал ошибки
+    // без вернувшейся кнопки оставил бы форму, из которой видно отказ, но нельзя
+    // повторить. Само имя «Add Account» (а не «Adding...») уже говорит, что
+    // `saving` снят; `disabled` проверяем отдельно — гейт у кнопки не один.
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("имя аккаунта уезжает в POST без пробелов по краям", async () => {
+    // Создание и правка обязаны понимать имя одинаково: `EditRegistrarModal`
+    // тримит его в `patch`, и без trim здесь первая же правка такого аккаунта
+    // молча переименовала бы его — пользователь увидел бы изменение, которого не
+    // просил. Сервер имя не чистит (`name: str` без валидатора), а гейт кнопки уже
+    // считает пробельное имя пустым — значит и в тело POST оно идёт тримленным.
+    setTauri(true);
+    mocks.apiPost.mockResolvedValue({ ...NAMECHEAP, provider: "hostiq" });
+
+    renderPage([]);
+    await openAddModal("hostiq");
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), {
+      target: { value: "  reg-new  " },
+    });
+    fireEvent.change(screen.getByPlaceholderText("••••••••••••••••"), {
+      target: { value: API_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add Account" }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPost.mock.calls[0][1].name).toBe("reg-new");
+  });
+
+  it("имя аккаунта обязательно: без него «Add Account» выключена", async () => {
+    setTauri(true);
+    renderPage([]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
+
+    // Пустое имя — единственное, что отличает форму ручного провайдера от
+    // готовой к отправке: секретов у него нет, и без этой проверки клик завёл бы
+    // безымянный аккаунт.
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "  " } });
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText("e.g., Hostiq Main"), { target: { value: "gd" } });
+    expect((screen.getByRole("button", { name: "Add Account" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("объявленный, но пустой Client IP отказывает ДО первой записи блоба", async () => {
@@ -287,6 +406,155 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body).not.toHaveProperty("api_secret_blob_id");
   });
 
+  it("правка ручного провайдера: только имя, без полей секретов", async () => {
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...MANUAL, name: "gd2" });
+
+    renderPage([MANUAL]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    // Провайдер виден, но не редактируется. Точное совпадение, а не `/GoDaddy/`:
+    // подпись карточки под модалкой — «GoDaddy · manual», и регулярка нашла бы
+    // обе строки. Отсутствие комбобокса и поля ввода с этим именем — вторая
+    // половина утверждения: сменить провайдера у заведённого аккаунта нельзя.
+    expect(screen.getByText("GoDaddy")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /provider/i })).toBeNull();
+    expect(screen.queryByDisplayValue("GoDaddy")).toBeNull();
+    // Ни одного поля учётных данных: у ручного провайдера их не бывает.
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+    expect(screen.queryByPlaceholderText("Leave empty to keep current IP")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("gd"), { target: { value: "gd2" } });
+    // Имя — единственное, что здесь можно изменить, и кнопка при нём рабочая.
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/registrars/accounts/9");
+    expect(body.name).toBe("gd2");
+    // Ссылок на секреты в теле нет вовсе — их и не появлялось.
+    expect(body).not.toHaveProperty("api_key_blob_id");
+    expect(body).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("правка ручного провайдера в вебе: заметки про секреты не прибавляется", async () => {
+    // У API-провайдера в вебе поля секретов заменяются на `DesktopOnlyNote`, и
+    // это верно: секрет есть, сохранить его отсюда нельзя. У ручного секретов
+    // нет вовсе — заметка «Saving secrets runs in the desktop app» была бы про
+    // то, чего у этого аккаунта не бывает. Переименовать при этом можно: для
+    // имени десктоп не нужен, и веб-правка имени — существующее поведение.
+    setTauri(false);
+    mocks.apiPut.mockResolvedValue({ ...MANUAL, name: "gd2" });
+
+    renderPage([MANUAL]);
+    // Ждём именно карточку: заметка в шапке вкладки нарисована сразу, ещё на
+    // «Loading registrars…», и на неё дожидаться нечего.
+    const edit = await screen.findByRole("button", { name: "✎ Edit" });
+    // На вкладке заметка ровно одна — на месте кнопки «+ Add Registrar».
+    expect(screen.getAllByText(DESKTOP_NOTE)).toHaveLength(1);
+    fireEvent.click(edit);
+
+    expect(screen.getAllByText(DESKTOP_NOTE)).toHaveLength(1);
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("gd"), { target: { value: "gd2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPut.mock.calls[0][1].name).toBe("gd2");
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+  });
+
+  it("правка API-провайдера в вебе: поля секретов заменены заметкой, имя правится", async () => {
+    // Обратная половина предыдущего теста — то самое существующее поведение,
+    // которое обёртка `m.api` не должна была задеть: у Namecheap полей два, и
+    // на месте каждого стоит заметка, а не пустота.
+    setTauri(false);
+    mocks.apiPut.mockResolvedValue({ ...NAMECHEAP, name: "nc2" });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    // Одна заметка на вкладке + две на месте полей ключа и Client IP.
+    expect(screen.getAllByText(DESKTOP_NOTE)).toHaveLength(3);
+    expect(screen.getByText("Namecheap")).toBeTruthy();
+
+    fireEvent.change(screen.getByDisplayValue("nc-main"), { target: { value: "nc2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    const body = mocks.apiPut.mock.calls[0][1];
+    expect(body.name).toBe("nc2");
+    // API User у API-провайдера остаётся полем и уезжает в PUT как прежде.
+    expect(body.api_user).toBe("ncuser");
+  });
+
+  it("карточка ручного провайдера: подпись manual и без кнопки Test", async () => {
+    setTauri(true);
+    renderPage([MANUAL]);
+
+    expect(await screen.findByText(/GoDaddy · manual/)).toBeTruthy();
+    // Аватар — сгенерированный, а не «?» на сером: это прямой пункт acceptance
+    // criteria плана, и до него карточка красила «?» любому провайдеру вне
+    // зашитой пары. Проверяем и букву, и отсутствие прежней заглушки.
+    expect(screen.getByText("G")).toBeTruthy();
+    expect(screen.queryByText("?")).toBeNull();
+    // У ручного провайдера Test недостижим (десктоп вернул бы unknown provider).
+    expect(screen.queryByRole("button", { name: "🔌 Test" })).toBeNull();
+    // Правка и удаление остаются: ярлык переименовывают и убирают, как любой
+    // другой аккаунт, — гейт по API касается только Test.
+    expect(screen.getByRole("button", { name: "✎ Edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "✕" })).toBeTruthy();
+  });
+
+  it("провайдер с пробелами в колонке: сырая строка видна и на карточке, и в правке", async () => {
+    // Случай из жизни: `"  hostiq  "` попал в колонку чужим импортом или ручной
+    // правкой БД. Десктоп такую строку не знает (`unknown provider`), поэтому
+    // аккаунт честно ручной — без Test и без полей секретов. Но метка тримится
+    // для показа, и раньше на экране стоял `hostiq` с чипом manual: символ,
+    // из-за которого аккаунт понижен, был вырезан из UI, и человек шёл искать
+    // баг в приложении вместо строки в БД. Сырая строка в кавычках объясняет
+    // себя сама.
+    setTauri(true);
+    renderPage([{ ...MANUAL, provider: "  hostiq  " }]);
+
+    const exact = { normalizer: (s: string) => s };
+    expect(await screen.findByText("«  hostiq  »", exact)).toBeTruthy();
+    expect(screen.getByText(/· manual/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "🔌 Test" })).toBeNull();
+
+    // В правке — тот же показ: read-only строка провайдера объясняет то же самое
+    // (изнутри UI это не чинится, провайдер там неизменяем осознанно).
+    fireEvent.click(screen.getByRole("button", { name: "✎ Edit" }));
+    expect(screen.getAllByText("«  hostiq  »", exact).length).toBe(2); // карточка + модалка
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+  });
+
+  it("карточка API-провайдера сохраняет кнопку Test и api_user", async () => {
+    setTauri(true);
+    renderPage(); // NAMECHEAP по умолчанию
+    expect(await screen.findByText(/Namecheap ·/)).toBeTruthy();
+    expect(screen.getByText("ncuser")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "🔌 Test" })).toBeTruthy();
+  });
+
+  it("API-провайдер без api_user: подпись без висящей точки", async () => {
+    // Состояние достижимо и из приложения, и из БД: `AddRegistrarModal` не
+    // требует API User (кнопка гейтится только именем аккаунта), а колонка
+    // nullable — старые строки и чужой импорт дают `null`. Подпись «Hostiq · »
+    // с оборванным хвостом читается как «тут что-то было и пропало».
+    setTauri(true);
+    renderPage([{ id: 7, provider: "hostiq", name: "hq", api_user: null, is_active: true,
+      api_key_blob_id: KEY_BLOB, api_secret_blob_id: null,
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }]);
+
+    expect(await screen.findByText("Hostiq")).toBeTruthy();
+    expect(screen.queryByText(/Hostiq ·/)).toBeNull();
+    // Провайдер при этом остаётся API-провайдером: бейдж и Test — про
+    // способность провайдера, а не про полноту учётки.
+    expect(screen.getByRole("button", { name: "🔌 Test" })).toBeTruthy();
+  });
+
   it("в вебе форма не открывается вовсе — объяснение стоит на месте кнопки", async () => {
     setTauri(false);
     renderPage([]);
@@ -317,7 +585,8 @@ describe("Settings — ключ и секрет регистратора чер�
     });
     expect(screen.queryByPlaceholderText("••••••••••••••••")).toBeNull();
 
-    fireEvent.click(screen.getByText("Namecheap"));
+    fireEvent.click(screen.getByRole("button", { name: /provider/i }));
+    fireEvent.click(screen.getByRole("option", { name: /Namecheap/ }));
     expect(screen.queryByPlaceholderText("••••••••")).toBeNull();
     expect(screen.queryByPlaceholderText("127.0.0.1")).toBeNull();
 
