@@ -250,17 +250,19 @@ export type RegistrarProvider = string;
   Фазы 4 приводил в это состояние. Дедуп по нормализованному ключу гарантирует, что
   каталожный `value` не задвоится.
 
-#### Долг, осознанно перенесённый в Фазу 5  `[ ]`
+#### Долг, осознанно перенесённый в Фазу 5
 
-- **`ApiTag` дублирует примитив `Badge`** (`components/ui/Primitives.tsx`) — тот же
+- [x] **`ApiTag` дублирует примитив `Badge`** (`components/ui/Primitives.tsx`) — тот же
   сигнал «API против manual» Фаза 5 рисует именно `Badge`, и в двух разных зелёных. Либо
   перевести `ApiTag` на `Badge`, либо сознательно оставить голый тег в плотной строке
   выпадашки и тогда использовать его же в карточке. Вразнобой оставлять нельзя.
-- **`Avatar` просится в общий `ProviderAvatar({ m, size })`** рядом, в
+  → Исполнено в Фазе 5 в пользу `Badge` (общий `ProviderApiTag`), обоснование там же.
+- [x] **`Avatar` просится в общий `ProviderAvatar({ m, size })`** рядом, в
   `components/settings/` (не импортом из комбобокса в страницу). Копий сегодня две, и
   после Фазы 5 обе будут питаться одним `ProviderMeta`, но рисоваться разным кодом.
-- **Возврат фокуса на кнопку после выбора** — сейчас фокус приземляется на `body`. Одна
-  строка через `ref`; в объёме фазы этого не было.
+  → Исполнено в Фазе 5: `components/settings/ProviderVisuals.tsx`.
+- [ ] **Возврат фокуса на кнопку после выбора** — сейчас фокус приземляется на `body`. Одна
+  строка через `ref`; в объёме фазы этого не было. → Открыт, перенесён в Фазу 7.
 
 ---
 
@@ -369,86 +371,77 @@ export type RegistrarProvider = string;
 
 ---
 
-### Фаза 5 — Карточки аккаунтов: бейджи, гейтинг Test, ручной провайдер  `[ ]`
+### Фаза 5 — Карточки аккаунтов: бейджи, гейтинг Test, ручной провайдер  `[x]`
 
 Аватар/подпись — из `providerMeta`; кнопка «Test» — только у API; для ручного подпись
-`Provider · manual`.
+`Provider · manual`. Плюс исполнен долг, перенесённый сюда ревью Фазы 3 (см. ниже).
 
 **Files:**
-- Modify: `frontend/src/pages/Settings.tsx:135-153` (рендер карточек).
+- Modify: `frontend/src/pages/Settings.tsx` (рендер карточек, импорты, текст `EmptyState`).
+- Modify: `frontend/src/pages/Settings.registrarblob.test.tsx` (два кейса на карточку).
+- Add: `frontend/src/components/settings/ProviderVisuals.tsx` (`ProviderAvatar`, `ProviderApiTag`).
+- Modify: `frontend/src/components/settings/ProviderCombobox.tsx` (локальные `Avatar`/`ApiTag`
+      заменены общими).
 
-- [ ] **Шаг 1: Падающий тест на карточку ручного провайдера**
+- [x] **Шаг 1: Падающий тест на карточку ручного провайдера** — оба кейса из спеки, плюс в
+      первом добавлены утверждения, что `✎ Edit` и `✕` у ручного остаются (гейт по API
+      касается только Test), а во втором — что `api_user` по-прежнему на карточке.
+- [x] **Шаг 2: Прогнать — падает** (1 из 18: «GoDaddy · manual» не находится, старый рендер
+      писал «Namecheap» и `?` на сером).
+- [x] **Шаг 3: Переписать рендер карточки** — по спеке, с двумя отличиями: аватар рисует
+      общий `ProviderAvatar` (долг B), а бейдж способности — общий `ProviderApiTag` (долг A).
+- [x] **Шаг 4: Прогнать — зелёный** (файл 18/18, комбобокс 18/18; весь набор 975/975 в 94
+      файлах, `tsc --noEmit` чист).
+- [x] **Шаг 5: Коммит** — двумя: вынос общих примитивов и сам рендер карточек.
 
-Добавить в `Settings.registrarblob.test.tsx`:
+Дословный код здесь не дублируется — по той же причине, что в фазах 1, 3 и 4. Актуальный
+код в файлах; ниже только решения.
 
-```tsx
-  it("карточка ручного провайдера: подпись manual и без кнопки Test", async () => {
-    setTauri(true);
-    renderPage([{ id: 9, provider: "GoDaddy", name: "gd", api_user: null, is_active: true,
-      api_key_blob_id: null, api_secret_blob_id: null,
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }]);
+#### Долг A — `ApiTag` против `Badge`: решено в пользу `Badge`  `[x]`
 
-    expect(await screen.findByText(/GoDaddy · manual/)).toBeTruthy();
-    // У ручного провайдера Test недостижим (десктоп вернул бы unknown provider).
-    expect(screen.queryByRole("button", { name: "🔌 Test" })).toBeNull();
-  });
+Сигнал «API против manual» теперь один на оба экрана: `ProviderApiTag` — это тонкая
+обёртка над примитивом `Badge` (`green` у API, `gray` у ручного), и её же зовут и
+выпадашка, и карточка.
 
-  it("карточка API-провайдера сохраняет кнопку Test и api_user", async () => {
-    setTauri(true);
-    renderPage(); // NAMECHEAP по умолчанию
-    expect(await screen.findByText(/Namecheap ·/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "🔌 Test" })).toBeTruthy();
-  });
-```
+Почему не наоборот (голый тег комбобокса — в карточку):
 
-- [ ] **Шаг 2: Прогнать — падает (старый рендер: `?`, Test у всех)**
+- на карточке этот бейдж стоит вплотную к `Badge` Active/Inactive. Голый серый текст
+  рядом с двумя чипами читается не как «нет API», а как подпись на полях — «мы про это
+  ничего не знаем». А знаем: `hasApi` дал определённый ответ, и он «нет» (CLAUDE.md §6
+  запрещает рисовать незнание здоровьем, но и обратное — знание незнанием — тоже враньё);
+- в плотной строке выпадашки `Badge` не шумит: 11px против 10px и 2×8 против 1×6 —
+  разница в пиксель-два, а не в вес элемента;
+- зелёный при этом остался ровно у API. Ручной провайдер серый, как и был: у него нет ни
+  Test, ни Set NS, и зелёный чип обещал бы работоспособность, которой нет.
 
-Run: `cd frontend && npx vitest run src/pages/Settings.registrarblob.test.tsx`
-Expected: FAIL на новых кейсах.
+Побочно исчез второй зелёный: `#dcfce7/#166534` из комбобокса заменён на `#f0fdf4/#16a34a`
+примитива — тот же, которым покрашен «Active» рядом.
 
-- [ ] **Шаг 3: Переписать рендер карточки (замена строк 135-153)**
+#### Долг B — общий `ProviderAvatar`  `[x]`
 
-```tsx
-      ) : registrars.map((r: any) => {
-        const m = providerMeta(r.provider);
-        return <Card key={r.id} style={{ marginBottom: 12 }}>
-          <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{ width: 38, height: 38, borderRadius: 9, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, color: m.color, flexShrink: 0 }}>{m.icon}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                <span style={{ fontSize: 14.5, fontWeight: 700, color: "#111" }}>{r.name}</span>
-                <Badge variant={r.is_active ? "green" : "gray"}>{r.is_active ? "Active" : "Inactive"}</Badge>
-                <Badge variant={m.api ? "green" : "gray"}>{m.api ? "API" : "manual"}</Badge>
-              </div>
-              <div style={{ fontSize: 12.5, color: "#6b7280" }}>
-                {m.label}{m.api ? <> · <span style={{ fontFamily: "monospace" }}>{r.api_user}</span></> : " · manual"}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              {m.api && testRes[r.id] && <Badge variant={testRes[r.id] === "ok" ? "green" : "red"}>{testRes[r.id] === "ok" ? "✓ Connected" : "✕ Failed"}</Badge>}
-              {m.api && <Btn size="sm" variant="secondary" onClick={() => handleTest(r.id)} disabled={testing[r.id]}>{testing[r.id] ? "Testing…" : "🔌 Test"}</Btn>}
-              <Btn size="sm" variant="secondary" onClick={() => setEditingRegistrar(r)}>✎ Edit</Btn>
-              <Btn size="sm" variant="danger" onClick={async () => { if (!(await confirmAction(`Delete registrar ${r.name}?`))) return; deleteReg.mutate(r); }}>✕</Btn>
-            </div>
-          </div>
-        </Card>;
-      })}
-```
+Вынесен в `components/settings/ProviderVisuals.tsx` (не из комбобокса, чтобы страница не
+импортировала компонент из соседнего компонента). Туда же уехал и `ProviderApiTag` — оба
+питаются одним `ProviderMeta` и живут парой на обоих экранах.
 
-Импорт `providerMeta` добавить к уже добавленным из `lib/registrarProviders` (Фаза 4).
-Удалить более не нужные локальные `plMap`/`pl`.
+Параметр один — `size`; радиус (`size × 0.25`) и кегль буквы (`size × 0.4`) выведены из
+него, чтобы третье место применения не завело третью пропорцию. Пропорции сняты с
+карточки (38px → 9.5 и 15.2, то есть как было); в выпадашке буква стала на ~2px мельче
+прежней — сознательная цена одного кода на два места.
 
-- [ ] **Шаг 4: Прогнать — зелёный**
+#### Правка вне спеки: текст `EmptyState`  `[x]`
 
-Run: `cd frontend && npx vitest run src/pages/Settings.registrarblob.test.tsx`
-Expected: PASS.
+«Add Hostiq or Namecheap credentials to assign domains to registrars» стал враньём в тот
+момент, когда провайдером смог быть любой. Заменён на формулировку с обеими половинами:
+Hostiq/Namecheap — учётными данными ради API, остальные — ярлыком для раскладки доменов.
+Одна строка, ровно в теме фазы («карточки/пустое состояние»).
 
-- [ ] **Шаг 5: Коммит**
+#### Что из долга Фазы 3 сюда НЕ входило  `[ ]`
 
-```bash
-git add frontend/src/pages/Settings.tsx frontend/src/pages/Settings.registrarblob.test.tsx
-git commit -m "feat(registrars): карточки — бейдж API/manual, Test только у API, метаданные из каталога"
-```
+**Возврат фокуса на кнопку после выбора** в комбобоксе — третий пункт того же списка —
+осознанно не трогался: он не про карточки и не про дублирование разметки, а про
+клавиатурную доступность выпадашки. Остаётся открытым долгом (см. Фазу 7).
+
+Коммиты: `52d8908` (вынос общих примитивов), `8506aeb` (карточки).
 
 ---
 
@@ -578,8 +571,10 @@ git commit -m "test(registrars): зелёная сюита после перех
 
 ## Итог
 
-- Реализован целиком: **нет** — план к исполнению.
-- Что осталось: все фазы 1–7.
+- Реализован целиком: **нет** — фазы 1–5 исполнены.
+- Что осталось: фазы 6 (`EditRegistrarModal`) и 7 (полный прогон и чистка). Открытый
+  долг на Фазу 7: возврат фокуса на кнопку комбобокса после выбора (сейчас фокус
+  приземляется на `body`).
 - Заметки на будущее (осознанно вне объёма):
   - **Ручной провайдер не хранит креды** (вариант 1 из брейншторма). Если позже понадобится
     хранить API-ключ «для справки» у провайдера без клиента — это отдельная фича.
