@@ -76,6 +76,24 @@ const NAMECHEAP = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+/**
+ * Ручной аккаунт: провайдера нет в каталоге, поэтому оба `*_blob_id` и
+ * `api_user` — NULL. Ровно это состояние заводит форма создания, и ровно его
+ * получают карточка и правка; один фикстур на всех, чтобы «ручной» значил в
+ * тестах одно и то же.
+ */
+const MANUAL = {
+  id: 9,
+  provider: "GoDaddy",
+  name: "gd",
+  api_user: null,
+  is_active: true,
+  api_key_blob_id: null,
+  api_secret_blob_id: null,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
 function renderPage(accounts: any[] = [NAMECHEAP]) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === "/registrars/accounts") return accounts;
@@ -184,9 +202,7 @@ describe("Settings — ключ и секрет регистратора чер�
 
   it("ручной провайдер: без полей секретов, создаётся с null-блобами", async () => {
     setTauri(true);
-    mocks.apiPost.mockResolvedValue({ id: 9, provider: "GoDaddy", name: "gd", api_user: null,
-      is_active: true, api_key_blob_id: null, api_secret_blob_id: null,
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
+    mocks.apiPost.mockResolvedValue({ ...MANUAL });
 
     renderPage([]);
     fireEvent.click((await screen.findAllByRole("button", { name: "+ Add Registrar" }))[0]);
@@ -390,11 +406,92 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body).not.toHaveProperty("api_secret_blob_id");
   });
 
+  it("правка ручного провайдера: только имя, без полей секретов", async () => {
+    setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...MANUAL, name: "gd2" });
+
+    renderPage([MANUAL]);
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    // Провайдер виден, но не редактируется. Точное совпадение, а не `/GoDaddy/`:
+    // подпись карточки под модалкой — «GoDaddy · manual», и регулярка нашла бы
+    // обе строки. Отсутствие комбобокса и поля ввода с этим именем — вторая
+    // половина утверждения: сменить провайдера у заведённого аккаунта нельзя.
+    expect(screen.getByText("GoDaddy")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /provider/i })).toBeNull();
+    expect(screen.queryByDisplayValue("GoDaddy")).toBeNull();
+    // Ни одного поля учётных данных: у ручного провайдера их не бывает.
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+    expect(screen.queryByPlaceholderText("Leave empty to keep current IP")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("gd"), { target: { value: "gd2" } });
+    // Имя — единственное, что здесь можно изменить, и кнопка при нём рабочая.
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    const [url, body] = mocks.apiPut.mock.calls[0];
+    expect(url).toBe("/registrars/accounts/9");
+    expect(body.name).toBe("gd2");
+    // Ссылок на секреты в теле нет вовсе — их и не появлялось.
+    expect(body).not.toHaveProperty("api_key_blob_id");
+    expect(body).not.toHaveProperty("api_secret_blob_id");
+  });
+
+  it("правка ручного провайдера в вебе: заметки про секреты не прибавляется", async () => {
+    // У API-провайдера в вебе поля секретов заменяются на `DesktopOnlyNote`, и
+    // это верно: секрет есть, сохранить его отсюда нельзя. У ручного секретов
+    // нет вовсе — заметка «Saving secrets runs in the desktop app» была бы про
+    // то, чего у этого аккаунта не бывает. Переименовать при этом можно: для
+    // имени десктоп не нужен, и веб-правка имени — существующее поведение.
+    setTauri(false);
+    mocks.apiPut.mockResolvedValue({ ...MANUAL, name: "gd2" });
+
+    renderPage([MANUAL]);
+    // Ждём именно карточку: заметка в шапке вкладки нарисована сразу, ещё на
+    // «Loading registrars…», и на неё дожидаться нечего.
+    const edit = await screen.findByRole("button", { name: "✎ Edit" });
+    // На вкладке заметка ровно одна — на месте кнопки «+ Add Registrar».
+    expect(screen.getAllByText(DESKTOP_NOTE)).toHaveLength(1);
+    fireEvent.click(edit);
+
+    expect(screen.getAllByText(DESKTOP_NOTE)).toHaveLength(1);
+    expect(screen.queryByPlaceholderText("Leave empty to keep current key")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("gd"), { target: { value: "gd2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPut.mock.calls[0][1].name).toBe("gd2");
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+  });
+
+  it("правка API-провайдера в вебе: поля секретов заменены заметкой, имя правится", async () => {
+    // Обратная половина предыдущего теста — то самое существующее поведение,
+    // которое обёртка `m.api` не должна была задеть: у Namecheap полей два, и
+    // на месте каждого стоит заметка, а не пустота.
+    setTauri(false);
+    mocks.apiPut.mockResolvedValue({ ...NAMECHEAP, name: "nc2" });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
+
+    // Одна заметка на вкладке + две на месте полей ключа и Client IP.
+    expect(screen.getAllByText(DESKTOP_NOTE)).toHaveLength(3);
+    expect(screen.getByText("Namecheap")).toBeTruthy();
+
+    fireEvent.change(screen.getByDisplayValue("nc-main"), { target: { value: "nc2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    const body = mocks.apiPut.mock.calls[0][1];
+    expect(body.name).toBe("nc2");
+    // API User у API-провайдера остаётся полем и уезжает в PUT как прежде.
+    expect(body.api_user).toBe("ncuser");
+  });
+
   it("карточка ручного провайдера: подпись manual и без кнопки Test", async () => {
     setTauri(true);
-    renderPage([{ id: 9, provider: "GoDaddy", name: "gd", api_user: null, is_active: true,
-      api_key_blob_id: null, api_secret_blob_id: null,
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }]);
+    renderPage([MANUAL]);
 
     expect(await screen.findByText(/GoDaddy · manual/)).toBeTruthy();
     // Аватар — сгенерированный, а не «?» на сером: это прямой пункт acceptance

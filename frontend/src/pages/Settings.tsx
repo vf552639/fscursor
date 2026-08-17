@@ -465,12 +465,29 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   const [apiUser, setApiUser] = useState(registrar.api_user || "");
   const secrets = useMultiSecretSave(REGISTRAR_SECRETS);
   const update = useUpdateRegistrarAccount(registrar.id);
+  // ВСЁ про провайдера — из одного `providerMeta`, как на карточке: и метка с
+  // аватаром в read-only строке, и `m.api`, который решает, показывать ли поля
+  // учётных данных. Отдельный вызов `hasApi` рядом был бы вторым ответом на тот
+  // же вопрос — на этой ветке такое расхождение уже ловили дважды.
+  //
+  // `String(... || "")` — страховка на пустой/`null` provider из ответа сервера:
+  // `providerMeta` начинает с `.trim()` и на `null` уронила бы модалку.
+  const m = providerMeta(String(registrar.provider || ""));
   // Тот же предикат, что у формы создания и у карточки: два ответа на вопрос
   // «нужен ли этому провайдеру Client IP» уже разъезжались (см. Фазу 1 плана).
+  // Сам он уже гейтится по `hasApi`, то есть у ручного провайдера всегда false.
   const hasClientIp = needsClientIp(String(registrar.provider || ""));
 
   const patch = (blobIds: { apiKey?: string; apiSecret?: string }) => ({
     name: name.trim(),
+    // `api_user` уезжает и у ручного провайдера — тем, чем он был в аккаунте
+    // (обычно `null`: форма создания у ручного шлёт жёсткий `null`). Жёсткого
+    // `null` здесь НЕТ намеренно: поле мы у него не показываем, а «не показываем»
+    // значит «не меняем». Достижимое исключение — строка вроде `" hostiq "`
+    // (провайдер с пробелами: десктоп такую не знает, значит для нас она ручная)
+    // с заполненным `api_user`; отправь мы `null`, переименование аккаунта молча
+    // стёрло бы логин, которого пользователю даже не показали. У API-провайдера
+    // поле на экране есть, и его значение сохраняется ровно как раньше.
     api_user: apiUser.trim() || null,
     ...(blobIds.apiKey ? { api_key_blob_id: blobIds.apiKey } : {}),
     ...(blobIds.apiSecret ? { api_secret_blob_id: blobIds.apiSecret } : {}),
@@ -491,8 +508,15 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
     // Сам плейнтекст он не чистит: в блоб уезжает стейт хука, а не эти
     // тримленные копии, — пробелы по краям с него снимает `trim` в onChange
     // полей ниже, и никакой второй страховки на плейнтекст здесь нет.
+    //
+    // Каждое поле гейтится ТЕМ ЖЕ предикатом, что решает, рисовать ли его:
+    // `m.api` у ключа, `hasClientIp` у IP. Сегодня это дублирует разметку
+    // (плейнтекст ненарисованного поля всегда пуст), но держит инвариант
+    // «чего не показали — того не пишем» в обработчике, а не в JSX: провайдер в
+    // правке неизменяем, и остаточному вводу взяться неоткуда ровно до тех пор,
+    // пока это так.
     const touched = {
-      apiKey: secrets.values.apiKey.trim() !== "",
+      apiKey: m.api && secrets.values.apiKey.trim() !== "",
       apiSecret: hasClientIp && secrets.values.apiSecret.trim() !== "",
     };
     const ok = await secrets.saveAll({
@@ -519,27 +543,60 @@ function EditRegistrarModal({ registrar, onClose }: { registrar: any; onClose: (
   return <Modal title={`Edit ${registrar.name}`} onClose={closeIfIdle} width={460}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Name</label><Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} /></div>
-      {/* Почему в вебе полей нет — JSDoc `DesktopOnlyNote`. Переименовать
-          аккаунт в вебе при этом можно: для этого секреты не нужны. */}
+      {/* Провайдер показан, но не редактируется — и это не «поле, которое забыли
+          сделать полем». Сменить провайдера у заведённого аккаунта значит
+          оставить блобы ключа и IP привязанными к учётке ДРУГОГО регистратора:
+          форма отрапортует «сохранено», а команды пойдут в чужой API со старым
+          ключом. Провайдер меняют заведением нового аккаунта, а этот — правят
+          или удаляют.
+
+          Нарисован тем же аватаром и тем же чипом, что комбобокс на создании и
+          карточка, из которой эту модалку открыли: один провайдер обязан
+          выглядеть одинаково везде (JSDoc `ProviderVisuals`). Своя разметка
+          «метка + Badge» была бы третьим способом рисовать одно различие — ровно
+          тем долгом, который закрыт в Фазе 5. Отличие от комбобокса — только
+          серый фон и серая метка: так строка читается как «показано», а не
+          «нажми меня». */}
       <div>
-        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key (optional)</label>
-        {isTauri() ? (
-          <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="Leave empty to keep current key" />
-        ) : (
-          <DesktopOnlyNote what="Saving secrets" />
-        )}
+        <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Provider</label>
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:8}}>
+          <ProviderAvatar m={m} />
+          <span style={{fontSize:13.5,fontWeight:600,color:"#6b7280"}}>{m.label}</span>
+          <ProviderApiTag api={m.api} />
+        </div>
       </div>
-      {hasClientIp && (
+      {/* Поля учётных данных — только у провайдера с рабочим API-клиентом, тем же
+          гейтом, что и в форме создания: у ручного ярлыка нет ни ключа, ни
+          Client IP, и «API Key (optional)» на его правке предлагал бы завести
+          секрет, который никто никогда не прочитает. В вебе у API-провайдера на
+          месте этих полей стоит заметка (`DesktopOnlyNote`), а у ручного нет и
+          её: сказать «секреты сохраняются в десктопе» про аккаунт, у которого
+          секретов не бывает, — обещание несуществующей функции.
+
+          Переименовать аккаунт в вебе при этом можно — и ручной, и API-шный:
+          для имени секреты не нужны. */}
+      {m.api && <>
+        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API User</label><Inp value={apiUser} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setApiUser((e.target as any).value)} /></div>
+        {/* Почему в вебе полей нет — JSDoc `DesktopOnlyNote`. */}
         <div>
-          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP (optional)</label>
+          <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>API Key (optional)</label>
           {isTauri() ? (
-            <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value.trim())} placeholder="Leave empty to keep current IP" />
+            <Inp type="password" value={secrets.values.apiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiKey", e.target.value.trim())} placeholder="Leave empty to keep current key" />
           ) : (
             <DesktopOnlyNote what="Saving secrets" />
           )}
         </div>
-      )}
+        {hasClientIp && (
+          <div>
+            <label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Client IP (optional)</label>
+            {isTauri() ? (
+              <Inp value={secrets.values.apiSecret} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>secrets.setValue("apiSecret", e.target.value.trim())} placeholder="Leave empty to keep current IP" />
+            ) : (
+              <DesktopOnlyNote what="Saving secrets" />
+            )}
+          </div>
+        )}
+      </>}
     </div>
     {secrets.error && (
       <div role="alert" style={{marginTop:14,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>{secrets.error}</div>
