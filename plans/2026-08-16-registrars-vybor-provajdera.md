@@ -16,8 +16,10 @@
 
 **Архитектура:** чисто фронтовая работа. `provider` в БД уже свободная строка
 `String(64)`, серверные схемы enum не навязывают, блобы секретов опциональны — **бэкенд
-и Rust не трогаем**. Источник правды об «API-способности» на фронте — новый каталог
-`lib/registrarProviders.ts`, зеркалящий `registrars::make_service` десктопа. Тип
+и Rust не трогаем**. Новый каталог `lib/registrarProviders.ts` — источник правды о
+**показе** провайдера (метка, буква аватара, цвета) и о `needsClientIp`. Ответ на вопрос
+«есть ли API» он **не даёт сам, а наследует** у уже существующего
+`lib/registrarCaps.ts` (`registrarSupportsNsApi`) — см. отклонение в итоге Фазы 1. Тип
 `RegistrarProvider` из строгого юниона становится `string`; способность проверяется
 функцией `hasApi()`, а не типом. Разросшийся `pages/Settings.tsx` разгружаем, вынеся
 селектор в отдельный компонент `ProviderCombobox`.
@@ -51,7 +53,9 @@
 - **Ноль аккаунтов:** список провайдеров = только API-каталог; «создать своего» доступно.
 - **Сотни аккаунтов у разных провайдеров:** дедуп по нормализованному ключу, список не
       разрастается повторами; выпадашка со скроллом и поиском.
-- **Регистр/пробелы:** `"Hostiq"`, `"hostiq"`, `" hostiq "` — один провайдер (нормализация).
+- **Регистр/пробелы:** `"Hostiq"`, `"hostiq"`, `" hostiq "` — один пункт в списке
+      (`normalizeProvider` тримит). Но **API-способным** `" hostiq "` не считается: десктоп
+      пробелы не срезает — см. отклонение в Фазе 1. Отсюда требование тримить ввод в форме.
 - **Ввод имени, совпадающего с существующим (в другом регистре):** «Создать» не предлагаем,
       подсвечиваем существующий вариант.
 - **Двойной клик / уход во время сохранения:** не регрессируем — `secrets.saving` по-прежнему
@@ -81,7 +85,7 @@
 
 ## Фазы
 
-### Фаза 1 — Каталог провайдеров и API-способность  `[ ]`
+### Фаза 1 — Каталог провайдеров и API-способность  `[x]`
 
 Чистый модуль без React — вся логика «кто по API, как показать, что в списке». Тестируется
 юнитами, питает и форму, и карточки.
@@ -90,209 +94,85 @@
 - Create: `frontend/src/lib/registrarProviders.ts`
 - Test: `frontend/src/lib/registrarProviders.test.ts`
 
-- [ ] **Шаг 1: Падающий тест на каталог и способность**
+- [x] **Шаг 1: Падающий тест на каталог и способность**
+- [x] **Шаг 2: Прогнать — тест падает (модуль не существует)**
+- [x] **Шаг 3: Реализация модуля**
+- [x] **Шаг 4: Прогнать — тест зелёный**
+- [x] **Шаг 5: Коммит** — `67ab2b4`
 
-```ts
-// frontend/src/lib/registrarProviders.test.ts
-import { describe, it, expect } from "vitest";
-import {
-  hasApi,
-  needsClientIp,
-  normalizeProvider,
-  providerMeta,
-  buildProviderList,
-} from "./registrarProviders";
+Исходный текст модуля и теста здесь больше не дублируется: он разъехался бы с
+реализацией при первой же правке, а один из вариантов уже успел это сделать (см.
+отклонение ниже). Актуальный код — в самих файлах; ниже только решения.
 
-describe("registrarProviders — API-способность", () => {
-  it("hasApi: только каталожные провайдеры, без учёта регистра и пробелов", () => {
-    expect(hasApi("hostiq")).toBe(true);
-    expect(hasApi("  Namecheap ")).toBe(true);
-    expect(hasApi("godaddy")).toBe(false);
-    expect(hasApi("")).toBe(false);
-  });
+#### Отклонение от исходной спеки: `hasApi` не тримит, а наследует предикат  `[x]`
 
-  it("needsClientIp: только Namecheap", () => {
-    expect(needsClientIp("namecheap")).toBe(true);
-    expect(needsClientIp("HOSTIQ")).toBe(false);
-    expect(needsClientIp("godaddy")).toBe(false);
-  });
+Спека предписывала `hasApi("  Namecheap ")` → `true` и собственную проверку
+`normalizeProvider(provider) in API_PROVIDERS`. Реализовано **иначе**, и это осознанно.
 
-  it("normalizeProvider: нижний регистр и trim", () => {
-    expect(normalizeProvider("  Hostiq ")).toBe("hostiq");
-  });
-});
+В проекте уже был `lib/registrarCaps.ts` с `registrarSupportsNsApi` — зеркало
+`registrars::make_service` десктопа, которое схлопывает регистр, но **намеренно не
+срезает пробелы** (у него есть тест на это, и парный тест в Rust держит `" namecheap "`
+среди контрольных входов: `make_service` отвечает на такую строку `unknown provider`).
+Свой предикат в новом каталоге означал бы, что строка `" hostiq "` в колонке
+`registrar_accounts.provider` (чужой импорт, ручная правка в БД) получает в Settings
+бейдж `API`, живую кнопку «Test» и поля секретов, а на карточке домена рядом —
+выключенный «Set NS»; за кнопкой «Test» её ждал бы `unknown provider` от десктопа. Один
+аккаунт, два ответа, и оптимистичный из них ложный — прямое нарушение принципа
+«не рисуй незнание здоровьем» (CLAUDE.md §6) и той самой причины, ради которой
+`registrarCaps.ts` заведён.
 
-describe("registrarProviders — метаданные показа", () => {
-  it("API-провайдер: метка и флаг из каталога", () => {
-    const m = providerMeta("namecheap");
-    expect(m.label).toBe("Namecheap");
-    expect(m.api).toBe(true);
-    expect(m.icon).toBe("N");
-  });
+Принято:
 
-  it("ручной провайдер: метка = ввод, буква = первая, api=false, без '?'", () => {
-    const m = providerMeta("GoDaddy");
-    expect(m.label).toBe("GoDaddy");
-    expect(m.api).toBe(false);
-    expect(m.icon).toBe("G");
-  });
+- `hasApi(provider)` — одна строка: `return registrarSupportsNsApi(provider)`. Предикат
+  в проекте один; расходиться нечему по конструкции, а не по договорённости.
+- `normalizeProvider` **сохраняет** trim: это другой вопрос — ключ для дедупа и поиска в
+  каталоге. `" hostiq "` и `"Hostiq"` в выпадашке — один пункт, а для десктопа это разные
+  строки. Разница проговорена в JSDoc обеих функций, чтобы не читалась опечаткой.
+- `providerMeta(...).api` и выбор ветки внутри `providerMeta` считаются **тем же**
+  `hasApi`, иначе бейдж «API» разъедется с кнопкой «Test» внутри одного экрана.
+  Следствие: `providerMeta(" hostiq ")` — ручной (метка `hostiq`, буква `H`, цвет из
+  палитры). Честно: десктоп такую строку не знает.
+- `needsClientIp` стоит за тем же гейтом: у непризнанного провайдера полей API не
+  спрашивают вовсе.
+- Каталог читается только через `catalogEntry()` с `Object.prototype.hasOwnProperty.call`.
+  Исходный `in` по объектному литералу отвечал `true` на `constructor`/`__proto__`/
+  `valueOf` — а имя провайдера здесь свободный ввод, и такое имя уходило бы в API-ветку
+  с `label: undefined` в аватаре.
+- Буква аватара берётся по кодовым точкам (`[...display][0]`), иначе имя с эмодзи давало
+  бы половину суррогатной пары.
+- **Тест согласия с десктопом** (`registrarProviders.test.ts`): тем же приёмом, что в
+  `registrarCaps.test.ts` (чтение `desktop/src-tauri/src/registrars/mod.rs` с диска),
+  проверяется, что у каждого провайдера десктопа есть запись в `API_PROVIDERS` и что
+  каждый ключ каталога признаётся `hasApi`. Проверено мутациями: тест краснеет в обе
+  стороны и не вырождается, если константу в `mod.rs` переименуют. Цепочка замкнута
+  целиком: `make_service` ← Rust-тест → `NS_API_PROVIDERS` ← файл-к-файлу →
+  `registrarCaps` ← согласие → `API_PROVIDERS`.
 
-  it("ручной провайдер: цвет детерминирован по имени", () => {
-    expect(providerMeta("GoDaddy").bg).toBe(providerMeta("godaddy").bg);
-  });
-});
+Коммит правок: `79d2a69`.
 
-describe("registrarProviders — список для выпадашки", () => {
-  it("сначала API-каталог, затем уникальные ручные из аккаунтов", () => {
-    const list = buildProviderList([
-      { provider: "GoDaddy" },
-      { provider: "godaddy" }, // дубль по регистру — не повторяем
-      { provider: "hostiq" },  // уже в каталоге — не повторяем
-    ]);
-    const keys = list.map((o) => o.key);
-    expect(keys.slice(0, 2)).toEqual(["hostiq", "namecheap"]); // каталог первым
-    expect(keys.filter((k) => k === "godaddy").length).toBe(1);
-    expect(list.find((o) => o.key === "godaddy")?.api).toBe(false);
-  });
+**Следствие для форм (учесть в фазах 3–4):** раз `hasApi` не тримит, вставленное из
+буфера `" Namecheap "` завело бы ручной ярлык без полей секретов и без «Test» — молча и
+с виду как настоящий Namecheap. Лечение — **trim ввода в форме до сохранения**, а не
+смягчение предиката. `ProviderCombobox` уже отдаёт наружу `q = query.trim()` и
+`o.key`/`o.label` (обе тримленные), так что путь через селектор закрыт; проверить это
+тестом при реализации фазы 3.
 
-  it("ноль аккаунтов: только API-каталог", () => {
-    expect(buildProviderList([]).map((o) => o.key)).toEqual(["hostiq", "namecheap"]);
-  });
-});
-```
-
-- [ ] **Шаг 2: Прогнать — тест падает (модуль не существует)**
-
-Run: `cd frontend && npx vitest run src/lib/registrarProviders.test.ts`
-Expected: FAIL — `Cannot find module './registrarProviders'`.
-
-- [ ] **Шаг 3: Реализация модуля**
-
-```ts
-// frontend/src/lib/registrarProviders.ts
-
-/**
- * Провайдеры со встроенным Rust-клиентом в десктопе. Зеркалит
- * `registrars::make_service` (desktop/src-tauri/src/registrars/mod.rs): у кого
- * здесь есть запись — у того реально работают test_connection / get_domains /
- * set_nameservers. Всё остальное — «ручной» провайдер: хранится ярлыком, API нет.
- *
- * ЕДИНСТВЕННЫЙ источник правды об API-способности на фронте. Добавляя новый
- * Rust-клиент, добавь запись СЮДА — иначе форма не покажет ему поля секретов, а
- * карточка — кнопку Test.
- */
-export const API_PROVIDERS = {
-  hostiq: { label: "Hostiq", icon: "H", bg: "#fff7ed", color: "#ea580c", needsClientIp: false },
-  namecheap: { label: "Namecheap", icon: "N", bg: "#fef2f2", color: "#dc2626", needsClientIp: true },
-} as const;
-
-export type ApiProviderKey = keyof typeof API_PROVIDERS;
-
-/** В БД `provider` — свободная строка; "Hostiq"/" hostiq " — один провайдер. */
-export function normalizeProvider(provider: string): string {
-  return provider.trim().toLowerCase();
-}
-
-/** Есть ли у провайдера рабочий API-клиент. Не в каталоге → ручной. */
-export function hasApi(provider: string): boolean {
-  return normalizeProvider(provider) in API_PROVIDERS;
-}
-
-/** Нужно ли поле Client IP (сегодня — только Namecheap). */
-export function needsClientIp(provider: string): boolean {
-  const meta = API_PROVIDERS[normalizeProvider(provider) as ApiProviderKey];
-  return !!meta && meta.needsClientIp;
-}
-
-export interface ProviderMeta {
-  key: string;   // нормализованный ключ (для дедупа и сравнения)
-  label: string; // человекочитаемое имя
-  icon: string;  // одна буква для аватара
-  bg: string;    // фон аватара
-  color: string; // цвет буквы
-  api: boolean;  // есть ли API-клиент
-}
-
-/**
- * Палитра для ручных провайдеров: детерминированный цвет по имени, чтобы список
- * не был серым и один провайдер всегда красился одинаково (а не «?» на сером,
- * как раньше давал неизвестный provider на карточке).
- */
-const MANUAL_PALETTE = [
-  { bg: "#eef2ff", color: "#4f46e5" },
-  { bg: "#ecfeff", color: "#0891b2" },
-  { bg: "#f0fdf4", color: "#16a34a" },
-  { bg: "#fef3c7", color: "#b45309" },
-  { bg: "#fce7f3", color: "#be185d" },
-  { bg: "#f3f4f6", color: "#374151" },
-];
-
-function hashIndex(s: string, mod: number): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h % mod;
-}
-
-/** Метаданные показа: API — из каталога, ручной — из палитры по хешу имени. */
-export function providerMeta(provider: string): ProviderMeta {
-  const key = normalizeProvider(provider);
-  const api = API_PROVIDERS[key as ApiProviderKey];
-  if (api) {
-    return { key, label: api.label, icon: api.icon, bg: api.bg, color: api.color, api: true };
-  }
-  const display = provider.trim() || "?";
-  const pal = MANUAL_PALETTE[hashIndex(key || "?", MANUAL_PALETTE.length)];
-  return { key, label: display, icon: (display[0] || "?").toUpperCase(), bg: pal.bg, color: pal.color, api: false };
-}
-
-/**
- * Список для выпадашки: сначала API-каталог (частый кейс сверху), затем
- * уникальные провайдеры уже заведённых аккаунтов (ручные). Без повторов по
- * нормализованному ключу. Отдельной таблицы провайдеров нет — «ранее
- * использованные» выводятся из списка аккаунтов, который и так грузится на вкладке.
- */
-export function buildProviderList(accounts: { provider: string }[]): ProviderMeta[] {
-  const seen = new Set<string>();
-  const out: ProviderMeta[] = [];
-  for (const key of Object.keys(API_PROVIDERS)) {
-    out.push(providerMeta(key));
-    seen.add(key);
-  }
-  for (const acc of accounts) {
-    const key = normalizeProvider(acc.provider);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(providerMeta(acc.provider));
-  }
-  return out;
-}
-```
-
-- [ ] **Шаг 4: Прогнать — тест зелёный**
-
-Run: `cd frontend && npx vitest run src/lib/registrarProviders.test.ts`
-Expected: PASS (все кейсы).
-
-- [ ] **Шаг 5: Коммит**
-
-```bash
-git add frontend/src/lib/registrarProviders.ts frontend/src/lib/registrarProviders.test.ts
-git commit -m "feat(registrars): каталог провайдеров и API-способность (чистый модуль)"
-```
+**Известный остаток (не долг фазы):** аккаунт, у которого пробелы уже лежат в колонке
+`provider`, теперь честно показывается ручным, а провайдер в правке read-only — из UI
+такую строку не починить. Регрессии нет (провайдер и раньше не редактировался), но
+знать об этом стоит: чинится только в БД.
 
 ---
 
-### Фаза 2 — Тип `RegistrarProvider` → `string`  `[ ]`
+### Фаза 2 — Тип `RegistrarProvider` → `string`  `[x]`
 
-Строгий юнион `"hostiq" | "namecheap"` мешает произвольным провайдерам. Ослабляем до
-`string`; способность к API теперь проверяет `hasApi()`, а не тип.
+Строгий юнион `"hostiq" | "namecheap"` мешает произвольным провайдерам. Ослаблен до
+`string`; способность к API проверяет `hasApi()`, а не тип.
 
 **Files:**
-- Modify: `frontend/src/api/registrars.ts:14` (тип), затрагиваемые места создания.
+- Modify: `frontend/src/api/registrars.ts`
 
-- [ ] **Шаг 1: Ослабить тип**
-
-В `frontend/src/api/registrars.ts` заменить строку 14:
+- [x] **Шаг 1: Ослабить тип**
 
 ```ts
 // Было: export type RegistrarProvider = "hostiq" | "namecheap";
@@ -302,18 +182,12 @@ git commit -m "feat(registrars): каталог провайдеров и API-с
 export type RegistrarProvider = string;
 ```
 
-- [ ] **Шаг 2: Убедиться, что типы всё ещё компилируются**
+- [x] **Шаг 2: Проверка типов** — `cd frontend && npx tsc --noEmit`, чисто.
+- [x] **Шаг 3: Коммит** — `c059b69`.
 
-Run: `cd frontend && npx tsc --noEmit`
-Expected: без новых ошибок (алиас = string, все прежние присваивания валидны).
-
-- [ ] **Шаг 3: Коммит**
-
-```bash
-git add frontend/src/api/registrars.ts
-git commit -m "refactor(registrars): RegistrarProvider как свободная строка"
-```
-
+Попутно (в `79d2a69`): у `RegistrarAccount.provider` убран хвост `| string` — после
+ослабления алиаса он читался как `string | string`; и поправлен JSDoc в
+`registrarCaps.ts`, который цитировал устаревшую форму типа как обоснование сигнатуры.
 ---
 
 ### Фаза 3 — Компонент `ProviderCombobox`  `[ ]`
