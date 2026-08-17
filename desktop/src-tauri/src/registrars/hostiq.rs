@@ -27,6 +27,12 @@ const HOSTIQ_API: &str = "https://hostiq.ua/clients/di-api/v3";
 /// запросом» нельзя даже на большом числе — только пагинация.
 const PAGE_LIMIT: usize = 1000;
 
+/// Потолок числа страниц листинга. Не про размер аккаунта (50 000 доменов у
+/// одного регистратора — фантастика), а про API, который проигнорирует
+/// `offset`: без потолка такой ответ дал бы вечный цикл с 30-секундным
+/// таймаутом на каждый запрос.
+const MAX_PAGES: usize = 50;
+
 /// Сколько nameservers принимает `domain/changeNameServer`: `ns1`+`ns2`
 /// обязательны, дальше до `ns5`.
 const MIN_NS: usize = 2;
@@ -134,26 +140,59 @@ impl HostiqService {
         if status.as_u16() >= 400 {
             return Err(RegistrarError::Api(failure_text(status, &text)));
         }
+        // Пустое тело — законный ответ, у `changeNameServer` он допустим.
         if text.is_empty() {
             return Ok(serde_json::json!({}));
         }
+        // Код 2xx — ещё не успех, и это не педантичность. Ответить 200 может не
+        // Hostiq: страница корпоративного прокси, капча, портал публичного
+        // Wi-Fi. Тело такого ответа не JSON — раньше оно уезжало вызывающему
+        // как `Value::String`, и дальше каждый путь врал по-своему: листинг
+        // отдавал «у аккаунта нет доменов», а смена NS — `Ok(true)`, из
+        // которого `commands::registrars::ns_outcome_plan` пишет `ns_status =
+        // "ok"` и строчку `registrar.ns_set` в audit log. Аудит, утверждающий
+        // смену, которой не было, хуже любой ошибки.
+        //
+        // Условие «не распознали» здесь ровно то же, что и при ≥400, — и
+        // разбор конверта ошибки зовётся тот же: если Hostiq ответил 200 с
+        // узнаваемым отказом в теле, это отказ. Ценой ложной тревоги: успешный
+        // ответ с полем `message` на верхнем уровне (живьём такого не
+        // встречалось — успех приходит как `{"result":"success"}`) будет
+        // назван ошибкой. Сторону компромисса выбираем осознанно: объявить
+        // неуверенность дешевле, чем записать несостоявшуюся смену как
+        // состоявшуюся.
         match serde_json::from_str(&text) {
-            Ok(v) => Ok(v),
-            Err(_) => Ok(Value::String(text)),
+            Ok(v) if error_message(&text).is_none() => Ok(v),
+            _ => Err(RegistrarError::Api(failure_text(status, &text))),
         }
     }
 
     /// Весь список доменов аккаунта, страницами.
     ///
     /// Смещение двигается на ЧИСЛО ПОЛУЧЕННЫХ записей, а не на `PAGE_LIMIT`:
-    /// запрошенный `limit` API соблюдать не обязан (выше 1000 он молча отдаёт
-    /// 100), и шаг «по запрошенному» перепрыгивал бы через хвост каждой
-    /// страницы. Условие остановки — `total` из ответа; пустая страница
-    /// обрывает цикл отдельно, чтобы враньё в `total` не стало вечным циклом.
+    /// запрошенный `limit` API соблюдать не обязан (выше 1000 он молча
+    /// откатывает к 100), и шаг «по запрошенному» перепрыгивал бы через хвост
+    /// каждой страницы. По той же причине короткая страница НЕ считается концом
+    /// списка: «прислали меньше, чем просили» у этого API — штатное поведение,
+    /// а не сигнал.
+    ///
+    /// Признак конца — ПУСТАЯ страница. `total` при этом только верхняя
+    /// граница: он позволяет не тратить лишний запрос, но не решает, полон ли
+    /// ответ. Обратный порядок («кончился, когда набрали `total`») выглядит
+    /// экономнее и молча врёт: исчезни или переименуйся поле — и листинг
+    /// обрезался бы первой страницей, а вызывающий считал бы её всем аккаунтом.
+    /// Домены со второй страницы после этого «не существуют»: `get_domains` их
+    /// не покажет, `domain_id` объявит, что домена нет в аккаунте. Цена
+    /// выбранного порядка — один пустой запрос в конце, когда `total` не
+    /// пришёл.
+    ///
+    /// `MAX_PAGES` — страховка от единственного исхода, при котором цикл не
+    /// кончится сам: API, игнорирующий `offset`. Обрывать список молча в этом
+    /// случае нельзя (это опять «часть выдана за всё»), поэтому ошибка.
     async fn all_domains(&self) -> Result<Vec<Value>, RegistrarError> {
         let mut out: Vec<Value> = Vec::new();
         let mut offset = 0usize;
-        loop {
+        for _ in 0..MAX_PAGES {
             let page = self
                 .call(
                     reqwest::Method::GET,
@@ -167,20 +206,22 @@ impl HostiqService {
                 .cloned()
                 .unwrap_or_default();
             if items.is_empty() {
-                break;
+                return Ok(out);
             }
             offset += items.len();
             out.extend(items);
-            let total = page
+            let reached_total = page
                 .get("total")
                 .and_then(as_i64)
-                .map(|t| t.max(0) as usize)
-                .unwrap_or(out.len());
-            if out.len() >= total {
-                break;
+                .is_some_and(|t| out.len() as i64 >= t);
+            if reached_total {
+                return Ok(out);
             }
         }
-        Ok(out)
+        Err(RegistrarError::Api(format!(
+            "Hostiq listing did not end after {MAX_PAGES} pages ({} domains)",
+            out.len()
+        )))
     }
 
     /// `domainid` домена — числом, как его требует `changeNameServer`.
@@ -197,7 +238,21 @@ impl HostiqService {
         if let Some(id) = self.cached_id(&key) {
             return Ok(id);
         }
-        let index = domain_index(&self.all_domains().await?);
+        let listed = self.all_domains().await?;
+        let index = domain_index(&listed);
+        // «Записи есть, а id не добыт ни у одной» — это про ФОРМАТ ответа, а не
+        // про домен, и путать их нельзя. Поле `id` уже зовётся по-разному на
+        // разных эндпоинтах (`changeNameServer` требует `domainid`), так что
+        // переименование — не выдуманный риск. Свалившись в общую ветку, оно
+        // дало бы худшую из диагностик: `test_connection` зелёный, `get_domains`
+        // безупречен (он читает только имя, срок и статус), а КАЖДАЯ смена NS
+        // обвиняет аккаунт пользователя в отсутствии домена, который в нём есть.
+        if index.is_empty() && !listed.is_empty() {
+            return Err(RegistrarError::Api(format!(
+                "Hostiq listed {} domains but none carried a usable id field",
+                listed.len()
+            )));
+        }
         let found = index.get(&key).copied();
         *self.domain_ids.lock().unwrap_or_else(|e| e.into_inner()) = index;
         found.ok_or_else(|| {
@@ -268,7 +323,13 @@ fn non_empty(v: Option<&Value>) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
-/// Число из значения, которое API отдаёт то числом, то строкой (`id`, `total`).
+/// Число из значения ответа (`id`, `total`).
+///
+/// Живой API отдаёт их ЧИСЛАМИ — строка здесь принимается страховкой, а не по
+/// наблюдению. Асимметрия с отправкой намеренная: наружу `domainid` уходит
+/// жёстко числом (строку DI-API v3 отбивает `400`), а внутрь берётся всё, что
+/// читается, — потому что цена промаха на чтении молчаливая: запись просто
+/// выпадает из индекса доменов (см. `domain_id`).
 fn as_i64(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())
 }
@@ -331,11 +392,20 @@ impl RegistrarService for HostiqService {
     }
 
     async fn set_nameservers(&self, domain: &str, ns: &[String]) -> Result<bool, RegistrarError> {
-        let servers: Vec<String> = ns
-            .iter()
-            .map(|s| normalize_ns(s))
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Повторы схлопываются ПОСЛЕ нормализации, потому что до неё они не
+        // видны: `ADA.ns.cloudflare.com.` и `ada.ns.cloudflare.com` — один
+        // сервер. Иначе дубль проходил бы гейт как «два сервера» и приводил
+        // ровно к тому, ради чего гейт и стоит: голому `{"code":400,
+        // "message":"error"}` — или, хуже, к принятому делегированию на один
+        // сервер. Фронт (`lib/nsDelegation.ts`) схлопывает их по той же
+        // причине. `Vec::dedup` тут не годится: он снимает только СОСЕДНИЕ
+        // повторы, а список приходит из формы в любом порядке.
+        let mut servers: Vec<String> = Vec::new();
+        for host in ns.iter().map(|s| normalize_ns(s)) {
+            if !host.is_empty() && !servers.contains(&host) {
+                servers.push(host);
+            }
+        }
         // Гейты ДО сети. На неверном числе серверов API отвечает голым
         // `{"code":400,"message":"error"}` — без объяснения причины, так что
         // пользователю досталась бы ошибка, из которой нечего понять.
@@ -565,6 +635,103 @@ mod tests {
         assert_eq!(listings, 1, "аккаунт выкачан заново на второй домен");
     }
 
+    /// Конец списка — пустая страница, а не набранный `total`. Ответ без
+    /// `total` вовсе (поле исчезло или переименовалось) обязан доехать целиком:
+    /// обрезав его первой страницей, клиент выдал бы часть аккаунта за весь.
+    #[tokio::test]
+    async fn a_listing_without_total_is_not_cut_short() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .and(query_param("offset", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "domains": [{"id": 1, "domainname": "one.com"},
+                            {"id": 2, "domainname": "two.com"}]
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .and(query_param("offset", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "domains": [{"id": 3, "domainname": "three.com"}]
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .and(query_param("offset", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "domains": []
+            })))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let names: Vec<String> = svc
+            .get_domains()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.domain)
+            .collect();
+        assert_eq!(names, vec!["one.com", "two.com", "three.com"]);
+    }
+
+    /// Единственный исход, при котором цикл пагинации не кончится сам: API
+    /// игнорирует `offset` и отдаёт одну и ту же страницу вечно. Тест держит
+    /// потолок `MAX_PAGES`: без него вызов зависал бы на 50 запросах по 30
+    /// секунд таймаута каждый. Обрыв молча (усечённым списком) тоже не годится
+    /// — поэтому ошибка.
+    #[tokio::test]
+    async fn a_listing_that_never_ends_fails_instead_of_looping() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "domains": [{"id": 1, "domainname": "one.com"}]
+            })))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let text = svc.get_domains().await.unwrap_err().to_string();
+        assert!(text.contains("did not end"), "{text}");
+        assert_eq!(srv.received_requests().await.unwrap().len(), MAX_PAGES);
+    }
+
+    /// Записи есть, а `id` не добыт ни у одной — это про формат ответа, и
+    /// сказать надо именно это. Свалившись в ветку «домена нет в аккаунте»,
+    /// клиент обвинял бы аккаунт пользователя при переименованном поле.
+    #[tokio::test]
+    async fn a_listing_without_ids_blames_the_response_not_the_account() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(page(
+                serde_json::json!([
+                    {"domainid": 1, "domainname": "one.com"},
+                    {"domainid": 2, "domainname": "two.com"}
+                ]),
+                2,
+            ))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let ns = vec![
+            "ada.ns.cloudflare.com".to_string(),
+            "bob.ns.cloudflare.com".to_string(),
+        ];
+        let text = svc
+            .set_nameservers("one.com", &ns)
+            .await
+            .expect_err("без id смену NS не собрать")
+            .to_string();
+        assert!(text.contains("usable id field"), "{text}");
+        assert!(!text.contains("is not in this account"), "{text}");
+    }
+
     /// Домена нет в аккаунте — это своя ошибка, а не то, что ответит API: с
     /// чужим `domainid` DI-API v3 говорит `403 Forbidden`, и «нет прав» вместо
     /// «домена нет» отправило бы разбираться не туда.
@@ -641,6 +808,55 @@ mod tests {
         assert!(text.contains("at least 2"), "{text}");
     }
 
+    /// Повтор — не второй сервер. До гейта дубли должны схлопываться, иначе
+    /// «две штуки, обе одинаковые» уехали бы в API за голым `400` — или, хуже,
+    /// были бы приняты как делегирование на один сервер.
+    #[tokio::test]
+    async fn a_repeated_nameserver_does_not_count_twice() {
+        let svc = HostiqService::with_base_url("secret-token", NOWHERE);
+        let ns = vec![
+            "ADA.ns.cloudflare.com.".to_string(),
+            "ada.ns.cloudflare.com".to_string(),
+        ];
+        let text = svc
+            .set_nameservers("betify2.com", &ns)
+            .await
+            .expect_err("один сервер дважды — это один сервер")
+            .to_string();
+        assert!(text.contains("at least 2"), "{text}");
+    }
+
+    /// Верхняя граница `MAX_NS` — единственное место, где формируется `ns5`.
+    #[tokio::test]
+    async fn five_nameservers_fill_the_slots_up_to_ns5() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(page(
+                serde_json::json!([{"id": 42, "domainname": "betify2.com"}]),
+                1,
+            ))
+            .mount(&srv)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/domain/changeNameServer"))
+            .and(body_json(serde_json::json!({
+                "domainid": 42,
+                "ns1": "ns1.example.com", "ns2": "ns2.example.com",
+                "ns3": "ns3.example.com", "ns4": "ns4.example.com",
+                "ns5": "ns5.example.com"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": "success"
+            })))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let five: Vec<String> = (1..=MAX_NS).map(|i| format!("ns{i}.example.com")).collect();
+        assert!(svc.set_nameservers("betify2.com", &five).await.unwrap());
+    }
+
     /// Чтение NS у Hostiq невозможно, и отказ обязан быть без сети: выдуманный
     /// эндпоинт вернул бы 404, то есть соврал бы про причину.
     #[tokio::test]
@@ -671,6 +887,86 @@ mod tests {
         let svc = HostiqService::with_base_url("secret-token", &srv.uri());
         let text = svc.get_domains().await.unwrap_err().to_string();
         assert!(text.contains("Hostiq error: Syntax error"), "{text}");
+    }
+
+    /// Код 200 от НЕ Hostiq (прокси, капча, портал Wi-Fi) обязан стать ошибкой,
+    /// а не данными. На смене NS это самое дорогое место в файле: приняв такое
+    /// тело за успех, клиент возвращал бы `Ok(true)`, а команда писала бы
+    /// `ns_status = "ok"` и строчку `registrar.ns_set` в audit log — аудит
+    /// утверждал бы смену, которой не было.
+    #[tokio::test]
+    async fn a_200_from_a_foreign_page_is_not_a_successful_ns_change() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(page(
+                serde_json::json!([{"id": 42, "domainname": "betify2.com"}]),
+                1,
+            ))
+            .mount(&srv)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/domain/changeNameServer"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("<html><body>captive portal: please sign in</body></html>"),
+            )
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let ns = vec![
+            "ada.ns.cloudflare.com".to_string(),
+            "bob.ns.cloudflare.com".to_string(),
+        ];
+        let text = svc
+            .set_nameservers("betify2.com", &ns)
+            .await
+            .expect_err("страница прокси — не состоявшаяся смена NS")
+            .to_string();
+        assert!(text.contains("unrecognised response (HTTP 200"), "{text}");
+        assert!(!text.contains("captive portal"), "{text}");
+    }
+
+    /// Тот же чужой ответ на листинге: пустой список означал бы «у аккаунта нет
+    /// доменов», то есть незнание, нарисованное фактом.
+    #[tokio::test]
+    async fn a_200_from_a_foreign_page_is_not_an_empty_account() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("<html><body>sign in</body></html>"),
+            )
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let text = svc
+            .get_domains()
+            .await
+            .expect_err("страница прокси — не пустой аккаунт")
+            .to_string();
+        assert!(text.contains("unrecognised response (HTTP 200"), "{text}");
+    }
+
+    /// Узнаваемый конверт отказа при коде 200 — это отказ. Разбор для него уже
+    /// написан, и позвать его на успешной ветке дешевле, чем однажды объяснять,
+    /// почему смена NS «прошла».
+    #[tokio::test]
+    async fn an_error_envelope_under_a_200_is_still_an_error() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domain/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "error": {"code": 403, "message": "Forbidden"}
+            })))
+            .mount(&srv)
+            .await;
+
+        let svc = HostiqService::with_base_url("secret-token", &srv.uri());
+        let text = svc.get_domains().await.unwrap_err().to_string();
+        assert!(text.contains("Hostiq error: Forbidden"), "{text}");
     }
 
     /// Ошибка живого пути доезжает до экрана (бейдж делегирования), поэтому
