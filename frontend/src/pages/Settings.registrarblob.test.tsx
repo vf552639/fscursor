@@ -475,6 +475,10 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body.name).toBe("nc-renamed");
     expect(body).not.toHaveProperty("api_key_blob_id");
     expect(body).not.toHaveProperty("api_secret_blob_id");
+    // Обратная сторона чистки `api_user` у Hostiq: у Namecheap поле живое
+    // (`ApiUser` уходит в каждый запрос), показано на форме и уезжает в PATCH
+    // нетронутым — переименование логин не задевает.
+    expect(body.api_user).toBe("ncuser");
   });
 
   it("правка ручного провайдера: только имя, без полей секретов", async () => {
@@ -510,14 +514,16 @@ describe("Settings — ключ и секрет регистратора чер�
     expect(body).not.toHaveProperty("api_secret_blob_id");
   });
 
-  it("правка Hostiq: поля API User нет, а прежний email не стирается молча", async () => {
-    // Две половины одного правила «чего не показали — того не меняем». Поле у
-    // Hostiq снято (email в DI-API v3 не уходит), но у заведённых аккаунтов он
-    // лежит в колонке, и переименование не должно его вычищать: пользователь
-    // просил сменить имя, а не трогать то, чего ему даже не показали. Само
-    // значение безвредно — в запросы к регистратору оно не попадает.
+  it("правка Hostiq: поля API User нет, а унаследованный email вычищается", async () => {
+    // Поле у Hostiq снято, и колонка чистится вместе с ним. Это НЕ «не
+    // показали — не трогаем»: `api_user` у Hostiq мёртв по контракту (DI-API v3
+    // авторизуется одним заголовком), то есть в колонке лежат не данные
+    // пользователя, а мусор от API, которого не существовало. Пока он там,
+    // карточка подписана «Hostiq · admin@…» и врёт про то, чем аккаунт
+    // настроен. Момент выбран не наугад: старый ключ нерабочий, и в правку за
+    // новым токеном обязан зайти владелец каждого существующего аккаунта.
     setTauri(true);
-    mocks.apiPut.mockResolvedValue({ ...HOSTIQ, name: "hq2" });
+    mocks.apiPut.mockResolvedValue({ ...HOSTIQ, name: "hq2", api_user: null });
 
     renderPage([HOSTIQ]);
     fireEvent.click(await screen.findByRole("button", { name: "✎ Edit" }));
@@ -534,11 +540,15 @@ describe("Settings — ключ и секрет регистратора чер�
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
-    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
     const [url, body] = mocks.apiPut.mock.calls[0];
     expect(url).toBe("/registrars/accounts/5");
     expect(body.name).toBe("hq2");
-    expect(body.api_user).toBe("admin@hostiq.ua");
+    expect(body.api_user).toBeNull();
+    // ГРАНИЦА: чистится только мёртвое поле. Ключ не тронут — значит «оставь
+    // текущий», и ни блоба, ни ссылки в теле не появляется. Распространи
+    // новое правило на секреты — и правка имени стирала бы рабочий ключ.
+    expect(putBlobCalls(mocks.invokeIfTauri).length).toBe(0);
+    expect(body).not.toHaveProperty("api_key_blob_id");
   });
 
   it("правка ручного провайдера в вебе: заметки про секреты не прибавляется", async () => {
