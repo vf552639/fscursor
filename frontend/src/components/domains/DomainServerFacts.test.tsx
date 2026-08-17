@@ -378,14 +378,22 @@ describe("расхождение нашей записи с фактом", () =>
   });
 });
 
-describe("«Accounts on server»: home не дублирует путь сайта", () => {
+describe("«Accounts on server»: перечень не повторяет уже сказанного", () => {
   it("home совпал с путём сайта (с точностью до хвостового слэша) — не печатается", () => {
+    // Второй аккаунт — чтобы перечень вообще рисовался: проверяем именно
+    // гашение `home`, а не гашение блока.
     show({
-      fp_facts: facts({ ftp_accounts: [{ login: "example_ftp", home: "/var/www/example.com/" }] }),
+      fp_facts: facts({
+        ftp_accounts: [
+          { login: "example_ftp", home: "/var/www/example.com/" },
+          { login: "second_ftp", home: "/home/second" },
+        ],
+      }),
       fp_facts_at: ago(HOUR),
     });
     expect(screen.getByText("Accounts on server")).toBeTruthy();
     expect(screen.queryByText(/· \/var\/www\/example\.com/)).toBeNull();
+    expect(screen.getByText(/· \/home\/second/)).toBeTruthy();
   });
 
   it("home отличается от пути сайта — печатается", () => {
@@ -394,6 +402,45 @@ describe("«Accounts on server»: home не дублирует путь сайт
       fp_facts_at: ago(HOUR),
     });
     expect(screen.getByText(/· \/home\/example_usr/)).toBeTruthy();
+  });
+
+  it("единственный аккаунт уже напечатан полем Login — блока нет вовсе", () => {
+    // Иначе перечень — это одна строка, дословно повторяющая строку над собой
+    // в той же колонке: логин тот же, `home` погашен как копия пути сайта.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(rowText("Login")).toContain("example_ftp");
+    expect(screen.queryByText("Accounts on server")).toBeNull();
+  });
+
+  it("рядом есть второй аккаунт — печатается ВЕСЬ перечень, включая основной", () => {
+    // Блок гасится целиком или показывается целиком: список, из которого молча
+    // изъят основной логин, врал бы своему заголовку «Accounts on server».
+    show({
+      fp_facts: facts({
+        ftp_accounts: [
+          { login: "example_ftp", home: "/var/www/example.com" },
+          { login: "second_ftp", home: "/var/www/example.com" },
+        ],
+      }),
+      fp_facts_at: ago(HOUR),
+    });
+    const roster = screen.getByText("Accounts on server").parentElement?.textContent ?? "";
+    expect(roster).toContain("example_ftp");
+    expect(roster).toContain("second_ftp");
+  });
+
+  it("гашение считается против ПОКАЗАННОГО логина, а не против нашей записи", () => {
+    // Наша запись `example_ftp` разошлась с сервером, поэтому полем `Login`
+    // показан факт `server_ftp` — и перечень из него одного ничего не
+    // добавляет, хотя с нашей записью он и не совпадает.
+    show({
+      fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: "/var/www/example.com" }] }),
+      fp_facts_at: ago(HOUR),
+      ftp_user: "example_ftp",
+    });
+    expect(rowText("Login")).toContain("server_ftp");
+    expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+    expect(screen.queryByText("Accounts on server")).toBeNull();
   });
 });
 

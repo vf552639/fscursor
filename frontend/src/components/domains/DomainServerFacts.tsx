@@ -301,6 +301,39 @@ export default function DomainServerFacts({
   const listFact = (value: string | null): React.ReactNode =>
     value ?? (noSnapshot ? null : <span style={{ color: MUTED }}>not read</span>);
 
+  /**
+   * Домашняя папка аккаунта, если она ОТЛИЧАЕТСЯ от пути сайта.
+   *
+   * У типового аккаунта это тот же путь, и он уже стоит в Site → Path — третья
+   * его копия на экране ничего не добавляет. Вопрос «та же ли это папка» задаём
+   * тем же `samePath`, что и правило расхождения, а не своим сравнением строк:
+   * хвостовой слэш стороны пишут как придётся, и вторая нормализация
+   * разъехалась бы с первой (принцип №6 CLAUDE.md).
+   */
+  const otherHome = (home: string | null): string | null =>
+    home && !samePath(home, facts?.site?.site_path) ? home : null;
+
+  /**
+   * Стоит ли рисовать перечень «Accounts on server».
+   *
+   * У типового домена аккаунт ровно один, он же напечатан выше полем `Login`, а
+   * его `home` погашен как копия пути сайта — то есть перечень получается одной
+   * строкой, дословно повторяющей строку над собой, в той же колонке.
+   *
+   * Гасим блок ЦЕЛИКОМ, а не вычищаем из него основной логин: «Accounts on
+   * server» — это ПЕРЕЧЕНЬ аккаунтов домена, и список, из которого молча изъят
+   * один, врал бы собственному заголовку (человек прочтёт «на сервере есть
+   * только эти» и не найдёт того, которым сам подключается). Поэтому условие
+   * ровно одно: есть ли в перечне хоть одна строка, говорящая что-то новое, —
+   * другой логин либо непривычная домашняя папка. Есть — печатаем перечень
+   * ПОЛНОСТЬЮ, включая основной; нет — не печатаем вовсе.
+   */
+  const ftpRosterAdds =
+    !!facts &&
+    facts.ftp_accounts.some(
+      (a) => a.login.trim() !== (factFtpLogin ?? "").trim() || otherHome(a.home) !== null,
+    );
+
   return (
     <div style={{ marginTop: 20, borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
@@ -325,7 +358,12 @@ export default function DomainServerFacts({
       {/* Ошибка последней ПОПЫТКИ — под шапкой. Снимок при этом остаётся прежним
           (сервер не трогает `fp_facts` при провале), и его свежесть — выше. */}
       {domain.fp_check_error ? (
-        <div role="alert" style={{ fontSize: 12, color: "#b91c1c", marginBottom: 8 }}>
+        // `overflowWrap` — текст ЧУЖОЙ: это ответ ssh или FastPanel, и в нём
+        // сидит неразрывный токен (путь, ключ хоста, URL). Без переноса он
+        // распирает модалку и даёт ей горизонтальную полосу, запрещённую
+        // `design-brief.md` §11. Тот же приём и той же формулировкой одет
+        // `Last error` в карточке и ошибки записи в полях ряда связей.
+        <div role="alert" style={{ fontSize: 12, color: "#b91c1c", marginBottom: 8, overflowWrap: "anywhere" }}>
           Last check failed: {domain.fp_check_error}
         </div>
       ) : null}
@@ -342,9 +380,18 @@ export default function DomainServerFacts({
       ) : null}
 
       <HasSnapshot.Provider value={!noSnapshot}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 8 }}>
+        {/* `minmax(0, 1fr)`, а не `1fr`: голый `1fr` — это `minmax(auto, 1fr)`,
+            и минимум трека равен ширине содержимого, поэтому один неразрывный
+            токен (путь, чужая ошибка) распирает колонку за ширину модалки. У
+            `Modal` стоит `overflowY: auto`, из-за чего `overflow-x` вычисляется
+            в `auto` — распёртая колонка даёт КАРТОЧКЕ горизонтальную полосу,
+            запрещённую `design-brief.md` §11. Ряд связей этажом выше держит ту
+            же дисциплину (`DomainLinks`), и по той же причине колонкам нужен
+            `minWidth: 0`: у grid-элемента он по умолчанию равен содержимому, и
+            без него в трек упрётся не текст, а сам столбец. */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16, marginTop: 8 }}>
           {/* ─── FTP ─────────────────────────────────────────────────────── */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start" }}>
+          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
             <SubTitle>FTP access</SubTitle>
             {/* Host и Port — не про снимок: адрес берётся у сервера, порт
                 константа. У домена без сервера Host остаётся прочерком. */}
@@ -352,22 +399,17 @@ export default function DomainServerFacts({
             <Row k="Port" v={FTP_PORT} />
             <FactRow k="Login" fact={listFact(factFtpLogin)} src={src.ftpLogin} />
             <FtpPassword domain={domain} desktop={desktop} />
-            {facts && facts.ftp_accounts.length > 0 ? (
+            {ftpRosterAdds && facts ? (
               <div style={{ marginTop: 6 }}>
                 <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Accounts on server</div>
                 {facts.ftp_accounts.map((a) => (
-                  <div key={a.login} style={{ fontSize: 12.5, color: "#374151" }}>
+                  // `overflowWrap` — путь тут печатается ровно в интересном
+                  // случае: когда он НЕ совпал с путём сайта, то есть когда он
+                  // нестандартный и, скорее всего, длинный. Без переноса он
+                  // распирает колонку и даёт модалке горизонтальную полосу.
+                  <div key={a.login} style={{ fontSize: 12.5, color: "#374151", overflowWrap: "anywhere" }}>
                     {a.login}
-                    {/* `home` печатаем, только когда он ОТЛИЧАЕТСЯ от пути сайта:
-                        у типового аккаунта это тот же путь, и он уже стоит в
-                        Site → Path — третья его копия на экране ничего не
-                        добавляет. Вопрос «та же ли это папка» задаём тем же
-                        `samePath`, что и правило расхождения, а не своим
-                        сравнением строк: хвостовой слэш стороны пишут как
-                        придётся, и вторая нормализация разъехалась бы с первой. */}
-                    {a.home && !samePath(a.home, facts.site?.site_path) ? (
-                      <span style={{ color: MUTED }}> · {a.home}</span>
-                    ) : null}
+                    {otherHome(a.home) ? <span style={{ color: MUTED }}> · {otherHome(a.home)}</span> : null}
                   </div>
                 ))}
               </div>
@@ -375,7 +417,7 @@ export default function DomainServerFacts({
           </div>
   
           {/* ─── SSL ─────────────────────────────────────────────────────── */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start" }}>
+          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
             <SubTitle>SSL</SubTitle>
             <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
               <b style={{ color: "#6b7280", fontWeight: 600, minWidth: KEY_WIDTH }}>State</b>
@@ -385,8 +427,10 @@ export default function DomainServerFacts({
             {ssl === "missing" ? (
               <div style={{ fontSize: 12.5, color: "#b91c1c" }}>No certificate on the server.</div>
             ) : null}
+            {/* `overflowWrap` — текст ЧУЖОЙ (ответ openssl/FastPanel), и в нём
+                сидит неразрывный токен: см. `Last check failed` выше. */}
             {facts?.ssl.error ? (
-              <div style={{ fontSize: 12.5, color: "#b91c1c" }}>{facts.ssl.error}</div>
+              <div style={{ fontSize: 12.5, color: "#b91c1c", overflowWrap: "anywhere" }}>{facts.ssl.error}</div>
             ) : null}
             {/* `ssl.expires_at` — полный datetime: печатаем в зоне ЧИТАТЕЛЯ
                 (`formatExpiryDate` сам это решает по форме iso), не в UTC. Иначе
@@ -404,7 +448,7 @@ export default function DomainServerFacts({
           </div>
   
           {/* ─── Site ────────────────────────────────────────────────────── */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start", gridColumn: "1 / -1" }}>
+          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0, gridColumn: "1 / -1" }}>
             <SubTitle>Site</SubTitle>
             <FactRow k="Path" fact={facts?.site?.site_path} src={src.sitePath} />
             <FactRow k="Owner" fact={facts?.site?.site_user} src={src.siteOwner} />
