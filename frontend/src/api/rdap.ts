@@ -31,6 +31,49 @@ export type RegistryNameservers =
   /** Спросить не удалось — про делегирование не известно ничего. */
   | { state: "unavailable"; reason: string };
 
+/**
+ * Развести все три состояния, ничего не забыв.
+ *
+ * Union заставляет потребителя СУЗИТЬ тип, но не заставляет РАЗВЕСТИ незнание:
+ * `if (answer.state === "registered") … else <серый бейдж>` компилируется
+ * прекрасно и молча схлопывает «домена нет в реестре» с «спросить не удалось» —
+ * то есть осуществляет ровно тот страх, ради которого этот тип и заведён. А
+ * дальше `registered` с пустым списком превращается в утверждение «NS не
+ * прописаны».
+ *
+ * Поэтому разбор состояний идёт через этот хелпер: `never`-ветка в `default`
+ * ломает СБОРКУ, если в union появится четвёртое состояние, а три обязательных
+ * поля — если потребитель решит обойтись двумя. Тем же приёмом в проекте держат
+ * перечисление причин у бейджа делегирования (`lib/nsDelegation.ts`,
+ * `NsUnknownReason`).
+ */
+export function foldRegistryNameservers<T>(
+  answer: RegistryNameservers,
+  on: {
+    /** Реестр ответил. Пустой список — «зарегистрирован, но не делегирован». */
+    registered: (nameservers: string[]) => T;
+    /** Домена в реестре нет — утверждение реестра. */
+    notRegistered: () => T;
+    /** Спросить не удалось — про делегирование не известно ничего. */
+    unavailable: (reason: string) => T;
+  },
+): T {
+  switch (answer.state) {
+    case "registered":
+      return on.registered(answer.nameservers);
+    case "not_registered":
+      return on.notRegistered();
+    case "unavailable":
+      return on.unavailable(answer.reason);
+    default: {
+      // Недостижимо, пока union и этот switch совпадают, — а разойдутся они
+      // ошибкой компиляции здесь, а не серым бейджем у пользователя.
+      const unhandled: never = answer;
+      throw new Error(`unhandled registry answer: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 export const rdapKeys = {
   /**
    * Ключ на ДОМЕН и только на него: реестру всё равно, к какому аккаунту
@@ -58,7 +101,10 @@ export const rdapKeys = {
  */
 export function useRegistryNameservers(domain: string | null | undefined) {
   return useQuery({
-    queryKey: domain ? rdapKeys.nameservers(domain) : ["rdap", "nameservers", "disabled"],
+    // Ключ строится тем же `rdapKeys`, даже когда домена нет: отдельная строка-
+    // заглушка была бы четвёртым пространством ключей, про которое надо помнить
+    // при инвалидации. Запрос при `!domain` всё равно не летит (`enabled`).
+    queryKey: rdapKeys.nameservers(domain ?? ""),
     queryFn: async () => {
       requireDesktop("Reading nameservers from the domain registry");
       return invokeIfTauri<RegistryNameservers>("domain_registry_nameservers", { domain });

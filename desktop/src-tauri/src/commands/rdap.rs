@@ -14,7 +14,7 @@
 //! `registrar_test_connection`): в audit_log пишут действия, которые что-то
 //! меняют.
 
-use crate::rdap::{RdapClient, RegistryNameservers};
+use crate::rdap::{self, RegistryNameservers};
 
 /// Куда домен делегирован по данным реестра.
 ///
@@ -22,7 +22,11 @@ use crate::rdap::{RdapClient, RegistryNameservers};
 /// `RegistryNameservers`), и неудача запроса среди них полноправна. Отдай мы её
 /// как ошибку команды, фронт снова не смог бы отличить «не смогли спросить» от
 /// «домена нет в реестре» — то, ради чего этот тип и заведён.
+///
+/// Клиент команда не собирает: `rdap::registry_nameservers` берёт общий на
+/// процесс (TLS-конфиг и пул соединений — не то, что стоит переучреждать на
+/// каждый домен списка; подробности у `rdap::shared`).
 #[tauri::command]
 pub async fn domain_registry_nameservers(domain: String) -> RegistryNameservers {
-    RdapClient::new().nameservers(&domain).await
+    rdap::registry_nameservers(&domain).await
 }

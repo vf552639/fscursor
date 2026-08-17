@@ -3,7 +3,12 @@ import { renderHook, waitFor, cleanup } from "@testing-library/react";
 import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { useRegistryNameservers, rdapKeys } from "./rdap";
+import {
+  useRegistryNameservers,
+  rdapKeys,
+  foldRegistryNameservers,
+  type RegistryNameservers,
+} from "./rdap";
 
 /**
  * RDAP-ответ ходит из десктопа и доезжает до фронта ТРЕМЯ различимыми
@@ -106,5 +111,41 @@ describe("api/rdap — делегирование из реестра", () => {
 
   it("ключ кэша — на домен, а не на аккаунт регистратора", () => {
     expect(rdapKeys.nameservers("betify2.com")).toEqual(["rdap", "nameservers", "betify2.com"]);
+  });
+
+  /**
+   * Хелпер существует затем, чтобы потребитель не смог отмахнуться от двух
+   * состояний одним `else`. Проверяется, что каждое из трёх попадает в СВОЮ
+   * ветку — в том числе `registered` с пустым списком, который обязан остаться
+   * ответом «не делегирован», а не съехать к «не знаем».
+   */
+  it("развод состояний ведёт каждое в свою ветку", () => {
+    const label = (answer: RegistryNameservers) =>
+      foldRegistryNameservers(answer, {
+        registered: (ns) => `registered:${ns.length}`,
+        notRegistered: () => "not-registered",
+        unavailable: (reason) => `unavailable:${reason}`,
+      });
+
+    expect(label({ state: "registered", nameservers: ["a.ns", "b.ns"] })).toBe("registered:2");
+    expect(label({ state: "registered", nameservers: [] })).toBe("registered:0");
+    expect(label({ state: "not_registered" })).toBe("not-registered");
+    expect(label({ state: "unavailable", reason: "timeout" })).toBe("unavailable:timeout");
+  });
+
+  /**
+   * Ответ незнакомого состояния не должен молча стать «пусто»: так выглядел бы
+   * рассинхрон с Rust (новый вариант енума приехал, фронт не пересобран).
+   * Компилятор такое ловит только при пересборке, поэтому в рантайме — бросок.
+   */
+  it("незнакомое состояние не проходит молча", () => {
+    const alien = { state: "no_such_state" } as unknown as RegistryNameservers;
+    expect(() =>
+      foldRegistryNameservers(alien, {
+        registered: () => "x",
+        notRegistered: () => "x",
+        unavailable: () => "x",
+      }),
+    ).toThrow(/unhandled registry answer/);
   });
 });
