@@ -37,6 +37,8 @@ const STORED = "2026-09-01";
 /** Срок такой даты — конец дня, поэтому от 18-го полудня до неё 14 полных суток. */
 const STORED_LABEL = "01.09.2026 · in 14 days";
 const PICKED = "2027-01-01";
+/** Третья дата — ею в строку домена пишет КТО-ТО ДРУГОЙ, не это поле. */
+const OTHER = "2027-03-01";
 
 function domain(over: Record<string, unknown> = {}) {
   return {
@@ -64,6 +66,19 @@ function value() {
 /** Значение в состоянии правки: инпут даты. */
 function dateInput() {
   return screen.getByLabelText("Expiry date") as HTMLInputElement;
+}
+
+/**
+ * Дать мутации шанс уйти.
+ *
+ * `mutate` зовёт `mutationFn` не синхронно, поэтому проверка «ничего не
+ * записано» сразу после события проходит и на поле, которое пишет: она успевает
+ * раньше записи. Все утверждения об ОТСУТСТВИИ PUT'а идут после этого ожидания.
+ */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 }
 
 /** Тела всех `PUT /domains/42` — то, что поле записало в строку домена. */
@@ -130,11 +145,20 @@ describe("срок домена — правка на месте", () => {
     expect(writes()[0]).toEqual({ expiry_date: PICKED });
   });
 
-  it("пустой инпут снимает срок значением null, а не пустой строкой", async () => {
+  it("снятие срока подтверждается уходом из поля и пишется значением null", async () => {
     show();
     fireEvent.click(value());
+    // Пустое поле само по себе ещё ничего не значит: ровно так же выглядит
+    // недонабранная с клавиатуры дата.
     fireEvent.change(dateInput(), { target: { value: "" } });
+    await settle();
+    expect(writes().length).toBe(0);
+    // И поле осталось пустым: привязанное к показанному значению, оно прыгало
+    // бы обратно на прежнюю дату (React восстанавливает управляемый инпут после
+    // события, не изменившего состояние) — и снять срок было бы нельзя вовсе.
+    expect(dateInput().value).toBe("");
 
+    fireEvent.blur(dateInput());
     await waitFor(() => expect(writes().length).toBe(1));
     // Пустая строка в `expiry_date` — не «даты нет», а нечитаемая дата.
     expect(writes()[0]).toEqual({ expiry_date: null });
@@ -150,13 +174,53 @@ describe("срок домена — правка на месте", () => {
     expect(writes()[0]).toEqual({ expiry_date: STORED });
   });
 
-  it("та же дата не пишется вовсе", () => {
+  it("уход из пустого поля без правки ничего не пишет", async () => {
+    show({ expiry_date: null });
+    fireEvent.click(value());
+    // Пустое поле уходом из него ПОДТВЕРЖДАЕТ снятие срока — но у домена,
+    // который срока и не знал, снимать нечего: «сохранение», ничего не
+    // меняющее, стоило бы инвалидации списка доменов и ещё обманывало бы.
+    fireEvent.blur(dateInput());
+    await settle();
+    expect(writes().length).toBe(0);
+  });
+
+  it("уход из поля без правки ничего не пишет", async () => {
     show();
     fireEvent.click(value());
-    // Пустой PUT инвалидировал бы список доменов и перерисовал бы полэкрана ни
-    // за чем — а «сохранение», ничего не меняющее, ещё и обманывает.
-    fireEvent.change(dateInput(), { target: { value: STORED } });
+    // Открыть поле и передумать — не правка. PUT здесь инвалидировал бы список
+    // доменов и перерисовал бы полэкрана на простое любопытство, а
+    // «сохранение», ничего не меняющее, ещё и обманывает.
+    fireEvent.blur(dateInput());
+    await settle();
     expect(writes().length).toBe(0);
+  });
+
+  it("незавершённый набор с клавиатуры срок не снимает", async () => {
+    show();
+    fireEvent.click(value());
+    // Нативный `<input type="date">` отдаёт `""` за любой незаконченный набор:
+    // стирая сегмент даты, человек шлёт сюда «срока нет» посреди правки.
+    // Записанное, оно снимало бы срок без вопросов, а вторым PUT'ом вдогонку
+    // давало бы гонку двух записей из одного хука — севший последним `null`
+    // оставлял бы базу пустой под уверенно нарисованной новой датой.
+    fireEvent.change(dateInput(), { target: { value: "" } });
+    fireEvent.change(dateInput(), { target: { value: PICKED } });
+
+    await waitFor(() => expect(writes().length).toBe(1));
+    expect(writes()).toEqual([{ expiry_date: PICKED }]);
+  });
+
+  it("выбор в пикере пишется один раз, а не дважды с уходом из поля", async () => {
+    show();
+    fireEvent.click(value());
+    fireEvent.change(dateInput(), { target: { value: PICKED } });
+    await waitFor(() => expect(writes().length).toBe(1));
+
+    // `blur` записывает ровно один случай — пустое поле, а здесь оно не пустое.
+    fireEvent.blur(dateInput());
+    await settle();
+    expect(writes().length).toBe(1);
   });
 
   it("возврат к прежней дате поверх незаписанной правки всё равно уходит на сервер", async () => {
@@ -221,6 +285,45 @@ describe("срок домена — что видно, пока запись и�
     });
     // И после ответа сервера — тоже: пропс всё ещё старый, а правда уже новая.
     expect(value().textContent).toContain("01.01.2027");
+  });
+
+  it("провал записи не стирает набранное, но и не выдаёт его за сохранённое", async () => {
+    mocks.apiPut.mockRejectedValue(new Error("HTTP 422: expiry_date is not a valid date"));
+
+    show();
+    fireEvent.click(value());
+    fireEvent.change(dateInput(), { target: { value: PICKED } });
+
+    await screen.findByRole("alert");
+    // Открытое поле — рабочее место: сервер отверг дату, поправят её здесь же,
+    // и стирать набранное значило бы заставить набирать заново.
+    expect(dateInput().value).toBe(PICKED);
+
+    // А закрытое обязано называть то, что лежит в базе: удержав отвергнутую
+    // дату, оно рисовало бы её сохранённой.
+    fireEvent.blur(dateInput());
+    expect(value().textContent).toBe(STORED_LABEL);
+  });
+
+  it("чужая правка строки домена снимает наложение, а не прячется под ним", async () => {
+    const { rerender } = show();
+    fireEvent.click(value());
+    fireEvent.change(dateInput(), { target: { value: PICKED } });
+    await waitFor(() => expect(writes().length).toBe(1));
+    fireEvent.blur(dateInput());
+    expect(value().textContent).toContain("01.01.2027");
+
+    // Строка домена приехала с ТРЕТЬЕЙ датой — так выглядит любая чужая запись
+    // в `expiry_date` (синк регистратора, write-back полной настройки) после
+    // инвалидации `domainsKeys.all`. Наложение обязано уйти: дата из
+    // законченной правки поверх свежей правды — это старое значение, которое
+    // нечем снять до закрытия карточки.
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <DomainExpiryField domain={domain({ expiry_date: OTHER })} now={NOW} />
+      </QueryClientProvider>,
+    );
+    expect(value().textContent).toContain("01.03.2027");
   });
 
   it("провал записи возвращает сохранённую дату и называет причину", async () => {
