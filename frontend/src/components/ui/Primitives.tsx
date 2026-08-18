@@ -180,13 +180,18 @@ export function CBo({children, style}: {children: React.ReactNode, style?: React
  * у макета все секции одинаковы до пикселя, и разбирать их на части значило бы
  * разрешить собрать их по-разному.
  */
-export function SectionCard({title, right, children, style, bodyStyle}: {
+export function SectionCard({title, right, children}: {
   title: React.ReactNode;
   /** Правый край шапки: пилюля состояния или мета-подпись вроде «Checked 4h ago». */
   right?: React.ReactNode;
   children: React.ReactNode;
-  style?: React.CSSProperties;
-  bodyStyle?: React.CSSProperties;
+  /*
+   * Слотов `style`/`bodyStyle` здесь нет, и это то же решение, что у
+   * `tabs/TabLayout` и `ui/Tabs`: проп без потребителя — приглашение развести
+   * одинаковые карточки по-разному. Оба дожили до одиннадцати мест вызова, не
+   * понадобившись ни одному; вернуть их стоит одной строки в тот день, когда
+   * появится карточка, которой правда нужен свой отступ.
+   */
 }){
   /**
    * Карточка — ИМЕНОВАННАЯ группа, и это не украшение разметки.
@@ -225,7 +230,6 @@ export function SectionCard({title, right, children, style, bodyStyle}: {
     // модалку. Та же дисциплина ждёт и сами гриды — `minmax(0,1fr)` вместо
     // голого `1fr`.
     minWidth:0,
-    ...style,
   }}>
     <div style={{background:"#eef2f7",borderBottom:"1px solid #dbe3ee",padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
       {/* Заголовок, а не просто жирный текст: секций на вкладках карточки
@@ -235,7 +239,7 @@ export function SectionCard({title, right, children, style, bodyStyle}: {
       <h3 id={titleId} style={{margin:0,fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</h3>
       {right}
     </div>
-    <div style={{padding:"16px 18px",...bodyStyle}}>{children}</div>
+    <div style={{padding:"16px 18px"}}>{children}</div>
   </div>;
 }
 

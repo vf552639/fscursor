@@ -273,8 +273,8 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
     show();
     expect(within(plate("Server")).getByText("web-01")).toBeTruthy();
     expect(within(plate("Server")).getByText("10.0.0.3")).toBeTruthy();
-    // Тот же адрес секция фактов показывает как FTP Host — и берётся он из того
-    // же объекта, а не из второго чтения (секция живёт на вкладке Server,
+    // Тот же адрес карточка FTP показывает как Host — и берётся он из того
+    // же объекта, а не из второго чтения (карточка живёт на вкладке Server,
     // поэтому спрашиваем её после переключения).
     openTab("Server");
     expect(screen.getByText("Host").parentElement?.textContent).toContain("10.0.0.3");

@@ -34,6 +34,17 @@ describe("logFileLabel", () => {
     expect(logFileLabel("/var/log/syslog", "example.com")).toBe("syslog");
   });
 
+  it("ротированный лог подписывается именем файла: срез вслепую выдумал бы вид", () => {
+    // Половина стража `known` про `.log` на конце не проверялась ничем: путь с
+    // ЧУЖИМ префиксом отсекала первая половина, и снятая вторая переживала всю
+    // сюиту. А переживать ей нельзя: у `…access.log.1` префикс наш, конец — нет,
+    // и слепой срез четырёх символов дал бы «Frontend access l» — ровно ту
+    // выдуманную подпись, которую функция и запрещает.
+    expect(logFileLabel("/home/u/logs/example.com-frontend.access.log.1", "example.com")).toBe(
+      "example.com-frontend.access.log.1",
+    );
+  });
+
   it("вид из одного слова тоже подписывается", () => {
     expect(logFileLabel("/home/u/logs/example.com-php.log", "example.com")).toBe("Php");
   });

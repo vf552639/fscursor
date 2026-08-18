@@ -98,6 +98,15 @@ describe("Tabs", () => {
     expect(screen.getByRole("tab", { name: "Logs" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("false");
     expect(screen.getByRole("tabpanel").textContent).toContain("panel of logs");
+
+    // Связь панели обязана ЕХАТЬ за выбором, и проверяется это только здесь:
+    // тест выше спрашивает её на вкладке, активной при первом рендере, то есть
+    // на `items[0]`. Замри id панели на первой вкладке — и `aria-controls`
+    // четырёх вкладок из пяти повисли бы в пустоту, не уронив ничего.
+    const logs = screen.getByRole("tab", { name: "Logs" });
+    const panel = screen.getByRole("tabpanel");
+    expect(logs.getAttribute("aria-controls")).toBe(panel.getAttribute("id"));
+    expect(panel.getAttribute("aria-labelledby")).toBe(logs.getAttribute("id"));
   });
 
   it("в таб-порядок попадает только активная вкладка", () => {

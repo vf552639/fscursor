@@ -6,6 +6,7 @@ import { Server } from "../../api/servers";
 import DomainCloudflareField from "./DomainCloudflareField";
 import DomainRegistrarField from "./DomainRegistrarField";
 import { SectionCard } from "../ui/Primitives";
+import { CardRow } from "./tabs/TabLayout";
 
 /** Приглушённый текст пояснения — тот же тон, что у подписей внутри карточек. */
 const NOTE_TEXT = "#6b7280";
@@ -100,13 +101,9 @@ export interface DomainLinksProps {
  */
 export default function DomainLinks({ domain, server, zone, zones, zonesError }: DomainLinksProps) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-        gap: 14,
-      }}
-    >
+    // Ряд вкладки, а не свой грид: зазор и дисциплина `minmax(0, 1fr)` живут в
+    // `tabs/TabLayout` вместе с объяснением, зачем они нужны.
+    <CardRow columns={3}>
       <SectionCard title="Registrar">
         <DomainRegistrarField domain={domain} />
       </SectionCard>
@@ -116,6 +113,6 @@ export default function DomainLinks({ domain, server, zone, zones, zonesError }:
       <SectionCard title="Server">
         <ServerLink serverId={domain.server_id} server={server} />
       </SectionCard>
-    </div>
+    </CardRow>
   );
 }
