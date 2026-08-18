@@ -159,6 +159,50 @@ describe("Tabs", () => {
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("Home и End уводят на края строки", () => {
+    render(<Harness />);
+
+    const overview = screen.getByRole("tab", { name: "Overview" });
+    overview.focus();
+    fireEvent.keyDown(overview, { key: "End" });
+
+    const logs = screen.getByRole("tab", { name: "Logs" });
+    expect(logs.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(logs);
+
+    fireEvent.keyDown(logs, { key: "Home" });
+    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Overview" }));
+  });
+
+  it("неизвестный value не выбрасывает строку из таб-порядка и лечится с клавиатуры", () => {
+    // Так выглядит вкладка, приехавшая из чужой ссылки `sdmp://`: id есть, а
+    // вкладки с таким id в сборке нет. Строка обязана остаться живой — иначе
+    // до неё нельзя добраться ни Tab'ом, ни стрелкой, и выбраться некуда.
+    const onChange = vi.fn();
+    render(
+      <Tabs items={ITEMS} value="nope" onChange={onChange} label="Domain sections">
+        <div>panel of nope</div>
+      </Tabs>,
+    );
+
+    // Выбранной вкладки нет, и врать об этом примитив не должен.
+    for (const tab of screen.getAllByRole("tab")) {
+      expect(tab.getAttribute("aria-selected")).toBe("false");
+    }
+    // ...а вот имя панели без выбранной вкладки взять неоткуда: ссылка на
+    // отсутствующий id хуже отсутствия ссылки.
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBeNull();
+
+    // Точка входа клавиатуры есть всегда — первая вкладка.
+    const overview = screen.getByRole("tab", { name: "Overview" });
+    expect(overview.getAttribute("tabindex")).toBe("0");
+
+    overview.focus();
+    fireEvent.keyDown(overview, { key: "ArrowRight" });
+    expect(onChange).toHaveBeenCalledWith("server");
+  });
+
   it("чужие клавиши строку вкладок не трогают", () => {
     // Строка горизонтальная, и вертикальные стрелки принадлежат прокрутке
     // модалки: перехвати мы их здесь — прокрутка встала бы, а вкладка уехала.
@@ -167,9 +211,15 @@ describe("Tabs", () => {
 
     const overview = screen.getByRole("tab", { name: "Overview" });
     overview.focus();
-    fireEvent.keyDown(overview, { key: "ArrowDown" });
-
+    // `fireEvent` возвращает `false`, если обработчик позвал `preventDefault`, —
+    // то есть проверяется ровно заявленное: вертикальную стрелку строка
+    // пропускает дальше, к прокрутке модалки.
+    expect(fireEvent.keyDown(overview, { key: "ArrowDown" })).toBe(true);
     expect(onChange).not.toHaveBeenCalled();
     expect(overview.getAttribute("aria-selected")).toBe("true");
+
+    // Контраст, без которого первая проверка ничего не доказывает: свою
+    // клавишу строка забирает себе, отменяя действие по умолчанию.
+    expect(fireEvent.keyDown(overview, { key: "ArrowRight" })).toBe(false);
   });
 });

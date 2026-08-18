@@ -195,15 +195,20 @@ export function SectionCard({title, right, children, style, bodyStyle}: {
     // Шапка красится фоном до самого края, а край скруглён — без `hidden` её
     // прямые углы вылезают поверх скругления рамки.
     overflow:"hidden",
-    // Карточки стоят в грид-рядах (`1fr 1fr`, `1fr 1fr 1fr`), а грид-элемент по
+    // Карточки встанут в грид-ряды (`1fr 1fr`, `1fr 1fr 1fr`), а грид-элемент по
     // умолчанию не сжимается уже своего содержимого: одна длинная строка без
     // пробелов — путь до лога, IPv6-адрес — распирала бы колонку, а с ней и
-    // модалку. Ту же дисциплину держат `minmax(0,1fr)` у самих гридов.
+    // модалку. Та же дисциплина ждёт и сами гриды — `minmax(0,1fr)` вместо
+    // голого `1fr`.
     minWidth:0,
     ...style,
   }}>
     <div style={{background:"#eef2f7",borderBottom:"1px solid #dbe3ee",padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
-      <div style={{fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</div>
+      {/* Заголовок, а не просто жирный текст: секций на вкладках карточки
+          набирается больше десятка, и по `h3` скринридер даёт по ним навигацию,
+          которой у `div` нет. `margin:0` обязателен — браузерный отступ `h3`
+          иначе распирает шапку-полоску, ломая её высоту 10px 18px. */}
+      <h3 style={{margin:0,fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</h3>
       {right}
     </div>
     <div style={{padding:"16px 18px",...bodyStyle}}>{children}</div>
@@ -276,7 +281,12 @@ type ModalProps = {
 export function Modal({title, onClose, children, width=480, closeOnBackdrop=true, header}: ModalProps){
   return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>{if(closeOnBackdrop&&e.target===e.currentTarget)onClose();}}>
     <div style={{background:"#fff",borderRadius:14,width,maxWidth:"95vw",boxShadow:"0 20px 60px rgba(0,0,0,0.18)",padding:28,position:"relative",maxHeight:"90vh",overflowY:"auto"}}>
-      {header ?? (
+      {/* `||`, а не `??`: `header={cond && <Header/>}` при ложном `cond` — это
+          `false`, и на `??` он заменил бы штатную строку ПУСТОТОЙ, то есть
+          модалка осталась бы без крестика, а с `closeOnBackdrop={false}` —
+          вовсе без выхода. Ни один ложный `ReactNode` шапкой быть не может,
+          так что `||` не теряет ни одного осмысленного случая. */}
+      {header || (
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
           <div style={{fontSize:18,fontWeight:700,color:"#111"}}>{title}</div>
           <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,color:"#9ca3af",lineHeight:1}}>✕</button>
