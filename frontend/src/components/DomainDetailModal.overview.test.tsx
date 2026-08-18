@@ -1,13 +1,13 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainDetailModal from "./DomainDetailModal";
 import { queryClient } from "../api/queryClient";
 
 /**
- * Верх карточки домена: сводка и ряд связей.
+ * Верх карточки домена: шапка и ряд связей.
  *
  * Раньше здесь были два столбца — «слева чем домен является, справа что
  * развёрнуто на сервере», — и правый ПОВТОРЯЛ восемь полей секции «Server
@@ -20,10 +20,11 @@ import { queryClient } from "../api/queryClient";
  *
  * Здесь остались три правила:
  *
- * 1. Сводка отвечает ровно на три вопроса (статус, срок домена, состояние
- *    сертификата) и ни одного ответа не выдумывает: бейдж SSL считает та же
- *    `sslState`, что и секция ниже, поэтому разойтись они не могут, а
- *    непроверенный домен получает серое «Not checked», а не зелёное.
+ * 1. Шапка отвечает ровно на три вопроса (статус, срок домена, состояние
+ *    сертификата) и ни одного ответа не выдумывает: `sslState` карточка считает
+ *    ОДИН раз и раздаёт вниз, поэтому бейдж шапки и бейдж секции ниже не могут
+ *    разойтись по построению, а непроверенный домен получает серое «Not
+ *    checked», а не зелёное.
  * 2. Ряд связей — это Registrar → Cloudflare → Server, путь запроса к домену.
  *    Каждая связь названа именем, а не числом, и у каждого пустого состояния
  *    есть слово: «не назначен» отличается от «есть, но не нашли».
@@ -153,8 +154,8 @@ afterEach(() => {
   queryClient.clear();
 });
 
-describe("сводка карточки", () => {
-  it("три ответа в одной строке: статус, срок домена, состояние сертификата", () => {
+describe("шапка карточки", () => {
+  it("три ответа в шапке: статус, срок домена, состояние сертификата", () => {
     const expiry = dateOnly(10 * DAY);
     show({ expiry_date: expiry });
 
@@ -168,24 +169,44 @@ describe("сводка карточки", () => {
     expect(field("Expires")).toContain("in 10 days");
   });
 
-  it("незнание срока — прочерк, а не пустое место", () => {
+  it("имя домена — заголовок карточки, и крестик шапки её закрывает", () => {
+    const onClose = vi.fn();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DomainDetailModal domain={domain()} servers={SERVERS} onClose={onClose} />
+      </QueryClientProvider>,
+    );
+
+    // `h2`, а не `h1`/`h3`: заголовки секций карточки — `h3`, и ступень между
+    // ними и шапкой пропускать нельзя.
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("example.com");
+    // Своя шапка заменяет штатную строку модалки ЦЕЛИКОМ, вместе с её
+    // крестиком: забыв позвать `onClose`, карточку нечем было бы закрыть, кроме
+    // подложки.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("незнание срока названо словом, а не пустым местом", () => {
     // Домен, заведённый вручную: срока нет. Пустая строка тут читалась бы как
     // «всё в порядке», а это «мы не знаем».
+    //
+    // Прочерк сменился приглашением «set date» вместе с переездом значения на
+    // кнопку: срок теперь правится прямо здесь, а прочерк на кнопке читается
+    // как «тут делать нечего». Утверждение то же — незнание названо словом.
     show();
-    expect(field("Expires")).toBe("—");
+    expect(field("Expires")).toBe("set date");
   });
 
   it("близкий срок красит, дальний — нет", () => {
+    // Значение переехало в кнопку инлайн-правки, поэтому цвет спрашиваем у неё
+    // — утверждение прежнее: близкий срок янтарный, дальний обычный тёмный.
     show({ expiry_date: dateOnly(10 * DAY) });
-    expect((screen.getByText(/in 10 days/).closest("span") as HTMLElement).style.color).toBe(
-      "rgb(217, 119, 6)",
-    );
+    expect((screen.getByText(/in 10 days/) as HTMLElement).style.color).toBe("rgb(217, 119, 6)");
     cleanup();
 
     show({ expiry_date: dateOnly(60 * DAY) });
-    expect((screen.getByText(/in 60 days/).closest("span") as HTMLElement).style.color).toBe(
-      "rgb(55, 65, 81)",
-    );
+    expect((screen.getByText(/in 60 days/) as HTMLElement).style.color).toBe("rgb(55, 65, 81)");
   });
 
   it("непроверенный домен получает серое «Not checked», а не зелёное", () => {
@@ -195,8 +216,9 @@ describe("сводка карточки", () => {
     show({ ssl_status: "active", ssl_expires_at: at(60 * DAY + HOUR), ssl_issuer: "Let's Encrypt" });
 
     // Дважды — и это главное: тот же ярлык стоит в секции «Server state».
-    // Бейдж сводки и состояние SSL там считает ОДНА функция (`sslState` +
-    // `SSL_BADGE` из `lib/domainFacts`), и разойтись они не могут.
+    // Бейдж шапки и состояние SSL там — это ОДНО значение: карточка считает
+    // `sslState` один раз на рендер и отдаёт его шапке пропсом, а секция берёт
+    // ту же функцию с теми же аргументами. Разойтись им нечем.
     expect(screen.getAllByText("Not checked").length).toBe(2);
     expect(screen.queryByText("Valid")).toBeNull();
   });
@@ -264,7 +286,7 @@ describe("наша запись — то, что не потерялось пр�
   it("тревожный итог выпуска сертификата назван, спокойный — нет", () => {
     // Список красит такой домен красным «SSL error», а карточка про провал не
     // говорила ни слова: `ssl_expires_at`/`ssl_issuer` у него пусты (секции
-    // нечего показать), бейдж сводки считает снимок с сервера и говорит «Not
+    // нечего показать), бейдж шапки считает снимок с сервера и говорит «Not
     // checked», а `last_provision_error` write-back провижининга явно гасит в
     // `null`. Человек кликал по красной строке — и не находил даже упоминания.
     show({ ssl_status: "error" });
@@ -280,7 +302,7 @@ describe("наша запись — то, что не потерялось пр�
     cleanup();
     // А вот успех прошлого прогона строкой не дублируется: он уже стоит в
     // «Server state» сроком и издателем с подписью «из provision, на сервере не
-    // проверено». Третье утверждение о том же — и рядом с серым бейджем сводки,
+    // проверено». Третье утверждение о том же — и рядом с серым бейджем шапки,
     // который отвечает про ИЗМЕРЕНИЕ, — только сбивало бы.
     show({ ssl_status: "active", ssl_expires_at: at(60 * DAY + HOUR) });
     expect(screen.queryByText("SSL at provision:")).toBeNull();

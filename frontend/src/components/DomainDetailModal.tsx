@@ -7,11 +7,12 @@ import { RegistryNameservers, useRegistryNameservers } from "../api/rdap";
 import { useRegistrarAccounts } from "../api/registrars";
 import { clip, errorText } from "../api/cfAutoBind";
 import { normalizeZoneName } from "../lib/cfZoneMatch";
+import { sslState } from "../lib/domainFacts";
 import { nsDelegation } from "../lib/nsDelegation";
 import DomainLinks from "./domains/DomainLinks";
+import DomainModalHeader from "./domains/DomainModalHeader";
 import DomainNsPanel from "./domains/DomainNsPanel";
 import DomainServerFacts from "./domains/DomainServerFacts";
-import DomainSummaryBar from "./domains/DomainSummaryBar";
 import { Modal } from "./ui/Primitives";
 
 /**
@@ -60,10 +61,11 @@ const SSL_PROVISION_ALARM: Record<string, string> = {
  * Карточка домена — один экран без вкладок, собранный сверху вниз как ответ на
  * вопрос «почему домен не работает».
  *
- * Порядок сверху вниз: сводка (статус, срок, SSL) → ряд связей Registrar →
- * Cloudflare → Server (это путь запроса к домену) → наша запись (последняя
- * попытка смены NS, тревожный итог выпуска сертификата, ошибка развёртывания)
- * → живое состояние сервера → делегирование с полем nameservers.
+ * Порядок сверху вниз: шапка (ярлык со статусом, имя домена, мета-ряд с
+ * состоянием SSL и правкой срока) → ряд связей Registrar → Cloudflare → Server
+ * (это путь запроса к домену) → наша запись (последняя попытка смены NS,
+ * тревожный итог выпуска сертификата, ошибка развёртывания) → живое состояние
+ * сервера → делегирование с полем nameservers.
  *
  * Раньше верх карточки был двумя колонками «слева чем домен является, справа
  * что развёрнуто на сервере»: колонки не означали ничего (просто перенос строки
@@ -118,6 +120,23 @@ export default function DomainDetailModal({
   // купил бы только стареющие сами по себе подписи, которых за время её жизни
   // никто не дождётся.
   const now = Date.now();
+
+  /**
+   * Состояние сертификата — ОДИН расчёт на всю карточку.
+   *
+   * Раньше та же `sslState` с теми же аргументами звалась дважды независимо (в
+   * строке-сводке и в секции фактов), и совпадали два ответа ровно до тех пор,
+   * пока совпадают аргументы: «сходится само» — не гарантия, а везение. Теперь
+   * значение считается здесь и раздаётся вниз, а раздельные копии остаются
+   * невозможны по построению (принцип №6 CLAUDE.md: непроверенный домен обязан
+   * получить серое «Not checked» ВЕЗДЕ, а не зелёное в одном месте).
+   *
+   * Мигрирован пока один потребитель — шапка. `DomainServerFacts` продолжает
+   * считать своё, и это шаг, а не недосмотр: фаза 3 выносит карточку SSL из
+   * этой секции наружу, и она получит то же значение отсюда — переписывать
+   * секцию сейчас значило бы затащить работу той фазы в этот коммит.
+   */
+  const ssl = sslState(domain.fp_facts?.ssl, domain.fp_facts_at, now);
 
   /**
    * Зоны аккаунта Cloudflare — одно чтение на всю карточку, и от него зависят
@@ -226,12 +245,19 @@ export default function DomainDetailModal({
   // держит `overflowY:auto`, из-за чего `overflow-x` вычисляется в `auto`, и
   // распёртая строка даёт горизонтальную прокрутку, а не обрезку.
   return (
-    <Modal title={`Domain: ${domain.domain_name}`} onClose={onClose} width={920}>
-      {/* Сводка и ряд связей. Срок домена и бейдж SSL считают те же модули, что
+    <Modal
+      onClose={onClose}
+      width={920}
+      // Шапка вместо штатной строки «title + ✕»: имя домена там 24/700, а
+      // рядом с ним живут бейдж статуса, бейдж SSL и правка срока. Слот
+      // заменяет строку целиком, поэтому крестик — внутри шапки, и `onClose`
+      // уезжает туда же.
+      header={<DomainModalHeader domain={domain} ssl={ssl} now={now} onClose={onClose} />}
+    >
+      {/* Ряд связей. Срок домена и бейдж SSL в шапке считают те же модули, что
           и колонки списка (`lib/domainExpiry`, `lib/domainFacts`): два разных
           ответа про один домен на двух поверхностях хуже, чем отсутствие
           одного из них. */}
-      <DomainSummaryBar domain={domain} now={now} />
       <DomainLinks
         domain={domain}
         server={server}
