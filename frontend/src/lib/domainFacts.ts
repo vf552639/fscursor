@@ -10,13 +10,15 @@
  * TS-тип `DomainFacts` ТОЧНО повторяет то, что сериализует Rust
  * (`ssh/fastpanel_facts.rs`, serde → snake_case) и кладёт бэкенд в поле
  * `fp_facts` ответа домена. Имена полей менять нельзя — это wire-контракт.
+ *
+ * Внутри три предмета, и все три про одно знание: сам wire-тип, лестница
+ * состояния сертификата (`sslState` + `SSL_BADGE`) и РАЗБОР СНИМКА
+ * (`snapshotOf`) — «есть ли он, протух ли и сколько ему лет». Разбор, кроме
+ * флагов, собирает готовую английскую подпись («Checked 4h ago · stale»,
+ * «Never checked»), то есть слова интерфейса выходят отсюда наружу в ДВУХ
+ * местах, а не только из `SSL_BADGE`; оговорка про это — там же, над картой.
  */
 
-// Только `type`, и это условие: `api/domains` уже ссылается СЮДА за
-// `DomainFacts`, поэтому обратная ссылка значением завела бы настоящий цикл.
-// Типы стираются при сборке — в графе модулей этой пары рёбер нет ни в одну
-// сторону.
-import { type Domain } from "../api/domains";
 import { formatAgoStale } from "./format";
 
 /** Снимок состояния домена, прочитанный с сервера по SSH. */
@@ -147,13 +149,16 @@ export function sslState(
  * карты СТАНЕТ двое (карточка SSL и шапка карточки домена, которая её
  * получит), а два экрана, считающих состояние сервера по своей копии правила, в
  * этом проекте уже разъезжались (принцип №6 CLAUDE.md). Заодно
- * `Record<SslState, …>` не даст добавить шестое состояние, забыв его
+ * `Record<SslState, …>` не даст добавить состояние, забыв его
  * нарисовать: пропуск станет ошибкой типов, а не серым пятном на экране.
  *
  * Оговорка: вместе с состоянием сюда уехала и англоязычная ПОДПИСЬ — у соседних
  * модулей `lib` наружу выходит только токен, а слова остаются у показа. Здесь
  * иначе ровно затем, чтобы два места не назвали одно состояние по-разному;
- * появится словарь интерфейса — подписи уйдут в него.
+ * появится словарь интерфейса — подписи уйдут в него. Вместе с ними уйдёт и
+ * `freshness` из `snapshotOf`: это вторая дверь, через которую английские слова
+ * выходят из этого модуля, и не назвать её здесь значило бы обречь будущую
+ * миграцию её не найти.
  */
 export const SSL_BADGE: Record<SslState, { label: string; variant: string }> = {
   unchecked: { label: "Not checked", variant: "gray" },
@@ -189,22 +194,33 @@ export interface Snapshot {
  * Копий было две (вкладка Server и `DomainSslCard`), а с приездом вкладки Logs,
  * которой нужна та же тройка, стало три. Четыре строки выглядят слишком мелкими,
  * чтобы их собирать, но собраны они как раз потому, что мелкие: в них сидят два
- * решения, которые нельзя принять по-разному дважды — гейт `fp_facts_at` над
- * `fp_facts` (см. `facts`) и то, что свежесть считается от `fp_facts_at` (когда
- * снят снимок), а НЕ от `fp_checked_at` (когда была последняя попытка): иначе
+ * решения, которые нельзя принять по-разному дважды — гейт отметки времени над
+ * фактами (см. `Snapshot.facts`) и то, что свежесть считается от `fp_facts_at`
+ * (когда снят снимок), а НЕ от `fp_checked_at` (когда была последняя попытка): иначе
  * протухший снимок молодел бы от проваленной проверки. Ровно так же и по той же
  * причине собран показ полей (`components/domains/facts/fields.tsx`), а правило
  * расхождения — в `lib/domainDrift`.
+ *
+ * Типа `Domain` функция НЕ знает — как и `sslState` над ней, и как весь
+ * `lib/domainDrift`: берутся два значения, а не строка из тридцати полей.
+ * Дело не в аккуратности вызова, а в том, что знание домена завело бы у `lib`
+ * ссылку на `api` ради двух колонок, а правило перестало бы проверяться без
+ * сборки объекта домена.
+ *
+ * @param facts   колонка `fp_facts` домена — сам снимок.
+ * @param factsAt колонка `fp_facts_at` — когда снимок УДАЛСЯ.
  */
-export function snapshotOf(domain: Domain, now: number): Snapshot {
-  const noSnapshot = !domain.fp_facts_at;
-  const stale = isFactsStale(domain.fp_facts_at, now);
+export function snapshotOf(
+  facts: DomainFacts | null | undefined,
+  factsAt: string | null | undefined,
+  now: number,
+): Snapshot {
+  const noSnapshot = !factsAt;
+  const stale = isFactsStale(factsAt, now);
   return {
-    facts: noSnapshot ? null : domain.fp_facts ?? null,
+    facts: noSnapshot ? null : facts ?? null,
     noSnapshot,
     stale,
-    freshness: domain.fp_facts_at
-      ? `Checked ${formatAgoStale(domain.fp_facts_at, stale, now)}`
-      : "Never checked",
+    freshness: factsAt ? `Checked ${formatAgoStale(factsAt, stale, now)}` : "Never checked",
   };
 }

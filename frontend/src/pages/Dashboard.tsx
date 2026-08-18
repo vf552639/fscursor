@@ -1,5 +1,6 @@
 import React from "react";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDT, pctColor, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDT, pctColor, DIM_TEXT, STALE_TEXT } from "../components/ui/Primitives";
+import { formatAgoStale } from "../lib/format";
 import { useServers, type Server } from "../api/servers";
 import { useDomains } from "../api/domains";
 import { useCloudflareAccounts } from "../api/cloudflare";

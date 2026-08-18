@@ -1,6 +1,7 @@
 import React from "react";
 
-import { Badge, StatusDot, fmtDate, RowActions, formatAgoStale, DIM_TEXT, STALE_TEXT } from "../ui/Primitives";
+import { Badge, StatusDot, fmtDate, RowActions, DIM_TEXT, STALE_TEXT } from "../ui/Primitives";
+import { formatAgoStale } from "../../lib/format";
 import { Server } from "../../api/servers";
 import { RegistrarAccount } from "../../api/registrars";
 import { CloudflareAccount } from "../../api/cloudflare";

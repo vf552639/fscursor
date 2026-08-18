@@ -432,12 +432,3 @@ export function CopyBtn({value, label = "Copy"}: { value: string; label?: string
 
 export const fmtDate = (iso: string) => iso ? new Date(iso).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—";
 export const fmtDT   = (iso: string) => iso ? new Date(iso).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
-
-/*
- * Формат измеренных чисел — размер, аптайм, возраст — уехал в `lib/format`:
- * React в нём не участвовал ни строкой, а соседство с компонентами держало в
- * `components/` ещё и разбор снимка сервера (`snapshotOf`), который набирает
- * `formatAgoStale`. Реэкспорт — чтобы существующие импорты из `ui/Primitives`
- * остались рабочими; новому коду правильнее звать `lib/format` напрямую.
- */
-export { formatAgo, formatAgoStale, formatBytes, formatUptime, mbToGb, STALE_SUFFIX } from "../../lib/format";

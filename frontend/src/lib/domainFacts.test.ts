@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 
-import { FACTS_STALE_MS, isFactsStale, sslState, type DomainFacts } from "./domainFacts";
+import {
+  FACTS_STALE_MS,
+  isFactsStale,
+  snapshotOf,
+  SSL_BADGE,
+  sslState,
+  type DomainFacts,
+} from "./domainFacts";
 
 /**
  * Лестница SSL и порог свежести снимка — чистые функции, и проверяются они
@@ -121,5 +128,81 @@ describe("sslState — ошибка чтения", () => {
 
   it("ошибка сильнее наличия сертификата", () => {
     expect(sslState(ssl({ has_certificate: false, error: "openssl failed" }), ago(HOUR), NOW)).toBe("error");
+  });
+});
+
+/** Снимок целиком: `snapshotOf` берёт из него только факты SSL-независимо. */
+function facts(over: Partial<DomainFacts> = {}): DomainFacts {
+  return {
+    site: null,
+    ssl: ssl(),
+    ftp_accounts: [],
+    php_version: null,
+    php_handler: null,
+    databases: [],
+    logs: [],
+    ...over,
+  };
+}
+
+describe("SSL_BADGE — как состояние выглядит на экране", () => {
+  it("вся карта дословно: и подписи, и цвета", () => {
+    // Карту не проверял НИКТО: три таблицы тестов, которые её читают, берут
+    // ожидаемую подпись из неё же — то есть сверяют карту с самой собой и
+    // зеленеют при любой её правке. Переставь `unchecked` в зелёный, и
+    // непроверенный домен рисовался бы здоровым, не уронив ни одного теста, —
+    // ровно тот дефект, ради запрета которого написан принцип №6 CLAUDE.md.
+    //
+    // Целиком и `toEqual`, а не выборочно: правило звучит «серый у незнания,
+    // ЗЕЛЁНЫЙ ТОЛЬКО у valid», и вторая половина проверяется лишь тем, что у
+    // остальных пяти цвет назван поимённо. Новое состояние тоже обязано
+    // приехать сюда — иначе оно попадёт на экран, ни разу не будучи названным.
+    expect(SSL_BADGE).toEqual({
+      unchecked: { label: "Not checked", variant: "gray" },
+      missing: { label: "No certificate", variant: "red" },
+      expired: { label: "Expired", variant: "red" },
+      expiring: { label: "Expiring soon", variant: "yellow" },
+      valid: { label: "Valid", variant: "green" },
+      error: { label: "Read error", variant: "red" },
+    });
+  });
+});
+
+/**
+ * Разбор снимка — правило трёх экранов (карточка SSL, вкладки Server и Logs), и
+ * до сих пор оно проверялось только через их рендер. Ради этого разбор и уехал
+ * в `lib`: спрашивать его теперь можно напрямую.
+ */
+describe("snapshotOf", () => {
+  it("факты читаются ТОЛЬКО вместе с отметкой времени", () => {
+    // Пара «факты есть, отметки нет» бэкендом не производится (обе колонки
+    // пишутся одной транзакцией), но случись она — экран сказал бы «сервер не
+    // читали» и тут же напечатал эти факты как измеренные.
+    const s = snapshotOf(facts(), null, NOW);
+    expect(s.noSnapshot).toBe(true);
+    expect(s.facts).toBeNull();
+  });
+
+  it("снимок есть — факты те самые, и он не «никогда»", () => {
+    const f = facts();
+    const s = snapshotOf(f, ago(HOUR), NOW);
+    expect(s.facts).toBe(f);
+    expect(s.noSnapshot).toBe(false);
+  });
+
+  it("протухание считается тем же порогом, что и у `isFactsStale`", () => {
+    expect(snapshotOf(facts(), ago(FACTS_STALE_MS), NOW).stale).toBe(false);
+    expect(snapshotOf(facts(), ago(FACTS_STALE_MS + MINUTE), NOW).stale).toBe(true);
+  });
+
+  it("подпись возраста печатает и возраст, и пометку протухания", () => {
+    expect(snapshotOf(facts(), ago(4 * HOUR), NOW).freshness).toBe("Checked 4h ago");
+    expect(snapshotOf(facts(), ago(8 * DAY), NOW).freshness).toBe("Checked 8d ago · stale");
+  });
+
+  it("снимка не было — «Never checked», а не пустая строка", () => {
+    // Пустая строка на экране неотличима от «мы не напечатали возраст», то есть
+    // выдавала бы незнание за отсутствие вопроса.
+    expect(snapshotOf(null, null, NOW).freshness).toBe("Never checked");
   });
 });

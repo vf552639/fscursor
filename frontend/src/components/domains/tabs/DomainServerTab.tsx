@@ -78,7 +78,7 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
    * сказать, прячутся целиком, а вместо них вкладка говорит это ОДИН раз
    * словами.
    */
-  const snapshot = snapshotOf(domain, now);
+  const snapshot = snapshotOf(domain.fp_facts, domain.fp_facts_at, now);
   const { noSnapshot } = snapshot;
   const desktop = isTauri();
   const read = useReadDomainFacts(domain.id);

@@ -67,7 +67,11 @@ export default function DomainSslCard({
   // Разбор снимка — общий (`lib/domainFacts`): секция сервера и эта карточка
   // читают ОДИН снимок, и гейт `fp_facts_at` над `fp_facts` вместе с порогом
   // свежести обязаны быть у них одним правилом, а не двумя совпадающими.
-  const { facts, noSnapshot, stale: factsStale, freshness } = snapshotOf(domain, now);
+  const { facts, noSnapshot, stale: factsStale, freshness } = snapshotOf(
+    domain.fp_facts,
+    domain.fp_facts_at,
+    now,
+  );
 
   const sslBadge = SSL_BADGE[ssl];
   const src = {

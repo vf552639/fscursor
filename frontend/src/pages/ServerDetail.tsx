@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, mbToGb, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, formatUptime, formatAgoStale, STALE_SUFFIX, STALE_TEXT } from "../components/ui/Primitives";
+import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, STALE_TEXT } from "../components/ui/Primitives";
+import { STALE_SUFFIX, formatAgoStale, formatUptime, mbToGb } from "../lib/format";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useServerListSites, ServerSite } from "../api/servers";
 import { compareServerSites } from "../lib/serverSites";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";

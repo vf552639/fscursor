@@ -1,4 +1,4 @@
-import { formatUptime, mbToGb } from "../components/ui/Primitives";
+import { formatUptime, mbToGb } from "../lib/format";
 import type { Server } from "../api/servers";
 import type { AuditLogRow } from "../api/audit";
 

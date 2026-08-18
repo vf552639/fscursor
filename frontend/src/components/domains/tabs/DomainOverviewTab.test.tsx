@@ -5,7 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainOverviewTab from "./DomainOverviewTab";
 import { queryClient } from "../../../api/queryClient";
-import { SSL_BADGE, type DomainFacts, type SslState } from "../../../lib/domainFacts";
+import { SSL_BADGE, sslState, type DomainFacts, type SslState } from "../../../lib/domainFacts";
 import type { NsDelegation } from "../../../lib/nsDelegation";
 import type { NsDraft } from "../useNsDraft";
 
@@ -44,7 +44,7 @@ const HOUR = 60 * 60 * 1000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 const ahead = (ms: number) => new Date(Date.now() + ms).toISOString();
 
-/** Ступени берём из самой карты: шестая приедет в таблицу сама. */
+/** Ступени берём из самой карты: новая приедет в таблицу сама. */
 const STATES = Object.keys(SSL_BADGE) as SslState[];
 /** Что дал бы пересчёт по снимку ниже: живой сертификат на 60 дней — «valid». */
 const COMPUTED: SslState = "valid";
@@ -61,6 +61,9 @@ function facts(): DomainFacts {
     logs: [],
   };
 }
+
+/** Свежий снимок домена — то, чему проп обязан противоречить. */
+const SNAPSHOT = { fp_facts: facts(), fp_facts_at: ago(HOUR) };
 
 /** Делегирование «не знаем»: у вкладки оно только едет в пилюлю и в панель NS. */
 const DELEGATION: NsDelegation = { state: "unknown", reason: "no-zone", detail: null };
@@ -87,6 +90,12 @@ afterEach(() => {
 });
 
 describe("вкладка Overview доносит состояние сертификата, а не считает своё", () => {
+  it("фикстура и правда даёт COMPUTED, иначе пропуск строки съедет молча", () => {
+    // Без этой строки `COMPUTED` — комментарий, а не проверка: поменяй снимок,
+    // и пропуск сработает не на той ступени, а тест продолжит зеленеть.
+    expect(sslState(SNAPSHOT.fp_facts.ssl, SNAPSHOT.fp_facts_at, Date.now())).toBe(COMPUTED);
+  });
+
   it.each(STATES)("%s", (state) => {
     render(
       <QueryClientProvider client={queryClient}>
@@ -96,8 +105,7 @@ describe("вкладка Overview доносит состояние сертиф
               id: 42,
               domain_name: "example.com",
               status: "active",
-              fp_facts: facts(),
-              fp_facts_at: ago(HOUR),
+              ...SNAPSHOT,
             } as any
           }
           server={undefined}

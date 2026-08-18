@@ -4,7 +4,8 @@ import { Domain, useReadDomainFacts } from "../../../api/domains";
 import { DomainFacts, snapshotOf } from "../../../lib/domainFacts";
 import { logFileLabel } from "../../../lib/logFiles";
 import { isTauri } from "../../../lib/runtime";
-import { Btn, formatBytes } from "../../ui/Primitives";
+import { Btn } from "../../ui/Primitives";
+import { formatBytes } from "../../../lib/format";
 import { SnapshotLine } from "../facts/SnapshotLine";
 import { TabBody } from "./TabLayout";
 
@@ -198,7 +199,7 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
    * `fp_facts_at` (когда сняли), а не от `fp_checked_at` (когда пытались), —
    * иначе провалившаяся проверка молодила бы перечень логов.
    */
-  const snapshot = snapshotOf(domain, now);
+  const snapshot = snapshotOf(domain.fp_facts, domain.fp_facts_at, now);
   const { facts, noSnapshot } = snapshot;
   /**
    * `?? []` глотает и отсутствие поля, а не только пустой массив: снимок,
