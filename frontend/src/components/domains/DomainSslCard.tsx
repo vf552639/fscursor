@@ -4,7 +4,7 @@ import { Domain } from "../../api/domains";
 import { sslExpiresSource, sslIssuerSource } from "../../lib/domainDrift";
 import { formatExpiryDate } from "../../lib/domainExpiry";
 import { SSL_BADGE, SslState } from "../../lib/domainFacts";
-import { Badge, SectionCard } from "../ui/Primitives";
+import { Badge, SectionCard, STALE_TEXT } from "../ui/Primitives";
 import { FactRow, HasSnapshot, KEY_WIDTH, MUTED, RecordedNoteInLegend } from "./facts/fields";
 import { snapshotOf } from "./facts/snapshot";
 
@@ -93,7 +93,7 @@ export default function DomainSslCard({
     <SectionCard
       title="SSL"
       right={
-        <span style={{ fontSize: 12, color: factsStale ? "#8a8580" : "#6b7280" }}>{freshness}</span>
+        <span style={{ fontSize: 12, color: factsStale ? STALE_TEXT : "#6b7280" }}>{freshness}</span>
       }
     >
       <HasSnapshot.Provider value={!noSnapshot}>

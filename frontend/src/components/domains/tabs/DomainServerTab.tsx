@@ -7,6 +7,7 @@ import { Badge, Btn, SectionCard } from "../../ui/Primitives";
 import DomainFtpCard from "../DomainFtpCard";
 import DomainSiteCard from "../DomainSiteCard";
 import { HasSnapshot, RecordedNoteInLegend } from "../facts/fields";
+import { SnapshotLine } from "../facts/SnapshotLine";
 import { snapshotOf } from "../facts/snapshot";
 import { CardRow, TabBody, TabGroup } from "./TabLayout";
 
@@ -78,7 +79,7 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
    * словами.
    */
   const snapshot = snapshotOf(domain, now);
-  const { noSnapshot, stale: factsStale, freshness } = snapshot;
+  const { noSnapshot } = snapshot;
   const desktop = isTauri();
   const read = useReadDomainFacts(domain.id);
 
@@ -100,36 +101,29 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
           отношения не имеет, и включать её в «Server snapshot» значило бы
           назвать её частью измерения. */}
       <TabGroup label="Server snapshot">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <span style={{ fontSize: 13, color: factsStale ? "#8a8580" : "#6b7280" }}>{freshness}</span>
-          {/* Только десктоп: чтение идёт по SSH, веб этого не умеет. */}
-          {desktop ? (
-            <Btn
-              size="sm"
-              variant="secondary"
-              onClick={read.run}
-              disabled={read.pending}
-              title="Read SSL, FTP, PHP, site and databases from the server over one SSH session"
-            >
-              {read.pending ? "Checking…" : "Проверить на сервере"}
-            </Btn>
-          ) : null}
-        </div>
-
-        {/* Ошибка последней ПОПЫТКИ — под строкой свежести. Сам снимок при этом
-            остаётся прежним (сервер не трогает `fp_facts` при провале), и его
-            возраст напечатан строкой выше — тем и отличается «проверка упала» от
-            «данные устарели». */}
-        {domain.fp_check_error ? (
-          // `overflowWrap` — текст ЧУЖОЙ: это ответ ssh или FastPanel, и в нём
-          // сидит неразрывный токен (путь, ключ хоста, URL). Без переноса он
-          // распирает модалку и даёт ей горизонтальную полосу, запрещённую
-          // `design-brief.md` §11. Тот же приём и той же формулировкой одет
-          // `Last error` в карточке и ошибки записи в полях ряда связей.
-          <div role="alert" style={{ fontSize: 12, color: "#b91c1c", overflowWrap: "anywhere" }}>
-            Last check failed: {domain.fp_check_error}
-          </div>
-        ) : null}
+        {/* Возраст снимка, провал последней попытки и кнопка чтения — общая
+            шапка снимка (`facts/SnapshotLine`), одна на все вкладки, которые
+            его показывают. Своя копия этих восьми строк была здесь и на Logs, и
+            вторая уже успела потерять `fp_check_error`: провалившаяся проверка
+            там не оставляла на экране ни следа. */}
+        <SnapshotLine
+          snapshot={snapshot}
+          error={domain.fp_check_error}
+          right={
+            /* Только десктоп: чтение идёт по SSH, веб этого не умеет. */
+            desktop ? (
+              <Btn
+                size="sm"
+                variant="secondary"
+                onClick={read.run}
+                disabled={read.pending}
+                title="Read SSL, FTP, PHP, site and databases from the server over one SSH session"
+              >
+                {read.pending ? "Checking…" : "Проверить на сервере"}
+              </Btn>
+            ) : null
+          }
+        />
 
         {/* Снимка не было ни разу — говорим это словами ОДИН раз, вместо того
             чтобы повторять прочерком в каждом поле, а подписью «из provision, на

@@ -6,7 +6,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import DomainLogsTab from "./DomainLogsTab";
 import { queryClient } from "../../../api/queryClient";
 import type { DomainFacts } from "../../../lib/domainFacts";
-import { relativeLuminance } from "../../../test/colors";
+import { luminanceOfRgb } from "../../../test/colors";
 import { setTauri, setBlobUser, clearBlobUser } from "../../../test/secretBlobKit";
 
 /**
@@ -108,9 +108,9 @@ describe("перечень файлов", () => {
     const buttons = within(chips()).getAllByRole("button");
     expect(buttons).toHaveLength(LOGS.length);
     for (const f of LOGS) {
-      // Чип находим по его `title` (он начинается с полного пути), а выбрав —
+      // Чип находим по его `title` (это полный путь файла), а выбрав —
       // проверяем, что путь напечатан строкой под чипами.
-      const b = buttons.find((x) => (x.getAttribute("title") ?? "").startsWith(f.path));
+      const b = buttons.find((x) => x.getAttribute("title") === f.path);
       expect(b).toBeTruthy();
       fireEvent.click(b!);
       expect(screen.getByText(f.path)).toBeTruthy();
@@ -134,19 +134,24 @@ describe("перечень файлов", () => {
     expect(chip(/^example\.com\.error\.log/)).toBeTruthy();
   });
 
-  it("несуществующий файл отличим от существующего не только словами в title", () => {
-    // Правило, которого не было в тестах никогда: `exists: false` рисуется
-    // приглушённо. Сравниваем светлоту двух цветов, а не конкретный hex —
-    // цвет уедет в токены вместе с редизайном, а различимость должна остаться.
+  it("несуществующий файл назван словом, а не одним лишь цветом", () => {
+    // Правило, которого не было в тестах никогда: `exists: false` виден. Слово
+    // в бейдже — главный канал: цвет не доезжает ни до скринридера, ни до
+    // чёрно-белой печати, а `title` — ни до тача, ни до клавиатуры.
+    showWithSnapshot();
+    const missing = chip(/^Backend error/);
+    expect(missing.textContent).toContain("missing");
+    expect(chip(/^Frontend error/).textContent).not.toContain("missing");
+  });
+
+  it("и приглушён цветом — вторым каналом, дублирующим слово", () => {
+    // Сравниваем светлоту двух цветов, а не конкретный hex: цвет уедет в токены
+    // вместе с редизайном, а различимость должна остаться.
     showWithSnapshot();
     const missing = chip(/^Backend error/);
     const present = chip(/^Frontend error/);
     expect(missing.style.color).not.toBe(present.style.color);
-    expect(rgbLuminance(missing.style.color)).toBeGreaterThan(rgbLuminance(present.style.color));
-    // Цвет не доезжает ни до скринридера, ни до печати: то же самое сказано
-    // словами.
-    expect(missing.getAttribute("title")).toContain("not found on the server");
-    expect(present.getAttribute("title")).not.toContain("not found");
+    expect(luminanceOfRgb(missing.style.color)).toBeGreaterThan(luminanceOfRgb(present.style.color));
   });
 });
 
@@ -168,14 +173,14 @@ describe("бейдж чипа — размер, а не число строк", 
     const c = chip(/^Backend access/);
     expect(c.textContent).toContain("—");
     expect(c.textContent).not.toContain("0 B");
-    expect(c.getAttribute("title")).toContain("size was not read");
   });
 
-  it("несуществующий файл — прочерк, а не ноль", () => {
+  it("прочерк значит РОВНО «размер не прочитан»: у несуществующего файла его нет", () => {
+    // Пока прочерк стоял в обоих состояниях, различал их один лишь цвет.
     showWithSnapshot();
-    const c = chip(/^Backend error/);
-    expect(c.textContent).toContain("—");
-    expect(c.textContent).not.toContain("0 B");
+    const missing = chip(/^Backend error/);
+    expect(missing.textContent).not.toContain("—");
+    expect(missing.textContent).not.toContain("0 B");
   });
 });
 
@@ -189,6 +194,18 @@ describe("выбор файла", () => {
 
     expect(screen.getByText(LOGS[3].path)).toBeTruthy();
     expect(screen.queryByText(LOGS[0].path)).toBeNull();
+  });
+
+  it("выбранный чип связан со строкой пути, а невыбранные — нет", () => {
+    // Глазами путь стоит под чипами и потому к ним относится; на слух это
+    // реплика ниоткуда, пока связь не названа. Та же болезнь, которую на
+    // вкладке Server лечит `TabGroup`.
+    showWithSnapshot();
+    const active = chip(/^Frontend access/);
+    const described = active.getAttribute("aria-describedby");
+    expect(described).toBeTruthy();
+    expect(document.getElementById(described!)?.textContent).toBe(LOGS[0].path);
+    expect(chip(/^Backend error/).getAttribute("aria-describedby")).toBeNull();
   });
 
   it("выбранный чип объявлен нажатым, и нажат ровно один", () => {
@@ -248,14 +265,26 @@ describe("тело вкладки — честное состояние", () => 
     expect(buttons).toHaveLength(LOGS.length);
   });
 
-  it("снимок есть, а список пуст — это «не выяснили, где они лежат», а не «логов нет»", () => {
-    // Десктоп возвращает пустой список, только если не нашёл владельца сайта:
-    // существующие и несуществующие файлы иначе приезжают все четыре. Прочерк
-    // или фраза «no log files» соврали бы измерение, которого не было.
+  it("снимок есть, а список пуст — это «не знаем, где они лежат», а не «логов нет»", () => {
+    // Фраза «no log files» соврала бы измерение, которого не было: пустой
+    // список приезжает и от ненайденного владельца, и от упавшей на сервере
+    // команды (её код возврата десктоп выбрасывает), и от снимка, снятого до
+    // появления поля. Поэтому причина на экране не называется вовсе — только
+    // наше незнание.
     showWithSnapshot({ logs: [] });
     expect(screen.queryByRole("group", { name: "Log files" })).toBeNull();
-    expect(screen.getByText(/we do not know where this site's logs are/)).toBeTruthy();
+    expect(screen.getByText(/no log paths for this site/)).toBeTruthy();
     expect(screen.queryByText(/Reading log contents is not wired up yet/)).toBeNull();
+    // Диагноза, которого мы поставить не можем, на экране нет.
+    expect(screen.queryByText(/owner/i)).toBeNull();
+  });
+
+  it("снимок старее самого поля `logs` — то же состояние, а не падение", () => {
+    // `fp_facts` без `logs` приезжает от снимков, снятых до появления поля в
+    // контракте; `?? []` сводит их к той же честной пустоте.
+    showWithSnapshot({ logs: undefined as unknown as DomainFacts["logs"] });
+    expect(screen.getByText(/no log paths for this site/)).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Log files" })).toBeNull();
   });
 });
 
@@ -301,6 +330,31 @@ describe("снимка не было ни разу", () => {
   });
 });
 
+describe("провал последней попытки", () => {
+  it("виден на Logs, а не только на Server", () => {
+    // Кнопка чтения здесь единственная, а `runReadDomainFacts` наружу ничего не
+    // возвращает намеренно: провал он кладёт в `fp_check_error` и инвалидирует
+    // список — ровно затем, чтобы экран его показал. Без этой строки упавшее по
+    // SSH чтение оставляло бы вкладку в точности такой же, какой она была до
+    // клика.
+    show({ fp_check_error: "ssh: handshake failed" });
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("ssh: handshake failed");
+  });
+
+  it("снимок при этом остаётся: «проверка упала» и «данные устарели» — разные новости", () => {
+    showWithSnapshot({}, { fp_check_error: "ssh: handshake failed" });
+    expect(screen.getByRole("alert").textContent).toContain("ssh: handshake failed");
+    expect(chip(/^Frontend access/)).toBeTruthy();
+    expect(screen.getByText(/Checked/)).toBeTruthy();
+  });
+
+  it("ошибки нет — нет и алерта: пустая строка обещала бы поломку", () => {
+    showWithSnapshot();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 describe("свежесть снимка", () => {
   it("возраст снимка напечатан, старый помечен протухшим", () => {
     showWithSnapshot({}, { fp_facts_at: ago(8 * DAY) });
@@ -327,9 +381,3 @@ describe("свежесть снимка", () => {
   });
 });
 
-/** `rgb(r, g, b)` из jsdom → относительная светлота (`test/colors` берёт hex). */
-function rgbLuminance(rgb: string): number {
-  const [r, g, b] = rgb.match(/\d+/g)!.map(Number);
-  const hex = [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
-  return relativeLuminance(`#${hex}`);
-}

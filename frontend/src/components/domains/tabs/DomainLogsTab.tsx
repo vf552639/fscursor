@@ -1,10 +1,11 @@
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 
 import { Domain, useReadDomainFacts } from "../../../api/domains";
 import { DomainFacts } from "../../../lib/domainFacts";
 import { logFileLabel } from "../../../lib/logFiles";
 import { isTauri } from "../../../lib/runtime";
 import { Btn, formatBytes } from "../../ui/Primitives";
+import { SnapshotLine } from "../facts/SnapshotLine";
 import { snapshotOf } from "../facts/snapshot";
 import { TabBody } from "./TabLayout";
 
@@ -30,7 +31,10 @@ type LogFile = DomainFacts["logs"][number];
  *   ничего сделать; кнопка, которая ничего не делает, — обещание функции
  *   (та же причина, по которой на карточке нет «Create Site»).
  *
- * Кнопка снятия снимка тут ОДНА и только в состоянии «ни разу не читали».
+ * Кнопка снятия снимка тут ОДНА и только в состоянии «ни разу не читали»; её
+ * исход виден на месте — провал последней попытки печатает общая шапка снимка
+ * (`facts/SnapshotLine`), потому что единственное действие вкладки обязано
+ * оставлять на экране след.
  * Правило карточки — «читает с сервера вкладка Server», и рядом с показанными
  * данными эта вкладка его не нарушает: свежесть у неё общая с Server, снимок
  * один, и второй кнопкой «Проверить» они бы только спорили, кто из них главный.
@@ -75,23 +79,105 @@ function Placeholder({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Всплывающая подпись чипа: полный путь файла и, если о файле есть отдельная
- * новость, она же словами.
+ * Чип одного файла: подпись, бейдж и выбор.
  *
- * Новостей две, и в бейдже они выглядят одинаково — прочерком: файла на сервере
- * нет либо размер не прочитан. Различает их на экране только цвет чипа
- * (несуществующий приглушён, см. стиль ниже), а цвет не доезжает ни до
- * скринридера, ни до печати, ни до чёрно-белого скриншота в переписке — поэтому
- * обе сказаны здесь ещё и словами.
+ * Вынесен из `map`, потому что почти весь он — стили: тридцать строк инлайна в
+ * теле цикла прятали за собой три строки логики, и вкладка, которая возьмёт этот
+ * файл образцом, скопировала бы вместе с ними и это.
  *
- * Путь в `title` — по другой причине: на экране напечатан путь только
- * ВЫБРАННОГО файла, и у остальных чипов это единственное место, где видно,
- * какой файл стоит за подписью.
+ * Про честность бейджа. Состояний у файла три, и в бейдже у них ТРИ РАЗНЫХ
+ * ответа, а не два ответа и цвет:
+ *
+ * - файла на сервере нет — `missing` прямо в бейдже. План писал «`exists ? size
+ *   : —`», но прочерк там значил бы сразу две разные вещи (нет файла / не
+ *   прочитали размер), а различал бы их только приглушённый цвет — то есть
+ *   канал, которого нет ни у скринридера, ни у чёрно-белой печати, ни у
+ *   дальтоника. Отступление осознанное и записано ревью фазы;
+ * - файл есть, размер не прочитан (`size_bytes: null` при `exists: true`) —
+ *   прочерк, и теперь он однозначен;
+ * - файл есть и измерен — размер, включая честный «0 B» у пустого лога.
+ *
+ * Приглушённый цвет у несуществующего остаётся, но теперь он ДУБЛИРУЕТ слово, а
+ * не несёт смысл в одиночку. `title` с полным путём — тоже дубль, и полезен он
+ * не как канал состояния, а как ответ на «какой файл за этой подписью»: путь на
+ * экране напечатан только у выбранного чипа.
  */
-function chipTitle(f: LogFile): string {
-  if (!f.exists) return `${f.path} — not found on the server`;
-  if (f.size_bytes === null) return `${f.path} — size was not read`;
-  return f.path;
+function LogChip({
+  file,
+  domainName,
+  active,
+  pathId,
+  onSelect,
+}: {
+  file: LogFile;
+  /** Имя домена — из него выводится подпись файла (`lib/logFiles`). */
+  domainName: string;
+  active: boolean;
+  /** Id строки с полным путём — её читает `aria-describedby` выбранного чипа. */
+  pathId: string;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      // Модалка домена содержит формы; кнопка без `type` в форме — это submit.
+      type="button"
+      aria-pressed={active}
+      // Полный путь напечатан отдельной строкой, и глазами он связан с чипом
+      // соседством; на слух связи нет никакой, пока её не назвать — та же
+      // болезнь, которую на вкладке Server лечит `TabGroup`.
+      aria-describedby={active ? pathId : undefined}
+      title={file.path}
+      onClick={onSelect}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        border: `1px solid ${active ? "#0f172a" : "#e2e8f0"}`,
+        background: active ? "#0f172a" : "#fff",
+        // Три цвета вместо двух: приглушённый — это «файла на сервере нет», и
+        // он обязан быть виден и на выбранном чипе тоже, иначе выбор файла
+        // стирал бы новость о нём.
+        color: !file.exists ? "#94a3b8" : active ? "#fff" : "#475569",
+        // Шрифт задаётся явно, как у `Btn` и у вкладок `ui/Tabs`: без него
+        // кнопка берёт системный шрифт формы и выпадает из строки набранного
+        // Inter.
+        fontFamily: "'Inter',sans-serif",
+        fontSize: 13,
+        fontWeight: active ? 600 : 500,
+        padding: "6px 12px",
+        borderRadius: 99,
+        cursor: "pointer",
+      }}
+    >
+      {logFileLabel(file.path, domainName)}
+      <span
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          color: active ? "#cbd5e1" : "#64748b",
+          background: active ? "#1e293b" : "#f1f5f9",
+          borderRadius: 99,
+          padding: "1px 7px",
+        }}
+      >
+        {badgeText(file)}
+      </span>
+    </button>
+  );
+}
+
+/** Что стоит в бейдже чипа: размер, «нет файла» или «размер не прочитан». */
+function badgeText(f: LogFile): string {
+  if (!f.exists) return "missing";
+  // `null` — это не ноль: `stat` не разобрался, и печатать его нулём значило бы
+  // выдумать пустой файл. Ноль настоящий (пустой лог) печатается как «0 B».
+  //
+  // Ветку держит ТИП, а не тест: `formatBytes` принимает `number`, и без этой
+  // строки файл не соберётся. Мутационная проверка это подтвердила иначе —
+  // сняв её, поведение не меняется (тот же прочерк вернул бы страж
+  // `Number.isFinite` внутри `formatBytes`), падает только `tsc`.
+  if (f.size_bytes === null) return "—";
+  return formatBytes(f.size_bytes);
 }
 
 export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
@@ -102,7 +188,14 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
    * `fp_facts_at` (когда сняли), а не от `fp_checked_at` (когда пытались), —
    * иначе провалившаяся проверка молодила бы перечень логов.
    */
-  const { facts, noSnapshot, stale, freshness } = snapshotOf(domain, now);
+  const snapshot = snapshotOf(domain, now);
+  const { facts, noSnapshot } = snapshot;
+  /**
+   * `?? []` глотает и отсутствие поля, а не только пустой массив: снимок,
+   * снятый до появления `logs` в контракте, приезжает без него. Отдельного
+   * состояния у этого нет намеренно — ответ на экране один и тот же и одинаково
+   * честный: путей мы не знаем (см. пустое состояние внизу файла).
+   */
   const logs = facts?.logs ?? [];
   const desktop = isTauri();
   const read = useReadDomainFacts(domain.id);
@@ -119,6 +212,13 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const selected: LogFile | null = logs.find((f) => f.path === selectedPath) ?? logs[0] ?? null;
 
+  /**
+   * Id строки с полным путём: на неё ссылается `aria-describedby` выбранного
+   * чипа. `useId`, а не константа, — таких карточек на экране может быть
+   * несколько, и статический id связал бы все чипы с первой строкой.
+   */
+  const pathId = useId();
+
   return (
     <TabBody>
       {/* Отдельной названной области (`TabGroup`), как на вкладке Server, здесь
@@ -127,86 +227,62 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
           и панель уже названа своей вкладкой (`role="tabpanel"` +
           `aria-labelledby` в `ui/Tabs`). Вторая обёртка добавила бы к «Logs»
           ещё один заголовок про то же самое. */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        {/* Возраст снимка — тот же, что печатает вкладка Server: размеры файлов
-            это измерение, и без его возраста они читаются как сегодняшние. При
-            `noSnapshot` эта же строка и есть требуемое планом «Never checked» —
-            слова берутся из общего разбора, а не пишутся здесь второй раз. */}
-        <span style={{ fontSize: 13, color: stale ? "#8a8580" : "#6b7280" }}>{freshness}</span>
-        {/* Только десктоп: чтение идёт по SSH, веб этого не умеет (принцип №3).
-            И только без снимка — см. объяснение у компонента. */}
-        {noSnapshot && desktop ? (
-          <Btn
-            size="sm"
-            variant="secondary"
-            onClick={read.run}
-            disabled={read.pending}
-            title="Read the server snapshot over one SSH session — log file paths and sizes come with it"
-          >
-            {read.pending ? "Checking…" : "Проверить на сервере"}
-          </Btn>
-        ) : null}
-      </div>
+
+      {/* Возраст снимка, провал последней попытки и кнопка чтения — общая шапка
+          снимка (`facts/SnapshotLine`), та же, что на вкладке Server. Возраст
+          нужен потому, что размеры файлов — измерение и без возраста читаются
+          как сегодняшние; при `noSnapshot` эта же строка и есть требуемое
+          планом «Never checked». Ошибка последней попытки — потому что кнопка
+          ниже единственная на вкладке: без неё провалившееся чтение оставляло
+          бы экран ровно таким же, каким он был до клика. */}
+      <SnapshotLine
+        snapshot={snapshot}
+        error={domain.fp_check_error}
+        right={
+          /* Только десктоп: чтение идёт по SSH, веб этого не умеет (принцип
+             №3). И только без снимка — см. объяснение у компонента. */
+          noSnapshot && desktop ? (
+            <Btn
+              size="sm"
+              variant="secondary"
+              onClick={read.run}
+              disabled={read.pending}
+              title="Read the server snapshot over one SSH session — log file paths and sizes come with it"
+            >
+              {read.pending ? "Checking…" : "Проверить на сервере"}
+            </Btn>
+          ) : null
+        }
+      />
 
       {logs.length > 0 && selected ? (
         <>
-          {/* Чипы — переключатель одного значения, поэтому это кнопки с
-              `aria-pressed`, а не ссылки и не вторая строка вкладок: вложенный
-              `tablist` внутри панели вкладки читался бы как вкладки карточки. */}
+          {/* Чипы — кнопки с `aria-pressed` в именованной группе.
+              Рассматривались и отвергнуты два соседних варианта:
+
+              - **вложенный `tablist`** — панель вкладки уже внутри `tablist`
+                карточки, и вторая строка вкладок внутри первой читается как
+                вкладки той же карточки;
+              - **`radiogroup` + `aria-checked`** — семантически он точнее
+                (выбран ровно один) и дал бы стрелки с одной остановкой Tab.
+                Отвергнут не поэтому: радиогруппа обещает ВВОД — значение,
+                которое человек задаёт и которое куда-то поедет, — а здесь выбор
+                ничего не меняет ни на сервере, ни в нашей записи; он просто
+                показывает другой путь. Появится чтение содержимого (Tauri-`tail`)
+                — вопрос стоит открыть заново вместе с ним: тогда у выбора
+                появится последствие, и цена лишних четырёх остановок Tab станет
+                видна. */}
           <div role="group" aria-label="Log files" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {logs.map((f) => {
-              const active = f.path === selected.path;
-              return (
-                <button
-                  key={f.path}
-                  // Модалка домена содержит формы; кнопка без `type` в форме —
-                  // это submit.
-                  type="button"
-                  aria-pressed={active}
-                  title={chipTitle(f)}
-                  onClick={() => setSelectedPath(f.path)}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                    border: `1px solid ${active ? "#0f172a" : "#e2e8f0"}`,
-                    background: active ? "#0f172a" : "#fff",
-                    // Три цвета вместо двух: приглушённый — это «файла на
-                    // сервере нет», и он обязан быть виден и на выбранном чипе
-                    // тоже, иначе выбор файла стирал бы новость о нём.
-                    color: !f.exists ? "#94a3b8" : active ? "#fff" : "#475569",
-                    // Шрифт задаётся явно, как у `Btn` и у вкладок `ui/Tabs`:
-                    // без него кнопка берёт системный шрифт формы и выпадает из
-                    // строки набранного Inter.
-                    fontFamily: "'Inter',sans-serif",
-                    fontSize: 13,
-                    fontWeight: active ? 600 : 500,
-                    padding: "6px 12px",
-                    borderRadius: 99,
-                    cursor: "pointer",
-                  }}
-                >
-                  {logFileLabel(f.path, domain.domain_name)}
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: active ? "#cbd5e1" : "#64748b",
-                      background: active ? "#1e293b" : "#f1f5f9",
-                      borderRadius: 99,
-                      padding: "1px 7px",
-                    }}
-                  >
-                    {/* Размер, а не число строк (их мы не считали). Прочерк —
-                        два разных «не знаем»: файла нет вовсе либо `stat` не
-                        разобрался; `null` тут не ноль, и печатать его нулём
-                        значило бы выдумать пустой файл. Какое из двух — сказано
-                        в `title` чипа. */}
-                    {!f.exists || f.size_bytes === null ? "—" : formatBytes(f.size_bytes)}
-                  </span>
-                </button>
-              );
-            })}
+            {logs.map((f) => (
+              <LogChip
+                key={f.path}
+                file={f}
+                domainName={domain.domain_name}
+                active={f.path === selected.path}
+                pathId={pathId}
+                onSelect={() => setSelectedPath(f.path)}
+              />
+            ))}
           </div>
 
           {/* Полный путь выбранного файла. Моно — потому что путь читают
@@ -222,6 +298,7 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
               Названный, но не подключённый, он всё равно откатился бы к
               системному — то есть был бы строкой, которая ничего не делает. */}
           <div
+            id={pathId}
             style={{
               fontFamily: "ui-monospace, monospace",
               fontSize: 12,
@@ -238,17 +315,27 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
         <Placeholder>Log files are listed from the server snapshot, and none has been taken yet.</Placeholder>
       ) : logs.length === 0 ? (
         /* Снимок есть, а список путей пуст — и это НЕ «логов у сайта нет».
-           Десктоп строит пути от домашнего каталога владельца сайта и, не найдя
-           владельца, возвращает пустой список, ни одного файла не проверив
-           (`ssh/fastpanel_facts.rs`: `match owner_home { None => vec![] }`).
-           Найдись владелец — сюда приехали бы все четыре пути, и найденные, и
-           ненайденные файлы; то есть пустой список означает ровно «мы не
-           выяснили, где они лежат», и никогда — «логов нет». Ровно
-           то же различие, ради которого у полей-списков заведён `list` в
+           Причин у пустоты как минимум четыре, и НИ ОДНУ из них экран назвать
+           не может, потому что ни одна не доезжает сюда отличимой от других:
+
+           1. владелец сайта не найден — пути строить не от чего
+              (`ssh/fastpanel_facts.rs:615`, `match owner_home { None => vec![] }`);
+           2. владелец найден, но его домашний каталог пуст — там же, `:537`;
+           3. **команда на сервере не сработала**: `read_log_paths` намеренно
+              выбрасывает код возврата (`let (_, out) = s.run(...)`, `:542-544`),
+              а `parse_log_stats` (`:502-528`) на неразобранном выводе отдаёт
+              пустой список — внутри УДАЧНОГО в остальном снимка;
+           4. снимок снят до появления поля `logs` в контракте — тогда его тут
+              нет вовсе, и `?? []` наверху приводит это к той же пустоте.
+
+           Найдись владелец и сработай команда — приехали бы все четыре пути, и
+           найденные, и ненайденные файлы. Поэтому фраза ниже говорит ровно о
+           нашем незнании и НЕ называет причину: назвать «владельца не нашли» на
+           упавшей команде значило бы придумать диагноз (принцип №6 CLAUDE.md).
+           Ровно то же различие, ради которого у полей-списков заведён `list` в
            `FactRow`: прочерк там читался бы как «спросили, там пусто». */
         <Placeholder>
-          Log paths are derived from the site owner&apos;s home directory, and the last check did not find
-          one — so we do not know where this site&apos;s logs are.
+          The last snapshot brought no log paths for this site, so we do not know where its logs are.
         </Placeholder>
       ) : (
         <Placeholder>Reading log contents is not wired up yet.</Placeholder>
