@@ -9,16 +9,19 @@ import {
   sitePathSource,
 } from "../../lib/domainDrift";
 import { SectionCard } from "../ui/Primitives";
-import { FactRow, listFact } from "./facts/fields";
+import { FactRow, MUTED } from "./facts/fields";
 import { type Snapshot } from "./facts/snapshot";
 
 /**
  * Карточка «Site» вкладки Server — ответ на вопрос «что за сайт стоит на
  * сервере»: путь, владелец, PHP, базы.
  *
- * Снимок приходит разобранным (`Snapshot` от вкладки), а не берётся своим
- * вызовом `snapshotOf`: у карточек Server он ОДИН, вместе с подписью возраста в
- * шапке вкладки, и второй разбор рядом с первым разъезжается молча.
+ * Снимок приходит разобранным (от вкладки), а не берётся своим вызовом
+ * `snapshotOf`: у карточек Server он ОДИН, вместе с подписью возраста в строке
+ * над ними, и второй разбор рядом с первым разъезжается молча. Из разбора
+ * карточке отданы РОВНО факты и «снимка не было» — не весь `Snapshot`: возраст
+ * и протухание принадлежат той единственной строке, и карточка, начавшая
+ * печатать `freshness` у себя, вернула бы на экран два ответа про один снимок.
  *
  * **Перечня логов здесь нет намеренно.** Он читается из того же снимка
  * (`fp_facts.logs`) и по плану вкладок принадлежит вкладке Logs (фаза 5); до её
@@ -26,7 +29,13 @@ import { type Snapshot } from "./facts/snapshot";
  * список путей, — это два ответа на один вопрос, и расходиться они начали бы в
  * первый же день, когда одну из них поправят.
  */
-export default function DomainSiteCard({ domain, snapshot }: { domain: Domain; snapshot: Snapshot }) {
+export default function DomainSiteCard({
+  domain,
+  snapshot,
+}: {
+  domain: Domain;
+  snapshot: Pick<Snapshot, "facts" | "noSnapshot">;
+}) {
   const { facts, noSnapshot } = snapshot;
 
   /**
@@ -47,6 +56,30 @@ export default function DomainSiteCard({ domain, snapshot }: { domain: Domain; s
     dbUser: dbUserSource(domain.db_user),
   };
 
+  /**
+   * Карточка, которой сказать НЕЧЕГО, — и она обязана сказать об этом словом.
+   *
+   * Условие точное, а не приблизительное. Без снимка `facts` равны `null`,
+   * поэтому каждое правило `lib/domainDrift` возвращает ровно два исхода:
+   * `agree`, если нашей записи нет (`compare`/`compareInList` отвечают им на
+   * пустую запись), и `recorded-only`, если она есть; `drift` без факта
+   * невозможен по построению. Значит «все пять — `agree`» — это в точности
+   * «ни одной записи из provision», а каждая строка карточки при этом пуста и
+   * спрятана (`HasSnapshot`), включая `Databases` (без снимка `list` молчит) и
+   * `DB user` (у него ещё и `hideEmpty`).
+   *
+   * Под снимком условие не срабатывает никогда — и не должно: `Databases`
+   * печатает там хотя бы «not read», то есть пустой карточка уже не бывает.
+   *
+   * Почему это вообще нужно: рамка и крашеная шапка `SectionCard` рисуют
+   * ПУСТУЮ коробку, растянутую соседкой по ряду на её высоту, — и читается это
+   * поломкой вёрстки, а не ответом. Легенда вкладки объясняет ВКЛАДКУ («сервер
+   * ещё не читали»), а не то, почему у этой карточки нет ни строки; у
+   * импортированного домена, где нет ни снимка, ни записей provision, это
+   * единственный экран, который он увидит.
+   */
+  const nothingRecorded = noSnapshot && Object.values(src).every((s) => s.kind === "agree");
+
   return (
     <SectionCard title="Site">
       {/* `minWidth: 0` — карточка стоит в двухколоночном гриде, а печатает
@@ -55,6 +88,9 @@ export default function DomainSiteCard({ domain, snapshot }: { domain: Domain; s
           горизонтальную полосу, запрещённую `design-brief.md` §11, — а под
           `overflow: hidden` самой карточки путь ещё и обрежется. */}
       <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
+        {nothingRecorded ? (
+          <div style={{ fontSize: 13, color: MUTED }}>No site details recorded for this domain yet.</div>
+        ) : null}
         <FactRow k="Path" fact={facts?.site?.site_path} src={src.sitePath} />
         <FactRow k="Owner" fact={facts?.site?.site_user} src={src.siteOwner} />
         <FactRow
@@ -66,10 +102,13 @@ export default function DomainSiteCard({ domain, snapshot }: { domain: Domain; s
           }
           src={src.php}
         />
+        {/* `list` — факт этого поля СПИСОК, и пустой список под снимком значит
+            «не прочитали», а не «на сервере пусто» (`FactRow`, пункт 3). */}
         <FactRow
           k="Databases"
-          fact={listFact(facts && facts.databases.length > 0 ? facts.databases.join(", ") : null, noSnapshot)}
+          fact={facts && facts.databases.length > 0 ? facts.databases.join(", ") : null}
           src={src.dbName}
+          list
         />
         {/* Пользователь базы — единственное поле с `hideEmpty`: пустое, оно
             прячется даже ПОД снимком, потому что факта у него не бывает ни

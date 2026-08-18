@@ -190,7 +190,19 @@ describe("свежесть", () => {
 
 describe("ошибка последней попытки", () => {
   it("показана, а снимок остаётся (свежесть — от fp_facts_at)", () => {
-    show({ fp_facts: facts(), fp_facts_at: ago(2 * HOUR), fp_check_error: "ssh: connection refused" });
+    // `fp_checked_at` стоит В ФИКСТУРЕ и НАМЕРЕННО свежее снимка: без него имя
+    // теста обещало то, чего он не проверял. Считай возраст от последней
+    // ПОПЫТКИ — и строка сказала бы «Checked 1m ago» над данными двухчасовой
+    // давности, то есть проваленная проверка молодила бы снимок. Общее правило
+    // живёт в `facts/snapshot` и проверено ещё и у карточки SSL, но здесь у
+    // подписи свой потребитель и свой единственный экземпляр на вкладке.
+    show({
+      fp_facts: facts(),
+      fp_facts_at: ago(2 * HOUR),
+      fp_checked_at: ago(60_000),
+      fp_check_error: "ssh: connection refused",
+    });
+    expect(screen.getByText(/Checked/).textContent).toMatch(/2h/);
     expect(screen.getByText(/ssh: connection refused/)).toBeTruthy();
     // Снимок жив: поля по-прежнему из него, ошибка его не стёрла. Раньше это
     // проверялось по бейджу «Valid» — он уехал на карточку SSL вместе с ней, а
@@ -480,6 +492,34 @@ describe("снимка не было ни разу", () => {
     expect(screen.getAllByText(/из provision, на сервере не проверено/)).toHaveLength(1);
     // И ни одно значение не выдано за расхождение: сверять было не с чем.
     expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("карточке Site нечего сказать — она говорит это словом, а не пустой рамкой", () => {
+    // Импортированный домен: ни снимка, ни записей provision. Все пять строк
+    // карточки прячутся (прочерк читался бы как «спросили, там пусто»), и без
+    // этой фразы на экране остаётся пустая коробка с рамкой и крашеной шапкой,
+    // растянутая соседкой по ряду на её высоту, — вёрстка, читающаяся поломкой.
+    // Легенда вкладки объясняет ВКЛАДКУ, а не то, почему у карточки нет ни
+    // строки.
+    show({ ftp_user: null });
+    const site = screen.getByRole("group", { name: "Site" });
+    expect(site.textContent).toContain("No site details recorded for this domain yet.");
+  });
+
+  it("есть хоть одна запись из provision — фразы нет, есть строка", () => {
+    // Условие точное, а не «похоже на пустоту»: одна запись из provision — и
+    // карточке уже есть что показать, приглушённым значением.
+    show({ ftp_user: null, site_path: "/var/www/example.com" });
+    const site = screen.getByRole("group", { name: "Site" });
+    expect(site.textContent).not.toContain("No site details recorded");
+    expect(sourceOf("Path")).toBe("recorded-only");
+  });
+
+  it("под снимком фразы не бывает: пустое поле списка само говорит «not read»", () => {
+    show({ fp_facts: facts({ databases: [], ftp_accounts: [] }), fp_facts_at: ago(HOUR) });
+    expect(screen.getByRole("group", { name: "Site" }).textContent).not.toContain(
+      "No site details recorded",
+    );
   });
 
   it("факты без отметки времени не печатаются вопреки легенде", () => {

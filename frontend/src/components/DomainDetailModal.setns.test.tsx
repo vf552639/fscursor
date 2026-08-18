@@ -581,8 +581,8 @@ describe("вкладки не разводят Cloudflare и nameservers", () =>
     // Роутов `create-site`, `create-db`, `db-credentials`, `ssl-request`,
     // `ssl-cancel`, `refresh-ssl` и `nginx-override` на бэкенде нет — каждая из
     // этих вкладок всегда отвечала 404 в общий баннер. Голый «SSL» из списка
-    // ушёл: теперь это заголовок read-only секции «Server state» (живое чтение
-    // с сервера, без мутаций), а не вкладка-действие. Мёртвые SSL-ДЕЙСТВИЯ
+    // ушёл: теперь это заголовок read-only карточки SSL (живое чтение с
+    // сервера, без мутаций), а не вкладка-действие. Мёртвые SSL-ДЕЙСТВИЯ
     // (Request/Cancel/Refresh SSL) по-прежнему обязаны отсутствовать.
     for (const dead of ["DB", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();

@@ -8,7 +8,7 @@ import { isTauri } from "../../lib/runtime";
 import { useSecretSave } from "../../hooks/useSecretSave";
 import { RevealSecret } from "../RevealSecret";
 import { Btn, Inp, SectionCard } from "../ui/Primitives";
-import { FactRow, KEY_WIDTH, MUTED, Row, listFact } from "./facts/fields";
+import { FactRow, KEY_GAP, KEY_WIDTH, MUTED, Row } from "./facts/fields";
 import { type Snapshot } from "./facts/snapshot";
 
 /**
@@ -16,17 +16,29 @@ import { type Snapshot } from "./facts/snapshot";
  * подключаться к сайту»: адрес, порт, логин, пароль и перечень аккаунтов,
  * которые сервер знает за этим доменом.
  *
- * Снимок сервера приходит уже разобранным (`Snapshot` от вкладки), а не берётся
- * своим вызовом `snapshotOf`: карточки Server читают ОДИН снимок вместе с
- * подписью его возраста в строке над ними, и второй разбор рядом с первым
- * разъезжается молча — так же, как разъезжались правила, которые этот проект
- * потом сводил обратно в один модуль (`lib/serverStatus`, `lib/domainFacts`,
- * `lib/domainDrift`).
+ * Снимок сервера приходит уже разобранным (от вкладки), а не берётся своим
+ * вызовом `snapshotOf`: карточки Server читают ОДИН снимок вместе с подписью
+ * его возраста в строке над ними, и второй разбор рядом с первым разъезжается
+ * молча — так же, как разъезжались правила, которые этот проект потом сводил
+ * обратно в один модуль (`lib/serverStatus`, `lib/domainFacts`,
+ * `lib/domainDrift`). Из разбора карточке отданы РОВНО факты — единственное,
+ * что она читает: возраст и протухание принадлежат той единственной строке, и
+ * карточка, начавшая печатать `freshness` у себя, вернула бы на экран два
+ * ответа про один снимок. «Снимка не было» ей больше не нужно вовсе — на этот
+ * вопрос за неё отвечает контекст `HasSnapshot` внутри `FactRow`.
  *
  * Правило «наша запись против факта» тут не живёт: считает его
  * `lib/domainDrift`, рисует общий `FactRow` (`facts/fields`). Здесь — раскладка
- * и два своих решения, оба про честность: чем считать пустой список аккаунтов
- * (`listFact`) и когда перечень внизу говорит что-то новое (`ftpRosterAdds`).
+ * и ТРИ своих решения, все три про честность показа:
+ *
+ * 1. `factFtpLogin` — какой аккаунт представляет список в строке `Login`;
+ * 2. `otherHome` — когда домашняя папка аккаунта говорит что-то новое, а когда
+ *    она третья копия пути сайта на экране;
+ * 3. `ftpRosterAdds` — когда перечень внизу вообще стоит рисовать.
+ *
+ * А вот «пустой список — это незнание, а не измеренная пустота» здесь НЕ
+ * решается: вопрос общий с карточкой Site, и ответ на него один — проп `list`
+ * у `FactRow` (`facts/fields`).
  */
 
 /**
@@ -43,12 +55,16 @@ export default function DomainFtpCard({
   domain: Domain;
   /** Сервер домена: его адрес и есть Host. `undefined` — сервера у домена нет. */
   server: Server | undefined;
-  snapshot: Snapshot;
+  snapshot: Pick<Snapshot, "facts">;
 }) {
-  const { facts, noSnapshot } = snapshot;
+  const { facts } = snapshot;
   const desktop = isTauri();
 
-  const src = { ftpLogin: ftpLoginSource(domain.ftp_user, facts) };
+  // Одним значением, а не объектом `src`, как в карточке Site: там столбик из
+  // пяти почти одинаковых вызовов, и собраны они ради того, чтобы подмена
+  // аргумента бросалась в глаза; здесь вызов ровно один, и объект вокруг него
+  // намекал бы на правило, которого не существует.
+  const ftpLoginSrc = ftpLoginSource(domain.ftp_user, facts);
 
   /**
    * Логин FTP, прочитанный с СЕРВЕРА, — и это правка сути, а не формы.
@@ -74,7 +90,7 @@ export default function DomainFtpCard({
    * тот дефект, ради снятия которого это место и переписано.
    */
   const factFtpLogin =
-    (src.ftpLogin.kind === "agree" ? domain.ftp_user?.trim() || null : null) ||
+    (ftpLoginSrc.kind === "agree" ? domain.ftp_user?.trim() || null : null) ||
     facts?.ftp_accounts[0]?.login ||
     null;
 
@@ -123,21 +139,27 @@ export default function DomainFtpCard({
             константа. У домена без сервера Host остаётся прочерком. */}
         <Row k="Host" v={server?.ip_address} />
         <Row k="Port" v={FTP_PORT} />
-        <FactRow k="Login" fact={listFact(factFtpLogin, noSnapshot)} src={src.ftpLogin} />
+        {/* `list` — факт этого поля СПИСОК (аккаунты FTP), и пустой список под
+            снимком значит «не прочитали», а не «на сервере пусто»
+            (`FactRow`, пункт 3). */}
+        <FactRow k="Login" fact={factFtpLogin} src={ftpLoginSrc} list />
         <FtpPassword domain={domain} desktop={desktop} />
         {ftpRosterAdds && facts ? (
           <div>
             <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Accounts on server</div>
-            {facts.ftp_accounts.map((a) => (
-              // `overflowWrap` — путь тут печатается ровно в интересном
-              // случае: когда он НЕ совпал с путём сайта, то есть когда он
-              // нестандартный и, скорее всего, длинный. Без переноса он
-              // распирает колонку и даёт модалке горизонтальную полосу.
-              <div key={a.login} style={{ fontSize: 12.5, color: "#374151", overflowWrap: "anywhere" }}>
-                {a.login}
-                {otherHome(a.home) ? <span style={{ color: MUTED }}> · {otherHome(a.home)}</span> : null}
-              </div>
-            ))}
+            {facts.ftp_accounts.map((a) => {
+              const home = otherHome(a.home);
+              return (
+                // `overflowWrap` — путь тут печатается ровно в интересном
+                // случае: когда он НЕ совпал с путём сайта, то есть когда он
+                // нестандартный и, скорее всего, длинный. Без переноса он
+                // распирает колонку и даёт модалке горизонтальную полосу.
+                <div key={a.login} style={{ fontSize: 12.5, color: "#374151", overflowWrap: "anywhere" }}>
+                  {a.login}
+                  {home ? <span style={{ color: MUTED }}> · {home}</span> : null}
+                </div>
+              );
+            })}
           </div>
         ) : null}
       </div>
@@ -203,14 +225,25 @@ function FtpPassword({ domain, desktop }: { domain: Domain; desktop: boolean }) 
   }
 
   return (
-    // Ширина подписи — общий `KEY_WIDTH`, а не своё число: строка стоит в
-    // столбике полей карточки, и четыре пикселя расхождения читались бы сбоем
-    // вёрстки. `flexWrap` — потому что справа от подписи живут сразу два
-    // элемента (значение и кнопка), а карточка узкая (389px по макету).
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+    // Ширина подписи и отступ до значения — общие `KEY_WIDTH`/`KEY_GAP`, а не
+    // свои числа: строка стоит в столбике полей карточки, и пара пикселей
+    // расхождения читается сбоем вёрстки — колонка значений начиналась бы у
+    // пароля не там, где у всех соседей. `flexWrap` — потому что справа от
+    // подписи живут сразу два элемента (значение и кнопка), а карточка узкая
+    // (389px по макету).
+    <div style={{ display: "flex", alignItems: "center", gap: KEY_GAP, flexWrap: "wrap" }}>
       <b style={{ color: "#6b7280", fontWeight: 600, minWidth: KEY_WIDTH, fontSize: 13 }}>Password</b>
       {domain.ftp_password_blob_id ? (
-        <RevealSecret blobId={domain.ftp_password_blob_id} label="Show FTP password" />
+        // Обёртка — не украшение: `RevealSecret` печатает раскрытый пароль
+        // `<code>`, у которого нет правила переноса, а как flex-элемент он ещё
+        // и не сжимается уже содержимого (`min-width: auto`). Раньше длинный
+        // пароль просто распирал секцию; теперь вокруг стоит `SectionCard` с
+        // `overflow: hidden`, и он молча ОБРЕЗАЛСЯ БЫ по краю карточки — то
+        // есть кнопка «показать» показывала бы половину секрета. Тем же одета
+        // и ошибка расшифровки: в ней приезжает чужой текст с URL.
+        <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+          <RevealSecret blobId={domain.ftp_password_blob_id} label="Show FTP password" />
+        </span>
       ) : (
         <span style={{ fontSize: 13, color: "#9ca3af" }}>not set</span>
       )}

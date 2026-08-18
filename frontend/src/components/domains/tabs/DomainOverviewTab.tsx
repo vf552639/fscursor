@@ -11,6 +11,7 @@ import DomainLinks from "../DomainLinks";
 import DomainNsPanel, { NsDelegationPill } from "../DomainNsPanel";
 import { NsDraft } from "../useNsDraft";
 import DomainSslCard from "../DomainSslCard";
+import { CardRow, TabBody } from "./TabLayout";
 
 /**
  * `ssl_status` — НАША запись момента provision, и на карточке она печатается
@@ -23,7 +24,7 @@ import DomainSslCard from "../DomainSslCard";
  * - **`error` — обязателен.** Сегодня это единственное состояние домена, которое
  *   ВИДНО В СПИСКЕ (красный бейдж «SSL error»), но на экране диагностики не
  *   упомянуто ни разу: `ssl_expires_at` и `ssl_issuer` у такого домена пусты,
- *   поэтому «Server state» о нём молчит; бейдж сводки считает `sslState` по
+ *   поэтому карточка SSL о нём молчит; бейдж сводки считает `sslState` по
  *   снимку с сервера и у непроверенного домена говорит «Not checked»; а
  *   `last_provision_error` write-back провижининга в этот момент ЯВНО ГАСИТ в
  *   `null` и текст certbot на сервер не отправляет вовсе
@@ -109,9 +110,7 @@ export default function DomainOverviewTab({
   registrarProvider,
 }: DomainOverviewTabProps) {
   return (
-    // Отступа сверху здесь нет намеренно: его держит панель `Tabs` — иначе
-    // каждая вкладка компенсировала бы его своей копией одного и того же числа.
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <TabBody>
       <DomainLinks
         domain={domain}
         server={server}
@@ -155,13 +154,7 @@ export default function DomainOverviewTab({
         ) : null}
       </div>
 
-      {/* `minmax(0, 1fr)`, а не `1fr`: голый `1fr` — это `minmax(auto, 1fr)`, и
-          минимум трека равен ширине содержимого, поэтому один неразрывный токен
-          (имя издателя, чужая ошибка, длинный nameserver) распирает колонку за
-          ширину модалки. У `Modal` стоит `overflowY: auto`, из-за чего
-          `overflow-x` вычисляется в `auto` — распёртая колонка даёт КАРТОЧКЕ
-          горизонтальную полосу, запрещённую `design-brief.md` §11. */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14 }}>
+      <CardRow>
         <DomainSslCard domain={domain} ssl={ssl} now={now} />
         <SectionCard title="Nameservers" right={<NsDelegationPill delegation={delegation} />}>
           <DomainNsPanel
@@ -172,7 +165,7 @@ export default function DomainOverviewTab({
             registrarProvider={registrarProvider}
           />
         </SectionCard>
-      </div>
+      </CardRow>
 
       {/* DMCA — заглушка из самого макета, и единственная честная её форма:
           жалоб DMCA продукт сегодня не знает вовсе — ни модели, ни поля, ни
@@ -184,6 +177,6 @@ export default function DomainOverviewTab({
           DMCA complaints and takedown status for this domain will appear here in a future update.
         </div>
       </SectionCard>
-    </div>
+    </TabBody>
   );
 }
