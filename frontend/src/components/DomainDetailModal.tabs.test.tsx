@@ -1,11 +1,12 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainDetailModal from "./DomainDetailModal";
 import { queryClient } from "../api/queryClient";
 import { openTab } from "../test/tabs";
+import { useAuthStore } from "../store/auth";
 
 /**
  * Вкладки карточки домена: что на них лежит и что переживает переключение.
@@ -37,6 +38,20 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 
 const SERVERS = [{ id: 3, name: "web-01", ip_address: "10.0.0.3" }] as any[];
 
+/** Зона Cloudflare со своими NS — то, чем зеркало наполняет нетронутое поле. */
+const ZONE = {
+  id: "zone-a",
+  name: "example.com",
+  name_servers: ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"],
+  status: "active",
+};
+
+function setTauri(on: boolean) {
+  const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
+  if (on) w.__TAURI_INTERNALS__ = {};
+  else delete w.__TAURI_INTERNALS__;
+}
+
 function domain(over: Record<string, unknown> = {}) {
   return {
     id: 42,
@@ -66,11 +81,16 @@ const nsField = () => screen.getByLabelText(/one per line/i) as HTMLTextAreaElem
 beforeEach(() => {
   vi.resetAllMocks();
   queryClient.clear();
+  // Чтение зон требует пользователя (`requireUserId` в `zonesQuery`); без него
+  // запрос падает, и поле NS остаётся пустым по совсем другой причине.
+  useAuthStore.setState({ userId: "user-1", email: "u@e.x" });
   mocks.apiGet.mockResolvedValue([]);
 });
 
 afterEach(() => {
   cleanup();
+  setTauri(false);
+  useAuthStore.getState().clear();
   queryClient.clear();
 });
 
@@ -121,6 +141,31 @@ describe("набранное на Overview переживает уход на с
     openTab("Overview");
 
     expect(nsField().value).toBe("ns1.example.com\nns2.example.com");
+  });
+
+  it("правка ПОВЕРХ списка зоны не воскресает обратно в список зоны", async () => {
+    // Зеркальный случай к предыдущему, и куда коварнее: у домена с
+    // резолвнутой зоной поле наполняется её nameservers само, пока его не
+    // трогали. Потеряй переключение вкладок не `text`, а `edited` — эффект
+    // зеркала включился бы снова и подставил список зоны ПОВЕРХ правки, прямо
+    // под курсором. Пустое поле человек заметит; воскресший правдоподобный
+    // список — нет.
+    setTauri(true);
+    mocks.invokeSynced.mockImplementation(async (cmd: string) =>
+      cmd === "cf_list_zones" ? [ZONE] : [],
+    );
+    show({ cloudflare_account_id: 7, cloudflare_zone_id: "zone-a" });
+
+    // Дожидаемся именно подстановки из зоны — иначе правка легла бы в поле,
+    // которое зеркало ещё не успело наполнить, и тест проверял бы не то.
+    await waitFor(() => expect(nsField().value).toContain("ada.ns.cloudflare.com"));
+    fireEvent.change(nsField(), { target: { value: "ns1.mine.com\nns2.mine.com" } });
+
+    openTab("Server");
+    openTab("Overview");
+
+    expect(nsField().value).toBe("ns1.mine.com\nns2.mine.com");
+    expect(nsField().value).not.toContain("cloudflare.com");
   });
 });
 
