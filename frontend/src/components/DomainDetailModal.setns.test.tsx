@@ -138,16 +138,18 @@ function renderModal(d = domain()) {
 }
 
 /**
- * Кнопка смены NS. Вкладок у карточки нет: NS живут на том же экране, что и
- * аккаунт Cloudflare, — поэтому открывать перед действием нечего, надо только
- * дождаться отрисовки.
+ * Кнопка смены NS. Открывать перед действием нечего: вкладки у карточки есть,
+ * но NS живут на Overview — той, с которой она открывается, — и на том же
+ * экране, что и аккаунт Cloudflare. Надо только дождаться отрисовки.
  */
 async function nsButton() {
   return (await screen.findByText(/Set NS/)).closest("button") as HTMLButtonElement;
 }
 
 function nsField() {
-  return screen.getByLabelText(/Nameservers/i) as HTMLTextAreaElement;
+  // Ярлык поля — «One per line»: предмет называет шапка карточки
+  // (`SectionCard` «Nameservers»), и поле не повторяет её слово.
+  return screen.getByLabelText(/one per line/i) as HTMLTextAreaElement;
 }
 
 function setNsCalls() {
@@ -569,7 +571,7 @@ describe("Set NS — веб только смотрит", () => {
   });
 });
 
-describe("карточка домена — один экран без вкладок", () => {
+describe("вкладки не разводят Cloudflare и nameservers", () => {
   it("не предлагает DB / SSL / NGINX и Create Site и не ходит по их роутам", async () => {
     setTauri(true);
 
@@ -585,15 +587,15 @@ describe("карточка домена — один экран без вкла�
     for (const dead of ["DB", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
     }
-    // Переключателя вкладок нет вовсе: NS переехали к аккаунту Cloudflare, а
-    // разложенные по двум экранам они заставляли ходить туда-сюда, чтобы
-    // понять, почему NS не пушатся.
-    for (const tab of ["OVERVIEW", "NS"]) {
-      expect(screen.queryByText(tab), `вкладки ${tab} быть не должно`).toBeNull();
-    }
-    // Поле NS и сроки домена теперь на одном экране, без единого клика.
+    // Отдельной вкладки NS нет и не появилось: разложенные по двум экранам, NS
+    // и аккаунт Cloudflare заставляли ходить туда-сюда, чтобы понять, почему NS
+    // не пушатся. Вкладок теперь две, и обе половины вопроса — на первой.
+    expect(screen.queryByRole("tab", { name: "NS" }), "вкладки NS быть не должно").toBeNull();
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Server"]);
+    // Поле NS и сроки домена по-прежнему на одном экране, без единого клика.
     expect(nsField()).toBeTruthy();
     expect(screen.getByText("Expires:")).toBeTruthy();
+    expect(screen.getByLabelText("Cloudflare account")).toBeTruthy();
 
     // По домену карточка не ходит НИ ПО ОДНОМУ роуту: креды БД и
     // nginx-override тянулись `useQuery` с `enabled: !!domainId` прямо при

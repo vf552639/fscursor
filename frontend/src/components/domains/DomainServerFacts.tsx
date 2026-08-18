@@ -2,7 +2,7 @@ import React, { useState } from "react";
 
 import { Domain, useReadDomainFacts, useUpdateDomain } from "../../api/domains";
 import { Server } from "../../api/servers";
-import { SSL_BADGE, isFactsStale, sslState } from "../../lib/domainFacts";
+import { isFactsStale } from "../../lib/domainFacts";
 import {
   dbNameSource,
   dbUserSource,
@@ -11,20 +11,19 @@ import {
   samePath,
   siteOwnerSource,
   sitePathSource,
-  sslExpiresSource,
-  sslIssuerSource,
 } from "../../lib/domainDrift";
-import { formatExpiryDate } from "../../lib/domainExpiry";
 import { BLOB_KIND } from "../../lib/secretBlob";
 import { isTauri } from "../../lib/runtime";
 import { useSecretSave } from "../../hooks/useSecretSave";
 import { RevealSecret } from "../RevealSecret";
-import { Badge, Btn, Inp, formatAgoStale } from "../ui/Primitives";
-import { FactRow, HasSnapshot, KEY_WIDTH, MUTED, Row, SubTitle } from "./facts/fields";
+import { Btn, Inp, formatAgoStale } from "../ui/Primitives";
+import { FactRow, HasSnapshot, MUTED, Row, SubTitle } from "./facts/fields";
 
 /**
  * Секция «состояние на сервере» — ЕДИНСТВЕННОЕ место карточки, отвечающее на
- * вопрос «что с сайтом».
+ * вопрос «что развёрнуто на сервере»: доступ по FTP и сам сайт (путь, владелец,
+ * PHP, базы). Сертификат отвечает на свой вопрос и живёт своей карточкой на
+ * Overview — из того же снимка, но не здесь (см. ниже).
  *
  * Раньше на тот же вопрос отвечал и двухколоночный блок наверху: он печатал
  * НАШУ запись (снимок момента provision из колонок домена), а секция — живое
@@ -34,9 +33,16 @@ import { FactRow, HasSnapshot, KEY_WIDTH, MUTED, Row, SubTitle } from "./facts/f
  * развёртывании: X» ровно тогда, когда РАСХОДИТСЯ с фактом, и становится
  * значением (приглушённым, с честной подписью) там, где факта нет вовсе.
  *
- * Порог протухания и лестница SSL живут в `lib/domainFacts`, само правило
- * расхождения — в `lib/domainDrift`, а не здесь: три экрана про сервер уже
- * разъезжались, когда правило жило в компоненте.
+ * Порог протухания живёт в `lib/domainFacts`, само правило расхождения — в
+ * `lib/domainDrift`, а его показ (`FactRow`) — в `domains/facts/fields`, а не
+ * здесь: три экрана про сервер уже разъезжались, когда правило жило в
+ * компоненте.
+ *
+ * Сертификата в секции больше нет: карточка SSL уехала на вкладку Overview
+ * (`DomainSslCard`) вместе со своей половиной правила расхождений, потому что
+ * там же стоит бейдж SSL в шапке карточки. Снимок при этом остался ОДИН — тот,
+ * что снимает кнопка ниже, — и его возраст карточка SSL печатает у себя в
+ * шапке, чтобы Overview не выдавал протухшее измерение за свежее.
  *
  * Про язык подписей: проза секции английская, но три строки этой фазы — «при
  * развёртывании: X», «из provision, на сервере не проверено» и «Сервер ещё не
@@ -78,9 +84,6 @@ export default function DomainServerFacts({
     ? `Checked ${formatAgoStale(domain.fp_facts_at, factsStale, now)}`
     : "Never checked";
 
-  const ssl = sslState(facts?.ssl, domain.fp_facts_at, now);
-  const sslBadge = SSL_BADGE[ssl];
-
   /**
    * Удачного снимка не было ни разу. Тогда решётка прочерков — враньё: прочерк
    * в поле читается как «сервер спросили, там пусто», а спрашивать мы ещё не
@@ -90,7 +93,7 @@ export default function DomainServerFacts({
   const noSnapshot = !domain.fp_facts_at;
 
   /**
-   * Наша запись против факта — все восемь вопросов в ОДНОМ месте.
+   * Наша запись против факта — все вопросы секции в ОДНОМ месте.
    *
    * Собраны сюда намеренно: вызовы почти одинаковы (`(recorded, facts)`), и
    * подмена аргумента — `phpVersionSource(domain.site_user, facts)` — исправно
@@ -99,8 +102,6 @@ export default function DomainServerFacts({
    */
   const src = {
     ftpLogin: ftpLoginSource(domain.ftp_user, facts),
-    sslExpires: sslExpiresSource(domain.ssl_expires_at, facts),
-    sslIssuer: sslIssuerSource(domain.ssl_issuer, facts),
     sitePath: sitePathSource(domain.site_path, facts),
     siteOwner: siteOwnerSource(domain.site_user, facts),
     php: phpVersionSource(domain.php_version, facts),
@@ -191,7 +192,11 @@ export default function DomainServerFacts({
     );
 
   return (
-    <div style={{ marginTop: 20, borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
+    // Своей верхней границы у секции больше нет: она теперь тело вкладки, а
+    // строка вкладок над ней рисует свою линию — две подряд читались бы как
+    // пустая полоса. Отступ — по макету панели (24px сверху; горизонтальные и
+    // нижний даёт `Modal`).
+    <div style={{ paddingTop: 24 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>Server state</div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -272,39 +277,11 @@ export default function DomainServerFacts({
             ) : null}
           </div>
   
-          {/* ─── SSL ─────────────────────────────────────────────────────── */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
-            <SubTitle>SSL</SubTitle>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-              <b style={{ color: "#6b7280", fontWeight: 600, minWidth: KEY_WIDTH }}>State</b>
-              <Badge variant={sslBadge.variant}>{sslBadge.label}</Badge>
-            </div>
-            {/* «Сертификата нет» — отдельное слово, отличимое от «не проверяли». */}
-            {ssl === "missing" ? (
-              <div style={{ fontSize: 12.5, color: "#b91c1c" }}>No certificate on the server.</div>
-            ) : null}
-            {/* `overflowWrap` — текст ЧУЖОЙ (ответ openssl/FastPanel), и в нём
-                сидит неразрывный токен: см. `Last check failed` выше. */}
-            {facts?.ssl.error ? (
-              <div style={{ fontSize: 12.5, color: "#b91c1c", overflowWrap: "anywhere" }}>{facts.ssl.error}</div>
-            ) : null}
-            {/* `ssl.expires_at` — полный datetime: печатаем в зоне ЧИТАТЕЛЯ
-                (`formatExpiryDate` сам это решает по форме iso), не в UTC. Иначе
-                далеко от UTC дата съедет на день и разойдётся с остальным кодом
-                (правило в `domainExpiry.ts`). Наша запись — тем же
-                `formatExpiryDate`: сырой ISO под человеческой датой читался бы
-                расхождением там, где его нет. */}
-            <FactRow
-              k="Expires"
-              fact={facts?.ssl.expires_at ? formatExpiryDate(facts.ssl.expires_at) : null}
-              src={src.sslExpires}
-              showRecorded={formatExpiryDate}
-            />
-            <FactRow k="Issuer" fact={facts?.ssl.issuer} src={src.sslIssuer} />
-          </div>
-  
           {/* ─── Site ────────────────────────────────────────────────────── */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0, gridColumn: "1 / -1" }}>
+          {/* На всю ширину блок растягивался, пока в ряду выше стояли ДВА
+              соседа (FTP и SSL). SSL уехал на Overview, соседей стало два
+              всего — и растяжка оставила бы половину первого ряда пустой. */}
+          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
             <SubTitle>Site</SubTitle>
             <FactRow k="Path" fact={facts?.site?.site_path} src={src.sitePath} />
             <FactRow k="Owner" fact={facts?.site?.site_user} src={src.siteOwner} />

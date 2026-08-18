@@ -17,8 +17,12 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
  *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
  *  - свежесть считается от `fp_facts_at`, «never checked» — отдельное слово;
  *  - провал последней попытки виден, но снимок остаётся;
- *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет;
- *  - лестница SSL: протухший снимок не зелёный, «нет сертификата» отличимо.
+ *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет.
+ *
+ * Про SSL здесь больше нет ничего: карточка сертификата уехала на вкладку
+ * Overview вместе со своей половиной правила расхождений, и проверяется она там
+ * же — `DomainSslCard.test.tsx` (лестница состояний) и
+ * `DomainDetailModal.overview.test.tsx` (бейдж шапки и карточка не расходятся).
  *
  * Фаза 4 (наша запись против факта):
  *  - строка «при развёртывании: X» есть при расхождении и отсутствует при
@@ -180,29 +184,10 @@ describe("ошибка последней попытки", () => {
   it("показана, а снимок остаётся (свежесть — от fp_facts_at)", () => {
     show({ fp_facts: facts(), fp_facts_at: ago(2 * HOUR), fp_check_error: "ssh: connection refused" });
     expect(screen.getByText(/ssh: connection refused/)).toBeTruthy();
-    // Снимок жив: SSL по-прежнему «Valid», ошибка его не стёрла.
-    expect(screen.getByText("Valid")).toBeTruthy();
-  });
-});
-
-describe("SSL по лестнице", () => {
-  it("свежий валидный сертификат — «Valid» (зелёный)", () => {
-    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
-    expect(screen.getByText("Valid")).toBeTruthy();
-  });
-
-  it("протухший снимок валидного сертификата — «Not checked», а не «Valid»", () => {
-    show({ fp_facts: facts(), fp_facts_at: ago(8 * DAY) });
-    expect(screen.getByText("Not checked")).toBeTruthy();
-    expect(screen.queryByText("Valid")).toBeNull();
-  });
-
-  it("свежий снимок без сертификата — «No certificate», отличимо от «не проверяли»", () => {
-    show({
-      fp_facts: facts({ ssl: { has_certificate: false, expires_at: null, issuer: null, is_letsencrypt: false } }),
-      fp_facts_at: ago(HOUR),
-    });
-    expect(screen.getByText("No certificate")).toBeTruthy();
+    // Снимок жив: поля по-прежнему из него, ошибка его не стёрла. Раньше это
+    // проверялось по бейджу «Valid» — он уехал на карточку SSL вместе с ней, а
+    // утверждение осталось тем же и спрашивает теперь соседнее поле снимка.
+    expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
   });
 });
 
@@ -293,7 +278,6 @@ describe("расхождение нашей записи с фактом", () =>
       site_path: "/var/www/example.com/", // хвостовой слэш — не расхождение
       site_user: "example_usr",
       db_name: "example_db",
-      ssl_issuer: "Let's Encrypt",
     });
     expect(screen.queryByText(/при развёртывании/)).toBeNull();
   });
@@ -304,21 +288,21 @@ describe("расхождение нашей записи с фактом", () =>
     expect(screen.getByText(/при развёртывании: 7\.4/)).toBeTruthy();
   });
 
-  it("путь, владелец, издатель и база расходятся каждый своей строкой", () => {
+  it("путь, владелец и база расходятся каждый своей строкой", () => {
+    // Издатель сертификата был здесь четвёртым и уехал на карточку SSL вместе
+    // с ней (`DomainSslCard.test.tsx` проверяет его тем же утверждением).
     show({
       ...fresh,
       site_path: "/var/www/old.example.com",
       site_user: "old_usr",
-      ssl_issuer: "ZeroSSL",
       db_name: "old_db",
     });
     // Множеством, а не списком в DOM-порядке: перестановка колонок — вопрос
     // вёрстки, и красить ею тест про поведение незачем.
     const notes = screen.getAllByText(/при развёртывании/).map((n) => n.textContent);
-    expect(notes).toHaveLength(4);
+    expect(notes).toHaveLength(3);
     expect(new Set(notes)).toEqual(
       new Set([
-        "при развёртывании: ZeroSSL",
         "при развёртывании: /var/www/old.example.com",
         "при развёртывании: old_usr",
         "при развёртывании: old_db",
@@ -345,36 +329,6 @@ describe("расхождение нашей записи с фактом", () =>
     show({ ...fresh, fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }), ftp_user: "   " });
     expect(rowText("Login")).toContain("server_ftp");
     expect(sourceOf("Login")).toBe("agree");
-  });
-
-  it("срок сертификата сверяется по дате, а наша запись печатается по-человечески", () => {
-    // Часы задаём ЛОКАЛЬНЫЕ: «тот же день» не должен зависеть от зоны CI.
-    const at = (days: number, hour: number) => {
-      const d = new Date();
-      d.setDate(d.getDate() + days);
-      d.setHours(hour, 0, 0, 0);
-      return d;
-    };
-    const base = {
-      fp_facts: facts({
-        ssl: { has_certificate: true, expires_at: at(60, 9).toISOString(), issuer: "Let's Encrypt", is_letsencrypt: true },
-      }),
-      fp_facts_at: ago(HOUR),
-    };
-
-    // Тот же день, другое время — не расхождение (наша запись сделана в момент
-    // выпуска, сервер отдаёт то, что написано в сертификате).
-    show({ ...base, ssl_expires_at: at(60, 18).toISOString() });
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
-
-    cleanup();
-    // Другой день — расхождение, и в строке стоит ДАТА, а не сырой ISO: иначе
-    // она читалась бы расхождением с форматированным значением над ней.
-    const other = at(62, 9);
-    show({ ...base, ssl_expires_at: other.toISOString() });
-    const note = screen.getByText(/при развёртывании/).textContent ?? "";
-    expect(note).toContain(other.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }));
-    expect(note).not.toContain("T");
   });
 });
 

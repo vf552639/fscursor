@@ -188,7 +188,23 @@ export function SectionCard({title, right, children, style, bodyStyle}: {
   style?: React.CSSProperties;
   bodyStyle?: React.CSSProperties;
 }){
-  return <div style={{
+  /**
+   * Карточка — ИМЕНОВАННАЯ группа, и это не украшение разметки.
+   *
+   * Глазами границу карточки задают рамка и крашеная шапка-полоска; для
+   * скринридера же ряд из трёх таких карточек — сплошная лента из трёх селектов
+   * и пяти подписей, по которой нельзя ни перескочить карточку целиком, ни
+   * понять, к какой из них относится строка-диагноз под селектом. Ровно это
+   * говорила плашка ряда связей, которую `SectionCard` здесь заменил
+   * (`DomainLinks`), и терять её `role="group"` при переезде было нельзя.
+   *
+   * Имя берётся из собственного титула (`aria-labelledby`), а не дублируется
+   * пропом: два места, где карточку называют, разошлись бы ровно тогда, когда
+   * титул поправят, а про второе забудут. `useId` — потому что таких карточек на
+   * экране больше десятка, а статический id связал бы их все с первым титулом.
+   */
+  const titleId = React.useId();
+  return <div role="group" aria-labelledby={titleId} style={{
     border:"1px solid #dbe3ee",
     borderRadius:12,
     background:"#fbfcfe",
@@ -208,7 +224,7 @@ export function SectionCard({title, right, children, style, bodyStyle}: {
           набирается больше десятка, и по `h3` скринридер даёт по ним навигацию,
           которой у `div` нет. `margin:0` обязателен — браузерный отступ `h3`
           иначе распирает шапку-полоску, ломая её высоту 10px 18px. */}
-      <h3 style={{margin:0,fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</h3>
+      <h3 id={titleId} style={{margin:0,fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</h3>
       {right}
     </div>
     <div style={{padding:"16px 18px",...bodyStyle}}>{children}</div>

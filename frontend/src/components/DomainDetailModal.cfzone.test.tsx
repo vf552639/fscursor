@@ -169,7 +169,9 @@ function pageSends(rerender: (ui: React.ReactElement) => void, d: any) {
 }
 
 function nsField() {
-  return screen.getByLabelText(/Nameservers/i) as HTMLTextAreaElement;
+  // Ярлык поля — «One per line»: предмет называет шапка карточки
+  // (`SectionCard` «Nameservers»), и поле не повторяет её слово.
+  return screen.getByLabelText(/one per line/i) as HTMLTextAreaElement;
 }
 
 function nsButton() {

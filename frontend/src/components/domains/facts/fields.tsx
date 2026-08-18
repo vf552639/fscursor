@@ -26,7 +26,7 @@ export const MUTED = "#9ca3af";
 
 /** Ширина колонки подписи; приписка выравнивается под значение по ней же. */
 export const KEY_WIDTH = 84;
-export const KEY_GAP = 6;
+const KEY_GAP = 6;
 
 /** Строка «подпись: значение» в стиле карточки; пустое — прочерк, а не пустота. */
 export function Row({ k, v }: { k: string; v: React.ReactNode }) {
@@ -47,7 +47,7 @@ export function Row({ k, v }: { k: string; v: React.ReactNode }) {
  * длинная — «Databases»; заведёте длиннее — приписка съедет, и чинить это надо
  * будет здесь, а не подгонкой числа.
  */
-export function Note({ children }: { children: React.ReactNode }) {
+function Note({ children }: { children: React.ReactNode }) {
   return (
     <div style={{ fontSize: 12, color: MUTED, paddingLeft: KEY_WIDTH + KEY_GAP, wordBreak: "break-all" }}>
       {children}
