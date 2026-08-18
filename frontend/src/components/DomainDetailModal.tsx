@@ -220,8 +220,13 @@ export default function DomainDetailModal({
     registryNameservers: registryAnswer,
   });
 
+  // 920 — ширина карточки по макету: её содержимое раскладывается рядами по
+  // две-три колонки, и на 760 такой ряд сминается в нечитаемые полосы.
+  // Дисциплина `minmax(0,1fr)`/`minWidth:0` от этого не отменяется: `Modal`
+  // держит `overflowY:auto`, из-за чего `overflow-x` вычисляется в `auto`, и
+  // распёртая строка даёт горизонтальную прокрутку, а не обрезку.
   return (
-    <Modal title={`Domain: ${domain.domain_name}`} onClose={onClose} width={760}>
+    <Modal title={`Domain: ${domain.domain_name}`} onClose={onClose} width={920}>
       {/* Сводка и ряд связей. Срок домена и бейдж SSL считают те же модули, что
           и колонки списка (`lib/domainExpiry`, `lib/domainFacts`): два разных
           ответа про один домен на двух поверхностях хуже, чем отсутствие

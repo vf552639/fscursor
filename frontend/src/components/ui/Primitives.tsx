@@ -164,6 +164,52 @@ export function CBo({children, style}: {children: React.ReactNode, style?: React
   return <div style={{padding:20,...style}}>{children}</div>;
 }
 
+/**
+ * Карточка секции по макету карточки домена: рамка `#dbe3ee`, серая шапка-полоска
+ * с uppercase-титулом и правым слотом, тело `16px 18px`.
+ *
+ * Стоит РЯДОМ с `Card`/`CHd`/`CTi`/`CBo`, а не вместо них, и это осознанно.
+ * Геометрия у макета другая (цвет рамки, фон тела, крашеная шапка-полоска ниже
+ * прежней, титул мельче, но жирнее и в верхнем регистре, тело плотнее — 16×18
+ * против 20), а старый набор разобран десятками мест по всем страницам продукта —
+ * переписав его, мы бы поменяли вид всех экранов ради одной модалки, и разбор
+ * такого изменения стоил бы больше, чем сама функция. Когда на новый паттерн
+ * переедут остальные экраны, лишним окажется старый набор, а не этот.
+ *
+ * Собран одним компонентом, а не тройкой «шапка/титул/тело» по образцу `Card`:
+ * у макета все секции одинаковы до пикселя, и разбирать их на части значило бы
+ * разрешить собрать их по-разному.
+ */
+export function SectionCard({title, right, children, style, bodyStyle}: {
+  title: React.ReactNode;
+  /** Правый край шапки: пилюля состояния или мета-подпись вроде «Checked 4h ago». */
+  right?: React.ReactNode;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  bodyStyle?: React.CSSProperties;
+}){
+  return <div style={{
+    border:"1px solid #dbe3ee",
+    borderRadius:12,
+    background:"#fbfcfe",
+    // Шапка красится фоном до самого края, а край скруглён — без `hidden` её
+    // прямые углы вылезают поверх скругления рамки.
+    overflow:"hidden",
+    // Карточки стоят в грид-рядах (`1fr 1fr`, `1fr 1fr 1fr`), а грид-элемент по
+    // умолчанию не сжимается уже своего содержимого: одна длинная строка без
+    // пробелов — путь до лога, IPv6-адрес — распирала бы колонку, а с ней и
+    // модалку. Ту же дисциплину держат `minmax(0,1fr)` у самих гридов.
+    minWidth:0,
+    ...style,
+  }}>
+    <div style={{background:"#eef2f7",borderBottom:"1px solid #dbe3ee",padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+      <div style={{fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</div>
+      {right}
+    </div>
+    <div style={{padding:"16px 18px",...bodyStyle}}>{children}</div>
+  </div>;
+}
+
 // `title` — потому что подпись кнопки коротка по построению (она стоит в ряду
 // таких же), а сказать иногда надо ещё и границы действия: что именно оно
 // делает и чего НЕ делает. Без него такое объяснение уезжает в обёртку-`span`
@@ -200,17 +246,42 @@ export function Sel({value, onChange, children, style, ...rest}: any){
   </select>;
 }
 
+type ModalProps = {
+  /** Штатная строка шапки. Не нужен там, где шапку целиком рисует `header`. */
+  title?: React.ReactNode;
+  onClose: () => void;
+  children?: React.ReactNode;
+  width?: number;
+  closeOnBackdrop?: boolean;
+  /**
+   * Своя шапка вместо штатной строки «title + ✕» — целиком, вместе с закрытием.
+   *
+   * Заведено под карточку домена: её шапка по макету — три строки (ярлык с
+   * пилюлей состояния, имя домена 24/700, мета-ряд с редактируемым сроком) и
+   * своя квадратная кнопка закрытия. Передать это через `title` нельзя: текст
+   * там завёрнут в 18/700, а штатный «✕» встал бы вторым крестиком рядом с
+   * макетным. Поэтому слот заменяет строку ПОЛНОСТЬЮ, и вызывающий обязан сам
+   * позвать `onClose` — иначе модалку нечем будет закрыть, кроме подложки.
+   *
+   * Дефолт не меняется: без `header` разметка ровно прежняя, и остальные три
+   * десятка вызовов ничего об этом пропе не знают.
+   */
+  header?: React.ReactNode;
+};
+
 // `closeOnBackdrop={false}` — для модалок, чей `onClose` УНИЧТОЖАЕТ единственную
 // копию показанного (пароли FTP/БД/панели). Промах мимо кнопки Done не должен
 // стоить пароля к уже созданному аккаунту, а в очереди из двадцати модалок,
 // которые ещё и разной высоты, такой промах — вопрос времени.
-export function Modal({title, onClose, children, width=480, closeOnBackdrop=true}: any){
+export function Modal({title, onClose, children, width=480, closeOnBackdrop=true, header}: ModalProps){
   return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>{if(closeOnBackdrop&&e.target===e.currentTarget)onClose();}}>
     <div style={{background:"#fff",borderRadius:14,width,maxWidth:"95vw",boxShadow:"0 20px 60px rgba(0,0,0,0.18)",padding:28,position:"relative",maxHeight:"90vh",overflowY:"auto"}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-        <div style={{fontSize:18,fontWeight:700,color:"#111"}}>{title}</div>
-        <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,color:"#9ca3af",lineHeight:1}}>✕</button>
-      </div>
+      {header ?? (
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+          <div style={{fontSize:18,fontWeight:700,color:"#111"}}>{title}</div>
+          <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,color:"#9ca3af",lineHeight:1}}>✕</button>
+        </div>
+      )}
       {children}
     </div>
   </div>;
