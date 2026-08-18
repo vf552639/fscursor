@@ -5,7 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainModalHeader from "./DomainModalHeader";
 import { queryClient } from "../../api/queryClient";
-import type { DomainFacts } from "../../lib/domainFacts";
+import { SSL_BADGE, type DomainFacts, type SslState } from "../../lib/domainFacts";
 
 /**
  * Шапка карточки домена — и ровно одно правило, которое видно только отсюда.
@@ -20,7 +20,9 @@ import type { DomainFacts } from "../../lib/domainFacts";
  * до того, как расчёт подняли в модалку.
  *
  * Поэтому снимок в тесте НАРОЧНО противоречит пропу: по снимку сертификат
- * валиден, а сказать шапка обязана то, что ей дали.
+ * валиден, а сказать шапка обязана то, что ей дали. И противоречие проходит по
+ * ВСЕЙ лестнице: потребитель, оставивший `SSL_BADGE` на месте и подменивший один
+ * ярлык, прошёл бы проверку на любом другом состоянии.
  *
  * Больше шапка не считает ничего, и своих проверок на это здесь нет: статус
  * называет `lib/domainStatus` (через `DomainStatusBadge`), срок —
@@ -46,10 +48,15 @@ function facts(): DomainFacts {
   };
 }
 
+/** Ступени берём из самой карты: шестая приедет в таблицу сама. */
+const STATES = Object.keys(SSL_BADGE) as SslState[];
+/** Что даёт пересчёт по снимку теста: живой сертификат на 60 дней — «valid». */
+const COMPUTED: SslState = "valid";
+
 afterEach(cleanup);
 
 describe("шапка карточки домена", () => {
-  it("состояние сертификата ПРИЕЗЖАЕТ пропсом, а не считается по снимку заново", () => {
+  it.each(STATES)("состояние сертификата ПРИЕЗЖАЕТ пропсом, а не считается по снимку заново: %s", (state) => {
     render(
       <QueryClientProvider client={queryClient}>
         <DomainModalHeader
@@ -63,14 +70,16 @@ describe("шапка карточки домена", () => {
               fp_facts_at: ago(HOUR),
             } as any
           }
-          ssl="expiring"
+          ssl={state}
           now={Date.now()}
           onClose={() => {}}
         />
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText("Expiring soon")).toBeTruthy();
-    expect(screen.queryByText("Valid")).toBeNull();
+    expect(screen.getByText(SSL_BADGE[state].label)).toBeTruthy();
+    // На `valid` противоречия нет по построению — это ровно то, что дал бы
+    // пересчёт; строка таблицы остаётся, но доказывает только показ.
+    if (state !== COMPUTED) expect(screen.queryByText(SSL_BADGE[COMPUTED].label)).toBeNull();
   });
 });

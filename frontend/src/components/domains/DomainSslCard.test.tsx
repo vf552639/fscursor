@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 
 import DomainSslCard from "./DomainSslCard";
-import type { DomainFacts, SslState } from "../../lib/domainFacts";
+import { SSL_BADGE, type DomainFacts, type SslState } from "../../lib/domainFacts";
 
 /**
  * Карточка SSL вкладки Overview — сертификат домена и то, что о нём говорит
@@ -74,6 +74,18 @@ function show(over: Record<string, unknown> = {}, ssl: SslState = "valid") {
 
 const fresh = { fp_facts: facts(), fp_facts_at: ago(HOUR) };
 
+/**
+ * Вся лестница состояний, а не одна ступень.
+ *
+ * Потребитель, который оставил `SSL_BADGE` на месте и подменил ОДИН ярлык,
+ * проходит проверку на любом ДРУГОМ состоянии — и мутация «карточка врёт про
+ * `expired`» пережила эти тесты, пока ступень была одна. Список берётся из самой
+ * карты: шестое состояние приедет в таблицу само, а не будет забыто.
+ */
+const STATES = Object.keys(SSL_BADGE) as SslState[];
+/** Что даёт пересчёт по `fresh`: живой сертификат на 60 дней — это «valid». */
+const COMPUTED: SslState = "valid";
+
 // RTL чистит DOM сам; `cleanup()` внутри тестов зовётся там, где один тест
 // показывает карточку дважды подряд.
 afterEach(cleanup);
@@ -119,7 +131,7 @@ describe("свежесть снимка — в шапке карточки", () 
 });
 
 describe("состояние сертификата названо словом", () => {
-  it("состояние ПРИЕЗЖАЕТ пропсом, а не считается по снимку заново", () => {
+  it.each(STATES)("состояние ПРИЕЗЖАЕТ пропсом, а не считается по снимку заново: %s", (state) => {
     // Единственное место, где это правило вообще видно. Через модалку оно не
     // проверяется никак: считай карточка `sslState` сама, теми же аргументами,
     // она дала бы тот же ответ — на экране не изменилось бы ничего, а вторая
@@ -130,9 +142,11 @@ describe("состояние сертификата названо словом"
     // Поэтому снимок здесь НАРОЧНО противоречит пропу: по снимку сертификат
     // валиден (`fresh` — живой сертификат на 60 дней), а сказать карточка
     // обязана то, что ей дали.
-    show(fresh, "expiring");
-    expect(screen.getByText("Expiring soon")).toBeTruthy();
-    expect(screen.queryByText("Valid")).toBeNull();
+    show(fresh, state);
+    expect(screen.getByText(SSL_BADGE[state].label)).toBeTruthy();
+    // Ступень `valid` — та самая, которую даёт пересчёт, и противоречия на ней
+    // нет по построению: строка таблицы остаётся, но доказывает только показ.
+    if (state !== COMPUTED) expect(screen.queryByText(SSL_BADGE[COMPUTED].label)).toBeNull();
   });
 
   it("«сертификата нет» — отдельная строка, отличимая от «не проверяли»", () => {
