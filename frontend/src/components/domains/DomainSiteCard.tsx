@@ -82,12 +82,16 @@ export default function DomainSiteCard({
 
   return (
     <SectionCard title="Site">
-      {/* `minWidth: 0` — карточка стоит в двухколоночном гриде, а печатает
-          ЧУЖИЕ строки (путь сайта, имена баз): без него grid-элемент не
-          сожмётся уже своего содержимого, распёртая колонка даст модалке
-          горизонтальную полосу, запрещённую `design-brief.md` §11, — а под
-          `overflow: hidden` самой карточки путь ещё и обрежется. */}
-      <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
+      {/* `minWidth: 0` здесь НЕ нужен, и его отсутствие — не недосмотр. Дисциплину
+          ширины держат двое, и оба выше: grid-элементом ряда является корень
+          `SectionCard`, и он ставит `minWidth: 0` себе сам (`ui/Primitives`), а
+          сам ряд с его `minmax(0, 1fr)` объяснён в `tabs/TabLayout` (`CardRow`).
+          Этот же div — обычный блок внутри тела карточки, а `min-width: auto`
+          считается по содержимому ТОЛЬКО у flex- и grid-элементов; у блока он и
+          так ноль. От распирания чужим путём сайта и именами баз спасают
+          переносы у самих значений (`Row` рвёт по `wordBreak`), а не ширина
+          этого трека. */}
+      <div style={{ display: "grid", gap: 10 }}>
         {nothingRecorded ? (
           <div style={{ fontSize: 13, color: MUTED }}>No site details recorded for this domain yet.</div>
         ) : null}
