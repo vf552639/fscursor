@@ -99,22 +99,26 @@ describe("строка вкладок", () => {
     show();
     expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Server"]);
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
-    // Ряд связей и панель NS — на Overview, секция сервера — нет.
+    // Ряд связей и панель NS — на Overview, карточки сервера — нет.
+    // Спрашиваем именно карточку `FTP Access` (`role="group"` с её именем):
+    // заголовка «Server state» у вкладки больше нет — его место заняли шапки
+    // карточек, — а по группе видно ровно то же самое: смонтирована вкладка
+    // Server или нет.
     expect(screen.getByRole("group", { name: "Registrar" })).toBeTruthy();
-    expect(screen.queryByText("Server state")).toBeNull();
+    expect(screen.queryByRole("group", { name: "FTP Access" })).toBeNull();
   });
 
   it("Server показывает живое чтение, Overview — карточки связей", () => {
     show();
     openTab("Server");
-    expect(screen.getByText("Server state")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "FTP Access" })).toBeTruthy();
     // Панель не просто добавилась рядом: прежняя размонтирована, иначе на
     // экране оказались бы два ответа про один домен сразу.
     expect(screen.queryByRole("group", { name: "Registrar" })).toBeNull();
 
     openTab("Overview");
     expect(screen.getByRole("group", { name: "Registrar" })).toBeTruthy();
-    expect(screen.queryByText("Server state")).toBeNull();
+    expect(screen.queryByRole("group", { name: "FTP Access" })).toBeNull();
   });
 
   it("Cloudflare и nameservers стоят на ОДНОЙ вкладке", () => {

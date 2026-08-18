@@ -1,17 +1,25 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
-import DomainServerFacts from "./DomainServerFacts";
-import { queryClient } from "../../api/queryClient";
-import type { DomainFacts } from "../../lib/domainFacts";
-import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from "../../test/secretBlobKit";
+import DomainServerTab from "./DomainServerTab";
+import { queryClient } from "../../../api/queryClient";
+import type { DomainFacts } from "../../../lib/domainFacts";
+import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from "../../../test/secretBlobKit";
 
 /**
- * Секция «Server state» карточки домена: витрина прочитанного с сервера с
- * честной свежестью — и, после фазы 4, ЕДИНСТВЕННОЕ место карточки, отвечающее
- * на вопрос «что с сайтом». Проверяем продуктовые правила обеих фаз.
+ * Вкладка Server карточки домена: витрина прочитанного с сервера с честной
+ * свежестью — и ЕДИНСТВЕННОЕ место карточки, отвечающее на вопрос «что с
+ * сайтом». Проверяем продуктовые правила всех фаз, которые её собрали.
+ *
+ * Нумерация фаз ниже — из ПРЕЖНЕГО плана карточки домена (там их было четыре);
+ * раскладку по вкладкам делает следующий план, и его правила названы здесь
+ * словами, а не номером, чтобы две нумерации не читались как одна.
+ *
+ * Раскладка вкладок: секция стала двумя карточками (`FTP Access` и `Site`) плюс
+ * заглушкой `Backups`, а перечень логов из этого же снимка принадлежит вкладке
+ * Logs — здесь его быть не должно, иначе на один вопрос отвечают два места.
  *
  * Фаза 3 (свежесть и секреты):
  *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
@@ -38,7 +46,7 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
 
 const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn(), invokeIfTauri: vi.fn(), apiPut: vi.fn() }));
 
-vi.mock("../../lib/localCache", async (importOriginal) => ({
+vi.mock("../../../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
@@ -48,12 +56,12 @@ vi.mock("../../lib/localCache", async (importOriginal) => ({
 // тест обязан ВИДЕТЬ, что уехало в блоб (плейнтекст) и что — в тело PUT (только
 // blobId). Заглушка над `putSecretBlob`/`useSecretSave` пропустила бы регрессию,
 // прокидывающую пароль в `variables` мутации домена.
-vi.mock("../../lib/tauri-invoke", async (importOriginal) => ({
+vi.mock("../../../lib/tauri-invoke", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeIfTauri: mocks.invokeIfTauri,
 }));
 
-vi.mock("../../api/client", async (importOriginal) => ({
+vi.mock("../../../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   apiPut: mocks.apiPut,
 }));
@@ -122,7 +130,7 @@ function rowText(label: string): string {
 function show(over: Record<string, unknown> = {}, server = SERVER) {
   render(
     <QueryClientProvider client={queryClient}>
-      <DomainServerFacts domain={domain(over)} server={server} now={Date.now()} />
+      <DomainServerTab domain={domain(over)} server={server} now={Date.now()} />
     </QueryClientProvider>,
   );
 }
@@ -251,12 +259,57 @@ describe("пароль FTP", () => {
 });
 
 describe("данные сайта", () => {
-  it("путь, PHP с обработчиком, БД и логи из фактов", () => {
+  it("путь, PHP с обработчиком и БД из фактов", () => {
     show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
     expect(screen.getByText("/var/www/example.com")).toBeTruthy();
     expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
     expect(screen.getByText("example_db")).toBeTruthy();
-    expect(screen.getByText("/var/log/nginx/example.com.error.log")).toBeTruthy();
+  });
+
+  it("перечня логов на вкладке Server нет: он предмет вкладки Logs", () => {
+    // Утверждение-дубль прежнего: раньше здесь проверялось, что строка `Logs`
+    // печатает пути из снимка. Логи читаются из того же `fp_facts.logs`, что и
+    // всё остальное, и по плану вкладок принадлежат вкладке Logs — два места,
+    // печатающие один и тот же перечень, разъехались бы в первый же день,
+    // когда одно из них поправят. Поэтому правило осталось, только с обратным
+    // знаком, и переживёт приезд самой вкладки.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(screen.queryByText("/var/log/nginx/example.com.error.log")).toBeNull();
+    expect(screen.queryByText("Logs")).toBeNull();
+  });
+});
+
+describe("раскладка макета: карточки, а не сплошная секция", () => {
+  it("две именованные карточки — FTP Access и Site", () => {
+    // Именно `role="group"` с именем: карточка `SectionCard` — единица, по
+    // которой скринридер прыгает и к которой относит поля. Ряд из полей без
+    // группировки — это лента, где непонятно, чей `Login` и чей `Path`.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(screen.getByRole("group", { name: "FTP Access" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Site" })).toBeTruthy();
+    // Поля стоят каждое в своей карточке, а не рядом друг с другом.
+    const ftp = screen.getByRole("group", { name: "FTP Access" }).textContent ?? "";
+    expect(ftp).toContain("Host");
+    expect(ftp).toContain("Password");
+    expect(ftp).not.toContain("Databases");
+    const site = screen.getByRole("group", { name: "Site" }).textContent ?? "";
+    expect(site).toContain("Databases");
+    expect(site).not.toContain("Password");
+  });
+
+  it("Backups — честная заглушка: пилюля COMING SOON и ни одного мёртвого органа управления", () => {
+    // Отступление 1 плана: макет рисует здесь два селекта (частота и место),
+    // поле пути и кнопки «Backup now»/«Save», а также мету «Last backup: … ·
+    // 412 MB». О резервных копиях продукт не знает ничего — ни модели, ни
+    // колонки, ни поля в снимке, — поэтому селект, который ничего не
+    // сохраняет, обещал бы настройку, которой нет.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    const backups = screen.getByRole("group", { name: "Backups" });
+    expect(backups.textContent).toContain("COMING SOON");
+    expect(within(backups).queryAllByRole("combobox")).toEqual([]);
+    expect(within(backups).queryAllByRole("button")).toEqual([]);
+    expect(within(backups).queryAllByRole("textbox")).toEqual([]);
+    expect(backups.textContent).not.toMatch(/Last backup/i);
   });
 });
 
@@ -407,6 +460,11 @@ describe("снимка не было ни разу", () => {
     // поля снимка спрятаны целиком, потому что прочерк в них читался бы как
     // «спросили, там пусто».
     expect(screen.queryAllByText("—")).toEqual([]);
+    // И «not read» — тоже ни одного: так помечен ПУСТОЙ СПИСОК под снимком
+    // («спросили, не прочитали»), а здесь спрашивать мы не ходили вовсе, и
+    // легенда строкой выше уже сказала это словами. Утверждение общее на обе
+    // карточки: список печатают и `Login` (аккаунты FTP), и `Databases`.
+    expect(screen.queryAllByText("not read")).toEqual([]);
   });
 
   it("известное из provision показано как наша запись, а подпись дана легендой один раз", () => {
@@ -440,7 +498,7 @@ describe("снимка не было ни разу", () => {
     // `show` подставляет сервер по умолчанию, поэтому рендерим напрямую.
     render(
       <QueryClientProvider client={queryClient}>
-        <DomainServerFacts domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
+        <DomainServerTab domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
       </QueryClientProvider>,
     );
     expect(screen.getByText("Host").parentElement?.textContent).toContain("—");

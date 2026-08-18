@@ -11,8 +11,8 @@ import { sslState } from "../lib/domainFacts";
 import { nsDelegation } from "../lib/nsDelegation";
 import DomainModalHeader from "./domains/DomainModalHeader";
 import { useNsDraft } from "./domains/useNsDraft";
-import DomainServerFacts from "./domains/DomainServerFacts";
 import DomainOverviewTab from "./domains/tabs/DomainOverviewTab";
+import DomainServerTab from "./domains/tabs/DomainServerTab";
 import { Modal } from "./ui/Primitives";
 import { Tabs } from "./ui/Tabs";
 
@@ -27,9 +27,9 @@ import { Tabs } from "./ui/Tabs";
  *
  * Раньше верх карточки был двумя колонками «слева чем домен является, справа
  * что развёрнуто на сервере»: колонки не означали ничего (просто перенос строки
- * посреди списка), а правая ПОВТОРЯЛА восемь полей секции «Server state» — по
- * нашей записи из provision, тогда как секция читает те же поля с сервера
- * вживую. Теперь всё про сайт живёт только там, где оно измерено.
+ * посреди списка), а правая ПОВТОРЯЛА поля вкладки Server — по нашей записи из
+ * provision, тогда как вкладка читает те же поля с сервера вживую. Теперь всё
+ * про сайт живёт только там, где оно измерено.
  *
  * Вкладок здесь ровно столько, сколько есть содержимого, и это правило. `db`,
  * `ssl` и `nginx` (и кнопка «Create Site») по-прежнему невозможны: их действия
@@ -51,7 +51,8 @@ import { Tabs } from "./ui/Tabs";
  * provision, и нигде не хранится — поэтому пустого поля под него здесь тоже
  * нет, оно обещало бы значение, которого не будет никогда. **Пароль FTP**,
  * наоборот, хранится — непрозрачным блобом (`ftp_password_blob_id`), — и живёт
- * в «Server state» рядом с логином: там его показывает `RevealSecret`, там же
+ * в карточке FTP на вкладке Server рядом с логином: там его показывает
+ * `RevealSecret`, там же
  * его можно задать из десктопа. Плейнтекста в этой ветке нет ни в одном месте:
  * расшифровка идёт по кнопке и не проходит ни через пропсы, ни через стейт
  * карточки.
@@ -271,11 +272,11 @@ export default function DomainDetailModal({
         {/* Единственный ответ на вопрос «что с сайтом»: значением поля там
             всегда факт с сервера, а наша запись из provision всплывает только
             строкой расхождения либо там, где факта нет вовсе
-            (`lib/domainDrift`). Свежесть у секции честная и своя — снимок
+            (`lib/domainDrift`). Свежесть у вкладки честная и своя — снимок
             снимается по кнопке, которая стоит здесь же; карточка SSL на
             Overview читает ТОТ ЖЕ снимок и печатает его возраст у себя в
             шапке, чтобы не выдать протухшее измерение за свежее. */}
-        {tab === "server" ? <DomainServerFacts domain={domain} server={server} now={now} /> : null}
+        {tab === "server" ? <DomainServerTab domain={domain} server={server} now={now} /> : null}
       </Tabs>
     </Modal>
   );
