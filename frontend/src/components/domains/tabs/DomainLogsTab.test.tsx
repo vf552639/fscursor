@@ -144,6 +144,17 @@ describe("перечень файлов", () => {
     expect(chip(/^Frontend error/).textContent).not.toContain("missing");
   });
 
+  it("«размер не прочитан» тоже назван словом: прочерк на слух не звучит", () => {
+    // Близнец теста выше. Глиф «—» скринридер по умолчанию не произносит, и без
+    // метки чип объявлялся бы просто «Backend access» — то есть состояние
+    // пришлось бы выводить из отсутствия размера, из тишины.
+    showWithSnapshot();
+    expect(chip(/^Backend access/).textContent).toContain("—");
+    expect(within(chips()).getByRole("button", { name: /Backend access\s*size not read/ })).toBeTruthy();
+    // У измеренного файла метки нет: его содержимое читается как есть.
+    expect(within(chips()).queryByRole("button", { name: /Frontend access\s*size not read/ })).toBeNull();
+  });
+
   it("и приглушён цветом — вторым каналом, дублирующим слово", () => {
     // Сравниваем светлоту двух цветов, а не конкретный hex: цвет уедет в токены
     // вместе с редизайном, а различимость должна остаться.
