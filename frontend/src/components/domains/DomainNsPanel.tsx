@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import { useMutationState } from "@tanstack/react-query";
 
 import { clip, errorText } from "../../api/cfAutoBind";
@@ -16,6 +16,7 @@ import { NsDelegation, nsDelegationVariant } from "../../lib/nsDelegation";
 import { registrarProviderKnown, registrarSupportsNsApi } from "../../lib/registrarCaps";
 import { isTauri } from "../../lib/runtime";
 import { Badge, Btn } from "../ui/Primitives";
+import { NsDraft } from "./useNsDraft";
 
 const WARN_TEXT = "#b45309";
 
@@ -26,14 +27,6 @@ const WARN_TEXT = "#b45309";
  */
 function parseNameservers(text: string): string[] {
   return text.split(/[\s,]+/).filter(Boolean);
-}
-
-/** Откуда пришёл текст поля: зона со своим списком либо ниоткуда (набрано руками). */
-function zoneSourceOf(
-  zoneId: string | null,
-  nameservers: string[],
-): { zoneId: string; nameservers: string[] } | null {
-  return zoneId && nameservers.length > 0 ? { zoneId, nameservers } : null;
 }
 
 /** Осталось ли в поле хоть одно имя из подставленного списка. Регистр не в счёт. */
@@ -51,106 +44,16 @@ function sameNameservers(a: string[], b: string[]): boolean {
   return norm(a) === norm(b);
 }
 
-/**
- * Черновик поля nameservers — набранное, но ещё не отправленное.
- *
- * Живёт ВЫШЕ панели (`useNsDraft` зовёт модалка), и это вынужденно: вкладки
- * рисуют ровно активную панель, поэтому переход Overview → Server → Overview
- * размонтирует это поддерево. Оставь состояние внутри — и список, набранный
- * руками, исчезал бы молча по дороге на соседнюю вкладку. Цена ленивой
- * отрисовки названа в `ui/Tabs`, здесь она и оплачена.
- */
-export interface NsDraft {
-  /** Текст поля как есть — по имени на строку, но запятые прощаются. */
-  text: string;
-  /**
-   * Трогал ли поле пользователь. Признак нужен отдельным флагом, а не «текст
-   * непустой»: стирание backspace'ом проходит через пустую строку, и по тексту
-   * поле в этот момент наполнялось бы NS зоны обратно — следующие backspace'ы
-   * стирали бы уже их.
-   */
-  edited: boolean;
-  /**
-   * Откуда в поле взялись nameservers: зона и ЕЁ СПИСОК на момент подстановки
-   * (`null` — текст набран руками).
-   *
-   * Список хранится вместе с id, потому что вопрос ниже звучит не «была ли
-   * подстановка», а «осталось ли в поле хоть что-то от той зоны». Пользователь,
-   * заменивший подставленное целиком, набрал свой текст — предупреждать его про
-   * чужую зону значило бы приписывать его NS чужому происхождению.
-   */
-  zoneSource: { zoneId: string; nameservers: string[] } | null;
-  /** Правка руками: она же навсегда отключает зеркало зоны. */
-  edit: (text: string) => void;
-  /** «↺ Restore from Cloudflare» — вернуть в поле nameservers текущей зоны. */
-  restore: () => void;
-}
-
-/**
- * Состояние поля nameservers. Заведено здесь, а зовётся из модалки: правила
- * («зеркалим зону, пока не печатали», «правка выключает зеркало») принадлежат
- * панели, а вот ЖИЗНЬ состояния — модалке, потому что пережить оно обязано
- * переключение вкладок.
- */
-export function useNsDraft({
-  zoneNameservers,
-  zoneId,
-}: {
-  /** NS зоны Cloudflare — то, что подставляется в нетронутое поле. */
-  zoneNameservers: string[];
-  /** `cloudflare_zone_id` домена: вместе с ним запоминается происхождение текста. */
-  zoneId: string | null;
-}): NsDraft {
-  const [text, setText] = useState("");
-  const [edited, setEdited] = useState(false);
-  const [zoneSource, setZoneSource] = useState<NsDraft["zoneSource"]>(null);
-
-  /**
-   * Нетронутое поле ЗЕРКАЛИТ nameservers текущей зоны — включая случай, когда
-   * зоны не стало.
-   *
-   * Одноразовой подстановки тут мало, и это не теория: карточка не
-   * пересоздаётся при смене аккаунта Cloudflare (`key` у неё — id домена), а
-   * смена аккаунта обнуляет `cloudflare_zone_id`. Подставленные раньше NS зоны
-   * СТАРОГО аккаунта оставались бы в поле, ссылка «Restore from Cloudflare»
-   * при этом исчезала (сравнивать не с чем), и кнопка оставалась живой — то
-   * есть одним кликом регистратору уезжали nameservers аккаунта, от которого
-   * пользователь только что отказался.
-   *
-   * Зеркалит только пока пользователь не печатал: поздний ответ Cloudflare не
-   * вправе затирать набранное руками, а домен без зоны CF (или уезжающий на
-   * чужой хостинг) обязан оставаться заполняемым вручную.
-   */
-  React.useEffect(() => {
-    if (edited) return;
-    setText(zoneNameservers.join("\n"));
-    setZoneSource(zoneSourceOf(zoneId, zoneNameservers));
-  }, [zoneNameservers, edited, zoneId]);
-
-  return {
-    text,
-    edited,
-    zoneSource,
-    edit: (next: string) => {
-      setEdited(true);
-      setText(next);
-    },
-    restore: () => {
-      // Правка отключает зеркало зоны навсегда, поэтому «восстановить» — это
-      // такая же явная правка, а не возврат к нетронутому состоянию.
-      setEdited(true);
-      setText(zoneNameservers.join("\n"));
-      setZoneSource(zoneSourceOf(zoneId, zoneNameservers));
-    },
-  };
-}
-
 export interface DomainNsPanelProps {
   domain: Domain;
-  /** Набранное, но не отправленное: живёт в модалке, чтобы пережить вкладки. */
+  /**
+   * Набранное, но не отправленное: живёт в модалке, чтобы пережить вкладки.
+   *
+   * Список NS зоны приезжает ВНУТРИ него (`draft.zoneNameservers`), а не
+   * вторым пропом рядом: подстановка в поле и «эталон» для ссылки
+   * восстановления обязаны быть одним значением — см. `NsDraft`.
+   */
   draft: NsDraft;
-  /** NS зоны Cloudflare: подстановка в поле и «эталон» сверки. Пусто — зоны нет или она не прочитана. */
-  zoneNameservers: string[];
   /** Отказ чтения зон аккаунта — причина, по которой подстановка пуста. */
   zonesError: unknown;
   /** Итог сверки «NS зоны против NS домена В РЕЕСТРЕ» (`lib/nsDelegation`). */
@@ -181,7 +84,6 @@ export interface DomainNsPanelProps {
 export default function DomainNsPanel({
   domain,
   draft,
-  zoneNameservers,
   zonesError,
   delegation,
   registrarProvider,
@@ -258,6 +160,16 @@ export default function DomainNsPanel({
    * пуст, и ручной ввод для домена без зоны CF (задокументированная
    * возможность) молчит, как и раньше.
    */
+  /**
+   * id поля — из `useId`, а не строкой `"ns-list"`.
+   *
+   * Связь `<label for>` с textarea по статическому id держится ровно пока панель
+   * на экране одна: вторая привяжет свой ярлык к ПЕРВОМУ полю, и клик по подписи
+   * уведёт фокус в чужую карточку — молча, без единой ошибки. Тем же приёмом и
+   * по той же причине выданы id вкладкам (`ui/Tabs`) и титулу `SectionCard`.
+   */
+  const fieldId = React.useId();
+
   const nsFromDetachedZone =
     draft.edited &&
     draft.zoneSource != null &&
@@ -280,7 +192,7 @@ export default function DomainNsPanel({
               потерян — он и есть единственное, чего шапка не говорит. Для
               скринридера имя не пропало: карточка `SectionCard` — именованная
               группа, и «Nameservers» он объявляет при входе в неё. */}
-          <label htmlFor="ns-list" style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
+          <label htmlFor={fieldId} style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>
             One per line
           </label>
           {/* Правка отключает зеркало зоны навсегда (см. `NsDraft.edited`),
@@ -290,7 +202,7 @@ export default function DomainNsPanel({
           {/* Сравниваем НОРМАЛИЗОВАННЫЕ списки, а не текст посимвольно:
               лишний перевод строки в конце — не повод предлагать
               восстановление того, что и так уже в поле. */}
-          {zoneNameservers.length > 0 && !sameNameservers(nameservers, zoneNameservers) ? (
+          {draft.zoneNameservers.length > 0 && !sameNameservers(nameservers, draft.zoneNameservers) ? (
             <button
               type="button"
               onClick={draft.restore}
@@ -301,7 +213,7 @@ export default function DomainNsPanel({
           ) : null}
         </div>
         <textarea
-          id="ns-list"
+          id={fieldId}
           value={draft.text}
           onChange={(e) => draft.edit(e.target.value)}
           placeholder={"ns1.example.com\nns2.example.com"}
@@ -319,7 +231,11 @@ export default function DomainNsPanel({
                 разница между «не смогли прочитать» и «нечего показывать»
                 здесь и есть ответ на вопрос пользователя. */}
             {zonesError ? (
-              <div style={{ fontSize: 12, color: WARN_TEXT }}>
+              // `overflowWrap` — текст ЧУЖОЙ (ответ Cloudflare), а карточка
+              // теперь вдвое уже прежней панели и обрезает содержимое
+              // (`SectionCard` держит `overflow: hidden`): без переноса
+              // неразрывный токен не распирал бы её, а молча уезжал под край.
+              <div style={{ fontSize: 12, color: WARN_TEXT, overflowWrap: "anywhere" }}>
                 Could not prefill from Cloudflare: {clip(errorText(zonesError))}
               </div>
             ) : null}
@@ -445,7 +361,10 @@ function NsDelegationLine({
   return (
     <div style={{ display: "grid", gap: 4 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, color: "#6b7280" }}>
+        {/* `overflowWrap` — к фразе приписываются слова реестра
+            (`clip(delegation.detail)`: «no RDAP server for .xyz», хост, URL), а
+            карточка обрезает содержимое (`SectionCard`, `overflow: hidden`). */}
+        <span style={{ fontSize: 12, color: "#6b7280", overflowWrap: "anywhere" }}>
           {delegationText(delegation, nsJustPushed)}
           {/* Слова источника приписываются к причине, а не заменяют её: «не
               знаем» отвечает на вопрос пользователя, а текст реестра («no RDAP

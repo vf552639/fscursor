@@ -10,7 +10,7 @@ import { normalizeZoneName } from "../lib/cfZoneMatch";
 import { sslState } from "../lib/domainFacts";
 import { nsDelegation } from "../lib/nsDelegation";
 import DomainModalHeader from "./domains/DomainModalHeader";
-import { useNsDraft } from "./domains/DomainNsPanel";
+import { useNsDraft } from "./domains/useNsDraft";
 import DomainServerFacts from "./domains/DomainServerFacts";
 import DomainOverviewTab from "./domains/tabs/DomainOverviewTab";
 import { Modal } from "./ui/Primitives";
@@ -211,6 +211,10 @@ export default function DomainDetailModal({
    * руками список исчезал бы молча по пути на соседнюю вкладку; правила же
    * («зеркалим зону, пока не печатали», «правка выключает зеркало») остались в
    * `useNsDraft` рядом с панелью, наверх уехала только ЖИЗНЬ состояния.
+   *
+   * Список зоны отдаётся ТОЛЬКО сюда: панель получает его из самого черновика,
+   * а не вторым пропом, — иначе «что зеркалим» и «с чем сверяем» стали бы двумя
+   * значениями, которые ничто не заставляет совпадать.
    */
   const nsDraft = useNsDraft({ zoneNameservers, zoneId: domain.cloudflare_zone_id });
 
@@ -260,7 +264,6 @@ export default function DomainDetailModal({
             ssl={ssl}
             now={now}
             delegation={delegation}
-            zoneNameservers={zoneNameservers}
             nsDraft={nsDraft}
             registrarProvider={registrarProvider}
           />

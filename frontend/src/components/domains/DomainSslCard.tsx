@@ -3,9 +3,10 @@ import React from "react";
 import { Domain } from "../../api/domains";
 import { sslExpiresSource, sslIssuerSource } from "../../lib/domainDrift";
 import { formatExpiryDate } from "../../lib/domainExpiry";
-import { SSL_BADGE, SslState, isFactsStale } from "../../lib/domainFacts";
-import { Badge, SectionCard, formatAgoStale } from "../ui/Primitives";
+import { SSL_BADGE, SslState } from "../../lib/domainFacts";
+import { Badge, SectionCard } from "../ui/Primitives";
 import { FactRow, HasSnapshot, KEY_WIDTH } from "./facts/fields";
+import { snapshotOf } from "./facts/snapshot";
 
 /**
  * Сертификат домена — карточка вкладки Overview, вынутая из секции «Server
@@ -28,12 +29,12 @@ import { FactRow, HasSnapshot, KEY_WIDTH } from "./facts/fields";
  *
  * Легенды «Сервер ещё не читали. Приглушённые значения — из provision, на
  * сервере не проверено» на Overview нет, и это осознанно: она принадлежит
- * секции сервера, где полей восемь. Здесь их два, и то же самое говорят рядом
- * бейдж `Not checked` и подпись `Never checked` в шапке — вместе с приглушённым
- * цветом значений этого хватает, а третья формулировка о том же в карточке из
- * двух строк была бы теснотой без нового знания (принцип №2). Поэтому и
- * `HasSnapshot` здесь ровно тот же, что в секции: без снимка приписки под
- * полями не печатаются.
+ * секции сервера, где над сеткой полей стоит одной строкой на всех. Здесь
+ * легенды нет — поэтому подпись печатается У ПОЛЯ, под каждым из двух
+ * (`RecordedNoteInLegend` карточка не ставит вовсе). Так смысл приглушённого
+ * значения держится на СЛОВАХ, а не на сером цвете, который миграция на токены
+ * ещё будет переназначать. Пустые поля при этом всё равно прячутся целиком —
+ * это `HasSnapshot`, и он про домен, а не про место показа.
  */
 export default function DomainSslCard({
   domain,
@@ -51,20 +52,10 @@ export default function DomainSslCard({
   /** «Сейчас» карточки: один раз на рендер, общее для всех её сроков. */
   now: number;
 }) {
-  // Снимок читается ТОЛЬКО вместе со своей отметкой времени: «когда сняли» —
-  // часть самого снимка, а не украшение. Тот же гейт стоит в секции сервера, и
-  // по той же причине: пара «факты есть, отметки нет» не должна дать карточке
-  // сказать «не читали» и тут же напечатать эти факты значениями.
-  const facts = domain.fp_facts_at ? domain.fp_facts ?? null : null;
-  const noSnapshot = !domain.fp_facts_at;
-
-  // Свежесть — от `fp_facts_at` (когда снят снимок), НЕ от `fp_checked_at`
-  // (когда была последняя попытка): протухший снимок не должен молодеть от
-  // проваленной проверки. «Never checked» — отдельное слово, а не прочерк.
-  const factsStale = isFactsStale(domain.fp_facts_at, now);
-  const freshness = domain.fp_facts_at
-    ? `Checked ${formatAgoStale(domain.fp_facts_at, factsStale, now)}`
-    : "Never checked";
+  // Разбор снимка — общий (`facts/snapshot`): секция сервера и эта карточка
+  // читают ОДИН снимок, и гейт `fp_facts_at` над `fp_facts` вместе с порогом
+  // свежести обязаны быть у них одним правилом, а не двумя совпадающими.
+  const { facts, noSnapshot, stale: factsStale, freshness } = snapshotOf(domain, now);
 
   const sslBadge = SSL_BADGE[ssl];
   const src = {

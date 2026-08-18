@@ -8,7 +8,8 @@ import { SslState } from "../../../lib/domainFacts";
 import { NsDelegation } from "../../../lib/nsDelegation";
 import { Badge, SectionCard } from "../../ui/Primitives";
 import DomainLinks from "../DomainLinks";
-import DomainNsPanel, { NsDelegationPill, NsDraft } from "../DomainNsPanel";
+import DomainNsPanel, { NsDelegationPill } from "../DomainNsPanel";
+import { NsDraft } from "../useNsDraft";
 import DomainSslCard from "../DomainSslCard";
 
 /**
@@ -66,8 +67,10 @@ export interface DomainOverviewTabProps {
   /** «Сейчас» карточки: один раз на рендер, общее для всех её сроков. */
   now: number;
   delegation: NsDelegation;
-  zoneNameservers: string[];
-  /** Черновик поля NS: живёт в модалке, чтобы пережить переключение вкладок. */
+  /**
+   * Черновик поля NS: живёт в модалке, чтобы пережить переключение вкладок, и
+   * несёт в себе список зоны, который зеркалит.
+   */
   nsDraft: NsDraft;
   registrarProvider: string | null | undefined;
 }
@@ -86,10 +89,12 @@ export interface DomainOverviewTabProps {
  * читаются как две независимые поломки. Прежняя карточка вкладки потеряла в том
  * числе поэтому; новые их не возвращают.
  *
- * Своей логики у вкладки нет ни строчки — вся раскладка и ни одного расчёта:
- * состояние SSL считает модалка, делегирование — `lib/nsDelegation`, расхождения
- * — `lib/domainDrift`. Единственное её собственное знание — `SSL_PROVISION_ALARM`
- * выше: какой итог прошлого выпуска сертификата стоит называть словами.
+ * Правил о СОСТОЯНИИ домена вкладка не заводит ни одного: состояние SSL считает
+ * модалка, делегирование — `lib/nsDelegation`, расхождение нашей записи с
+ * фактом — `lib/domainDrift`, срок — `lib/domainExpiry`. Собственного знания у
+ * неё ровно одно и оно наверху файла: `SSL_PROVISION_ALARM` — какой итог
+ * прошлого выпуска сертификата стоит называть словами. Всё остальное здесь —
+ * раскладка и три условные строки нашей записи.
  */
 export default function DomainOverviewTab({
   domain,
@@ -100,14 +105,13 @@ export default function DomainOverviewTab({
   ssl,
   now,
   delegation,
-  zoneNameservers,
   nsDraft,
   registrarProvider,
 }: DomainOverviewTabProps) {
   return (
-    // Отступ панели по макету — `24px 28px 28px`; горизонтальные 28 и нижние 28
-    // уже даёт `Modal` своим `padding`, поэтому здесь остаётся только верхний.
-    <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingTop: 24 }}>
+    // Отступа сверху здесь нет намеренно: его держит панель `Tabs` — иначе
+    // каждая вкладка компенсировала бы его своей копией одного и того же числа.
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <DomainLinks
         domain={domain}
         server={server}
@@ -163,7 +167,6 @@ export default function DomainOverviewTab({
           <DomainNsPanel
             domain={domain}
             draft={nsDraft}
-            zoneNameservers={zoneNameservers}
             zonesError={zonesError}
             delegation={delegation}
             registrarProvider={registrarProvider}

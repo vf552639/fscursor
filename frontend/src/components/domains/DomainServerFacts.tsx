@@ -2,7 +2,6 @@ import React, { useState } from "react";
 
 import { Domain, useReadDomainFacts, useUpdateDomain } from "../../api/domains";
 import { Server } from "../../api/servers";
-import { isFactsStale } from "../../lib/domainFacts";
 import {
   dbNameSource,
   dbUserSource,
@@ -16,8 +15,9 @@ import { BLOB_KIND } from "../../lib/secretBlob";
 import { isTauri } from "../../lib/runtime";
 import { useSecretSave } from "../../hooks/useSecretSave";
 import { RevealSecret } from "../RevealSecret";
-import { Btn, Inp, formatAgoStale } from "../ui/Primitives";
-import { FactRow, HasSnapshot, MUTED, Row, SubTitle } from "./facts/fields";
+import { Btn, Inp } from "../ui/Primitives";
+import { FactRow, HasSnapshot, MUTED, RecordedNoteInLegend, Row, SubTitle } from "./facts/fields";
+import { snapshotOf } from "./facts/snapshot";
 
 /**
  * Секция «состояние на сервере» — ЕДИНСТВЕННОЕ место карточки, отвечающее на
@@ -66,31 +66,20 @@ export default function DomainServerFacts({
   server: Server | undefined;
   now: number;
 }) {
-  // Снимок читается ТОЛЬКО вместе со своей отметкой времени: «когда сняли» —
-  // часть самого снимка, а не украшение. Бэкенд пишет обе колонки одной
-  // транзакцией (`domain_service.record_facts`), так что пара «факты есть,
-  // отметки нет» не должна возникать; гейт — чтобы, если она возникнет, секция
-  // не сказала «Сервер ещё не читали» и тут же не напечатала эти факты списком
-  // аккаунтов. Одна истина вместо двух независимых.
-  const facts = domain.fp_facts_at ? domain.fp_facts ?? null : null;
+  /**
+   * Разбор снимка — общий (`facts/snapshot`), а не свой: гейт `fp_facts_at` над
+   * `fp_facts` и порог свежести обязаны быть одинаковыми у секции и у карточки
+   * SSL на Overview, потому что снимок у них ОДИН.
+   *
+   * `noSnapshot` значит «удачного снимка не было ни разу», и тогда решётка
+   * прочерков — враньё: прочерк в поле читается как «сервер спросили, там
+   * пусто», а спрашивать мы ещё не ходили. Поэтому поля, которым нечего
+   * сказать, прячутся целиком, а вместо них секция говорит это ОДИН раз
+   * словами.
+   */
+  const { facts, noSnapshot, stale: factsStale, freshness } = snapshotOf(domain, now);
   const desktop = isTauri();
   const read = useReadDomainFacts(domain.id);
-
-  // Свежесть считается от `fp_facts_at` (когда снят снимок), НЕ от `fp_checked_at`
-  // (когда была последняя попытка): протухший снимок не должен молодеть от
-  // проваленной проверки. «never checked» — отдельное слово, а не прочерк.
-  const factsStale = isFactsStale(domain.fp_facts_at, now);
-  const freshness = domain.fp_facts_at
-    ? `Checked ${formatAgoStale(domain.fp_facts_at, factsStale, now)}`
-    : "Never checked";
-
-  /**
-   * Удачного снимка не было ни разу. Тогда решётка прочерков — враньё: прочерк
-   * в поле читается как «сервер спросили, там пусто», а спрашивать мы ещё не
-   * ходили. Поэтому поля, которым нечего сказать, прячутся целиком, а вместо
-   * них секция говорит это ОДИН раз словами.
-   */
-  const noSnapshot = !domain.fp_facts_at;
 
   /**
    * Наша запись против факта — все вопросы секции в ОДНОМ месте.
@@ -192,11 +181,11 @@ export default function DomainServerFacts({
     );
 
   return (
-    // Своей верхней границы у секции больше нет: она теперь тело вкладки, а
-    // строка вкладок над ней рисует свою линию — две подряд читались бы как
-    // пустая полоса. Отступ — по макету панели (24px сверху; горизонтальные и
-    // нижний даёт `Modal`).
-    <div style={{ paddingTop: 24 }}>
+    // Ни границы, ни отступа сверху у секции нет: она теперь тело вкладки.
+    // Граница ушла потому, что строка вкладок рисует свою линию — две подряд
+    // читались бы как пустая полоса; отступ — потому что это забота панели
+    // (`ui/Tabs`), а не секции, и держать его надо в одном месте на все вкладки.
+    <div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>Server state</div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -240,86 +229,93 @@ export default function DomainServerFacts({
         </div>
       ) : null}
 
+      {/* Два контекста, а не один: «снимка нет» прячет пустые поля, а гашение
+          приписки «из provision, на сервере не проверено» объявляет ровно тот,
+          кто печатает легенду с этими же словами — она стоит строкой выше и
+          только под `noSnapshot`. Слитые в один, они гасили приписку и на
+          карточке SSL (Overview), где никакой легенды нет. */}
       <HasSnapshot.Provider value={!noSnapshot}>
-        {/* `minmax(0, 1fr)`, а не `1fr`: голый `1fr` — это `minmax(auto, 1fr)`,
-            и минимум трека равен ширине содержимого, поэтому один неразрывный
-            токен (путь, чужая ошибка) распирает колонку за ширину модалки. У
-            `Modal` стоит `overflowY: auto`, из-за чего `overflow-x` вычисляется
-            в `auto` — распёртая колонка даёт КАРТОЧКЕ горизонтальную полосу,
-            запрещённую `design-brief.md` §11. Ряд связей этажом выше держит ту
-            же дисциплину (`DomainLinks`), и по той же причине колонкам нужен
-            `minWidth: 0`: у grid-элемента он по умолчанию равен содержимому, и
-            без него в трек упрётся не текст, а сам столбец. */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16, marginTop: 8 }}>
-          {/* ─── FTP ─────────────────────────────────────────────────────── */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
-            <SubTitle>FTP access</SubTitle>
-            {/* Host и Port — не про снимок: адрес берётся у сервера, порт
-                константа. У домена без сервера Host остаётся прочерком. */}
-            <Row k="Host" v={server?.ip_address} />
-            <Row k="Port" v={FTP_PORT} />
-            <FactRow k="Login" fact={listFact(factFtpLogin)} src={src.ftpLogin} />
-            <FtpPassword domain={domain} desktop={desktop} />
-            {ftpRosterAdds && facts ? (
-              <div style={{ marginTop: 6 }}>
-                <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Accounts on server</div>
-                {facts.ftp_accounts.map((a) => (
-                  // `overflowWrap` — путь тут печатается ровно в интересном
-                  // случае: когда он НЕ совпал с путём сайта, то есть когда он
-                  // нестандартный и, скорее всего, длинный. Без переноса он
-                  // распирает колонку и даёт модалке горизонтальную полосу.
-                  <div key={a.login} style={{ fontSize: 12.5, color: "#374151", overflowWrap: "anywhere" }}>
-                    {a.login}
-                    {otherHome(a.home) ? <span style={{ color: MUTED }}> · {otherHome(a.home)}</span> : null}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
+        <RecordedNoteInLegend.Provider value={noSnapshot}>
+          {/* `minmax(0, 1fr)`, а не `1fr`: голый `1fr` — это `minmax(auto, 1fr)`,
+              и минимум трека равен ширине содержимого, поэтому один неразрывный
+              токен (путь, чужая ошибка) распирает колонку за ширину модалки. У
+              `Modal` стоит `overflowY: auto`, из-за чего `overflow-x` вычисляется
+              в `auto` — распёртая колонка даёт КАРТОЧКЕ горизонтальную полосу,
+              запрещённую `design-brief.md` §11. Ряд связей этажом выше держит ту
+              же дисциплину (`DomainLinks`), и по той же причине колонкам нужен
+              `minWidth: 0`: у grid-элемента он по умолчанию равен содержимому, и
+              без него в трек упрётся не текст, а сам столбец. */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16, marginTop: 8 }}>
+            {/* ─── FTP ─────────────────────────────────────────────────────── */}
+            <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
+              <SubTitle>FTP access</SubTitle>
+              {/* Host и Port — не про снимок: адрес берётся у сервера, порт
+                  константа. У домена без сервера Host остаётся прочерком. */}
+              <Row k="Host" v={server?.ip_address} />
+              <Row k="Port" v={FTP_PORT} />
+              <FactRow k="Login" fact={listFact(factFtpLogin)} src={src.ftpLogin} />
+              <FtpPassword domain={domain} desktop={desktop} />
+              {ftpRosterAdds && facts ? (
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Accounts on server</div>
+                  {facts.ftp_accounts.map((a) => (
+                    // `overflowWrap` — путь тут печатается ровно в интересном
+                    // случае: когда он НЕ совпал с путём сайта, то есть когда он
+                    // нестандартный и, скорее всего, длинный. Без переноса он
+                    // распирает колонку и даёт модалке горизонтальную полосу.
+                    <div key={a.login} style={{ fontSize: 12.5, color: "#374151", overflowWrap: "anywhere" }}>
+                      {a.login}
+                      {otherHome(a.home) ? <span style={{ color: MUTED }}> · {otherHome(a.home)}</span> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
   
-          {/* ─── Site ────────────────────────────────────────────────────── */}
-          {/* На всю ширину блок растягивался, пока в ряду выше стояли ДВА
-              соседа (FTP и SSL). SSL уехал на Overview, соседей стало два
-              всего — и растяжка оставила бы половину первого ряда пустой. */}
-          <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
-            <SubTitle>Site</SubTitle>
-            <FactRow k="Path" fact={facts?.site?.site_path} src={src.sitePath} />
-            <FactRow k="Owner" fact={facts?.site?.site_user} src={src.siteOwner} />
-            <FactRow
-              k="PHP"
-              fact={
-                facts?.php_version
-                  ? `${facts.php_version}${facts.php_handler ? ` · ${facts.php_handler}` : ""}`
-                  : facts?.site?.php_version || null
-              }
-              src={src.php}
-            />
-            <FactRow
-              k="Databases"
-              fact={listFact(facts && facts.databases.length > 0 ? facts.databases.join(", ") : null)}
-              src={src.dbName}
-            />
-            {/* Пользователь базы — единственное поле с `hideEmpty`: пустое, оно
-                прячется даже ПОД снимком, потому что факта у него не бывает ни
-                при каком чтении (`docs/FASTPANEL_CLI.md`), и прочерк обещал бы
-                измерение, которого не будет никогда. Нет записи — нет и строки. */}
-            <FactRow k="DB user" src={src.dbUser} hideEmpty />
-            <FactRow
-              k="Logs"
-              fact={
-                facts && facts.logs.length > 0 ? (
-                  <span>
-                    {facts.logs.map((l) => (
-                      <span key={l.path} style={{ display: "block", color: l.exists ? "#374151" : MUTED }}>
-                        {l.path}
-                      </span>
-                    ))}
-                  </span>
-                ) : null
-              }
-            />
+            {/* ─── Site ────────────────────────────────────────────────────── */}
+            {/* На всю ширину блок растягивался, пока в ряду выше стояли ДВА
+                соседа (FTP и SSL). SSL уехал на Overview, соседей стало два
+                всего — и растяжка оставила бы половину первого ряда пустой. */}
+            <div style={{ display: "grid", gap: 6, alignContent: "start", minWidth: 0 }}>
+              <SubTitle>Site</SubTitle>
+              <FactRow k="Path" fact={facts?.site?.site_path} src={src.sitePath} />
+              <FactRow k="Owner" fact={facts?.site?.site_user} src={src.siteOwner} />
+              <FactRow
+                k="PHP"
+                fact={
+                  facts?.php_version
+                    ? `${facts.php_version}${facts.php_handler ? ` · ${facts.php_handler}` : ""}`
+                    : facts?.site?.php_version || null
+                }
+                src={src.php}
+              />
+              <FactRow
+                k="Databases"
+                fact={listFact(facts && facts.databases.length > 0 ? facts.databases.join(", ") : null)}
+                src={src.dbName}
+              />
+              {/* Пользователь базы — единственное поле с `hideEmpty`: пустое, оно
+                  прячется даже ПОД снимком, потому что факта у него не бывает ни
+                  при каком чтении (`docs/FASTPANEL_CLI.md`), и прочерк обещал бы
+                  измерение, которого не будет никогда. Нет записи — нет и строки. */}
+              <FactRow k="DB user" src={src.dbUser} hideEmpty />
+              <FactRow
+                k="Logs"
+                fact={
+                  facts && facts.logs.length > 0 ? (
+                    <span>
+                      {facts.logs.map((l) => (
+                        <span key={l.path} style={{ display: "block", color: l.exists ? "#374151" : MUTED }}>
+                          {l.path}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null
+                }
+              />
+            </div>
           </div>
-        </div>
+        </RecordedNoteInLegend.Provider>
       </HasSnapshot.Provider>
     </div>
   );
