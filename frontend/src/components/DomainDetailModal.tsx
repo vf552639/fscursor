@@ -11,6 +11,7 @@ import { sslState } from "../lib/domainFacts";
 import { nsDelegation } from "../lib/nsDelegation";
 import DomainModalHeader from "./domains/DomainModalHeader";
 import { useNsDraft } from "./domains/useNsDraft";
+import DomainLogsTab from "./domains/tabs/DomainLogsTab";
 import DomainOverviewTab from "./domains/tabs/DomainOverviewTab";
 import DomainServerTab from "./domains/tabs/DomainServerTab";
 import { Modal } from "./ui/Primitives";
@@ -23,7 +24,9 @@ import { Tabs } from "./ui/Tabs";
  * Шапка (ярлык со статусом, имя домена, мета-ряд с состоянием SSL и правкой
  * срока) видна всегда; под ней вкладки. **Overview** — путь запроса к домену
  * (Registrar → Cloudflare → Server), наша запись о прошлых прогонах, сертификат
- * и делегирование. **Server** — живое чтение с сервера по SSH.
+ * и делегирование. **Server** — живое чтение с сервера по SSH. **Logs** —
+ * перечень лог-файлов сайта из ТОГО ЖЕ снимка (пути, наличие, размеры); их
+ * содержимое пока не читает никто, и вкладка говорит это словами.
  *
  * Раньше верх карточки был двумя колонками «слева чем домен является, справа
  * что развёрнуто на сервере»: колонки не означали ничего (просто перенос строки
@@ -35,9 +38,10 @@ import { Tabs } from "./ui/Tabs";
  * `ssl` и `nginx` (и кнопка «Create Site») по-прежнему невозможны: их действия
  * бьют в роуты, которых на бэкенде не существует, — вернуть их можно только
  * новыми Tauri-командами с SSH-логикой, это отдельная функция со своим планом.
- * Logs / Template / Custom из макета появятся своими фазами вместе со своим
- * содержимым: вкладка, открывающаяся в пустоту, — то же обещание функции,
- * которой нет.
+ * Template и Custom из макета появятся своей фазой вместе со своим содержимым:
+ * вкладка, открывающаяся в пустоту, — то же обещание функции, которой нет.
+ * Logs это правило соблюдает: она приехала не пустой, а с перечнем файлов,
+ * который уже лежит в снимке.
  *
  * А аккаунт Cloudflare и nameservers вкладки НЕ разводят — оба стоят на
  * Overview, и это то самое свойство, ради которого прежние вкладки и были
@@ -241,14 +245,14 @@ export default function DomainDetailModal({
       // уезжает туда же.
       header={<DomainModalHeader domain={domain} ssl={ssl} now={now} onClose={onClose} />}
     >
-      {/* Вкладок в строке ровно две, потому что содержимого сегодня две
-          вкладки. Logs / Template / Custom из макета приедут своими фазами
-          вместе с тем, что они показывают: пустая вкладка обещает функцию, а
-          не откладывает её. */}
+      {/* Вкладок в строке ровно столько, сколько есть содержимого. Template и
+          Custom из макета приедут своей фазой вместе с тем, что они
+          показывают: пустая вкладка обещает функцию, а не откладывает её. */}
       <Tabs
         items={[
           { id: "overview", label: "Overview" },
           { id: "server", label: "Server" },
+          { id: "logs", label: "Logs" },
         ]}
         value={tab}
         onChange={setTab}
@@ -277,6 +281,11 @@ export default function DomainDetailModal({
             Overview читает ТОТ ЖЕ снимок и печатает его возраст у себя в
             шапке, чтобы не выдать протухшее измерение за свежее. */}
         {tab === "server" ? <DomainServerTab domain={domain} server={server} now={now} /> : null}
+        {/* Логи читаются из ТОГО ЖЕ снимка, что и вкладка Server, и потому
+            получают то же «сейчас»: возраст снимка на двух вкладках обязан
+            совпадать. Сервер вкладке не нужен вовсе — пути логов приезжают в
+            снимке готовыми, а адрес хоста спрашивает только FTP. */}
+        {tab === "logs" ? <DomainLogsTab domain={domain} now={now} /> : null}
       </Tabs>
     </Modal>
   );

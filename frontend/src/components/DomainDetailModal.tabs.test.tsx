@@ -14,9 +14,12 @@ import { useAuthStore } from "../store/auth";
  * Три правила, и каждое — про цену ленивой отрисовки (`ui/Tabs` рисует ровно
  * активную панель, поэтому переключение РАЗМОНТИРУЕТ прежнюю):
  *
- * 1. Вкладок ровно столько, сколько есть содержимого. Logs / Template / Custom
- *    из макета появятся своими фазами: вкладка, открывающаяся в пустоту, — то
- *    же обещание функции, которой нет, что и мёртвая кнопка.
+ * 1. Вкладок ровно столько, сколько есть содержимого. Template и Custom из
+ *    макета появятся своей фазой: вкладка, открывающаяся в пустоту, — то же
+ *    обещание функции, которой нет, что и мёртвая кнопка. Logs приехала с
+ *    перечнем файлов, который уже лежит в снимке, — её содержимое проверяется
+ *    у самой вкладки (`domains/tabs/DomainLogsTab.test.tsx`), здесь только то,
+ *    что она в строке есть и монтируется.
  * 2. Cloudflare и nameservers вкладки НЕ разводят — ровно то свойство, ради
  *    которого прежние вкладки карточки и были сняты.
  * 3. Набранный, но не отправленный список NS переключение переживает. Живёт он
@@ -95,9 +98,9 @@ afterEach(() => {
 });
 
 describe("строка вкладок", () => {
-  it("вкладок ровно две, и открыта Overview", () => {
+  it("вкладок ровно три, и открыта Overview", () => {
     show();
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Server"]);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Server", "Logs"]);
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
     // Ряд связей и панель NS — на Overview, карточки сервера — нет.
     // Спрашиваем именно карточку `FTP Access` (`role="group"` с её именем):
@@ -118,6 +121,17 @@ describe("строка вкладок", () => {
 
     openTab("Overview");
     expect(screen.getByRole("group", { name: "Registrar" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "FTP Access" })).toBeNull();
+  });
+
+  it("Logs открывается своим содержимым, а не пустой панелью", () => {
+    // Вкладка в строке и панель под ней — разные вещи: забыть отрисовать
+    // панель значит вернуть ровно то, что план запрещает, — вкладку,
+    // открывающуюся в пустоту. У домена фикстуры снимка нет, поэтому Logs
+    // обязана сказать это словами.
+    show();
+    openTab("Logs");
+    expect(screen.getByText(/none has been taken yet/)).toBeTruthy();
     expect(screen.queryByRole("group", { name: "FTP Access" })).toBeNull();
   });
 

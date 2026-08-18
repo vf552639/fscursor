@@ -589,9 +589,14 @@ describe("вкладки не разводят Cloudflare и nameservers", () =>
     }
     // Отдельной вкладки NS нет и не появилось: разложенные по двум экранам, NS
     // и аккаунт Cloudflare заставляли ходить туда-сюда, чтобы понять, почему NS
-    // не пушатся. Вкладок теперь две, и обе половины вопроса — на первой.
+    // не пушатся. Обе половины вопроса — на первой вкладке; остальные вкладки
+    // отвечают на свои («что на сервере», «какие у сайта логи»).
     expect(screen.queryByRole("tab", { name: "NS" }), "вкладки NS быть не должно").toBeNull();
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Server"]);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Server",
+      "Logs",
+    ]);
     // Поле NS и сроки домена по-прежнему на одном экране, без единого клика.
     expect(nsField()).toBeTruthy();
     expect(screen.getByText("Expires:")).toBeTruthy();

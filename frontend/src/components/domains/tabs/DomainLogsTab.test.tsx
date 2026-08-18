@@ -1,0 +1,335 @@
+import React from "react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+
+import DomainLogsTab from "./DomainLogsTab";
+import { queryClient } from "../../../api/queryClient";
+import type { DomainFacts } from "../../../lib/domainFacts";
+import { relativeLuminance } from "../../../test/colors";
+import { setTauri, setBlobUser, clearBlobUser } from "../../../test/secretBlobKit";
+
+/**
+ * Вкладка Logs: перечень лог-файлов сайта из снимка сервера — и честный ответ о
+ * том, чего мы про них не знаем.
+ *
+ * Три из проверяемых здесь правил — восстановленные. Раньше перечень логов был
+ * одной строкой `FactRow` в карточке Site, и вместе с её удалением с экрана
+ * ушли гарантии: что печатается КАЖДЫЙ путь снимка, что несуществующий файл
+ * отличим от существующего (это не проверялось вообще никогда) и что пустой
+ * список под снимком не выдаётся за измеренную пустоту. Здесь они снова под
+ * тестом.
+ *
+ * Остальное — правила самой вкладки: подпись чипа выводится из пути (а не
+ * берётся из зашитой четвёрки), в бейдже стоит РАЗМЕР (числа строк мы не
+ * считали), переключение чипа меняет напечатанный путь, а тело вкладки во всех
+ * трёх состояниях говорит словами, а не рисует выдуманные строки лога.
+ */
+
+const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn() }));
+
+vi.mock("../../../lib/localCache", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeSynced: mocks.invokeSynced,
+  syncLocalCache: vi.fn(async () => {}),
+}));
+
+const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const ahead = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+/** Реальная раскладка путей из `ssh/fastpanel_facts.rs::log_candidates`. */
+const LOGS: DomainFacts["logs"] = [
+  { path: "/var/www/example_usr/data/logs/example.com-frontend.access.log", exists: true, size_bytes: 2048 },
+  { path: "/var/www/example_usr/data/logs/example.com-frontend.error.log", exists: true, size_bytes: 0 },
+  { path: "/var/www/example_usr/data/logs/example.com-backend.access.log", exists: true, size_bytes: null },
+  { path: "/var/www/example_usr/data/logs/example.com-backend.error.log", exists: false, size_bytes: null },
+];
+
+function facts(over: Partial<DomainFacts> = {}): DomainFacts {
+  return {
+    site: { domain_name: "example.com", site_user: "example_usr", site_path: "/var/www/example.com", php_version: "8.2" },
+    ssl: { has_certificate: true, expires_at: ahead(60 * DAY), issuer: "Let's Encrypt", is_letsencrypt: true },
+    ftp_accounts: [],
+    php_version: "8.2",
+    php_handler: "php-fpm",
+    databases: [],
+    logs: LOGS,
+    ...over,
+  };
+}
+
+function domain(over: Record<string, unknown> = {}) {
+  return {
+    id: 42,
+    domain_name: "example.com",
+    status: "active",
+    server_id: 3,
+    ...over,
+  } as any;
+}
+
+function show(over: Record<string, unknown> = {}) {
+  render(
+    <QueryClientProvider client={queryClient}>
+      <DomainLogsTab domain={domain(over)} now={Date.now()} />
+    </QueryClientProvider>,
+  );
+}
+
+/** Домен со свежим снимком — самое частое состояние вкладки. */
+function showWithSnapshot(over: Partial<DomainFacts> = {}, domainOver: Record<string, unknown> = {}) {
+  show({ fp_facts: facts(over), fp_facts_at: ago(2 * HOUR), ...domainOver });
+}
+
+const chips = () => screen.getByRole("group", { name: "Log files" });
+const chip = (name: string | RegExp) => within(chips()).getByRole("button", { name });
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  queryClient.clear();
+  setBlobUser();
+});
+
+afterEach(() => {
+  cleanup();
+  setTauri(false);
+  clearBlobUser();
+  queryClient.clear();
+});
+
+describe("перечень файлов", () => {
+  it("на экран попадает КАЖДЫЙ путь снимка", () => {
+    // Гарантия, потерянная вместе со строкой `Logs` карточки Site: перечень
+    // может молча укоротиться (взяли `logs[0]`, отфильтровали несуществующие),
+    // и человек будет искать файл, который на сервере есть.
+    showWithSnapshot();
+    const buttons = within(chips()).getAllByRole("button");
+    expect(buttons).toHaveLength(LOGS.length);
+    for (const f of LOGS) {
+      // Чип находим по его `title` (он начинается с полного пути), а выбрав —
+      // проверяем, что путь напечатан строкой под чипами.
+      const b = buttons.find((x) => (x.getAttribute("title") ?? "").startsWith(f.path));
+      expect(b).toBeTruthy();
+      fireEvent.click(b!);
+      expect(screen.getByText(f.path)).toBeTruthy();
+    }
+  });
+
+  it("подпись чипа выведена из пути, а не из зашитой четвёрки", () => {
+    showWithSnapshot();
+    expect(chip(/^Frontend access/)).toBeTruthy();
+    expect(chip(/^Frontend error/)).toBeTruthy();
+    expect(chip(/^Backend access/)).toBeTruthy();
+    expect(chip(/^Backend error/)).toBeTruthy();
+  });
+
+  it("путь незнакомой формы подписан именем файла и ничего не ломает", () => {
+    // Раскладка путей принадлежит FastPanel и десктопу; поменяйся она — вкладка
+    // обязана показать файл, а не упасть и не подписать его чужим именем.
+    showWithSnapshot({
+      logs: [{ path: "/var/log/nginx/example.com.error.log", exists: true, size_bytes: 10 }],
+    });
+    expect(chip(/^example\.com\.error\.log/)).toBeTruthy();
+  });
+
+  it("несуществующий файл отличим от существующего не только словами в title", () => {
+    // Правило, которого не было в тестах никогда: `exists: false` рисуется
+    // приглушённо. Сравниваем светлоту двух цветов, а не конкретный hex —
+    // цвет уедет в токены вместе с редизайном, а различимость должна остаться.
+    showWithSnapshot();
+    const missing = chip(/^Backend error/);
+    const present = chip(/^Frontend error/);
+    expect(missing.style.color).not.toBe(present.style.color);
+    expect(rgbLuminance(missing.style.color)).toBeGreaterThan(rgbLuminance(present.style.color));
+    // Цвет не доезжает ни до скринридера, ни до печати: то же самое сказано
+    // словами.
+    expect(missing.getAttribute("title")).toContain("not found on the server");
+    expect(present.getAttribute("title")).not.toContain("not found");
+  });
+});
+
+describe("бейдж чипа — размер, а не число строк", () => {
+  it("существующий файл показывает свой размер", () => {
+    showWithSnapshot();
+    expect(chip(/^Frontend access/).textContent).toContain("2 KB");
+  });
+
+  it("пустой файл — это ноль, а не прочерк", () => {
+    // Пустой лог на сервере ЕСТЬ, и его пустота измерена: прочерк тут читался
+    // бы как «не знаем».
+    showWithSnapshot();
+    expect(chip(/^Frontend error/).textContent).toContain("0 B");
+  });
+
+  it("размер не прочитан — прочерк, и файл при этом не назван пустым", () => {
+    showWithSnapshot();
+    const c = chip(/^Backend access/);
+    expect(c.textContent).toContain("—");
+    expect(c.textContent).not.toContain("0 B");
+    expect(c.getAttribute("title")).toContain("size was not read");
+  });
+
+  it("несуществующий файл — прочерк, а не ноль", () => {
+    showWithSnapshot();
+    const c = chip(/^Backend error/);
+    expect(c.textContent).toContain("—");
+    expect(c.textContent).not.toContain("0 B");
+  });
+});
+
+describe("выбор файла", () => {
+  it("под чипами стоит полный путь ВЫБРАННОГО файла, и он меняется по клику", () => {
+    showWithSnapshot();
+    expect(screen.getByText(LOGS[0].path)).toBeTruthy();
+    expect(screen.queryByText(LOGS[3].path)).toBeNull();
+
+    fireEvent.click(chip(/^Backend error/));
+
+    expect(screen.getByText(LOGS[3].path)).toBeTruthy();
+    expect(screen.queryByText(LOGS[0].path)).toBeNull();
+  });
+
+  it("выбранный чип объявлен нажатым, и нажат ровно один", () => {
+    showWithSnapshot();
+    expect(chip(/^Frontend access/).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(chip(/^Backend access/));
+    expect(chip(/^Backend access/).getAttribute("aria-pressed")).toBe("true");
+    expect(
+      within(chips())
+        .getAllByRole("button")
+        .filter((b) => b.getAttribute("aria-pressed") === "true"),
+    ).toHaveLength(1);
+  });
+});
+
+describe("выбор пережил перечитывание снимка", () => {
+  it("исчезнувший из снимка файл не остаётся напечатанным путём", () => {
+    // Список приезжает из снимка и переснимается кнопкой: сайт мог переехать,
+    // владелец — смениться. Прежний путь под чипами, которого в перечне уже
+    // нет, — это ответ про файл, о котором мы больше ничего не знаем.
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <DomainLogsTab domain={domain({ fp_facts: facts(), fp_facts_at: ago(2 * HOUR) })} now={Date.now()} />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(chip(/^Backend error/));
+    expect(screen.getByText(LOGS[3].path)).toBeTruthy();
+
+    const moved = facts({ logs: [{ path: "/var/www/other/data/logs/example.com-frontend.access.log", exists: true, size_bytes: 12 }] });
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <DomainLogsTab domain={domain({ fp_facts: moved, fp_facts_at: ago(1 * HOUR) })} now={Date.now()} />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText(LOGS[3].path)).toBeNull();
+    expect(screen.getByText(moved.logs[0].path)).toBeTruthy();
+  });
+});
+
+describe("тело вкладки — честное состояние", () => {
+  it("файлы есть, но их содержимое мы читать не умеем — и говорим это", () => {
+    showWithSnapshot();
+    expect(screen.getByText(/Reading log contents is not wired up yet/)).toBeTruthy();
+    // Ни таблицы access, ни тёмной консоли, ни единой выдуманной строки лога.
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByText(/\[error\]/)).toBeNull();
+  });
+
+  it("ни «Refresh», ни «Download»: кнопка, которая ничего не делает, обещает функцию", () => {
+    setTauri(true);
+    showWithSnapshot();
+    expect(screen.queryByText("Refresh")).toBeNull();
+    expect(screen.queryByText("Download")).toBeNull();
+    // Кнопок на вкладке со снимком нет вовсе — только чипы выбора файла.
+    const buttons = screen.getAllByRole("button");
+    expect(buttons).toHaveLength(LOGS.length);
+  });
+
+  it("снимок есть, а список пуст — это «не выяснили, где они лежат», а не «логов нет»", () => {
+    // Десктоп возвращает пустой список, только если не нашёл владельца сайта:
+    // существующие и несуществующие файлы иначе приезжают все четыре. Прочерк
+    // или фраза «no log files» соврали бы измерение, которого не было.
+    showWithSnapshot({ logs: [] });
+    expect(screen.queryByRole("group", { name: "Log files" })).toBeNull();
+    expect(screen.getByText(/we do not know where this site's logs are/)).toBeTruthy();
+    expect(screen.queryByText(/Reading log contents is not wired up yet/)).toBeNull();
+  });
+});
+
+describe("снимка не было ни разу", () => {
+  it("вместо чипов — «Never checked» и слова, почему пусто", () => {
+    show();
+    expect(screen.getByText("Never checked")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Log files" })).toBeNull();
+    expect(screen.getByText(/none has been taken yet/)).toBeTruthy();
+  });
+
+  it("в десктопе есть кнопка снятия снимка, и она зовёт то же чтение, что Server", async () => {
+    // Та же команда и тот же прогон (`useReadDomainFacts`), что у кнопки
+    // вкладки Server: разойтись двум кнопкам нельзя — снимок один.
+    setTauri(true);
+    mocks.invokeSynced.mockResolvedValue(facts());
+    show();
+    fireEvent.click(screen.getByText("Проверить на сервере"));
+    await waitFor(() =>
+      expect(mocks.invokeSynced).toHaveBeenCalledWith("domain_read_facts", {
+        userId: "user-1",
+        domainId: "42",
+      }),
+    );
+  });
+
+  it("в вебе кнопки нет: чтение идёт по SSH", () => {
+    setTauri(false);
+    show();
+    expect(screen.queryByText("Проверить на сервере")).toBeNull();
+  });
+
+  it("под снимком кнопки чтения нет: за перечитывание отвечает вкладка Server", async () => {
+    setTauri(true);
+    showWithSnapshot();
+    expect(screen.queryByText("Проверить на сервере")).toBeNull();
+    // `mutate` зовёт `mutationFn` асинхронно, поэтому «ничего не запускалось»
+    // проверяем ПОСЛЕ микрозадач: синхронная проверка была бы пустой.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+});
+
+describe("свежесть снимка", () => {
+  it("возраст снимка напечатан, старый помечен протухшим", () => {
+    showWithSnapshot({}, { fp_facts_at: ago(8 * DAY) });
+    // Размеры файлов — измерение: без возраста они читаются как сегодняшние.
+    expect(screen.getByText(/Checked/).textContent).toContain("stale");
+  });
+
+  it("протухший возраст отличается от свежего не только словом «stale»", () => {
+    // Тот же приём, что у показаний сервера (`STALE_TEXT` против обычного
+    // серого): подпись «· stale» — второй канал, а не единственный.
+    showWithSnapshot({}, { fp_facts_at: ago(8 * DAY) });
+    const staleColor = screen.getByText(/Checked/).style.color;
+    cleanup();
+    showWithSnapshot({}, { fp_facts_at: ago(2 * HOUR) });
+    expect(screen.getByText(/Checked/).style.color).not.toBe(staleColor);
+  });
+
+  it("свежесть считается от снимка, а не от последней ПОПЫТКИ", () => {
+    // Провалившаяся проверка не должна молодить перечень логов: `fp_checked_at`
+    // свежий, снимок — недельной давности.
+    showWithSnapshot({}, { fp_facts_at: ago(8 * DAY), fp_checked_at: ago(60 * 1000) });
+    expect(screen.getByText(/Checked/).textContent).toContain("stale");
+    expect(screen.getByText(/Checked/).textContent).not.toContain("1m ago");
+  });
+});
+
+/** `rgb(r, g, b)` из jsdom → относительная светлота (`test/colors` берёт hex). */
+function rgbLuminance(rgb: string): number {
+  const [r, g, b] = rgb.match(/\d+/g)!.map(Number);
+  const hex = [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+  return relativeLuminance(`#${hex}`);
+}
