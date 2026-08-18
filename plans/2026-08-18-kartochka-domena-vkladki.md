@@ -220,7 +220,7 @@ cd frontend && npx tsc --noEmit
 
 ## Итог
 
-Реализован частично: выполнены **фазы 1–2**.
+Реализован частично: выполнены **фазы 1–6**, идёт фаза 7.
 
 **Фаза 1 — каркас.** Примитив `ui/Tabs.tsx` с ролями `tablist`/`tab`/`tabpanel`,
 `aria-selected`, roving tabindex, ходьбой стрелками и `Home`/`End`; `SectionCard` рядом
