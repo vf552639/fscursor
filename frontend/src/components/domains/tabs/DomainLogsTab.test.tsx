@@ -307,6 +307,19 @@ describe("снимка не было ни разу", () => {
     expect(screen.getByText(/none has been taken yet/)).toBeTruthy();
   });
 
+  it("факты без отметки времени не превращаются в чипы вопреки шапке", () => {
+    // Пара «`fp_facts` есть, `fp_facts_at` нет» бэкендом не производится (обе
+    // колонки пишутся одной транзакцией), но гейт над ней держит общий разбор
+    // снимка — тот же, что у карточки SSL, где это правило уже под тестом.
+    // Читай вкладка `domain.fp_facts` напрямую, и она напечатала бы чипы с
+    // размерами прямо под строкой «Never checked»: снимка нет, а измерения
+    // показаны — ровно то враньё, ради запрета которого гейт и заведён.
+    show({ fp_facts: facts() });
+    expect(screen.getByText("Never checked")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Log files" })).toBeNull();
+    expect(screen.getByText(/none has been taken yet/)).toBeTruthy();
+  });
+
   it("в десктопе есть кнопка снятия снимка, и она зовёт то же чтение, что Server", async () => {
     // Та же команда и тот же прогон (`useReadDomainFacts`), что у кнопки
     // вкладки Server: разойтись двум кнопкам нельзя — снимок один.
