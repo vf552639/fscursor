@@ -14,12 +14,14 @@ import { useAuthStore } from "../store/auth";
  * Три правила, и каждое — про цену ленивой отрисовки (`ui/Tabs` рисует ровно
  * активную панель, поэтому переключение РАЗМОНТИРУЕТ прежнюю):
  *
- * 1. Вкладок ровно столько, сколько есть содержимого. Template и Custom из
- *    макета появятся своей фазой: вкладка, открывающаяся в пустоту, — то же
- *    обещание функции, которой нет, что и мёртвая кнопка. Logs приехала с
- *    перечнем файлов, который уже лежит в снимке, — её содержимое проверяется
- *    у самой вкладки (`domains/tabs/DomainLogsTab.test.tsx`), здесь только то,
- *    что она в строке есть и монтируется.
+ * 1. Ни одна вкладка не открывается в пустоту. Overview, Server и Logs приехали
+ *    с данными — их содержимое проверяется у самих вкладок
+ *    (`domains/tabs/*.test.tsx`), здесь только то, что вкладка в строке есть и
+ *    монтируется. Template и Custom содержимого не имеют вовсе, и потому
+ *    проверяются ЗДЕСЬ целиком: пилюля `COMING SOON`, фраза о том, чем вкладка
+ *    станет, и — главное — ни одного органа управления в панели. Мёртвый
+ *    селект или кнопка «Run» обещали бы функцию ровно так же, как пустая
+ *    панель.
  * 2. Cloudflare и nameservers вкладки НЕ разводят — ровно то свойство, ради
  *    которого прежние вкладки карточки и были сняты.
  * 3. Набранный, но не отправленный список NS переключение переживает. Живёт он
@@ -98,9 +100,15 @@ afterEach(() => {
 });
 
 describe("строка вкладок", () => {
-  it("вкладок ровно три, и открыта Overview", () => {
+  it("вкладок ровно пять, и открыта Overview", () => {
     show();
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Server", "Logs"]);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Server",
+      "Logs",
+      "Template",
+      "Custom",
+    ]);
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
     // Ряд связей и панель NS — на Overview, карточки сервера — нет.
     // Спрашиваем именно карточку `FTP Access` (`role="group"` с её именем):
@@ -133,6 +141,55 @@ describe("строка вкладок", () => {
     openTab("Logs");
     expect(screen.getByText(/none has been taken yet/)).toBeTruthy();
     expect(screen.queryByRole("group", { name: "FTP Access" })).toBeNull();
+  });
+
+  /**
+   * Template и Custom — заглушки, и заглушка обязана ровно двум вещам: сказать
+   * словами, чем вкладка станет, и не притворяться работающей.
+   *
+   * Второе проверяется по РОЛЯМ, а не по тексту: совпадение с фразой пережило
+   * бы добавление селекта из макета рядом с ней, а пустой список кнопок,
+   * комбобоксов и полей — нет. Тот же приём, что у заглушки Backups
+   * (`domains/tabs/DomainServerTab.test.tsx`).
+   *
+   * Спрашиваем панель (`role="tabpanel"`), а не карточку: карточка ответила бы
+   * только за себя, а обещанием функции была бы и кнопка, положенная в панель
+   * мимо неё.
+   */
+  it("Template — заглушка со словами и без единого органа управления", () => {
+    // Макет рисует здесь селект из пяти шаблонов, «Save» с правилом «выбрать
+    // можно один раз», превью в фальшивом окне браузера и поле заметки. О
+    // шаблонах сайта продукт не знает ничего — ни колонки у домена, ни поля в
+    // снимке, ни команды, — так что сохранять выбор было бы некуда.
+    show();
+    openTab("Template");
+    const panel = screen.getByRole("tabpanel");
+    expect(within(panel).getByRole("group", { name: "Site template" })).toBeTruthy();
+    expect(panel.textContent).toContain("COMING SOON");
+    // Фраза, а не заголовок: «Site template» стоит и в шапке карточки, так что
+    // совпадение с одним этим словосочетанием пережило бы удаление всего
+    // объяснения. Спрашиваем кусок, которого в шапке быть не может.
+    expect(panel.textContent).toMatch(/site template this domain is built from will be chosen/i);
+    expect(within(panel).queryAllByRole("button")).toEqual([]);
+    expect(within(panel).queryAllByRole("combobox")).toEqual([]);
+    expect(within(panel).queryAllByRole("textbox")).toEqual([]);
+  });
+
+  it("Custom — заглушка говорит, чем станет, и ни одного «Run»", () => {
+    // Макет рисует девять пресетов с кнопками «Run» и вложенную модалку «+ New
+    // preset». Сохранять пресеты негде (ни модели, ни роутов), а исполнять
+    // составленную человеком цепочку шагов нечем — девять кнопок «Run» были бы
+    // девятью обещаниями. Фраза же обязана сказать, чем вкладка станет: без неё
+    // «Presets» и `COMING SOON` не объясняют, чего именно ждать.
+    show();
+    openTab("Custom");
+    const panel = screen.getByRole("tabpanel");
+    expect(within(panel).getByRole("group", { name: "Presets" })).toBeTruthy();
+    expect(panel.textContent).toContain("COMING SOON");
+    expect(panel.textContent).toMatch(/saved multi-step actions you can run on this domain/i);
+    expect(within(panel).queryAllByRole("button")).toEqual([]);
+    expect(within(panel).queryAllByRole("combobox")).toEqual([]);
+    expect(within(panel).queryAllByRole("textbox")).toEqual([]);
   });
 
   it("Cloudflare и nameservers стоят на ОДНОЙ вкладке", () => {
