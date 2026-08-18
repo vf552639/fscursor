@@ -1,7 +1,7 @@
 import React from "react";
 
+import { type Snapshot } from "../../../lib/domainFacts";
 import { STALE_TEXT } from "../../ui/Primitives";
-import { type Snapshot } from "./snapshot";
 
 /**
  * Шапка снимка на вкладке: сколько ему лет, провалилась ли последняя попытка и
@@ -31,7 +31,8 @@ import { type Snapshot } from "./snapshot";
  *
  * Живёт в `facts/`, а не в `tabs/TabLayout`: `TabLayout` знает только про
  * геометрию вкладки (столбец, зазор, число колонок) и ни про какие данные, а
- * это — показ САМОГО снимка, сосед `snapshot.ts` и `fields.tsx`.
+ * это — показ САМОГО снимка, сосед `fields.tsx` (сам разбор живёт в
+ * `lib/domainFacts`).
  */
 export function SnapshotLine({
   snapshot,

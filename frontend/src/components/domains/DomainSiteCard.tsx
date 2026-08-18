@@ -8,9 +8,9 @@ import {
   siteOwnerSource,
   sitePathSource,
 } from "../../lib/domainDrift";
+import { type Snapshot } from "../../lib/domainFacts";
 import { SectionCard } from "../ui/Primitives";
 import { FactRow, MUTED } from "./facts/fields";
-import { type Snapshot } from "./facts/snapshot";
 
 /**
  * Карточка «Site» вкладки Server — ответ на вопрос «что за сайт стоит на

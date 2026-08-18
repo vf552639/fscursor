@@ -3,10 +3,9 @@ import React from "react";
 import { Domain } from "../../api/domains";
 import { sslExpiresSource, sslIssuerSource } from "../../lib/domainDrift";
 import { formatExpiryDate } from "../../lib/domainExpiry";
-import { SSL_BADGE, SslState } from "../../lib/domainFacts";
+import { SSL_BADGE, SslState, snapshotOf } from "../../lib/domainFacts";
 import { Badge, SectionCard, STALE_TEXT } from "../ui/Primitives";
 import { FactRow, HasSnapshot, KEY_WIDTH, MUTED, RecordedNoteInLegend } from "./facts/fields";
-import { snapshotOf } from "./facts/snapshot";
 
 /**
  * Сертификат домена — карточка вкладки Overview, вынутая из секции «Server
@@ -65,7 +64,7 @@ export default function DomainSslCard({
   /** «Сейчас» карточки: один раз на рендер, общее для всех её сроков. */
   now: number;
 }) {
-  // Разбор снимка — общий (`facts/snapshot`): секция сервера и эта карточка
+  // Разбор снимка — общий (`lib/domainFacts`): секция сервера и эта карточка
   // читают ОДИН снимок, и гейт `fp_facts_at` над `fp_facts` вместе с порогом
   // свежести обязаны быть у них одним правилом, а не двумя совпадающими.
   const { facts, noSnapshot, stale: factsStale, freshness } = snapshotOf(domain, now);

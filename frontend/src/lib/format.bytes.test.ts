@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { formatBytes } from "./Primitives";
+import { formatBytes } from "./format";
 
 /**
  * Размер файла словами. Проверяем не красоту вывода, а два его обещания:

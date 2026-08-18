@@ -3,13 +3,13 @@ import React, { useState } from "react";
 import { Domain, useUpdateDomain } from "../../api/domains";
 import { Server } from "../../api/servers";
 import { ftpLoginSource, samePath } from "../../lib/domainDrift";
+import { type Snapshot } from "../../lib/domainFacts";
 import { BLOB_KIND } from "../../lib/secretBlob";
 import { isTauri } from "../../lib/runtime";
 import { useSecretSave } from "../../hooks/useSecretSave";
 import { RevealSecret } from "../RevealSecret";
 import { Btn, Inp, SectionCard } from "../ui/Primitives";
 import { FactRow, KEY_GAP, KEY_WIDTH, MUTED, Row } from "./facts/fields";
-import { type Snapshot } from "./facts/snapshot";
 
 /**
  * Карточка «FTP Access» вкладки Server — ответ на вопрос «чем и куда

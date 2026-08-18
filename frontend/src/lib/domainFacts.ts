@@ -12,6 +12,13 @@
  * `fp_facts` ответа домена. Имена полей менять нельзя — это wire-контракт.
  */
 
+// Только `type`, и это условие: `api/domains` уже ссылается СЮДА за
+// `DomainFacts`, поэтому обратная ссылка значением завела бы настоящий цикл.
+// Типы стираются при сборке — в графе модулей этой пары рёбер нет ни в одну
+// сторону.
+import { type Domain } from "../api/domains";
+import { formatAgoStale } from "./format";
+
 /** Снимок состояния домена, прочитанный с сервера по SSH. */
 export type DomainFacts = {
   /** Сайт на сервере; `null` — домена на сервере нет вовсе (не ошибка проверки). */
@@ -156,3 +163,48 @@ export const SSL_BADGE: Record<SslState, { label: string; variant: string }> = {
   valid: { label: "Valid", variant: "green" },
   error: { label: "Read error", variant: "red" },
 };
+
+/** Снимок сервера, разобранный на то, что о нём спрашивают экраны. */
+export interface Snapshot {
+  /**
+   * Факты снимка либо `null`. Читаются ТОЛЬКО вместе со своей отметкой времени:
+   * «когда сняли» — часть самого снимка, а не украшение. Бэкенд пишет обе
+   * колонки одной транзакцией (`domain_service.record_facts`), так что пара
+   * «факты есть, отметки нет» не должна возникать; гейт — чтобы, если она
+   * возникнет, экран не сказал «Сервер ещё не читали» и тут же не напечатал эти
+   * факты списком аккаунтов. Одна истина вместо двух независимых.
+   */
+  facts: DomainFacts | null;
+  /** Удачного снимка не было ни разу. */
+  noSnapshot: boolean;
+  /** Снимок есть, но он старше порога `FACTS_STALE_MS`. */
+  stale: boolean;
+  /** Готовая подпись возраста: «Checked 4h ago · stale» либо «Never checked». */
+  freshness: string;
+}
+
+/**
+ * Разбор снимка — ОДНО правило на все экраны, которые его показывают.
+ *
+ * Копий было две (вкладка Server и `DomainSslCard`), а с приездом вкладки Logs,
+ * которой нужна та же тройка, стало три. Четыре строки выглядят слишком мелкими,
+ * чтобы их собирать, но собраны они как раз потому, что мелкие: в них сидят два
+ * решения, которые нельзя принять по-разному дважды — гейт `fp_facts_at` над
+ * `fp_facts` (см. `facts`) и то, что свежесть считается от `fp_facts_at` (когда
+ * снят снимок), а НЕ от `fp_checked_at` (когда была последняя попытка): иначе
+ * протухший снимок молодел бы от проваленной проверки. Ровно так же и по той же
+ * причине собран показ полей (`components/domains/facts/fields.tsx`), а правило
+ * расхождения — в `lib/domainDrift`.
+ */
+export function snapshotOf(domain: Domain, now: number): Snapshot {
+  const noSnapshot = !domain.fp_facts_at;
+  const stale = isFactsStale(domain.fp_facts_at, now);
+  return {
+    facts: noSnapshot ? null : domain.fp_facts ?? null,
+    noSnapshot,
+    stale,
+    freshness: domain.fp_facts_at
+      ? `Checked ${formatAgoStale(domain.fp_facts_at, stale, now)}`
+      : "Never checked",
+  };
+}

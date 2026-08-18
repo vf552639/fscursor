@@ -2,13 +2,13 @@ import React from "react";
 
 import { Domain, useReadDomainFacts } from "../../../api/domains";
 import { Server } from "../../../api/servers";
+import { snapshotOf } from "../../../lib/domainFacts";
 import { isTauri } from "../../../lib/runtime";
 import { Badge, Btn, SectionCard } from "../../ui/Primitives";
 import DomainFtpCard from "../DomainFtpCard";
 import DomainSiteCard from "../DomainSiteCard";
 import { HasSnapshot, RecordedNoteInLegend } from "../facts/fields";
 import { SnapshotLine } from "../facts/SnapshotLine";
-import { snapshotOf } from "../facts/snapshot";
 import { CardRow, TabBody, TabGroup } from "./TabLayout";
 
 /**
@@ -32,7 +32,7 @@ import { CardRow, TabBody, TabGroup } from "./TabLayout";
  *    прочерков в полях. Её же наличие гасит приписку «из provision, на сервере
  *    не проверено» под полями (`RecordedNoteInLegend`), потому что легенда
  *    несёт те же слова.
- * 4. **Разбор снимка — один** (`facts/snapshot`) и уезжает в обе карточки
+ * 4. **Разбор снимка — один** (`lib/domainFacts`) и уезжает в обе карточки
  *    пропом, причём урезанным: возраст и протухание карточкам не отдаются
  *    вовсе. Второй разбор внутри карточки совпадал бы с этим ровно до
  *    ближайшей правки.
@@ -68,7 +68,7 @@ export interface DomainServerTabProps {
 
 export default function DomainServerTab({ domain, server, now }: DomainServerTabProps) {
   /**
-   * Разбор снимка — общий (`facts/snapshot`), а не свой: гейт `fp_facts_at` над
+   * Разбор снимка — общий (`lib/domainFacts`), а не свой: гейт `fp_facts_at` над
    * `fp_facts` и порог свежести обязаны быть одинаковыми у этой вкладки и у
    * карточки SSL на Overview, потому что снимок у них ОДИН.
    *

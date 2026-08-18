@@ -1,12 +1,11 @@
 import React, { useId, useState } from "react";
 
 import { Domain, useReadDomainFacts } from "../../../api/domains";
-import { DomainFacts } from "../../../lib/domainFacts";
+import { DomainFacts, snapshotOf } from "../../../lib/domainFacts";
 import { logFileLabel } from "../../../lib/logFiles";
 import { isTauri } from "../../../lib/runtime";
 import { Btn, formatBytes } from "../../ui/Primitives";
 import { SnapshotLine } from "../facts/SnapshotLine";
-import { snapshotOf } from "../facts/snapshot";
 import { TabBody } from "./TabLayout";
 
 /** Один файл из снимка — то, что о нём знает провод (`lib/domainFacts`). */
@@ -193,7 +192,7 @@ function badgeText(f: LogFile): string {
 
 export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
   /**
-   * Разбор снимка — общий (`facts/snapshot`), а не свой: гейт `fp_facts_at` над
+   * Разбор снимка — общий (`lib/domainFacts`), а не свой: гейт `fp_facts_at` над
    * `fp_facts` и порог свежести обязаны быть теми же, что на вкладке Server и в
    * карточке SSL, потому что снимок у всех троих ОДИН. Свежесть считается от
    * `fp_facts_at` (когда сняли), а не от `fp_checked_at` (когда пытались), —
