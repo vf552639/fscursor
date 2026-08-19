@@ -117,6 +117,49 @@ const OPTIONAL_TOOLS: [&str; 2] = ["nice", "ionice"];
 /// 137), и любой такой код — отказ по общему правилу «≥ 2».
 const NO_EXIT_STATUS: i32 = -1;
 
+/// Текст, которым `SshSession::exec` сообщает о своём дедлайне.
+///
+/// Разбор по строке, а не по типу, потому что типа для «не уложился» у
+/// [`SshError`] нет; прецедент — `exec_error`/`db_error` в
+/// `commands::provision`, которые разбирают ровно её же. Строка при этом
+/// контракт, а не совпадение: `exec_to_writer` говорит о своём простое
+/// НАМЕРЕННО иначе («stream idle…»), чтобы эти два исхода не слипались, и в
+/// `client.rs` это записано комментарием.
+const EXEC_TIMEOUT_MESSAGE: &str = "exec timeout";
+
+/// Отказ транспорта → отказ с именем шага.
+fn ssh_failure(step: &'static str, budget: Duration, e: SshError) -> BackupError {
+    match e {
+        // Отмена — не свойство шага. Проходит нетронутой (см. `BackupError::Ssh`).
+        SshError::Cancelled { .. } => BackupError::Ssh(e),
+        SshError::Session(ref m) if m == EXEC_TIMEOUT_MESSAGE => BackupError::StepTimeout {
+            step,
+            budget_secs: budget.as_secs(),
+        },
+        other => BackupError::StepTransport {
+            step,
+            source: other,
+        },
+    }
+}
+
+/// Единственная дорога от шага к серверу.
+///
+/// Существует ради одного: чтобы имя шага и его бюджет попадали в отказ
+/// автоматически, а не «когда автор вспомнил». Голый `s.run(...).await?`
+/// компилироваться перестал (у `BackupError::Ssh` нет `#[from]`), и обойти это
+/// молча нельзя.
+async fn run_step(
+    s: &mut impl Exec,
+    step: &'static str,
+    cmd: &str,
+    budget: Duration,
+) -> Result<(i32, String), BackupError> {
+    s.run(cmd, budget)
+        .await
+        .map_err(|e| ssh_failure(step, budget, e))
+}
+
 /// Убедиться, что итог шага вообще доехал. См. [`NO_EXIT_STATUS`].
 fn ensure_exit_status_arrived(step: &'static str, code: i32) -> Result<(), BackupError> {
     if code == NO_EXIT_STATUS {
@@ -159,8 +202,46 @@ pub const PIPE_STATUS_TAIL: &str = "st=\"${PIPESTATUS[*]}\"; printf 'SDMP_RC\\t%
 /// баз»), и вызывающему из фазы 4 нужно уметь их различать не по подстроке.
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
+    /// Ошибка транспорта, которую НЕЛЬЗЯ приписать шагу.
+    ///
+    /// Сегодня это ровно один случай — [`SshError::Cancelled`]: отмену приносит
+    /// сквозь ядро обёртка `CancellableExec` из `commands::domain_backup`, и
+    /// это решение человека, а не свойство шага. Написать «шаг `dump_db` не
+    /// удался» про нажатую самим человеком кнопку значило бы соврать, поэтому
+    /// отмена проходит НЕТРОНУТОЙ и опознаётся вызывающим по этому варианту.
+    ///
+    /// `#[from]` здесь намеренно НЕТ: с ним любой случайный `?` на `s.run(...)`
+    /// молча собрал бы этот вариант и потерял имя шага — ту самую дыру, ради
+    /// которой заведены два варианта ниже. Без `#[from]` такой `?` не
+    /// компилируется, и единственная дорога наружу — [`run_step`].
     #[error(transparent)]
-    Ssh(#[from] SshError),
+    Ssh(SshError),
+
+    /// Шаг не уложился в отведённый ему бюджет.
+    ///
+    /// Отдельный вариант, потому что это САМЫЙ ВЕРОЯТНЫЙ отказ модуля и он
+    /// обязан быть действенным. Без него наружу уходила голая строка `exec
+    /// timeout`, по которой нельзя узнать ни в чей бюджет упёрлись, ни что
+    /// мерить: первый же большой сайт даёт `du -sk` дольше минуты (холодный
+    /// кеш inode-ов на дереве в миллион файлов — это минуты), а часовой `tar`
+    /// сообщал бы о себе теми же двумя словами.
+    #[error(
+        "step {step} did not finish within its {budget_secs}s budget. \
+         The command was still running when SDMP gave up — measure it on the server \
+         (for example `time du -sk <site path>`) and raise the budget if the site is simply that big"
+    )]
+    StepTimeout {
+        step: &'static str,
+        budget_secs: u64,
+    },
+
+    /// Сессия умерла посреди шага. Имя шага здесь тоже обязательно: «связь
+    /// оборвалась» на резолве и на часовом `tar` — разные новости.
+    #[error("step {step} lost its SSH session: {source}")]
+    StepTransport {
+        step: &'static str,
+        source: SshError,
+    },
 
     #[error("site {domain} is not in `sites list --json` on this server — nothing to archive")]
     SiteNotFound { domain: String },
@@ -462,12 +543,13 @@ pub(crate) async fn resolve_target(
     fp_path: &str,
     domain: &str,
 ) -> Result<BackupTarget, BackupError> {
-    let (code, out) = s
-        .run(
-            &format!("{} sites list --json", q(fp_path)),
-            BACKUP_STEP_TIMEOUT,
-        )
-        .await?;
+    let (code, out) = run_step(
+        s,
+        "resolve",
+        &format!("{} sites list --json", q(fp_path)),
+        BACKUP_STEP_TIMEOUT,
+    )
+    .await?;
     if code != 0 {
         return Err(BackupError::Step {
             step: "resolve",
@@ -490,12 +572,13 @@ pub(crate) async fn resolve_target(
 
     // Мн.ч. `databases` — НЕ `database`: ед.ч. на этой сборке падает
     // (`expected command but got "database"`, сверено).
-    let (c2, o2) = s
-        .run(
-            &format!("{} databases list --json", q(fp_path)),
-            BACKUP_STEP_TIMEOUT,
-        )
-        .await?;
+    let (c2, o2) = run_step(
+        s,
+        "resolve",
+        &format!("{} databases list --json", q(fp_path)),
+        BACKUP_STEP_TIMEOUT,
+    )
+    .await?;
     if c2 != 0 {
         return Err(BackupError::DatabasesUnknown {
             domain: domain.to_string(),
@@ -558,7 +641,7 @@ pub(crate) async fn probe_tools(
     }
     wanted.extend_from_slice(&OPTIONAL_TOOLS);
     let cmd = build_tools_probe_cmd(&wanted);
-    let (code, out) = s.run(&cmd, BACKUP_STEP_TIMEOUT).await?;
+    let (code, out) = run_step(s, "preflight", &cmd, BACKUP_STEP_TIMEOUT).await?;
     // Код возврата не смотрим (цикл завершается успешно и когда всё отсутствует)
     // — кроме «итог не доехал»: см. `NO_EXIT_STATUS`.
     ensure_exit_status_arrived("preflight", code)?;
@@ -688,7 +771,7 @@ pub(crate) async fn check_space(
         step: "space",
         detail: format!("{root} has no parent directory to measure free space on"),
     })?;
-    let (code, out) = s.run(&cmd, BACKUP_STEP_TIMEOUT).await?;
+    let (code, out) = run_step(s, "space", &cmd, BACKUP_STEP_TIMEOUT).await?;
     // Код возврата не смотрим: `du` возвращает не ноль на любом нечитаемом
     // подкаталоге, а размер при этом печатает. Читаем вывод. Исключение одно —
     // «итога не было вовсе» (`NO_EXIT_STATUS`).
@@ -786,18 +869,23 @@ pub(crate) async fn acquire_lock(
     s: &mut impl Exec,
     paths: &BackupPaths,
 ) -> Result<(), BackupError> {
-    let (code, out) = s
-        .run(
-            &build_lock_cmd(&paths.root, &paths.work),
-            BACKUP_STEP_TIMEOUT,
-        )
-        .await?;
+    let (code, out) = run_step(
+        s,
+        "lock",
+        &build_lock_cmd(&paths.root, &paths.work),
+        BACKUP_STEP_TIMEOUT,
+    )
+    .await?;
     if code == 0 {
         return Ok(());
     }
-    let (_, probe) = s
-        .run(&build_lock_probe_cmd(&paths.work), BACKUP_STEP_TIMEOUT)
-        .await?;
+    let (_, probe) = run_step(
+        s,
+        "lock",
+        &build_lock_probe_cmd(&paths.work),
+        BACKUP_STEP_TIMEOUT,
+    )
+    .await?;
     match parse_lock_probe(&probe) {
         // Каталога нет, а `mkdir` всё равно не смог — это не занятый замок, а
         // сломанный `/var/tmp` (только чтение, кончились иноды, ФС в r/o).
@@ -1066,12 +1154,13 @@ async fn cleanup(
     } else {
         Some(paths.archive.as_str())
     };
-    let (code, out) = s
-        .run(
-            &build_cleanup_cmd(&paths.work, archive),
-            BACKUP_STEP_TIMEOUT,
-        )
-        .await?;
+    let (code, out) = run_step(
+        s,
+        "cleanup",
+        &build_cleanup_cmd(&paths.work, archive),
+        BACKUP_STEP_TIMEOUT,
+    )
+    .await?;
     if code != 0 {
         // Сырого вывода сервера здесь НЕТ намеренно, в отличие от остальных
         // шагов: текст этой ошибки — единственный, который уезжает в
@@ -1167,7 +1256,7 @@ async fn run_locked(
             path: target.site_path.clone(),
         }
     })?;
-    let (code, out) = s.run(&cmd, BACKUP_ARCHIVE_TIMEOUT).await?;
+    let (code, out) = run_step(s, "archive_files", &cmd, BACKUP_ARCHIVE_TIMEOUT).await?;
     // Убитый шелл маркера не печатает вовсе, и разбор ниже упёрся бы в «не
     // поняли вывод». Называем причину точнее, пока она известна.
     ensure_exit_status_arrived("archive_files", code)?;
@@ -1193,7 +1282,7 @@ async fn run_locked(
     let mut part_names: Vec<String> = vec![SITE_PART.to_string()];
     for db in &target.databases {
         let cmd = build_dump_db_cmd(db, &paths.work);
-        let (code, out) = s.run(&cmd, BACKUP_ARCHIVE_TIMEOUT).await?;
+        let (code, out) = run_step(s, "dump_db", &cmd, BACKUP_ARCHIVE_TIMEOUT).await?;
         ensure_exit_status_arrived("dump_db", code)?;
         let codes = parse_pipeline_status(&out).ok_or_else(|| BackupError::Unreadable {
             step: "dump_db",
@@ -1218,12 +1307,13 @@ async fn run_locked(
     // 3. Суммы частей — вход манифеста.
     // Часовой бюджет, а не минутный: `sha256sum` читает ровно те же гигабайты,
     // что писал `tar`. См. `BACKUP_ARCHIVE_TIMEOUT`.
-    let (code, out) = s
-        .run(
-            &build_hash_parts_cmd(&paths.work, &part_names),
-            BACKUP_ARCHIVE_TIMEOUT,
-        )
-        .await?;
+    let (code, out) = run_step(
+        s,
+        "manifest",
+        &build_hash_parts_cmd(&paths.work, &part_names),
+        BACKUP_ARCHIVE_TIMEOUT,
+    )
+    .await?;
     if code != 0 {
         return Err(BackupError::Step {
             step: "manifest",
@@ -1265,12 +1355,13 @@ async fn run_locked(
         &parts,
         BACKUP_TOOL,
     );
-    let (code, out) = s
-        .run(
-            &build_manifest_and_pack_cmd(&paths.work, &paths.archive, &manifest, &part_names),
-            BACKUP_ARCHIVE_TIMEOUT,
-        )
-        .await?;
+    let (code, out) = run_step(
+        s,
+        "pack",
+        &build_manifest_and_pack_cmd(&paths.work, &paths.archive, &manifest, &part_names),
+        BACKUP_ARCHIVE_TIMEOUT,
+    )
+    .await?;
     if code != 0 {
         return Err(BackupError::Step {
             step: "pack",
@@ -1281,9 +1372,13 @@ async fn run_locked(
     // 5. Контрольная сумма готового архива. Считается ЗДЕСЬ, на сервере, до
     //    любой выгрузки: только так скачавший может доказать, что довёз файл
     //    целиком (фаза 4 сверяет с ней локально посчитанную).
-    let (code, out) = s
-        .run(&build_checksum_cmd(&paths.archive), BACKUP_ARCHIVE_TIMEOUT)
-        .await?;
+    let (code, out) = run_step(
+        s,
+        "checksum",
+        &build_checksum_cmd(&paths.archive),
+        BACKUP_ARCHIVE_TIMEOUT,
+    )
+    .await?;
     if code != 0 {
         return Err(BackupError::Step {
             step: "checksum",
@@ -1358,6 +1453,8 @@ mod tests {
     struct FakeServer {
         replies: Vec<(&'static str, i32, String)>,
         seen: Vec<String>,
+        /// Отказы транспорта по подстроке команды.
+        fails: Vec<(&'static str, FailKind)>,
         /// Бюджет каждого вызова, параллельно `seen`. Отдельным вектором, а не
         /// парой в `seen`, чтобы два десятка существующих утверждений про
         /// ушедшие строки остались читаемыми.
@@ -1372,6 +1469,7 @@ mod tests {
                     .map(|(p, c, o)| (*p, *c, (*o).to_string()))
                     .collect(),
                 seen: Vec::new(),
+                fails: Vec::new(),
                 budgets: Vec::new(),
             }
         }
@@ -1402,6 +1500,12 @@ mod tests {
             ])
         }
 
+        /// Уронить шаг, чья команда содержит `pat`, отказом транспорта.
+        fn fail(&mut self, pat: &'static str, kind: FailKind) -> &mut Self {
+            self.fails.push((pat, kind));
+            self
+        }
+
         fn reply(&mut self, pat: &'static str, code: i32, out: &str) -> &mut Self {
             // В начало: первое совпадение выигрывает.
             self.replies.insert(0, (pat, code, out.to_string()));
@@ -1414,12 +1518,37 @@ mod tests {
         async fn run(&mut self, cmd: &str, t: Duration) -> Result<(i32, String), SshError> {
             self.seen.push(cmd.to_string());
             self.budgets.push(t);
+            for (pat, kind) in &self.fails {
+                if cmd.contains(pat) {
+                    return Err(kind.error());
+                }
+            }
             for (pat, code, out) in &self.replies {
                 if cmd.contains(pat) {
                     return Ok((*code, out.clone()));
                 }
             }
             Ok((127, format!("command not found: {cmd}")))
+        }
+    }
+
+    /// Классы отказа транспорта, которые видит шаг. `SshError` не `Clone`,
+    /// поэтому фейк хранит вид, а ошибку собирает заново на каждый вызов.
+    #[derive(Clone, Copy)]
+    enum FailKind {
+        /// Ровно то, что отдаёт `exec` на своём дедлайне.
+        Timeout,
+        Disconnected,
+        Cancelled,
+    }
+
+    impl FailKind {
+        fn error(self) -> SshError {
+            match self {
+                FailKind::Timeout => SshError::Session(EXEC_TIMEOUT_MESSAGE.to_string()),
+                FailKind::Disconnected => SshError::Disconnected { bytes: 17 },
+                FailKind::Cancelled => SshError::Cancelled { bytes: 17 },
+            }
         }
     }
 
@@ -2363,6 +2492,105 @@ mod tests {
         // вовсе, и шаг честно откажет.
         assert_eq!(build_space_cmd("/site", "/sdmp-backup"), None);
         assert_eq!(build_space_cmd("/site", "/"), None);
+    }
+
+    // Самый вероятный отказ модуля обязан быть действенным. Без имени шага
+    // наружу уходили два слова `exec timeout`: ни в чей бюджет упёрлись, ни что
+    // мерить, ни отработала ли уборка — узнать было нельзя.
+    #[tokio::test]
+    async fn a_step_that_runs_out_of_its_budget_names_the_step_and_its_budget() {
+        // Дешёвый на вид шаг, который на большом сайте дорог на самом деле.
+        let mut s = FakeServer::happy();
+        s.fail(DU_MARKER, FailKind::Timeout);
+        let err = create_backup(&mut s, FP, "example.com", now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackupError::StepTimeout {
+                    step: "space",
+                    budget_secs: 60
+                }
+            ),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("step space"), "{text}");
+        assert!(text.contains("60s budget"), "{text}");
+        // Действенность: сказано, чем мерить и что просить поднять.
+        assert!(text.contains("time du -sk"), "{text}");
+        // Замка ещё не было — и уборки быть не должно.
+        assert!(!s.seen.iter().any(|c| c.contains("rm -rf")));
+
+        // Часовой шаг называет свой бюджет, а не чужой.
+        let mut s = FakeServer::happy();
+        s.fail("tar --warning=no-file-changed", FailKind::Timeout);
+        let err = create_backup(&mut s, FP, "example.com", now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackupError::StepTimeout {
+                    step: "archive_files",
+                    budget_secs: 3600
+                }
+            ),
+            "{err}"
+        );
+        // А уборка после взятого замка отрабатывает по-прежнему.
+        assert!(s.seen.iter().any(|c| c.contains("rm -rf")), "{:?}", s.seen);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_dies_mid_step_names_the_step_and_still_cleans_up() {
+        let mut s = FakeServer::happy();
+        // Примета — `--single-transaction`, а не `mysqldump`: последнее слово
+        // стоит и в argv инвентаря инструментов, то есть уронило бы preflight.
+        s.fail("--single-transaction", FailKind::Disconnected);
+        let err = create_backup(&mut s, FP, "example.com", now())
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            matches!(
+                err,
+                BackupError::StepTransport {
+                    step: "dump_db",
+                    ..
+                }
+            ),
+            "{text}"
+        );
+        // Причина транспорта не теряется — она вложена, а не заменена.
+        assert!(text.contains("connection lost"), "{text}");
+        assert!(text.contains("step dump_db"), "{text}");
+        let rm = s
+            .seen
+            .iter()
+            .find(|c| c.contains("rm -rf"))
+            .expect("уборки не было");
+        assert!(rm.contains("example.com-20260819T103000Z.tar"), "{rm}");
+    }
+
+    // Контракт с `commands::domain_backup`: отмену он опознаёт как
+    // `BackupError::Ssh(SshError::Cancelled { .. })`. Отмена — решение человека,
+    // а не свойство шага, поэтому именем шага она НЕ обрастает: «шаг dump_db не
+    // уложился» про нажатую самим человеком кнопку было бы ложью.
+    #[tokio::test]
+    async fn cancellation_passes_through_without_being_blamed_on_a_step() {
+        let mut s = FakeServer::happy();
+        s.fail("--single-transaction", FailKind::Cancelled);
+        let err = create_backup(&mut s, FP, "example.com", now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackupError::Ssh(SshError::Cancelled { .. })),
+            "отмена перестала опознаваться вызывающим: {err}"
+        );
+        // И даже отменённый прогон убирает за собой.
+        assert!(s.seen.iter().any(|c| c.contains("rm -rf")), "{:?}", s.seen);
     }
 
     #[test]
