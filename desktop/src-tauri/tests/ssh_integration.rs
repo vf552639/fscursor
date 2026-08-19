@@ -14,6 +14,10 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use sdmp_desktop_lib::ssh::backup_run::{
+    build_cleanup_cmd, build_lock_cmd, build_lock_probe_cmd, parse_lock_probe,
+    parse_pipeline_status, PIPE_STATUS_TAIL,
+};
 use sdmp_desktop_lib::ssh::client::{
     append_known_host, connect, connect_with_keepalive_override, read_known_host, ConnectOptions,
     SshError, SshSession, KEEPALIVE_INTERVAL,
@@ -406,4 +410,104 @@ async fn keepalive_carries_a_silent_command_past_the_inactivity_timeout() {
     assert_eq!(r.exit, 0);
     assert_eq!(buf2, b"done");
     let _ = with.disconnect().await;
+}
+
+// ---- фаза 2: замок и маркер конвейера ---------------------------------------
+//
+// Оба теста живут здесь, а не в юнитах, потому что доказывают поведение ЧУЖОЙ
+// стороны: юнит-тест видит собранную строку, а не то, что с ней сделает
+// настоящий шелл настоящего сервера. Всё, что требует FastPanel или mysql
+// (`sites list`, `mysqldump`), сюда не переносится — на голом openssh такой
+// тест доказывал бы только то, что команды нет.
+
+/// `mkdir` каталога на POSIX атомарен: второй раз он ОБЯЗАН упасть.
+///
+/// На этом стоит весь серверный слой идемпотентности бэкапа, и проверить это
+/// можно только на живой ФС: юнит-тест увидел бы лишь текст команды. Заодно
+/// проверяются `stat -c %Y` и `date +%s` — их вывод разбирает `parse_lock_probe`,
+/// а форма у них платформенная.
+#[tokio::test]
+#[ignore = "requires docker ssh on SDMP_SSH_TEST_HOST:SDMP_SSH_TEST_PORT"]
+async fn a_backup_lock_directory_cannot_be_taken_twice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut s = trusted_session(&kh, Duration::from_secs(30), Some(KEEPALIVE_INTERVAL)).await;
+
+    let root = "/var/tmp/sdmp-backup-it";
+    let work = "/var/tmp/sdmp-backup-it/lock.example";
+    // Хвост прошлого прогона убираем ДО теста: замок, оставшийся с прошлого
+    // раза, сделал бы зелёным даже сломанный `mkdir`.
+    let _ = s
+        .exec(&build_cleanup_cmd(root, None), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+
+    let (first, _) = s
+        .exec(&build_lock_cmd(root, work), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+    assert_eq!(first, 0, "первый замок обязан взяться");
+
+    let (second, _) = s
+        .exec(&build_lock_cmd(root, work), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+    assert_ne!(second, 0, "второй `mkdir` обязан упасть — иначе замок не замок");
+
+    let (_, probe) = s
+        .exec(&build_lock_probe_cmd(work), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+    let age = parse_lock_probe(&probe)
+        .unwrap_or_else(|| panic!("проба замка не разобралась: {probe:?}"))
+        .expect("каталог существует, возраст обязан быть");
+    assert!((0..60).contains(&age), "возраст замка вне здравого смысла: {age}");
+
+    // Уборка снимает замок — и следующий прогон снова его берёт.
+    let (rm, _) = s
+        .exec(&build_cleanup_cmd(work, None), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+    assert_eq!(rm, 0);
+    let (third, _) = s
+        .exec(&build_lock_cmd(root, work), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+    assert_eq!(third, 0, "после уборки замок обязан браться снова");
+
+    let _ = s
+        .exec(&build_cleanup_cmd(root, None), Duration::from_secs(30), false)
+        .await
+        .unwrap();
+    let _ = s.disconnect().await;
+}
+
+/// Коды ВСЕХ звеньев конвейера доезжают через настоящий exec-канал.
+///
+/// Это то самое место, где «`tar` вернул 1, `gzip` отработал» отличается от
+/// «`tar` отработал, `gzip` упал»: без `PIPESTATUS` оба конца выглядят кодом 1,
+/// а первый у нас предупреждение, второй — отказ с обрезанным архивом. Сам
+/// `tar` здесь не зовётся намеренно: у busybox нет `--warning=no-file-changed`,
+/// и тест падал бы по причине, которой на целевых серверах (GNU tar) нет.
+#[tokio::test]
+#[ignore = "requires docker ssh on SDMP_SSH_TEST_HOST:SDMP_SSH_TEST_PORT"]
+async fn the_pipeline_marker_survives_a_real_login_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut s = trusted_session(&kh, Duration::from_secs(30), Some(KEEPALIVE_INTERVAL)).await;
+
+    let cmd = format!("set -o pipefail; (exit 3) | cat; {PIPE_STATUS_TAIL}");
+    let (_, out) = s.exec(&cmd, Duration::from_secs(30), false).await.unwrap();
+    assert_eq!(
+        parse_pipeline_status(&out),
+        Some(vec![3, 0]),
+        "маркер не доехал или разобрался неверно: {out:?}"
+    );
+
+    // И обратный случай: упало ВТОРОЕ звено, первое цело.
+    let cmd = format!("set -o pipefail; printf x | (exit 5); {PIPE_STATUS_TAIL}");
+    let (_, out) = s.exec(&cmd, Duration::from_secs(30), false).await.unwrap();
+    assert_eq!(parse_pipeline_status(&out), Some(vec![0, 5]), "{out:?}");
+
+    let _ = s.disconnect().await;
 }
