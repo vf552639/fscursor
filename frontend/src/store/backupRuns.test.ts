@@ -157,6 +157,56 @@ describe("исходы", () => {
   });
 });
 
+describe("просьба об отмене", () => {
+  it("остаётся видна, пока прогон не кончился", () => {
+    // Команда отмены отвечает мгновенно, а реакция приходит через десятки
+    // секунд — флаг читается на следующем чанке выгрузки. Всё это время экран
+    // обязан показывать, что нажатие услышано, иначе человек жмёт снова.
+    store().start(42);
+    store().requestCancel(42);
+    expect(run(42).cancelRequested).toBe(true);
+    // И события прогресса её не стирают: прогон ещё идёт, отмена ещё в силе.
+    progress({ step: "download", done_bytes: 10, total_bytes: 100 });
+    expect(run(42).cancelRequested).toBe(true);
+  });
+
+  it("снимается вместе с исходом — любым", () => {
+    for (const finish of [
+      () => store().cancelled(42),
+      () => store().failed(42, "ssh: handshake failed"),
+      () => store().saved(42, SAVED),
+    ]) {
+      store().start(42);
+      store().requestCancel(42);
+      finish();
+      expect(run(42).cancelRequested).toBe(false);
+    }
+  });
+
+  it("не ставится там, где отменять нечего", () => {
+    // Прогона нет вовсе.
+    store().requestCancel(42);
+    expect(run(42)).toBeUndefined();
+    // Прогон кончился: «Cancelling…» над законченным прогоном не сменится
+    // никогда, потому что менять его уже некому.
+    store().start(7);
+    store().saved(7, SAVED);
+    store().requestCancel(7);
+    expect(run(7).cancelRequested).toBe(false);
+  });
+
+  it("отбитая просьба снимает признак: кнопка обязана стать нажимаемой", () => {
+    // «Cancelling…», которое ничего не отменило, — то же враньё, что зелёный
+    // бейдж без измерения.
+    store().start(42);
+    store().requestCancel(42);
+    store().cancelRequestFailed(42);
+    expect(run(42).cancelRequested).toBe(false);
+    // И прогон при этом остаётся живым: провал ПРОСЬБЫ — не провал бэкапа.
+    expect(run(42).outcome).toBeNull();
+  });
+});
+
 describe("подписка на backup:progress", () => {
   /**
    * Оба утверждения — одним тестом, и это не лень: подписка memoized модульно, а

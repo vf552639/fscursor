@@ -5,6 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 const mocks = vi.hoisted(() => ({
   invokeSynced: vi.fn(),
+  invokeIfTauri: vi.fn(),
   chooseSavePath: vi.fn(),
   listen: vi.fn(),
 }));
@@ -13,6 +14,12 @@ vi.mock("../../../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
+}));
+
+/** Отмена идёт мимо `invokeSynced`: ей нечего резолвить и некогда ждать. */
+vi.mock("../../../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
 }));
 
 vi.mock("../../../lib/chooseSavePath", async (importOriginal) => ({
@@ -131,8 +138,11 @@ const EMPTY_STATES: Record<string, Record<string, unknown>> = {
 
 const rows = () => within(screen.getByRole("list", { name: "Backup copies" })).getAllByRole("listitem");
 
-/** Единственная кнопка вкладки. */
+/** Кнопка покоя и кнопка прогона: на экране всегда ровно одна из них. */
 const createBtn = () => screen.getByRole("button", { name: "Create backup" });
+const cancelBtn = () => screen.getByRole("button", { name: "Cancel" });
+const cancelCalls = () =>
+  mocks.invokeIfTauri.mock.calls.filter((c: unknown[]) => c[0] === "domain_backup_cancel");
 
 /** Путь, который выбрал человек, и путь, который вернула команда, — РАЗНЫЕ. */
 const CHOSEN = "/Users/me/Documents/example.com";
@@ -179,6 +189,7 @@ beforeEach(() => {
   });
   mocks.chooseSavePath.mockResolvedValue(CHOSEN);
   mocks.invokeSynced.mockResolvedValue(backupResult());
+  mocks.invokeIfTauri.mockResolvedValue(true);
   queryClient.clear();
   useBackupRunsStore.setState({ runs: {} });
   setBlobUser();
@@ -286,6 +297,13 @@ describe("органов управления ровно столько, ско�
     }
   });
 
+  it("кнопки отмены вне прогона нет вовсе: отменять нечего", () => {
+    // Кнопка, которой не с чем работать, обещала бы действие, которого нет, —
+    // ровно то, ради чего с этой вкладки сносили заглушки.
+    showListed([backup()]);
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+  });
+
   it("в вебе кнопок нет ни одной и сказано почему — общей фразой продукта", () => {
     setTauri(false);
     showListed([backup()]);
@@ -295,6 +313,21 @@ describe("органов управления ровно столько, ско�
     // Формулировка — общая `desktopOnly`, а не своя: иначе вкладка сочинила бы
     // четвёртый вариант объяснения одного и того же правила продукта.
     expect(screen.getByText(desktopOnly("Creating backups"))).toBeTruthy();
+  });
+
+  it("в вебе кнопок нет и во время прогона — ни создания, ни отмены", () => {
+    // Прогон в вебе не запустить, но строка о нём приехать может: стор
+    // модульный, а сборка одна на оба рантайма. Органов управления рядом с ней
+    // не появляется ни одного (принцип №3).
+    useBackupRunsStore.setState({
+      runs: {
+        "42": { step: "download", doneBytes: 10, totalBytes: 100, outcome: null, cancelRequested: false },
+      },
+    });
+    setTauri(false);
+    showListed([backup()]);
+    expect(screen.getByRole("progressbar")).toBeTruthy();
+    expect(screen.queryAllByRole("button")).toEqual([]);
   });
 
   it("ни селекта, ни поля пути, ни «Save» — того, что рисует макет, здесь нет", () => {
@@ -433,8 +466,90 @@ describe("строка прогресса", () => {
     // И кнопка остаётся погашенной: прогон-то идёт. Признак берётся из
     // `MutationCache`, а не из стейта размонтированного экземпляра, — иначе
     // второй клик по перемонтированной вкладке открыл бы вторую SSH-сессию.
-    const btn = screen.getByRole("button", { name: "Backing up…" });
-    expect(btn.hasAttribute("disabled")).toBe(true);
+    // На месте кнопки создания стоит отмена — и она рабочая: прогон-то идёт.
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel"]);
+    expect(cancelBtn().hasAttribute("disabled")).toBe(false);
+  });
+});
+
+describe("отмена прогона", () => {
+  /** Довести прогон до состояния «идёт»: команда не отвечает, пока не разрешим. */
+  async function startRun() {
+    let finish: (v: unknown) => void = () => {};
+    let fail: (e: unknown) => void = () => {};
+    mocks.invokeSynced.mockReturnValue(
+      new Promise((resolve, reject) => {
+        finish = resolve;
+        fail = reject;
+      }),
+    );
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalled());
+    return {
+      finish: () => act(async () => finish(backupResult())),
+      // Так отвечает Rust на отменённый прогон: маркером, а не текстом про
+      // оборванный поток.
+      cancelledByRust: () => act(async () => fail(new Error("api: BACKUP_CANCELLED"))),
+    };
+  }
+
+  it("во время прогона кнопка ровно одна — и это остановка", async () => {
+    // Две кнопки, зовущие в разные стороны, на экране не стоят: «сделай ещё
+    // раз» поверх идущей выгрузки бессмысленна, и целиться в неё незачем.
+    await startRun();
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel"]);
+  });
+
+  it("клик зовёт команду отмены с тем же доменом", async () => {
+    await startRun();
+    fireEvent.click(cancelBtn());
+    await waitFor(() => expect(cancelCalls()).toHaveLength(1));
+    expect(cancelCalls()[0][1]).toEqual({ domainId: "42" });
+  });
+
+  it("два клика дают ОДНУ команду", async () => {
+    await startRun();
+    fireEvent.click(cancelBtn());
+    fireEvent.click(cancelBtn());
+    await waitFor(() => expect(cancelCalls().length).toBeGreaterThan(0));
+    expect(cancelCalls()).toHaveLength(1);
+  });
+
+  it("нажатие видно, пока прогон не кончился", async () => {
+    // Команда отмены отвечает мгновенно, а прогон останавливается через
+    // десятки секунд. Не покажи мы этого — человек решит, что не сработало, и
+    // будет жать снова.
+    await startRun();
+    fireEvent.click(cancelBtn());
+    const cancelling = await screen.findByRole("button", { name: "Cancelling…" });
+    expect(cancelling.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("итог отменённого прогона — «Cancelled», а не «Backup failed»", async () => {
+    const { cancelledByRust } = await startRun();
+    fireEvent.click(cancelBtn());
+    await screen.findByRole("button", { name: "Cancelling…" });
+    await cancelledByRust();
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/Cancelled/));
+    // Отмена — не авария: `role="alert"` на неё был бы враньём.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Backup failed/);
+    // И кнопка вернулась к покою: прогона больше нет.
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Create backup"]);
+  });
+
+  it("отбитая просьба возвращает кнопку в рабочее состояние, а прогон продолжается", async () => {
+    mocks.invokeIfTauri.mockRejectedValue(new Error("command not found"));
+    const { finish } = await startRun();
+    fireEvent.click(cancelBtn());
+    // «Cancelling…», которое ничего не отменило, — то же враньё, что зелёный
+    // бейдж без измерения: кнопка обязана снова стать нажимаемой.
+    await waitFor(() => expect(cancelBtn().hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByRole("alert")).toBeNull();
+    // Прогон живой и доходит до своего исхода сам.
+    await finish();
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Saved to/));
   });
 });
 

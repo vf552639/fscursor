@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   invokeSynced: vi.fn(),
+  invokeIfTauri: vi.fn(),
   chooseSavePath: vi.fn(),
   listen: vi.fn(),
 }));
@@ -23,6 +24,17 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
   syncLocalCache: vi.fn(async () => {}),
 }));
 
+/**
+ * Отмена идёт мимо `invokeSynced` намеренно, и мок здесь ВТОРОЙ именно поэтому:
+ * синхронизация кэша перед просьбой остановиться — круг в сеть ровно там, где
+ * от вызова требуется быстрота, а резолвить отмене нечего (она смотрит только в
+ * реестр прогонов). Два разных мока держат это правило под тестом.
+ */
+vi.mock("../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
+}));
+
 vi.mock("../lib/chooseSavePath", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   chooseSavePath: mocks.chooseSavePath,
@@ -30,7 +42,12 @@ vi.mock("../lib/chooseSavePath", async (importOriginal) => ({
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
-import { BACKUP_CANCELLED, runCreateDomainBackup, type DomainBackupResult } from "./domainBackups";
+import {
+  BACKUP_CANCELLED,
+  runCancelDomainBackup,
+  runCreateDomainBackup,
+  type DomainBackupResult,
+} from "./domainBackups";
 import { queryClient } from "./queryClient";
 import { useAuthStore } from "../store/auth";
 import { useBackupRunsStore } from "../store/backupRuns";
@@ -68,6 +85,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.listen.mockResolvedValue(() => {});
   mocks.chooseSavePath.mockResolvedValue(CHOSEN);
+  mocks.invokeIfTauri.mockResolvedValue(true);
   queryClient.clear();
   useBackupRunsStore.setState({ runs: {} });
   setTauri(true);
@@ -204,6 +222,59 @@ describe("неуспех", () => {
     await runCreateDomainBackup(DOMAIN);
     expect(mocks.chooseSavePath).not.toHaveBeenCalled();
     expect(run().outcome).toMatchObject({ kind: "failed" });
+  });
+});
+
+describe("отмена прогона", () => {
+  const cancelCalls = () =>
+    mocks.invokeIfTauri.mock.calls.filter((c: unknown[]) => c[0] === "domain_backup_cancel");
+
+  it("зовёт команду с тем же доменом и отмечает просьбу на экране", async () => {
+    useBackupRunsStore.getState().start(42);
+    await runCancelDomainBackup(42);
+    expect(cancelCalls()).toHaveLength(1);
+    expect(cancelCalls()[0][1]).toEqual({ domainId: "42" });
+    // Реакция придёт через десятки секунд — всё это время нажатие обязано быть
+    // видно.
+    expect(run().cancelRequested).toBe(true);
+  });
+
+  it("два клика подряд дают ОДНУ команду", async () => {
+    useBackupRunsStore.getState().start(42);
+    await Promise.all([runCancelDomainBackup(42), runCancelDomainBackup(42)]);
+    expect(cancelCalls()).toHaveLength(1);
+  });
+
+  it("не идёт через синхронизацию кэша: резолвить ей нечего, а ждать некогда", async () => {
+    useBackupRunsStore.getState().start(42);
+    await runCancelDomainBackup(42);
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  it("отбитая просьба не хоронит живой прогон, но и не врёт, что отменила", async () => {
+    mocks.invokeIfTauri.mockRejectedValue(new Error("command not found"));
+    useBackupRunsStore.getState().start(42);
+    await runCancelDomainBackup(42);
+    expect(run().cancelRequested).toBe(false);
+    // Прогон-то идёт: красная строка на его месте объявила бы мёртвым живого.
+    expect(run().outcome).toBeNull();
+  });
+
+  it("нажатая отмена доводит прогон до исхода «отменён», а не «провален»", async () => {
+    // Полный путь: человек жмёт отмену, Rust отвечает прогону маркером.
+    mocks.invokeSynced.mockRejectedValue(new Error(`api: ${BACKUP_CANCELLED}`));
+    const running = runCreateDomainBackup(DOMAIN);
+    await runCancelDomainBackup(42);
+    await running;
+    expect(run().outcome).toEqual({ kind: "cancelled" });
+    // И признак просьбы снят вместе с исходом.
+    expect(run().cancelRequested).toBe(false);
+  });
+
+  it("в вебе не зовёт ничего", async () => {
+    setTauri(false);
+    await runCancelDomainBackup(42);
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
   });
 });
 

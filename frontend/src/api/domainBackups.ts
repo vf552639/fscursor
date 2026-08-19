@@ -4,6 +4,7 @@ import { runExclusive, useRunPending } from "./runGate";
 import { chooseSavePath, defaultBackupFileName } from "../lib/chooseSavePath";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
+import { invokeIfTauri } from "../lib/tauri-invoke";
 import { ensureBackupProgressSubscription, useBackupRunsStore } from "../store/backupRuns";
 import { useAuthStore } from "../store/auth";
 
@@ -40,6 +41,18 @@ import { useAuthStore } from "../store/auth";
  */
 export function domainBackupKey(domainId: number) {
   return ["domain-backup", domainId] as const;
+}
+
+/**
+ * Ключ гейта САМОЙ ОТМЕНЫ — отдельный, и это не оплошность.
+ *
+ * Ключ прогона занят на всё время бэкапа (в том и смысл), так что отмена,
+ * вставшая в ту же очередь, не выполнилась бы никогда: `runExclusive` увидел бы
+ * идущий прогон и промолчал. Свой ключ даёт отмене ровно то, что от гейта
+ * нужно ей самой, — не слать вторую команду на второй клик.
+ */
+export function domainBackupCancelKey(domainId: number) {
+  return ["domain-backup-cancel", domainId] as const;
 }
 
 /** Часть архива: файлы сайта или дамп базы (`BackupPart` в Rust). */
@@ -145,6 +158,40 @@ export async function runCreateDomainBackup(domain: BackupTarget): Promise<void>
 }
 
 /**
+ * Попросить идущий прогон остановиться.
+ *
+ * `invokeIfTauri`, а не `invokeSynced`: команда ничего не резолвит из
+ * локального кэша — она смотрит только в свой реестр прогонов
+ * (`BackupRuns` в managed state), — а круг в сеть за синхронизацией стоял бы
+ * ровно там, где от вызова требуется быстрота. Тот же довод, что у чтения
+ * хвоста лога.
+ *
+ * Ответ команды (`true`/`false`) наружу не идёт: `false` означает «такого
+ * прогона уже нет», то есть он кончился сам между нажатием и вызовом. Это не
+ * ошибка и не новость — исход прогона придёт своим путём и всё расскажет.
+ *
+ * Признак «отмену попросили» ставится ДО вызова: реакция придёт через десятки
+ * секунд (флаг читается на следующем чанке выгрузки), и всё это время экран
+ * обязан показывать, что нажатие услышано.
+ */
+export async function runCancelDomainBackup(domainId: number): Promise<void> {
+  await runExclusive(domainBackupCancelKey(domainId), async () => {
+    if (!isTauri()) return;
+    useBackupRunsStore.getState().requestCancel(domainId);
+    try {
+      await invokeIfTauri<boolean>("domain_backup_cancel", { domainId: String(domainId) });
+    } catch (e: unknown) {
+      // Провал ПРОСЬБЫ — не провал бэкапа: тот всё ещё идёт, и красная строка
+      // на его месте объявила бы мёртвым живой прогон. Поэтому исход прогона
+      // не трогаем вовсе, а признак снимаем — кнопка снова становится
+      // нажимаемой, и это и есть правда: не отменилось.
+      console.error("backup cancel failed", e);
+      useBackupRunsStore.getState().cancelRequestFailed(domainId);
+    }
+  });
+}
+
+/**
  * Кнопка «создать копию»: запуск и признак «идёт прогон».
  *
  * `pending` читается из `MutationCache` по ключу домена, поэтому переживает
@@ -157,6 +204,24 @@ export function useCreateDomainBackup(domain: BackupTarget) {
     pending,
     run: () => {
       void runCreateDomainBackup(domain);
+    },
+  };
+}
+
+/**
+ * Кнопка отмены: запуск и признак «уже попросили».
+ *
+ * `requested` берётся из стора, а не из `useRunPending`: сама команда отвечает
+ * мгновенно, а ждать приходится прогон. Кнопка обязана оставаться погашенной
+ * всё это время, иначе человек решит, что нажатие не сработало, и будет жать
+ * снова.
+ */
+export function useCancelDomainBackup(domainId: number) {
+  const requested = useBackupRunsStore((s) => s.runs[String(domainId)]?.cancelRequested ?? false);
+  return {
+    requested,
+    run: () => {
+      void runCancelDomainBackup(domainId);
     },
   };
 }

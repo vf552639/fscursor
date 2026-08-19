@@ -1,7 +1,7 @@
 import React from "react";
 
 import { Domain } from "../../../api/domains";
-import { useCreateDomainBackup } from "../../../api/domainBackups";
+import { useCancelDomainBackup, useCreateDomainBackup } from "../../../api/domainBackups";
 import {
   DESKTOP_READS_BACKUPS,
   backupsOf,
@@ -55,12 +55,14 @@ import { EmptyPanel, TabBody } from "./TabLayout";
  * снимок реально приносит пути логов, здесь — ничего. К кнопке создания эта
  * константа отношения не имеет: создание от списка не зависит.
  *
- * Кнопки **отмены** прогона тоже нет, хотя команда `domain_backup_cancel` в
- * десктопе есть: фаза 7 плана её не называет, и отдельная кнопка рядом с
- * идущим прогоном — своё решение (куда её ставить, что делать с `.part`,
- * как рисовать «отменяется»), а не следствие уже принятых. Отмена при этом
- * обработана целиком: если она придёт (второе окно, `sdmp://`), прогон покажет
- * её отдельным исходом, а не красной ошибкой.
+ * Пока прогон идёт, кнопка создания **сменяется** кнопкой отмены — на том же
+ * месте, а не рядом. Две кнопки, зовущие в разные стороны, стояли бы на экране
+ * одновременно: «сделай ещё раз» поверх идущей выгрузки бессмысленна (её гасит
+ * гейт), а погашенная кнопка рядом с живой — лишний повод целиться не туда.
+ * Отмена не удобство: выгрузка идёт десятками минут, и без неё единственным
+ * выходом было бы убийство приложения, после которого на сервере остаётся
+ * замок-каталог (ядро сносит его само только на штатных путях) — то есть
+ * следующая попытка упёрлась бы в него и потребовала рук на продакшне.
  *
  * `TabGroup` и `SectionCard` вокруг содержимого нет намеренно: панель уже
  * названа своей вкладкой (`role="tabpanel"` + `aria-labelledby` в `ui/Tabs`), и
@@ -220,6 +222,7 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
   const items = view.state === "listed" ? view.items : [];
   const desktop = isTauri();
   const backup = useCreateDomainBackup(domain);
+  const cancel = useCancelDomainBackup(domain.id);
   /**
    * Без привязки к серверу собирать архив не с чего: команда резолвит сервер по
    * `server_id` из локального кэша и отвечает «domain has no server_id». Кнопка
@@ -262,16 +265,35 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
         snapshot={snapshot}
         error={domain.fp_check_error}
         right={
+          // Одна кнопка в каждый момент времени, и в покое это создание, а во
+          // время прогона — остановка. Признак «идёт» общий для обеих
+          // (`MutationCache` по ключу домена), поэтому подмена переживает
+          // закрытие карточки: вернувшись, человек увидит ту же кнопку отмены,
+          // а не «Create backup» поверх идущей выгрузки.
           desktop ? (
-            <Btn
-              variant="primary"
-              size="sm"
-              onClick={backup.run}
-              disabled={backup.pending || !hasServer}
-              title={hasServer ? undefined : "This domain is not bound to a server"}
-            >
-              {backup.pending ? "Backing up…" : "Create backup"}
-            </Btn>
+            backup.pending ? (
+              <Btn
+                variant="secondary"
+                size="sm"
+                onClick={cancel.run}
+                disabled={cancel.requested}
+                // Что именно случится, сказано подсказкой: отмена не оставляет
+                // половины файла ни на диске, ни на сервере.
+                title="Stop the backup: the partial file and the server-side archive are removed"
+              >
+                {cancel.requested ? "Cancelling…" : "Cancel"}
+              </Btn>
+            ) : (
+              <Btn
+                variant="primary"
+                size="sm"
+                onClick={backup.run}
+                disabled={!hasServer}
+                title={hasServer ? undefined : "This domain is not bound to a server"}
+              >
+                Create backup
+              </Btn>
+            )
           ) : null
         }
       />

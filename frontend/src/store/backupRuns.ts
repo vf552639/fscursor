@@ -86,6 +86,17 @@ export interface BackupRun {
    */
   totalBytes: number | null;
   outcome: BackupOutcome | null;
+  /**
+   * Отмену уже попросили, а прогон ещё идёт.
+   *
+   * Отдельное поле, а не `pending` мутации отмены: команда `domain_backup_cancel`
+   * отвечает мгновенно (она только ставит флаг), а РЕАКЦИЯ на него приходит
+   * через десятки секунд — флаг читается на следующем чанке выгрузки или на
+   * границе шага. Признак «идёт» от мутации погас бы через миллисекунды, и
+   * человек, не увидев никакого отклика, жал бы отмену снова и снова, решив,
+   * что она не работает.
+   */
+  cancelRequested: boolean;
 }
 
 interface BackupRunsState {
@@ -99,9 +110,23 @@ interface BackupRunsState {
   saved: (domainId: number | string, saved: BackupSaved) => void;
   cancelled: (domainId: number | string) => void;
   failed: (domainId: number | string, error: string) => void;
+  /** Отмену попросили: прогон ещё идёт, но человек уже нажал. */
+  requestCancel: (domainId: number | string) => void;
+  /**
+   * Попросить не вышло (команда отбилась). Признак снимается, чтобы кнопка
+   * снова стала нажимаемой: «Cancelling…», которое ничего не отменило, —
+   * такое же враньё, как зелёный бейдж без измерения.
+   */
+  cancelRequestFailed: (domainId: number | string) => void;
 }
 
-const EMPTY_RUN: BackupRun = { step: null, doneBytes: null, totalBytes: null, outcome: null };
+const EMPTY_RUN: BackupRun = {
+  step: null,
+  doneBytes: null,
+  totalBytes: null,
+  outcome: null,
+  cancelRequested: false,
+};
 
 function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
@@ -153,6 +178,25 @@ export const useBackupRunsStore = create<BackupRunsState>((set) => ({
     set((s) => ({
       runs: { ...s.runs, [String(domainId)]: { ...EMPTY_RUN, outcome: { kind: "failed", error } } },
     })),
+
+  requestCancel: (domainId) =>
+    set((s) => {
+      const key = String(domainId);
+      const run = s.runs[key];
+      // Отменять нечего: прогона нет или он уже кончился. Признак в этом случае
+      // не ставится вовсе — иначе на экране повисло бы «Cancelling…» над
+      // законченным прогоном, которое никогда не сменится.
+      if (!run || run.outcome) return s;
+      return { runs: { ...s.runs, [key]: { ...run, cancelRequested: true } } };
+    }),
+
+  cancelRequestFailed: (domainId) =>
+    set((s) => {
+      const key = String(domainId);
+      const run = s.runs[key];
+      if (!run) return s;
+      return { runs: { ...s.runs, [key]: { ...run, cancelRequested: false } } };
+    }),
 }));
 
 /** Прогон одного домена — или `null`, если по нему ничего не запускали. */
