@@ -408,9 +408,14 @@ pub(crate) fn databases_for_backup(
             .and_then(|d| d.as_str())
             .map(|d| d.trim().to_lowercase())
             .filter(|d| !d.is_empty());
-        // Узнаваема строка, у которой есть ХОТЬ ОДНА привязка к сайту. Ни той,
-        // ни другой — форма чужая, и такие строки в счёт не идут.
-        if row_id.is_none() && row_domain.is_none() {
+        // Узнаваема не та строка, у которой есть привязка, а та, по которой
+        // привязку можно СРАВНИТЬ. Разница не теоретическая: строки с одним
+        // лишь `site.id` при нечитаемом `id` строки сайта сравнивать не с чем,
+        // и засчитай мы их узнаванием — `recognized` вырос бы, ни одна строка
+        // не совпала, и наружу ушло бы уверенное «баз нет» вместо отказа. Это
+        // ровно тот исход, от которого защищает вся функция: ключ, которым мы
+        // не умеем воспользоваться, узнаванием не считается.
+        if row_domain.is_none() && !(row_id.is_some() && site_id.is_some()) {
             continue;
         }
         recognized += 1;
@@ -587,21 +592,23 @@ pub(crate) async fn probe_tools(
 ///
 /// `df` спрашивается про РОДИТЕЛЯ рабочего каталога (`/var/tmp`): сам
 /// `/var/tmp/sdmp-backup` до первого прогона не существует, а `df` на
-/// несуществующем пути падает. Родитель, а не литерал `/var/tmp`, чтобы
-/// переезд `BACKUP_WORK_ROOT` не оставил проверку места смотреть на чужую ФС;
-/// связь «корень лежит внутри `/var/tmp`» закреплена тестом
-/// `the_work_root_lives_one_level_under_a_real_mount_point`.
-pub(crate) fn build_space_cmd(site_path: &str, work_root: &str) -> String {
+/// несуществующем пути падает. Родитель, а не литерал `/var/tmp`, чтобы переезд
+/// `BACKUP_WORK_ROOT` не оставил проверку места смотреть на чужую ФС.
+///
+/// `None`, если родителя нет или он корень ФС. Подставлять в этом случае
+/// литерал было бы худшим из миров: проверка молча ушла бы мерить чужую
+/// файловую систему, просто в другую сторону, и соврала бы вместо отказа. Такой
+/// `BACKUP_WORK_ROOT` — ошибка правки константы, и увидеть её надо сразу.
+pub(crate) fn build_space_cmd(site_path: &str, work_root: &str) -> Option<String> {
     let df_target = Path::new(work_root)
         .parent()
         .and_then(|p| p.to_str())
-        .filter(|p| p.starts_with('/') && p.len() > 1)
-        .unwrap_or("/var/tmp");
-    format!(
+        .filter(|p| p.starts_with('/') && p.len() > 1)?;
+    Some(format!(
         "printf '{DU_MARKER}\\n'; du -sk {} 2>/dev/null; printf '{DF_MARKER}\\n'; df -Pk {}",
         q(site_path),
         q(df_target)
-    )
+    ))
 }
 
 /// Килобайты из секции `du`: первое же число в ней.
@@ -677,9 +684,11 @@ pub(crate) async fn check_space(
     site_path: &str,
     root: &str,
 ) -> Result<u64, BackupError> {
-    let (code, out) = s
-        .run(&build_space_cmd(site_path, root), BACKUP_STEP_TIMEOUT)
-        .await?;
+    let cmd = build_space_cmd(site_path, root).ok_or_else(|| BackupError::Step {
+        step: "space",
+        detail: format!("{root} has no parent directory to measure free space on"),
+    })?;
+    let (code, out) = s.run(&cmd, BACKUP_STEP_TIMEOUT).await?;
     // Код возврата не смотрим: `du` возвращает не ноль на любом нечитаемом
     // подкаталоге, а размер при этом печатает. Читаем вывод. Исключение одно —
     // «итога не было вовсе» (`NO_EXIT_STATUS`).
@@ -1566,10 +1575,23 @@ mod tests {
             "command -v",
             DU_MARKER,
             "mkdir -m 700",
+            "[ -d ",
             "rm -rf",
         ];
-        assert_eq!(s.seen.len(), s.budgets.len());
-        for (cmd, budget) in s.seen.iter().zip(s.budgets.iter()) {
+        // Счастливый путь пробу замка не проходит — её бюджет иначе не сверял бы
+        // никто. Догоняем вторым прогоном, где замок занят.
+        let mut held = FakeServer::happy();
+        held.reply("mkdir -m 700", 1, "File exists")
+            .reply("[ -d ", 0, "SDMP_LOCK\t1000\t1100");
+        let _ = create_backup(&mut held, FP, "example.com", now())
+            .await
+            .unwrap_err();
+        assert!(held.seen.iter().any(|c| c.contains("[ -d ")));
+
+        let seen: Vec<&String> = s.seen.iter().chain(held.seen.iter()).collect();
+        let budgets: Vec<&Duration> = s.budgets.iter().chain(held.budgets.iter()).collect();
+        assert_eq!(seen.len(), budgets.len());
+        for (cmd, budget) in seen.iter().zip(budgets.iter()) {
             // Короткие сверяются ПЕРВЫМИ: инвентарь инструментов перечисляет
             // в argv и `mysqldump`, и `sha256sum`, то есть подходит под приметы
             // длинных шагов, оставаясь обменом парой строк.
@@ -1580,7 +1602,7 @@ mod tests {
             } else {
                 panic!("шаг не описан в таблице бюджетов: {cmd}");
             };
-            assert_eq!(*budget, want, "не тот бюджет у шага: {cmd}");
+            assert_eq!(**budget, want, "не тот бюджет у шага: {cmd}");
         }
     }
 
@@ -1802,6 +1824,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(art.databases, vec!["exmpldb".to_string()]);
+    }
+
+    // Ключ, которым мы не умеем воспользоваться, узнаванием не считается.
+    //
+    // Форма «строки БД несут только `site.id`» при нечитаемом `id` строки сайта
+    // сравнивать не с чем. Засчитай мы её узнаванием — `recognized` вырос бы,
+    // ни одна строка не совпала, и наружу ушло бы уверенное «баз нет» вместо
+    // отказа. Ровно этот пробой и открывала первая редакция правки.
+    #[test]
+    fn a_link_we_cannot_compare_is_not_recognition() {
+        const ONLY_ID: &str = r#"[{"id":1,"name":"exmpldb","site":{"id":3}}]"#;
+        // `id` строки сайта не прочитался — сравнивать не по чему, значит форма
+        // не понята. НЕ «баз нет».
+        assert_eq!(databases_for_backup(ONLY_ID, "example.com", None), None);
+        // Прочитался — сравнение состоялось, ответ настоящий в обе стороны.
+        assert_eq!(
+            databases_for_backup(ONLY_ID, "example.com", Some(3)),
+            Some(vec!["exmpldb".to_string()])
+        );
+        assert_eq!(
+            databases_for_backup(ONLY_ID, "example.com", Some(9)),
+            Some(Vec::<String>::new())
+        );
+        // И источник самого `id`: без него в строке сайта — `None`.
+        assert_eq!(
+            site_id_from_row(&serde_json::json!({"domain": "example.com"})),
+            None
+        );
+        assert_eq!(site_id_from_row(&serde_json::json!({"id": 3})), Some(3));
+        assert_eq!(site_id_from_row(&serde_json::json!({"id": "3"})), Some(3));
     }
 
     #[test]
@@ -2305,9 +2357,12 @@ mod tests {
     #[test]
     fn the_work_root_lives_one_level_under_a_real_mount_point() {
         assert_eq!(BACKUP_WORK_ROOT, "/var/tmp/sdmp-backup");
-        let cmd = build_space_cmd("/var/www/u/data/www/example.com", BACKUP_WORK_ROOT);
+        let cmd = build_space_cmd("/var/www/u/data/www/example.com", BACKUP_WORK_ROOT).unwrap();
         assert!(cmd.contains("df -Pk /var/tmp"), "{cmd}");
-        assert!(!cmd.contains("df -Pk /\n"), "{cmd}");
+        // Одноуровневый корень — не повод молча измерить чужую ФС: команды нет
+        // вовсе, и шаг честно откажет.
+        assert_eq!(build_space_cmd("/site", "/sdmp-backup"), None);
+        assert_eq!(build_space_cmd("/site", "/"), None);
     }
 
     #[test]

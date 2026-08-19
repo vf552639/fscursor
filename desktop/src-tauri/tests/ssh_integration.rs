@@ -508,7 +508,19 @@ async fn the_pipeline_marker_survives_a_real_login_shell() {
     );
 
     // И обратный случай: упало ВТОРОЕ звено, первое цело.
-    let cmd = format!("set -o pipefail; printf x | (exit 5); {PIPE_STATUS_TAIL}");
+    //
+    // Читатель обязан ДОЧИТАТЬ (`cat >/dev/null`), и это не украшение: с голым
+    // `printf x | (exit 5)` тест флачит примерно раз на триста прогонов (2000
+    // прогонов в контейнере дали 7 штук `141 5`). Гонка честная — читатель
+    // выходит, не читая, и `printf` то успевает в буфер трубы, то ловит
+    // SIGPIPE, — но живёт она в ТЕСТЕ, а не в продукте, и узаконивать её
+    // ожиданием «0 либо 141» значит превращать доказательство в допущение.
+    //
+    // Продукту 141 в первой позиции не страшен по построению: `tar` получает
+    // SIGPIPE, только если умер `gzip`, а тогда у `gzip` собственный код ≠ 0 —
+    // и `classify_tar_status` смотрит его ПЕРВЫМ, отдавая `Failed`. Даже
+    // окажись 141 первым при `gzip == 0`, его ловит ветка «≥ 2 — отказ».
+    let cmd = format!("set -o pipefail; printf x | (cat >/dev/null; exit 5); {PIPE_STATUS_TAIL}");
     let (_, out) = s.exec(&cmd, Duration::from_secs(30), false).await.unwrap();
     assert_eq!(parse_pipeline_status(&out), Some(vec![0, 5]), "{out:?}");
 
