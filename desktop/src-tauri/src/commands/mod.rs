@@ -4,6 +4,7 @@ pub mod cloudflare;
 pub mod creds;
 pub mod domain_backup;
 pub mod domain_facts;
+pub mod domain_logs;
 pub mod full_setup;
 pub mod provision;
 pub mod rdap;

@@ -63,6 +63,7 @@ pub fn run() {
             commands::domain_facts::domain_read_facts,
             commands::domain_backup::domain_backup_create,
             commands::domain_backup::domain_backup_cancel,
+            commands::domain_logs::domain_read_log_tail,
             commands::cloudflare::cf_verify_token,
             commands::cloudflare::cf_list_zones,
             commands::cloudflare::cf_list_dns_records,

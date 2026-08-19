@@ -5,3 +5,4 @@ pub mod backup_run;
 pub mod client;
 pub mod fastpanel;
 pub mod fastpanel_facts;
+pub mod fastpanel_logs;
