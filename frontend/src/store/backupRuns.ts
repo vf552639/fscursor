@@ -45,23 +45,48 @@ const STEPS: Record<string, BackupStep> = {
   facts: "facts",
 };
 
+/**
+ * Не шаг, а ОГОВОРКА: архив на сервере убрать не вышло, и он остался лежать.
+ *
+ * Приходит тем же каналом, но шагом прогресса не является — прогон после него
+ * продолжается (или кончается), а весть обязана дожить до исхода. Событие здесь
+ * — не дубль `warnings`, а единственный канал на пути ОТМЕНЫ и на пути отказа:
+ * там команда возвращает `Err`, и `warnings` вместе с результатом не доезжают
+ * никуда. Заглушив его, мы печатали бы «Cancelled — no copy was saved» над
+ * многогигабайтным тарболлом, оставшимся в `/var/tmp` продакшна.
+ */
+const STEP_REMOTE_CLEANUP_FAILED = "remote_cleanup_failed";
+
 /** Полезная нагрузка события. Байты приходят ТОЛЬКО у шага `download`. */
 export interface BackupProgressPayload {
   domain_id: string;
   step: string;
   done_bytes?: number;
   total_bytes?: number;
+  /** Текст оговорки — у `remote_cleanup_failed` там путь и что делать руками. */
+  note?: string;
 }
 
 /** Что сохранено на диске — из ответа команды, и только из него. */
 export interface BackupSaved {
   /** Путь, который ВЕРНУЛА команда (не тот, что выбрал человек). */
   path: string;
-  fileName: string;
   bytes: number;
+  /**
+   * Сколько дампов баз попало в архив.
+   *
+   * Печатается на экране, и это не украшение: архив сайта без базы выглядит
+   * ровно как архив с базой — те же байты, тот же путь, — а восстановиться из
+   * него нельзя. Число берётся из `parts` ответа, где каждая часть названа
+   * своим `kind`. Имён баз здесь нет: на вопрос «попали ли» отвечает счётчик, а
+   * имена только раздули бы строку.
+   */
+  databases: number;
+  /** Есть ли в архиве часть с файлами сайта. */
+  files: boolean;
   /** Что прошло, но не идеально: код `tar`, неубранный архив на сервере. */
   warnings: string[];
-  /** Обновился ли снимок домена. `false` — бэкап удался, а список копий нет. */
+  /** Обновился ли снимок домена. `false` — бэкап удался, а снимок старый. */
   factsRefreshed: boolean;
 }
 
@@ -97,6 +122,15 @@ export interface BackupRun {
    * что она не работает.
    */
   cancelRequested: boolean;
+  /**
+   * Оговорки, приехавшие событиями по ходу прогона (сегодня одна —
+   * неубранный архив на сервере).
+   *
+   * Переживают исход намеренно: они про то, что осталось ПОСЛЕ прогона, и
+   * гасить их вместе с шагом значило бы стереть единственную весть о гигабайте,
+   * забытом на чужой машине.
+   */
+  notes: string[];
 }
 
 interface BackupRunsState {
@@ -126,7 +160,20 @@ const EMPTY_RUN: BackupRun = {
   totalBytes: null,
   outcome: null,
   cancelRequested: false,
+  notes: [],
 };
+
+/** Закончить прогон, сохранив всё, что должно пережить исход. */
+function finish(
+  s: { runs: Record<string, BackupRun> },
+  domainId: number | string,
+  outcome: BackupOutcome,
+): { runs: Record<string, BackupRun> } {
+  const key = String(domainId);
+  return {
+    runs: { ...s.runs, [key]: { ...EMPTY_RUN, notes: s.runs[key]?.notes ?? [], outcome } },
+  };
+}
 
 function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
@@ -150,6 +197,13 @@ export const useBackupRunsStore = create<BackupRunsState>((set) => ({
       // последнее из них вполне может доехать ПОСЛЕ ответа команды; пустив его
       // дальше, мы бы стёрли готовый исход шагом, который давно позади.
       if (run.outcome) return s;
+      // Оговорка, а не шаг: шаг и байты она не трогает, зато доживает до
+      // исхода. Пустую строку не берём — весть без текста ничего не сообщает.
+      if (payload.step === STEP_REMOTE_CLEANUP_FAILED) {
+        const note = typeof payload.note === "string" ? payload.note.trim() : "";
+        if (!note || run.notes.includes(note)) return s;
+        return { runs: { ...s.runs, [key]: { ...run, notes: [...run.notes, note] } } };
+      }
       const step = STEPS[payload.step];
       // Незнакомый шаг выбрасываем. Сюда же попадает `facts_failed`: это не шаг
       // прогресса, а новость об исходе, и приезжает она полем `facts_refreshed`
@@ -163,21 +217,14 @@ export const useBackupRunsStore = create<BackupRunsState>((set) => ({
     }),
 
   // Все три исхода гасят шаг и байты: прогон кончился, и недорисованная полоса
-  // рядом со словом «Saved» — остаток прошлого кадра, а не состояние.
-  saved: (domainId, saved) =>
-    set((s) => ({
-      runs: { ...s.runs, [String(domainId)]: { ...EMPTY_RUN, outcome: { kind: "saved", saved } } },
-    })),
+  // рядом со словом «Saved» — остаток прошлого кадра, а не состояние. Оговорки
+  // при этом переносятся: они про то, что ОСТАЛОСЬ после прогона, и на пути
+  // отмены событие — их единственный канал.
+  saved: (domainId, saved) => set((s) => finish(s, domainId, { kind: "saved", saved })),
 
-  cancelled: (domainId) =>
-    set((s) => ({
-      runs: { ...s.runs, [String(domainId)]: { ...EMPTY_RUN, outcome: { kind: "cancelled" } } },
-    })),
+  cancelled: (domainId) => set((s) => finish(s, domainId, { kind: "cancelled" })),
 
-  failed: (domainId, error) =>
-    set((s) => ({
-      runs: { ...s.runs, [String(domainId)]: { ...EMPTY_RUN, outcome: { kind: "failed", error } } },
-    })),
+  failed: (domainId, error) => set((s) => finish(s, domainId, { kind: "failed", error })),
 
   requestCancel: (domainId) =>
     set((s) => {

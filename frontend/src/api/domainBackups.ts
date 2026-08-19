@@ -4,6 +4,7 @@ import { runExclusive, useRunPending } from "./runGate";
 import { chooseSavePath, defaultBackupFileName } from "../lib/chooseSavePath";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
+import { isHostKeyUnknown } from "../lib/sshHostKey";
 import { invokeIfTauri } from "../lib/tauri-invoke";
 import { ensureBackupProgressSubscription, useBackupRunsStore } from "../store/backupRuns";
 import { useAuthStore } from "../store/auth";
@@ -63,12 +64,27 @@ export interface DomainBackupPart {
   sha256: string;
 }
 
-/** Ответ `domain_backup_create` (`BackupResult` в `commands/domain_backup.rs`). */
+/**
+ * Ответ `domain_backup_create` (`BackupResult` в `commands/domain_backup.rs`).
+ *
+ * Тип повторяет структуру Rust целиком, а не только показываемое: он и есть
+ * описание провода, и поле, выброшенное из него «за ненадобностью», в
+ * следующий раз приедет сюрпризом. Что доходит до экрана — решает
+ * `runCreateDomainBackup`, и у каждого непоказанного поля причина записана
+ * рядом с ним.
+ */
 export interface DomainBackupResult {
+  /** Имя архива НА СЕРВЕРЕ. На экран не идёт: там печатается локальный путь. */
   file_name: string;
   /** Куда файл лёг на машине пользователя — это и печатается на экране. */
   path: string;
   bytes: number;
+  /**
+   * Контрольная сумма архива. На экран не идёт намеренно: 64 шестнадцатеричных
+   * знака человек ни с чем сверить не может, а машина уже сверила — Rust
+   * переименовывает `.part` в целевое имя ТОЛЬКО после совпадения хеша и
+   * размера, так что сам факт успеха и есть отчёт об этой проверке.
+   */
   sha256: string;
   parts: DomainBackupPart[];
   warnings: string[];
@@ -100,6 +116,22 @@ export const BACKUP_CANCELLED = "BACKUP_CANCELLED";
 function isCancelled(message: string): boolean {
   return message.trimEnd().endsWith(BACKUP_CANCELLED);
 }
+
+/**
+ * Что показать вместо маркера незнакомого ключа хоста.
+ *
+ * Бэкап — первое место продукта, где текст ошибки команды печатается человеку
+ * ДОСЛОВНО (у соседей он либо глотается гейтом, либо разбирается
+ * `sshExecWithHostKeyRetry`). Поэтому первый в жизни коннект к серверу давал бы
+ * здесь красное «api: HOST_KEY_UNKNOWN» — строку, которая ничего не значит для
+ * того, кто её читает, и притом одновременно с нативным вопросом про отпечаток,
+ * который в этот момент уже висит на экране.
+ *
+ * Повтора не делаем: бэкап — мутация, идущая часами, и её ход человек начинает
+ * сам. Фраза говорит ровно то, что нужно сделать, и называет кнопку.
+ */
+const HOST_KEY_UNKNOWN_TEXT =
+  "This server is not in known_hosts yet. Confirm its fingerprint in the dialog SDMP just showed, then press Create backup again.";
 
 /** Что нужно прогону от домена: id для команды, имя для имени файла. */
 export interface BackupTarget {
@@ -148,10 +180,14 @@ export async function runCreateDomainBackup(domain: BackupTarget): Promise<void>
       });
       // Правило 1 и правило 3 разом: успех ставится здесь и только здесь, а
       // путь берётся из ответа, а не из `dest`.
+      const parts = result.parts ?? [];
       useBackupRunsStore.getState().saved(domain.id, {
         path: result.path,
-        fileName: result.file_name,
         bytes: result.bytes,
+        // Части архива считаются здесь, а не рисуются сырым списком: человеку
+        // нужен ответ «база внутри?», а не перечень внутренних имён файлов.
+        databases: parts.filter((p) => p.kind === "database").length,
+        files: parts.some((p) => p.kind === "files"),
         warnings: result.warnings ?? [],
         factsRefreshed: result.facts_refreshed !== false,
       });
@@ -160,6 +196,8 @@ export async function runCreateDomainBackup(domain: BackupTarget): Promise<void>
       // Маркер приезжает внутри текста `CommandError` («api: BACKUP_CANCELLED»),
       // поэтому не равенство, но и не вхождение — см. `isCancelled`.
       if (isCancelled(message)) useBackupRunsStore.getState().cancelled(domain.id);
+      else if (isHostKeyUnknown(message))
+        useBackupRunsStore.getState().failed(domain.id, HOST_KEY_UNKNOWN_TEXT);
       else useBackupRunsStore.getState().failed(domain.id, message);
     } finally {
       // Свежую строку домена тянем на ОБОИХ исходах, как у чтения фактов:

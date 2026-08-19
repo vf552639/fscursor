@@ -328,7 +328,14 @@ describe("органов управления ровно столько, ско�
     // не появляется ни одного (принцип №3).
     useBackupRunsStore.setState({
       runs: {
-        "42": { step: "download", doneBytes: 10, totalBytes: 100, outcome: null, cancelRequested: false },
+        "42": {
+          step: "download",
+          doneBytes: 10,
+          totalBytes: 100,
+          outcome: null,
+          cancelRequested: false,
+          notes: [],
+        },
       },
     });
     setTauri(false);
@@ -390,6 +397,23 @@ describe("прогон: два клика, отмена и путь", () => {
     expect(screen.getByRole("status").textContent).not.toContain(`Saved to ${CHOSEN} `);
   });
 
+  it("после успеха сказано, что попало в архив: файлы и сколько баз", async () => {
+    // Молчание про базы читается как «всё внутри», а архив без дампа выглядит
+    // ровно как архив с дампом — и выясняется это при восстановлении.
+    mocks.invokeSynced.mockResolvedValue(
+      backupResult({
+        parts: [
+          { name: "files.tar", kind: "files", sha256: "d1" },
+          { name: "db1.sql", kind: "database", sha256: "d2" },
+        ],
+      }),
+    );
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Saved to/));
+    expect(screen.getByRole("status").textContent).toMatch(/site files \+ 1 database/);
+  });
+
   it("сбой печатается тревогой, а отмена прогона — нет", async () => {
     mocks.invokeSynced.mockRejectedValueOnce(new Error("ssh: handshake failed"));
     showListed([backup()]);
@@ -410,7 +434,10 @@ describe("прогон: два клика, отмена и путь", () => {
     showListed([backup()]);
     fireEvent.click(createBtn());
     await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Saved to/));
-    expect(screen.getByText(/list of copies above was not refreshed/i)).toBeTruthy();
+    expect(screen.getByText(/server snapshot could not be refreshed/i)).toBeTruthy();
+    // И ни слова про «список выше»: списка нет и не будет, пока не
+    // разблокирована фаза 3 — на его месте пунктирная панель.
+    expect(document.body.textContent).not.toMatch(/list of copies above/i);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -428,7 +455,7 @@ describe("прогон: два клика, отмена и путь", () => {
     fireEvent.click(createBtn());
     const status = await waitFor(() => screen.getByRole("status"));
     expect(within(status).getByText(/^Saved to/)).toBeTruthy();
-    expect(within(status).getByText(/list of copies above was not refreshed/i)).toBeTruthy();
+    expect(within(status).getByText(/server snapshot could not be refreshed/i)).toBeTruthy();
     expect(within(status).getByText(/still on the server at/i)).toBeTruthy();
   });
 });
@@ -600,6 +627,37 @@ describe("отмена прогона", () => {
     expect(document.body.textContent).not.toMatch(/Backup failed/);
     // И кнопка вернулась к покою: прогона больше нет.
     expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Create backup"]);
+  });
+
+  it("архив, оставшийся на сервере, назван и при отмене — иначе экран врёт", async () => {
+    // На пути отмены `warnings` не возвращаются вовсе (команда отдаёт `Err`), и
+    // событие `remote_cleanup_failed` — ЕДИНСТВЕННЫЙ канал этой вести. Заглуши
+    // его, и экран напечатает «Cancelled — no copy was saved» над
+    // многогигабайтным тарболлом, лежащим в `/var/tmp` продакшна, — а подсказка
+    // кнопки рядом ещё и обещала бы, что его убрали.
+    const note =
+      "the archive is still on the server at /var/tmp/sdmp-backup/example.com-2026.tar (rm exited 1) — remove it by hand";
+    const { cancelledByRust } = await startRun();
+    fireEvent.click(cancelBtn());
+    await screen.findByRole("button", { name: "Cancelling…" });
+    await emitProgress({ step: "remote_cleanup_failed", note });
+    await cancelledByRust();
+
+    const status = await waitFor(() => screen.getByRole("status"));
+    expect(within(status).getByText(/Cancelled/)).toBeTruthy();
+    // Весть — в той же живой области, что и слово «Cancelled»: она меняет его
+    // смысл, и объявиться обязана вместе с ним.
+    expect(within(status).getByText(/still on the server at/i)).toBeTruthy();
+  });
+
+  it("подсказка кнопки не обещает сноса серверного архива безусловно", async () => {
+    // Уборка на сервере — попытка: сессия после отмены могла уже развалиться, и
+    // тогда архив останется лежать (о чём скажет строка выше). Безусловное «are
+    // removed» врало бы ровно в тех отменах, где всё и пошло не так.
+    await startRun();
+    const title = cancelBtn().getAttribute("title") ?? "";
+    expect(title).toMatch(/tries to remove/i);
+    expect(title).not.toMatch(/archive are removed/i);
   });
 
   it("отбитая просьба возвращает кнопку в рабочее состояние, а прогон продолжается", async () => {

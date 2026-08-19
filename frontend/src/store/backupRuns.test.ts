@@ -45,8 +45,9 @@ function progress(over: Partial<BackupProgressPayload> = {}) {
 
 const SAVED = {
   path: "/Users/me/Documents/example.com.tar",
-  fileName: "example.com-20260819T103000Z.tar",
   bytes: 2048,
+  databases: 1,
+  files: true,
   warnings: [],
   factsRefreshed: true,
 };
@@ -204,6 +205,55 @@ describe("просьба об отмене", () => {
     expect(run(42).cancelRequested).toBe(false);
     // И прогон при этом остаётся живым: провал ПРОСЬБЫ — не провал бэкапа.
     expect(run(42).outcome).toBeNull();
+  });
+});
+
+describe("оговорка «архив остался на сервере»", () => {
+  const NOTE = "the archive is still on the server at /var/tmp/sdmp-backup/x.tar — remove it by hand";
+
+  it("не шаг: экран не начинает рассказывать про уборку как про прогресс", () => {
+    store().start(42);
+    progress({ step: "download", done_bytes: 10, total_bytes: 100 });
+    store().progress({ domain_id: "42", step: "remote_cleanup_failed", note: NOTE });
+    expect(run(42).step).toBe("download");
+    expect(run(42).notes).toEqual([NOTE]);
+  });
+
+  it("доживает до ЛЮБОГО исхода — на отмене событие её единственный канал", () => {
+    // `warnings` возвращаются только с успешным ответом; на отмене и на отказе
+    // команда отдаёт `Err`, и вместе с ним весть о гигабайте, оставшемся в
+    // `/var/tmp` продакшна, пропала бы совсем.
+    for (const finish of [
+      () => store().cancelled(42),
+      () => store().failed(42, "ssh: handshake failed"),
+      () => store().saved(42, SAVED),
+    ]) {
+      store().start(42);
+      store().progress({ domain_id: "42", step: "remote_cleanup_failed", note: NOTE });
+      finish();
+      expect(run(42).notes).toEqual([NOTE]);
+    }
+  });
+
+  it("новый прогон её стирает: она про прошлый", () => {
+    store().start(42);
+    store().progress({ domain_id: "42", step: "remote_cleanup_failed", note: NOTE });
+    store().start(42);
+    expect(run(42).notes).toEqual([]);
+  });
+
+  it("повтор той же вести не удваивает строку", () => {
+    store().start(42);
+    store().progress({ domain_id: "42", step: "remote_cleanup_failed", note: NOTE });
+    store().progress({ domain_id: "42", step: "remote_cleanup_failed", note: NOTE });
+    expect(run(42).notes).toEqual([NOTE]);
+  });
+
+  it("весть без текста не рисует пустую строку", () => {
+    store().start(42);
+    store().progress({ domain_id: "42", step: "remote_cleanup_failed" });
+    store().progress({ domain_id: "42", step: "remote_cleanup_failed", note: "   " });
+    expect(run(42).notes).toEqual([]);
   });
 });
 

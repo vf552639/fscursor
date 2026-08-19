@@ -44,6 +44,31 @@ const STEP_TEXT: Record<BackupStep, string> = {
 const STARTING_TEXT = "Starting…";
 
 const MUTED = "#64748b";
+/** Цвет оговорки: не ошибка (красный), но и не «всё хорошо». */
+const NOTE = "#b45309";
+
+/** Строка оговорки — общая для всех исходов: их формат обязан быть один. */
+function NoteLine({ children }: { children: React.ReactNode }) {
+  return <div style={{ fontSize: 12.5, color: NOTE, overflowWrap: "anywhere" }}>{children}</div>;
+}
+
+/**
+ * Что попало в архив, словами.
+ *
+ * Печатается всегда, а не только когда баз нет: молчание про базы читается как
+ * «всё внутри», а архив сайта без дампа выглядит ровно как архив с дампом — те
+ * же байты, тот же путь, — и обнаруживается это при восстановлении, то есть в
+ * худший из возможных моментов.
+ */
+function partsText(files: boolean, databases: number): string {
+  const what = [
+    files ? "site files" : null,
+    databases === 1 ? "1 database" : databases > 1 ? `${databases} databases` : null,
+  ].filter(Boolean);
+  // Пусто быть не должно (архив без частей не собирается), но если провод
+  // принесёт такое — скажем прямо, а не промолчим.
+  return what.length ? what.join(" + ") : "nothing recognizable";
+}
 
 export function BackupRunLine({ domainId }: { domainId: number }) {
   const run = useBackupRun(domainId);
@@ -53,7 +78,11 @@ export function BackupRunLine({ domainId }: { domainId: number }) {
 
   if (run.outcome) {
     if (run.outcome.kind === "saved") {
-      const { path, bytes, warnings, factsRefreshed } = run.outcome.saved;
+      const { path, bytes, warnings, factsRefreshed, databases, files } = run.outcome.saved;
+      // Оговорка про неубранный архив приезжает ДВУМЯ каналами сразу (Rust шлёт
+      // её и событием, и в `warnings`) — на успешном пути доезжают оба. Один
+      // текст, напечатанный дважды, выглядит как две разные беды.
+      const said = Array.from(new Set([...warnings, ...run.notes]));
       return (
         // `role="status"` — на ВЕСЬ исход, а не на одну зелёную строку. Строка
         // про непересъёмку и предупреждения меняют смысл зелёной: успех с ними
@@ -65,22 +94,25 @@ export function BackupRunLine({ domainId }: { domainId: number }) {
               неразрывный: без переноса он распирает модалку и даёт ей
               горизонтальную полосу, запрещённую `design-brief.md` §11. */}
           <div style={{ fontSize: 13, color: "#166534", overflowWrap: "anywhere" }}>
-            Saved to {path} · {formatBytes(bytes)}
+            Saved to {path} · {formatBytes(bytes)} · {partsText(files, databases)}
           </div>
           {factsRefreshed ? null : (
-            // Полууспех, а не успех: архив на диске, но список копий выше
-            // остался прежним. Красным это рисовать нельзя (бэкап удался),
-            // молчать — тоже: человек будет искать новую копию в списке и не
-            // найдёт её, решив, что бэкапа не было.
-            <div style={{ fontSize: 12.5, color: "#b45309", overflowWrap: "anywhere" }}>
-              The list of copies above was not refreshed: reading the server after the backup
-              failed, so it still shows what the last snapshot showed.
-            </div>
+            // Полууспех, а не успех: архив на диске, но снимок сервера остался
+            // прежним. Красным это рисовать нельзя (бэкап удался), молчать —
+            // тоже: карточка домена после удачного бэкапа показывает данные «до
+            // него», и без оговорки это читается как «ничего не произошло».
+            //
+            // Про «список копий выше» тут не говорится намеренно: списка нет и
+            // не будет, пока не разблокирована фаза 3 (`DESKTOP_READS_BACKUPS`),
+            // — на его месте пунктирная панель, которая не покажет ничего
+            // никогда, и ссылаться на неё значит объяснять непонятное несуществующим.
+            <NoteLine>
+              The server snapshot could not be refreshed after the backup, so this card still
+              shows what the last snapshot showed.
+            </NoteLine>
           )}
-          {warnings.map((w) => (
-            <div key={w} style={{ fontSize: 12.5, color: "#b45309", overflowWrap: "anywhere" }}>
-              {w}
-            </div>
+          {said.map((w) => (
+            <NoteLine key={w}>{w}</NoteLine>
           ))}
         </div>
       );
@@ -90,14 +122,32 @@ export function BackupRunLine({ domainId }: { domainId: number }) {
       // человек обязан узнать, что файла нет (недокачанный `.part` снесён, а
       // архив с сервера убран).
       return (
-        <div role="status" style={{ fontSize: 13, color: MUTED }}>
-          Cancelled — no copy was saved.
+        // Живая область — на весь исход, как и у успеха: оговорка про архив,
+        // оставшийся на сервере, меняет смысл слова «Cancelled» и обязана
+        // объявляться вместе с ним.
+        <div role="status" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 13, color: MUTED }}>Cancelled — no copy was saved.</div>
+          {/* На пути отмены `warnings` не возвращаются вовсе (команда отдаёт
+              `Err`), и событие — ЕДИНСТВЕННЫЙ канал этой вести. Заглуши его, и
+              экран будет утверждать, что убрал за собой, пока на продакшне
+              лежит многогигабайтный тарболл. */}
+          {run.notes.map((n) => (
+            <NoteLine key={n}>{n}</NoteLine>
+          ))}
         </div>
       );
     }
     return (
-      <div role="alert" style={{ fontSize: 13, color: "#b91c1c", overflowWrap: "anywhere" }}>
-        Backup failed: {run.outcome.error}
+      <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ fontSize: 13, color: "#b91c1c", overflowWrap: "anywhere" }}>
+          Backup failed: {run.outcome.error}
+        </div>
+        {/* И здесь тоже: провал выгрузки — как раз тот случай, когда архив на
+            сервере ОСТАВЛЕН намеренно (единственная целая копия), и путь к нему
+            человеку нужен больше всего. */}
+        {run.notes.map((n) => (
+          <NoteLine key={n}>{n}</NoteLine>
+        ))}
       </div>
     );
   }

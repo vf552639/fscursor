@@ -289,9 +289,13 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
                 size="sm"
                 onClick={cancel.run}
                 disabled={cancel.requested}
-                // Что именно случится, сказано подсказкой: отмена не оставляет
-                // половины файла ни на диске, ни на сервере.
-                title="Stop the backup: the partial file and the server-side archive are removed"
+                // Подсказка обещает ровно то, что гарантировано. Недокачанный
+                // файл сносится всегда (это делает наша сторона), а уборка на
+                // сервере — попытка: сессия после отмены могла уже развалиться,
+                // и тогда архив останется лежать. Пообещай мы снос безусловно —
+                // и в половине отмен подсказка врала бы; о том, что убрать не
+                // вышло, скажет строка прогона.
+                title="Stop the backup: the partial file is deleted and SDMP tries to remove the server-side archive"
               >
                 {cancel.requested ? "Cancelling…" : "Cancel"}
               </Btn>

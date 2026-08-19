@@ -156,8 +156,9 @@ describe("успех", () => {
       kind: "saved",
       saved: {
         path: RETURNED,
-        fileName: "example.com-20260819T103000Z.tar",
         bytes: 2048,
+        databases: 0,
+        files: true,
         warnings: [],
         factsRefreshed: true,
       },
@@ -173,6 +174,23 @@ describe("успех", () => {
       domainId: "42",
       destPath: CHOSEN,
     });
+  });
+
+  it("части архива доезжают счётчиком: базы внутри или нет — не догадка", async () => {
+    // Архив сайта без дампа базы выглядит ровно как архив с дампом, и
+    // выясняется это при восстановлении. Считаем по `kind`, а не по длине
+    // `parts`: там же лежит и часть с файлами.
+    mocks.invokeSynced.mockResolvedValue(
+      result({
+        parts: [
+          { name: "files.tar", kind: "files", sha256: "d1" },
+          { name: "db1.sql", kind: "database", sha256: "d2" },
+          { name: "db2.sql", kind: "database", sha256: "d3" },
+        ],
+      }),
+    );
+    await runCreateDomainBackup(DOMAIN);
+    expect(run().outcome).toMatchObject({ saved: { databases: 2, files: true } });
   });
 
   it("провал пересъёмки фактов не превращается в провал бэкапа", async () => {
@@ -201,6 +219,20 @@ describe("неуспех", () => {
     mocks.invokeSynced.mockRejectedValue(new Error(`api: ${BACKUP_CANCELLED}`));
     await runCreateDomainBackup(DOMAIN);
     expect(run().outcome).toEqual({ kind: "cancelled" });
+  });
+
+  it("незнакомый ключ хоста превращается в человеческую фразу, а не в маркер", async () => {
+    // Бэкап — первое место продукта, где текст ошибки команды печатается
+    // дословно, и «api: HOST_KEY_UNKNOWN» ничего не значит для того, кто это
+    // читает. Фраза обязана сказать, что сделать: подтвердить отпечаток и
+    // нажать снова.
+    mocks.invokeSynced.mockRejectedValue(new Error("api: HOST_KEY_UNKNOWN"));
+    await runCreateDomainBackup(DOMAIN);
+    const outcome = run().outcome as { kind: string; error: string };
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.error).not.toMatch(/HOST_KEY_UNKNOWN/);
+    expect(outcome.error).toMatch(/known_hosts/);
+    expect(outcome.error).toMatch(/Create backup again/);
   });
 
   it("маркер посреди чужого текста отменой НЕ считается", async () => {
