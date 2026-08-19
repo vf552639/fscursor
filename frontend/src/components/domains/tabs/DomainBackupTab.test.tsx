@@ -1,12 +1,40 @@
 import React from "react";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, within } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+
+const mocks = vi.hoisted(() => ({
+  invokeSynced: vi.fn(),
+  chooseSavePath: vi.fn(),
+  listen: vi.fn(),
+}));
+
+vi.mock("../../../lib/localCache", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeSynced: mocks.invokeSynced,
+  syncLocalCache: vi.fn(async () => {}),
+}));
+
+vi.mock("../../../lib/chooseSavePath", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  chooseSavePath: mocks.chooseSavePath,
+}));
+
+/**
+ * Подписка на `backup:progress` живёт в сторе и ставится настоящим `listen`.
+ * Мок нужен ради двух вещей сразу: в jsdom плагина событий нет (настоящая
+ * подписка упала бы), а события прогресса надо уметь ПРИСЛАТЬ — полоса и её
+ * отсутствие проверяются именно ими.
+ */
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
 import DomainBackupTab, { EMPTY_TEXT } from "./DomainBackupTab";
 import { fmtDT } from "../../ui/Primitives";
+import { queryClient } from "../../../api/queryClient";
 import { desktopOnly } from "../../../lib/runtime";
 import { DESKTOP_READS_BACKUPS, type BackupsFacts, type DomainBackup, type DomainFacts } from "../../../lib/domainFacts";
-import { setTauri } from "../../../test/secretBlobKit";
+import { useBackupRunsStore, type BackupProgressPayload } from "../../../store/backupRuns";
+import { setTauri, setBlobUser, clearBlobUser } from "../../../test/secretBlobKit";
 
 /**
  * Вкладка Backup: список резервных копий панели — и четыре разных ответа на
@@ -19,12 +47,17 @@ import { setTauri } from "../../../test/secretBlobKit";
  * CLAUDE.md). Поэтому четыре фразы проверяются вместе, а не по одной: тест
  * ловит не формулировку, а совпадение двух ответов.
  *
- * Второе правило — кнопок на вкладке сегодня нет ни одной, и это проверяется
- * ролями, а не текстом. В десктопе их нет потому, что чтение списка на стороне
- * Rust не написано (`DESKTOP_READS_BACKUPS`), а создание архива приезжает
- * отдельной фазой; в вебе — потому что веб только смотрит. Появись здесь живая
- * с виду кнопка — вернулась бы ровно та болезнь, ради которой снесли заглушку
- * `Backups` с вкладки Server.
+ * Второе правило — про органы управления, и оно проверяется РОЛЯМИ, а не
+ * текстом: **в вебе кнопок нет ни одной, в десктопе есть ровно одна**. В вебе —
+ * потому что веб только смотрит (принцип №3). В десктопе одна: «Create backup».
+ * Второй, «Проверить на сервере», здесь нет намеренно — новый снимок списка не
+ * принесёт (`DESKTOP_READS_BACKUPS`), — и «ровно одна» сторожит именно это:
+ * появись рядом кнопка, обещающая починить пустой список, вернулась бы та самая
+ * болезнь, ради которой снесли заглушку `Backups` с вкладки Server.
+ *
+ * Третье — правила «не соврать» про сам прогон: «Saved» рисует только ответ
+ * команды, отмена панели сохранения не оставляет следа, путь печатается
+ * возвращённый, а полоса прогресса — только при известном знаменателе.
  */
 
 const HOUR = 60 * 60 * 1000;
@@ -50,7 +83,14 @@ function domain(over: Record<string, unknown> = {}) {
 }
 
 function show(over: Record<string, unknown> = {}) {
-  return render(<DomainBackupTab domain={domain(over)} now={NOW} />);
+  // Провайдер нужен с тех пор, как на вкладке появилась кнопка: признак «идёт
+  // прогон» читается из `MutationCache` (гейт `api/runGate.ts`), а не из стейта
+  // компонента, — именно поэтому он и переживает закрытие карточки.
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <DomainBackupTab domain={domain(over)} now={NOW} />
+    </QueryClientProvider>,
+  );
 }
 
 /** Домен со снимком, в котором список копий такой, как просят. */
@@ -91,13 +131,66 @@ const EMPTY_STATES: Record<string, Record<string, unknown>> = {
 
 const rows = () => within(screen.getByRole("list", { name: "Backup copies" })).getAllByRole("listitem");
 
+/** Единственная кнопка вкладки. */
+const createBtn = () => screen.getByRole("button", { name: "Create backup" });
+
+/** Путь, который выбрал человек, и путь, который вернула команда, — РАЗНЫЕ. */
+const CHOSEN = "/Users/me/Documents/example.com";
+const RETURNED = "/Users/me/Documents/example.com-20260819T103000Z.tar";
+
+/** Ответ `domain_backup_create` — в форме `BackupResult` из Rust. */
+function backupResult(over: Record<string, unknown> = {}) {
+  return {
+    file_name: "example.com-20260819T103000Z.tar",
+    path: RETURNED,
+    bytes: 2048,
+    sha256: "abc",
+    parts: [],
+    warnings: [],
+    duration_ms: 1234,
+    facts_refreshed: true,
+    ...over,
+  };
+}
+
+/**
+ * Слушатель, которого поставил стор. Держится ФАЙЛОВОЙ переменной, а не
+ * `mocks.listen.mock.calls`, и это прямое следствие проверяемого свойства:
+ * подписка одна на всё приложение и ставится единожды, так что в тестах после
+ * первого `listen` больше не зовётся — а счётчик вызовов `vi.resetAllMocks`
+ * между тестами обнуляет. Сам слушатель при этом остаётся рабочим: он замкнут
+ * на стор, а не на рендер.
+ */
+let progressHandler: ((e: { payload: BackupProgressPayload }) => void) | null = null;
+
+/** Прислать событие прогресса тем же путём, каким оно приходит из Rust. */
+async function emitProgress(payload: Partial<BackupProgressPayload> = {}) {
+  expect(progressHandler, "подписка на backup:progress не поставлена").toBeTruthy();
+  await act(async () => {
+    progressHandler!({ payload: { domain_id: "42", step: "download", ...payload } });
+  });
+}
+
 beforeEach(() => {
+  vi.resetAllMocks();
+  mocks.listen.mockImplementation(async (_event: string, cb: any) => {
+    progressHandler = cb;
+    return () => {};
+  });
+  mocks.chooseSavePath.mockResolvedValue(CHOSEN);
+  mocks.invokeSynced.mockResolvedValue(backupResult());
+  queryClient.clear();
+  useBackupRunsStore.setState({ runs: {} });
+  setBlobUser();
   setTauri(true);
 });
 
 afterEach(() => {
   cleanup();
   setTauri(false);
+  clearBlobUser();
+  queryClient.clear();
+  useBackupRunsStore.setState({ runs: {} });
 });
 
 describe("четыре состояния пустоты — четыре разных ответа", () => {
@@ -179,18 +272,21 @@ describe("четыре состояния пустоты — четыре раз
   });
 });
 
-describe("органов управления нет ни одного", () => {
-  it("в десктопе кнопки «Проверить на сервере» нет: пересъёмка списка не принесёт", () => {
-    // Асимметрия с вкладкой Logs осознанная: там снимок реально приносит пути
-    // логов, здесь — ничего, пока не написано чтение бэкапов в Rust.
+describe("органов управления ровно столько, сколько работает", () => {
+  it("в десктопе кнопка РОВНО ОДНА — создание копии, в любом состоянии списка", () => {
+    // «Ровно одна» — не придирка к числу: вторая напрашивающаяся кнопка,
+    // «Проверить на сервере», обещала бы починить пустой список, а новый
+    // снимок его не принесёт (`DESKTOP_READS_BACKUPS`). Асимметрия с вкладкой
+    // Logs осознанная: там снимок реально приносит пути логов, здесь — ничего.
+    // Создание при этом от списка не зависит и есть во всех состояниях.
     for (const over of Object.values(EMPTY_STATES)) {
       show(over);
-      expect(screen.queryAllByRole("button")).toEqual([]);
+      expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Create backup"]);
       cleanup();
     }
   });
 
-  it("в вебе кнопок нет и сказано почему — общей фразой продукта", () => {
+  it("в вебе кнопок нет ни одной и сказано почему — общей фразой продукта", () => {
     setTauri(false);
     showListed([backup()]);
     // Список при этом виден: веб смотрит те же данные, он только не выполняет.
@@ -205,19 +301,152 @@ describe("органов управления нет ни одного", () => {
     showListed([backup()]);
     expect(screen.queryAllByRole("combobox")).toEqual([]);
     expect(screen.queryAllByRole("textbox")).toEqual([]);
-    expect(screen.queryAllByRole("button")).toEqual([]);
+    expect(screen.getAllByRole("button")).toHaveLength(1);
     // Меты «Last backup: … · 412 MB» из макета тоже нет: её никто не измерял.
     expect(document.body.textContent).not.toMatch(/Last backup/i);
+  });
+
+  it("домен без сервера: кнопка выключена и сказано, чего не хватает", () => {
+    // Собирать архив не с чего — команда ответила бы «domain has no server_id».
+    // Спрятать кнопку значило бы оставить вкладку без объяснения, почему копию
+    // создать нельзя; включённая — обещала бы работу, которой не будет.
+    showListed([backup()], { server_id: null });
+    expect(createBtn().hasAttribute("disabled")).toBe(true);
+    expect(createBtn().getAttribute("title")).toMatch(/not bound to a server/i);
+  });
+});
+
+describe("прогон: два клика, отмена и путь", () => {
+  it("два клика по кнопке дают ОДНУ команду", async () => {
+    // Гейт живёт в `MutationCache`, а не в стейте компонента: `pending`
+    // доезжает только к следующему рендеру, и два клика в одном такте успевают
+    // случиться раньше него.
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Saved to/));
+    expect(mocks.invokeSynced.mock.calls.filter((c) => c[0] === "domain_backup_create")).toHaveLength(1);
+  });
+
+  it("отмена панели сохранения не оставляет следа: ни «Saved», ни ошибки", async () => {
+    mocks.chooseSavePath.mockResolvedValue(null);
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(mocks.chooseSavePath).toHaveBeenCalled());
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+    // Ни строки успеха, ни строки ошибки, ни строки прогона вообще: человек
+    // ничего не запускал.
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Saved to|Backup failed|Cancelled/);
+  });
+
+  it("успех печатает путь, который ВЕРНУЛА команда, а не выбранный человеком", async () => {
+    // Панель сохранения дописывает расширение, а Rust нормализует путь: строки
+    // расходятся, и на экране обязана быть та, по которой файл лежит.
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain(RETURNED));
+    expect(screen.getByRole("status").textContent).not.toContain(`Saved to ${CHOSEN} `);
+  });
+
+  it("сбой печатается тревогой, а отмена прогона — нет", async () => {
+    mocks.invokeSynced.mockRejectedValueOnce(new Error("ssh: handshake failed"));
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("ssh: handshake failed"));
+
+    cleanup();
+    mocks.invokeSynced.mockRejectedValueOnce(new Error("api: BACKUP_CANCELLED"));
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/Cancelled/));
+    // Отмена — не авария: `role="alert"` на неё был бы враньём.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("бэкап удался, а снимок не пересняли — сказано отдельно, и это не ошибка", async () => {
+    mocks.invokeSynced.mockResolvedValue(backupResult({ facts_refreshed: false }));
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Saved to/));
+    expect(screen.getByText(/list of copies above was not refreshed/i)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("строка прогресса", () => {
+  /** Довести прогон до состояния «идёт»: команда не отвечает, пока не разрешим. */
+  async function startRun() {
+    let finish: (v: unknown) => void = () => {};
+    mocks.invokeSynced.mockReturnValue(new Promise((r) => (finish = r)));
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalled());
+    return () => act(async () => finish(backupResult()));
+  }
+
+  it("знаменатель неизвестен — полосы нет, есть слова о шаге", async () => {
+    // Полоса со знаменателем «на глаз» — тот же принцип №6, что зелёный бейдж
+    // вместо «не измеряли». Байты приходят только у выгрузки; у сборки архива
+    // на сервере их нет вовсе.
+    await startRun();
+    await emitProgress({ step: "archive" });
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText(/Building the archive on the server/)).toBeTruthy();
+
+    // И даже у выгрузки: довезённые байты без общего числа полосы не дают.
+    await emitProgress({ step: "download", done_bytes: 500 });
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("знаменатель известен — полоса с обоими числами", async () => {
+    await startRun();
+    await emitProgress({ step: "download", done_bytes: 512, total_bytes: 2048 });
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuenow")).toBe("512");
+    expect(bar.getAttribute("aria-valuemax")).toBe("2048");
+    // На слух — тот же формат, что на экране: голые байты на вопрос «сколько
+    // осталось» не отвечают.
+    expect(bar.getAttribute("aria-valuetext")).toBe("512 B of 2 KB");
+  });
+
+  it("«Saved» не появляется от события, даже когда довезены ВСЕ байты", async () => {
+    // Между последним байтом и файлом на диске стоят sha256, сверка размера и
+    // `rename`. Сервер мог доложить последний чанк и упасть на любом из них.
+    const finish = await startRun();
+    await emitProgress({ step: "download", done_bytes: 2048, total_bytes: 2048 });
+    expect(document.body.textContent).not.toMatch(/Saved to/);
+    // И только ответ команды рисует успех.
+    await finish();
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Saved to/));
+  });
+
+  it("прогон переживает закрытие карточки: вернулись — он на месте", async () => {
+    // Скачивание идёт минутами, и карточку за это время закрывают. Открыв её
+    // снова, человек обязан увидеть тот же прогон, а не чистый экран.
+    await startRun();
+    await emitProgress({ step: "download", done_bytes: 512, total_bytes: 2048 });
+    cleanup();
+    showListed([backup()]);
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("512");
+    // И кнопка остаётся погашенной: прогон-то идёт. Признак берётся из
+    // `MutationCache`, а не из стейта размонтированного экземпляра, — иначе
+    // второй клик по перемонтированной вкладке открыл бы вторую SSH-сессию.
+    const btn = screen.getByRole("button", { name: "Backing up…" });
+    expect(btn.hasAttribute("disabled")).toBe(true);
   });
 });
 
 describe("домен без сервера", () => {
-  it("своя фраза — читать копии не с чего, и ни одной кнопки", () => {
+  it("своя фраза — читать копии не с чего, и создать их тоже нечем", () => {
     show({ server_id: null });
     expect(screen.getByText(/not bound to a server/)).toBeTruthy();
     // И это не «копий нет»: сервера у домена нет, а не копий на сервере.
     expect(document.body.textContent).not.toMatch(/no backup copies/i);
-    expect(screen.queryAllByRole("button")).toEqual([]);
+    // Кнопка на месте, но выключена: без сервера архив собирать не с чего (то
+    // же правило проверяется выше, здесь оно замыкает разбор состояния).
+    expect(createBtn().hasAttribute("disabled")).toBe(true);
   });
 
   it("но приехавший список показывается и без нашей записи о сервере", () => {
@@ -348,10 +577,11 @@ describe("отложенное названо словами", () => {
     expect(screen.getByText(/Restoring a site from an archive is not part of SDMP/)).toBeTruthy();
   });
 
-  it("сказано и то, почему нельзя создать копию отсюда", () => {
-    // Вкладка про резервные копии, на которой нельзя сделать копию и не сказано
-    // почему, читается как поломка. Строку снимает фаза 7 вместе с кнопкой.
+  it("и ни слова о том, что создать копию нельзя: теперь можно", () => {
+    // Фраза «Making a backup from here is not available yet» стояла здесь ровно
+    // до кнопки. Оставить её рядом с работающей кнопкой — соврать в другую
+    // сторону, поэтому её отсутствие тоже под тестом.
     showListed([backup()]);
-    expect(screen.getByText(/Making a backup from here is not available yet/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/not available yet/i);
   });
 });
