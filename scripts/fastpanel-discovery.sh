@@ -9,10 +9,16 @@
 # написать `docs/FASTPANEL_CLI.md` и парсеры (фаза 0 плана
 # `plans/2026-08-16-fastpanel-cli-chtenie-domena.md`).
 #
+# Секции с префиксом `backup-*` добавлены позже и отвечают на другой вопрос: где
+# панель держит бэкапы, чем и по какому расписанию их делает, есть ли на сервере
+# `tar`/`mysqldump` и отвечает ли `mysql` под root через сокет (фаза 0 плана
+# `plans/2026-08-19-bekapy-domena.md`).
+#
 # ТОЛЬКО ЧТЕНИЕ. Ни одна команда здесь ничего не создаёт, не меняет и не удаляет:
-# `--help`, `list`, `test`, `ls`, `find`, `cat`, `grep`. Скрипт идёт на живой
-# продакшн, и это требование жёстче любого удобства — новую команду сюда можно
-# добавлять только убедившись, что она читающая.
+# `--help`, `list`, `test`, `ls`, `find`, `cat`, `grep`, `command -v`, `df`,
+# `systemctl list-timers`, а из `mysql` — только `SHOW`, `DESCRIBE` и
+# `SELECT COUNT(*)`. Скрипт идёт на живой продакшн, и это требование жёстче любого
+# удобства — новую команду сюда можно добавлять только убедившись, что она читающая.
 #
 # Разметка вывода скопирована с `COLLECT_METRICS_COMMAND`
 # (`frontend/src/lib/serverMetrics.ts`) и по той же причине: вывод едет с ЧУЖОЙ
@@ -82,6 +88,28 @@ readonly WWW_ROOT='/var/www'
 
 readonly NGINX_SITES_DIR='/etc/nginx/fastpanel2-sites'
 readonly APACHE_SITES_DIR='/etc/apache2/fastpanel2-sites'
+
+# Сколько таблиц с `backup` в имени разбираем во внутренней БД панели. Их там в
+# норме одна-две; больше — это уже совпадение по подстроке, и `DESCRIBE` на каждую
+# только раздувает вывод.
+readonly MAX_BACKUP_TABLES=5
+
+# Куда FastPanel может складывать архивы. Каждое место — своя пара секций: «каталога
+# нет» и «каталог есть, но пуст» — разные факты, и различить их можно только так.
+readonly BACKUP_PLACES_VAR_BACKUPS='/var/backups'
+readonly BACKUP_PLACES_FASTPANEL='/var/lib/fastpanel2'
+readonly BACKUP_PLACES_MNT='/mnt'
+readonly BACKUP_PLACES_BACKUP='/backup'
+
+# Глубина обхода и фильтр имён для поиска архивов.
+#
+# Фильтр по имени обязателен, а не удобен: каталог `/var/www/<owner>/data` содержит
+# сам сайт, и `find` без фильтра выдал бы сотню файлов приложения вместо архивов —
+# `head -n MAX_LIST_LINES` обрезал бы вывод раньше, чем дошёл до бэкапов. Пустой
+# вывод такой секции читается как «файлов с этими именами нет», а не «каталог пуст»:
+# на «пусто» отвечает соседняя секция `-dir`.
+readonly BACKUP_FIND_DEPTH=4
+readonly BACKUP_NAME_FILTER="-name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.bz2' -o -name '*.zip' -o -name '*.sql' -o -name '*.sql.gz' -o -name '*.bak' -o -name '*backup*'"
 
 # --- Состояние прогона -----------------------------------------------------
 
@@ -200,7 +228,8 @@ usage() {
           Не передан — берётся первый сайт с сервера.
 
 Без 2>&1: так предупреждение о логинах и путях останется на экране.
-Скрипт только читает: --help, list, test, ls, find, cat, grep. Запускать от root.
+Скрипт только читает: --help, list, test, ls, find, cat, grep, command -v, df,
+systemctl list-timers и mysql SHOW/DESCRIBE/SELECT COUNT(*). Запускать от root.
 USAGE
 }
 
@@ -233,9 +262,12 @@ warning() {
  Ни одна команда ниже ничего не создаёт, не меняет и не удаляет.
 
  В выводе БУДУТ: имена доменов, системные логины (владельцы сайтов, FTP-логины),
- имена баз, пути к файлам и конфиги nginx/apache.
+ имена баз, пути к файлам и конфиги nginx/apache, а также имена файлов бэкапов,
+ список системных таймеров и имена таблиц во внутренней БД панели.
  Паролей мы не собираем: команды с паролем в argv не запускаются, файлы
- приложений (wp-config.php и подобные) и пулы php-fpm не читаются вовсе.
+ приложений (wp-config.php и подобные) и пулы php-fpm не читаются вовсе,
+ `crontab -l` не зовётся (в строке cron может стоять mysqldump с паролем),
+ а из таблиц бэкапов берутся только структура и число строк, но не сами строки.
 
  ПРОСМОТРИТЕ вывод перед тем, как куда-то его отправлять: форма ответов панели
  нам как раз и неизвестна — за тем и разведка.
@@ -328,6 +360,24 @@ fp 'certificates-help' certificates --help
 # «Если есть»: команды `php` у панели может не оказаться вовсе, и код возврата
 # скажет об этом яснее, чем предварительная проверка.
 fp 'php-help' php --help
+
+# --- Бэкапы: команды панели -------------------------------------------------
+
+# `backup:plan` — единственная известная нам команда про бэкапы: она есть даже у
+# непривилегированного пользователя панели (`docs/FASTPANEL_CLI.md` §0), но её ни
+# разу не звали, и форма вывода неизвестна. `--help` и `list` читающие; ничего вроде
+# `backup:plan create` здесь быть не может — скрипт ходит на живой продакшн.
+fp 'backup-plan-help' backup:plan --help
+fp 'backup-plan-list-json' backup:plan list --json
+fp 'backup-plan-list-text' backup:plan list
+
+# Две лишние строки против одного повторного захода на продакшн: `database` против
+# `databases` (`docs/FASTPANEL_CLI.md` §3.1) уже стоил бага в провижининге — там
+# команда называлась во множественном числе, а слали единственное, и разведка этого
+# не проверила. Здесь спрашиваем оба написания сразу, чтобы имя группы было снято
+# фактом, а не догадкой по аналогии с `backup:plan`.
+fp 'backup-help' backup --help
+fp 'backups-help' backups --help
 
 # --- Какой домен смотрим ---------------------------------------------------
 
@@ -505,6 +555,141 @@ if [ "${#CONF_FILES[@]}" -gt 0 ]; then
 else
   skip_section 'log-directives' 'конфиги сайта не найдены'
 fi
+
+# --- Бэкапы: раскладка на диске --------------------------------------------
+
+# Одно место, где могут лежать архивы, — две секции, как у конфигов сайта:
+# `<prefix>-dir` показывает сам каталог, `<prefix>-files` — файлы в нём. Разделение
+# не косметическое: «каталога нет» отвечает `#sdmp:skip`, «каталог есть и пуст» —
+# `-dir` с пустым выводом и кодом 0, «архивов нет, а каталог живой» — пустой
+# `-files` при непустом `-dir`. Одна секция на место эти три случая слепила бы.
+#
+# Время и размер снимаем через `find -printf`, а не `ls -l`: формат `ls` зависит от
+# локали сервера (месяц словом, разделитель дробной части), и парсер на Rust ловил
+# бы чужой язык. `-printf` даёт ISO-дату и байты при любой локали.
+collect_backup_place() {
+  local prefix="$1" root="$2"
+
+  if [ ! -d "$root" ]; then
+    skip_section "$prefix-dir" "каталога $root нет"
+    skip_section "$prefix-files" "каталога $root нет"
+    return 0
+  fi
+
+  # `printf %q`: часть путей собрана из имени владельца сайта, приехавшего с чужой
+  # машины, и здесь оно впервые попадает в строку для шелла.
+  local root_q
+  root_q="$(printf '%q' "$root")"
+
+  run_sh "$prefix-dir" "ls -la $root_q | head -n $MAX_LIST_LINES"
+  run_sh "$prefix-files" \
+    "find $root_q -maxdepth $BACKUP_FIND_DEPTH -type f \\( $BACKUP_NAME_FILTER \\) -printf '%p\\t%s\\t%TY-%Tm-%Td %TH:%TM\\n' | head -n $MAX_LIST_LINES"
+}
+
+# Каталог владельца сайта — первое место, куда панель могла бы класть копии домена;
+# он единственный из пяти зависит от разбора домена выше.
+if [ -n "$SITE_USER" ]; then
+  collect_backup_place 'backup-fs-www' "$WWW_ROOT/$SITE_USER/data"
+else
+  skip_section 'backup-fs-www-dir' 'владелец сайта не определён'
+  skip_section 'backup-fs-www-files' 'владелец сайта не определён'
+fi
+
+collect_backup_place 'backup-fs-var-backups' "$BACKUP_PLACES_VAR_BACKUPS"
+collect_backup_place 'backup-fs-fastpanel2' "$BACKUP_PLACES_FASTPANEL"
+collect_backup_place 'backup-fs-mnt' "$BACKUP_PLACES_MNT"
+collect_backup_place 'backup-fs-backup' "$BACKUP_PLACES_BACKUP"
+
+# --- Бэкапы: расписание ----------------------------------------------------
+
+# `crontab -l` НЕ зовём и звать нельзя. В cron-строке панели может стоять
+# `mysqldump -p<пароль>`, а шапка скрипта обещает оператору, что паролей мы не
+# собираем — одно такое обещание дороже, чем удобство разведки. По той же причине
+# каталог `/etc/cron.d` только перечисляется (`ls`), но файлы из него не читаются.
+# Расписание нам нужно как факт «панель что-то делает по таймеру», а не построчно.
+run_sh 'backup-timers' "systemctl list-timers --all --no-pager | head -n $MAX_LIST_LINES"
+
+if [ -d /etc/cron.d ]; then
+  run_sh 'backup-cron-d' "ls -la /etc/cron.d | head -n $MAX_LIST_LINES"
+else
+  skip_section 'backup-cron-d' 'каталога /etc/cron.d нет'
+fi
+
+# --- Бэкапы: внутренняя БД панели ------------------------------------------
+
+# Секция важна не столько своим выводом, сколько побочным фактом: отвечает ли
+# `mysql` под root БЕЗ пароля через unix-сокет. На этом стоит вся схема `mysqldump`
+# в фазе 2 плана — если сокет-авторизации нет, дампить БД домена нечем, и это надо
+# знать до того, как код написан, а не после.
+#
+# ⚠️ `SELECT *` по таблицам бэкапов ЗАПРЕЩЁН: в их строках лежат учётки внешних
+# хранилищ (S3/FTP), а вывод разведки уезжает с сервера. Отсюда только `SHOW
+# TABLES`, `DESCRIBE` и `SELECT COUNT(*)` — форма и объём без содержимого.
+run 'backup-mysql-databases' mysql -N -B -e "SHOW DATABASES LIKE '%fastpanel%'"
+
+FP_DB=''
+if [ "$LAST_CODE" -eq 0 ]; then read -r FP_DB <<<"$LAST_OUT" || FP_DB=''; fi
+# Имя базы уходит дальше в argv `mysql`; форму проверяем, потому что строка приехала
+# с чужой машины, а не потому, что ждём подвоха от `SHOW DATABASES`.
+if [ -n "$FP_DB" ] && ! [[ "$FP_DB" =~ ^[A-Za-z0-9_]+$ ]]; then
+  note "имя внутренней БД «$FP_DB» отброшено: не похоже на имя базы"
+  FP_DB=''
+fi
+
+BACKUP_TABLES=''
+if [ -n "$FP_DB" ]; then
+  # `grep -i backup` вернёт код 1, если таблиц с таким именем нет, — и это ответ, а
+  # не сбой: «панель не хранит бэкапы в своей БД» тоже результат разведки.
+  run_sh 'backup-mysql-tables' \
+    "mysql $(printf '%q' "$FP_DB") -N -B -e 'SHOW TABLES' | grep -i backup"
+  if [ "$LAST_CODE" -eq 0 ]; then BACKUP_TABLES="$LAST_OUT"; fi
+else
+  skip_section 'backup-mysql-tables' 'внутренняя БД панели не найдена'
+fi
+
+# Нумерованные секции по образцу `*-conf-N`: таблиц может не быть ни одной, а может
+# быть несколько, и `backup-mysql-table-0` — это «разбирать было нечего».
+backup_table_n=0
+if [ -n "$BACKUP_TABLES" ]; then
+  while IFS= read -r backup_table; do
+    # Имя уходит в argv `mysql`, поэтому форму проверяем; отброшенное имя называем
+    # вслух — молчаливый пропуск выглядел бы как «таблицы не было».
+    if ! [[ "$backup_table" =~ ^[A-Za-z0-9_]+$ ]]; then
+      note "имя таблицы «$backup_table» отброшено: не похоже на имя таблицы"
+      continue
+    fi
+    backup_table_n=$((backup_table_n + 1))
+    [ "$backup_table_n" -le "$MAX_BACKUP_TABLES" ] || break
+    run "backup-mysql-table-$backup_table_n" mysql "$FP_DB" \
+      -e "DESCRIBE $backup_table; SELECT COUNT(*) FROM $backup_table"
+  done <<<"$BACKUP_TABLES"
+fi
+if [ "$backup_table_n" -eq 0 ]; then
+  if [ -n "$FP_DB" ]; then
+    skip_section 'backup-mysql-table-0' "таблиц с backup в имени в $FP_DB нет"
+  else
+    skip_section 'backup-mysql-table-0' 'внутренняя БД панели не найдена'
+  fi
+fi
+
+# --- Бэкапы: инструменты ---------------------------------------------------
+
+# Цикл, а не `command -v` одним списком: со списком bash печатает пути только
+# найденных и отдаёт код последнего имени — отсутствующий `ionice` в такой секции
+# выглядит как отсутствие строки, которую ещё надо заметить. Строка `MISSING` против
+# каждого имени отвечает на вопрос прямо, а не вычитанием одного списка из другого.
+run_sh 'backup-tools' \
+  "for t in tar gzip mysqldump sha256sum du df nice ionice install; do printf '%s\\t%s\\n' \"\$t\" \"\$(command -v \"\$t\" || echo MISSING)\"; done"
+
+# GNU tar и busybox tar расходятся кодами возврата: у GNU 1 — «файлы менялись при
+# чтении» (для живого сайта норма и не повод считать архив битым), 2 — настоящий
+# сбой; busybox такой градации не даёт вовсе. Схема обработки кодов в фазе 2 зависит
+# от того, какой именно tar стоит на сервере, — отсюда отдельная секция.
+run 'backup-tar-version' tar --version
+
+# `-Pk`: POSIX-формат и килобайты — иначе размер приезжает в «человеческих» единицах
+# с суффиксом, зависящим от локали, а его надо сравнивать с оценкой размера архива.
+run 'backup-df-var-tmp' df -Pk /var/tmp
 
 # Подпись «вывод доехал целиком» — та же роль, что у `#sdmp:end` в
 # `COLLECT_METRICS_COMMAND`: без неё непонятно, кончился прогон или оборвался.
