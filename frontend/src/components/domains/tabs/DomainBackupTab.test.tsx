@@ -185,7 +185,14 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.listen.mockImplementation(async (_event: string, cb: any) => {
     progressHandler = cb;
-    return () => {};
+    // Отписка ГАСИТ хендлер, а не возвращает пустышку. Разница несущая: с
+    // пустышкой подписка, перенесённая в эффект компонента и снимаемая при
+    // размонтировании, прошла бы весь набор зелёной — то есть осознанное
+    // решение «слушатель живёт столько же, сколько приложение» осталось бы
+    // незакреплённым, и следующий человек снёс бы его как утечку.
+    return () => {
+      progressHandler = null;
+    };
   });
   mocks.chooseSavePath.mockResolvedValue(CHOSEN);
   mocks.invokeSynced.mockResolvedValue(backupResult());
@@ -406,6 +413,24 @@ describe("прогон: два клика, отмена и путь", () => {
     expect(screen.getByText(/list of copies above was not refreshed/i)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("оговорка и предупреждения объявляются вместе с успехом, а не остаются немыми", async () => {
+    // Живая область накрывает ВЕСЬ исход, а не одну зелёную строку. Оговорка
+    // меняет смысл успеха — успех с ней полу-, — и, объяви скринридер только
+    // первую строку, он сказал бы «сохранено» там, где зрячий читает «но».
+    mocks.invokeSynced.mockResolvedValue(
+      backupResult({
+        facts_refreshed: false,
+        warnings: ["the archive is still on the server at /var/tmp/x.tar — remove it by hand"],
+      }),
+    );
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    const status = await waitFor(() => screen.getByRole("status"));
+    expect(within(status).getByText(/^Saved to/)).toBeTruthy();
+    expect(within(status).getByText(/list of copies above was not refreshed/i)).toBeTruthy();
+    expect(within(status).getByText(/still on the server at/i)).toBeTruthy();
+  });
 });
 
 describe("строка прогресса", () => {
@@ -444,6 +469,23 @@ describe("строка прогресса", () => {
     expect(bar.getAttribute("aria-valuetext")).toBe("512 B of 2 KB");
   });
 
+  it("живая область — на словах о шаге, и её НЕТ на счётчике байтов", async () => {
+    // Оба конца сразу. Счётчик меняется четыре раза в секунду (троттлинг Rust
+    // — 250 мс, то есть тысячи событий на гигабайт), и живая область вокруг
+    // него превратила бы чтение с экрана в поток цифр, из которого не выудить
+    // ни одной новости. Новость — смена шага, она и объявляется.
+    await startRun();
+    await emitProgress({ step: "download", done_bytes: 512, total_bytes: 2048 });
+
+    const step = screen.getByText("Downloading the archive…");
+    expect(step.getAttribute("aria-live")).toBe("polite");
+
+    const counter = screen.getByText("512 B of 2 KB");
+    // Спрашиваем не сам элемент, а всех его предков: `aria-live`, поднятый на
+    // общую обёртку строки, накрыл бы счётчик ровно так же.
+    expect(counter.closest("[aria-live]")).toBeNull();
+  });
+
   it("«Saved» не появляется от события, даже когда довезены ВСЕ байты", async () => {
     // Между последним байтом и файлом на диске стоят sha256, сверка размера и
     // `rename`. Сервер мог доложить последний чанк и упасть на любом из них.
@@ -456,11 +498,15 @@ describe("строка прогресса", () => {
   });
 
   it("прогон переживает закрытие карточки: вернулись — он на месте", async () => {
-    // Скачивание идёт минутами, и карточку за это время закрывают. Открыв её
-    // снова, человек обязан увидеть тот же прогон, а не чистый экран.
+    // Скачивание идёт минутами, и карточку за это время закрывают. Событие
+    // шлётся ПОСЛЕ размонтирования и ДО повторного показа — то есть ровно
+    // тогда, когда на экране нет ни одного потребителя. Пришли мы его до
+    // `cleanup()`, тест прошёл бы и с подпиской, живущей в эффекте компонента:
+    // цифра уже лежала бы в сторе. Здесь же поймать её может только слушатель,
+    // переживший размонтирование, — а это и есть проверяемое решение.
     await startRun();
-    await emitProgress({ step: "download", done_bytes: 512, total_bytes: 2048 });
     cleanup();
+    await emitProgress({ step: "download", done_bytes: 512, total_bytes: 2048 });
     showListed([backup()]);
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("512");
     // И кнопка остаётся погашенной: прогон-то идёт. Признак берётся из
@@ -499,6 +545,23 @@ describe("отмена прогона", () => {
     // раз» поверх идущей выгрузки бессмысленна, и целиться в неё незачем.
     await startRun();
     expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel"]);
+  });
+
+  it("пока висит панель сохранения, отменять нечего — и кнопки отмены нет", async () => {
+    // `pending` встаёт раньше прогона: сначала нативная панель, потом
+    // синхронизация кэша. Кнопка отмены в это окно отменяла бы то, чего ещё
+    // нет ни в сторе, ни в реестре Rust, и клик по ней не оставил бы вообще
+    // ничего.
+    let pick: (v: unknown) => void = () => {};
+    mocks.chooseSavePath.mockReturnValue(new Promise((r) => (pick = r)));
+    showListed([backup()]);
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(mocks.chooseSavePath).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+    // Кнопка создания при этом погашена: живая над модальной панелью обещала
+    // бы второй прогон.
+    expect(createBtn().hasAttribute("disabled")).toBe(true);
+    await act(async () => pick(null));
   });
 
   it("клик зовёт команду отмены с тем же доменом", async () => {

@@ -55,11 +55,16 @@ export function BackupRunLine({ domainId }: { domainId: number }) {
     if (run.outcome.kind === "saved") {
       const { path, bytes, warnings, factsRefreshed } = run.outcome.saved;
       return (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        // `role="status"` — на ВЕСЬ исход, а не на одну зелёную строку. Строка
+        // про непересъёмку и предупреждения меняют смысл зелёной: успех с ними
+        // — полууспех. Оставь живой область вокруг одной первой строки, и
+        // скринридер объявил бы полный успех там, где зрячий видит три строки и
+        // читает оговорку. Различия обязаны доезжать до обоих одинаково.
+        <div role="status" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {/* Путь — ЧУЖОЙ текст (его выбрал человек, а вернул Rust), и он
               неразрывный: без переноса он распирает модалку и даёт ей
               горизонтальную полосу, запрещённую `design-brief.md` §11. */}
-          <div role="status" style={{ fontSize: 13, color: "#166534", overflowWrap: "anywhere" }}>
+          <div style={{ fontSize: 13, color: "#166534", overflowWrap: "anywhere" }}>
             Saved to {path} · {formatBytes(bytes)}
           </div>
           {factsRefreshed ? null : (

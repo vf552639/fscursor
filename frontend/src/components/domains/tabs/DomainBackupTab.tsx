@@ -10,6 +10,7 @@ import {
 } from "../../../lib/domainFacts";
 import { formatBytes } from "../../../lib/format";
 import { isTauri } from "../../../lib/runtime";
+import { useBackupRun } from "../../../store/backupRuns";
 import { Btn, fmtDT } from "../../ui/Primitives";
 import { DesktopOnlyNote } from "../../DesktopOnlyNote";
 import { SnapshotLine } from "../facts/SnapshotLine";
@@ -223,6 +224,17 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
   const desktop = isTauri();
   const backup = useCreateDomainBackup(domain);
   const cancel = useCancelDomainBackup(domain.id);
+  const run = useBackupRun(domain.id);
+  /**
+   * Прогон существует, а не «кнопка занята».
+   *
+   * `pending` встаёт раньше прогона: между ним и стартом лежит нативная панель
+   * «сохранить как», а за ней — синхронизация кэша. Кнопка отмены, показанная в
+   * это окно, отменяла бы то, чего ещё нет: в сторе записи нет, в реестре Rust
+   * тоже. Условие `outcome === null` закрывает второй край — кадр между
+   * записью исхода и снятием `pending`.
+   */
+  const running = backup.pending && run !== null && run.outcome === null;
   /**
    * Без привязки к серверу собирать архив не с чего: команда резолвит сервер по
    * `server_id` из локального кэша и отвечает «domain has no server_id». Кнопка
@@ -271,7 +283,7 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
           // закрытие карточки: вернувшись, человек увидит ту же кнопку отмены,
           // а не «Create backup» поверх идущей выгрузки.
           desktop ? (
-            backup.pending ? (
+            running ? (
               <Btn
                 variant="secondary"
                 size="sm"
@@ -288,7 +300,10 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
                 variant="primary"
                 size="sm"
                 onClick={backup.run}
-                disabled={!hasServer}
+                // Гаснет и на время панели сохранения: гейт второй клик всё
+                // равно проглотит, но живая кнопка над модальной панелью
+                // обещала бы второй прогон.
+                disabled={backup.pending || !hasServer}
                 title={hasServer ? undefined : "This domain is not bound to a server"}
               >
                 Create backup

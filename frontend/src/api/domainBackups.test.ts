@@ -203,6 +203,18 @@ describe("неуспех", () => {
     expect(run().outcome).toEqual({ kind: "cancelled" });
   });
 
+  it("маркер посреди чужого текста отменой НЕ считается", async () => {
+    // В тексте сбоя выгрузки едет путь на сервере. Файл или каталог с таким
+    // именем при разборе «содержит маркер» превратил бы аварию в тихое
+    // «отменено» — то есть спрятал бы провал. `Display` ставит маркер
+    // последним, так что строгость ничего не теряет.
+    mocks.invokeSynced.mockRejectedValue(
+      new Error(`ssh: the archive is still at /var/tmp/${BACKUP_CANCELLED}/site.tar — remove it`),
+    );
+    await runCreateDomainBackup(DOMAIN);
+    expect(run().outcome).toMatchObject({ kind: "failed" });
+  });
+
   it("сбой доезжает текстом, а не молчанием", async () => {
     mocks.invokeSynced.mockRejectedValue(new Error("ssh: handshake failed"));
     await runCreateDomainBackup(DOMAIN);
@@ -249,6 +261,20 @@ describe("отмена прогона", () => {
     useBackupRunsStore.getState().start(42);
     await runCancelDomainBackup(42);
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  it("«такого прогона нет» тоже снимает признак: нажатие ушло в пустоту", async () => {
+    // Между нашим `start()` и `runs.start()` в Rust лежит синхронизация кэша,
+    // то есть поход в сеть, и всё это время кнопка отмены на экране уже живая.
+    // Нажатие в это окно отменять нечего — Rust о прогоне ещё не знает, — и
+    // ответ `false` единственное, чем он может это сказать. Промолчи мы, и
+    // человек смотрел бы на «Cancelling…» десятки минут, чтобы получить
+    // «Saved».
+    mocks.invokeIfTauri.mockResolvedValue(false);
+    useBackupRunsStore.getState().start(42);
+    await runCancelDomainBackup(42);
+    expect(run().cancelRequested).toBe(false);
+    expect(run().outcome).toBeNull();
   });
 
   it("отбитая просьба не хоронит живой прогон, но и не врёт, что отменила", async () => {

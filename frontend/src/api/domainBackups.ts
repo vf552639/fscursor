@@ -87,6 +87,20 @@ export interface DomainBackupResult {
  */
 export const BACKUP_CANCELLED = "BACKUP_CANCELLED";
 
+/**
+ * Отмена ли это.
+ *
+ * Разбор строгий — «текст КОНЧАЕТСЯ маркером», а не «содержит его». Содержимое
+ * ловило бы маркер и посреди чужой строки, а чужие строки здесь длинные и не
+ * наши: в тексте сбоя выгрузки едет путь на сервере, и файл или каталог с таким
+ * именем превратил бы аварию в тихое «отменено» — то есть спрятал бы провал.
+ * `Display` у `CommandError` ставит маркер последним («api: BACKUP_CANCELLED»),
+ * так что строгость ничего не теряет.
+ */
+function isCancelled(message: string): boolean {
+  return message.trimEnd().endsWith(BACKUP_CANCELLED);
+}
+
 /** Что нужно прогону от домена: id для команды, имя для имени файла. */
 export interface BackupTarget {
   id: number;
@@ -144,8 +158,8 @@ export async function runCreateDomainBackup(domain: BackupTarget): Promise<void>
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       // Маркер приезжает внутри текста `CommandError` («api: BACKUP_CANCELLED»),
-      // поэтому `includes`, а не равенство.
-      if (message.includes(BACKUP_CANCELLED)) useBackupRunsStore.getState().cancelled(domain.id);
+      // поэтому не равенство, но и не вхождение — см. `isCancelled`.
+      if (isCancelled(message)) useBackupRunsStore.getState().cancelled(domain.id);
       else useBackupRunsStore.getState().failed(domain.id, message);
     } finally {
       // Свежую строку домена тянем на ОБОИХ исходах, как у чтения фактов:
@@ -166,9 +180,15 @@ export async function runCreateDomainBackup(domain: BackupTarget): Promise<void>
  * ровно там, где от вызова требуется быстрота. Тот же довод, что у чтения
  * хвоста лога.
  *
- * Ответ команды (`true`/`false`) наружу не идёт: `false` означает «такого
- * прогона уже нет», то есть он кончился сам между нажатием и вызовом. Это не
- * ошибка и не новость — исход прогона придёт своим путём и всё расскажет.
+ * Ответ команды (`true`/`false`) НЕ выбрасывается, и это не педантизм.
+ * `false` — «такого прогона в реестре нет», и случаев за ним два. Первый
+ * безобиден: прогон кончился сам между нажатием и вызовом, признак и так
+ * снимется исходом. Второй — настоящая дыра: между нашим `start()` и
+ * `runs.start()` в Rust лежит `syncLocalCache()`, то есть поход в сеть, и всё
+ * это время на экране уже стоит живая кнопка отмены. Нажатие в это окно
+ * уходит в пустоту — отменять Rust ещё нечего, — и, промолчи мы, человек
+ * смотрел бы на «Cancelling…» десятки минут, чтобы в конце получить «Saved».
+ * Поэтому на `false` признак снимается: кнопка снова нажимаема, и это правда.
  *
  * Признак «отмену попросили» ставится ДО вызова: реакция придёт через десятки
  * секунд (флаг читается на следующем чанке выгрузки), и всё это время экран
@@ -179,7 +199,10 @@ export async function runCancelDomainBackup(domainId: number): Promise<void> {
     if (!isTauri()) return;
     useBackupRunsStore.getState().requestCancel(domainId);
     try {
-      await invokeIfTauri<boolean>("domain_backup_cancel", { domainId: String(domainId) });
+      const accepted = await invokeIfTauri<boolean>("domain_backup_cancel", {
+        domainId: String(domainId),
+      });
+      if (!accepted) useBackupRunsStore.getState().cancelRequestFailed(domainId);
     } catch (e: unknown) {
       // Провал ПРОСЬБЫ — не провал бэкапа: тот всё ещё идёт, и красная строка
       // на его месте объявила бы мёртвым живой прогон. Поэтому исход прогона
