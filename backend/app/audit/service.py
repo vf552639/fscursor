@@ -21,6 +21,12 @@ SAFE_ACTIONS = frozenset(
         # Приём снимка состояния домена с сервера (`POST /domains/{id}/facts`).
         # Мутирующий write-back с десктопа, как и `server.metrics`.
         "domain.read_facts",
+        # Архив домена собран на сервере и выгружен на машину пользователя
+        # (десктопная команда `domain_backup_create`). Метаданные — размер,
+        # число частей, длительность, имена баз; ПУТИ НАЗНАЧЕНИЯ ЗДЕСЬ НЕТ и
+        # быть не может: это локальная ФС пользователя, и `~/Documents/клиент-X/`
+        # сам по себе разглашение.
+        "domain.backup_created",
         "server.create",
         "server.update",
         "server.delete",

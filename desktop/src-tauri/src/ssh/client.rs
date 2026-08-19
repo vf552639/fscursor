@@ -1,6 +1,7 @@
 //! SSH client (russh) with strict host-key checking and TOFU support.
 
 use std::io::{self, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -9,6 +10,7 @@ use fs2::FileExt;
 use russh::client::{self, Handler};
 use russh::keys::key;
 use russh::ChannelMsg;
+use tokio::io::AsyncWriteExt;
 use tokio::time::Duration;
 use zeroize::Zeroize;
 
@@ -44,6 +46,32 @@ pub enum SshError {
     HostKeyUnknown { fingerprint: String },
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    /// Выгрузку остановил сам вызывающий (`ControlFlow::Break` из `on_progress`).
+    ///
+    /// Отдельный вариант, а не `Session(...)`, потому что отмена — не сбой:
+    /// связь цела, сервер жив, файл просто не нужен. В аудите и на экране это
+    /// обязано выглядеть иначе, чем оборванный канал, иначе человек пойдёт
+    /// чинить сеть после того, как сам же нажал «отмена».
+    #[error("cancelled by the caller after {bytes} bytes — the transfer was stopped on purpose, the connection is fine")]
+    Cancelled { bytes: u64 },
+    /// Канал кончился, не сообщив, чем кончилась команда.
+    ///
+    /// Третий исход рядом с отменой и простоем, и путать их нельзя: простой —
+    /// «сервер молчит дольше, чем мы согласны ждать», отмена — «мы сами
+    /// передумали», а это — «связь оборвалась на середине». Именно так
+    /// выглядит смерть сессии по `inactivity_timeout` или по keepalive: russh
+    /// роняет `Session::run`, отправитель сообщений канала исчезает, и
+    /// `Channel::wait()` отдаёт `None`.
+    ///
+    /// Отдельный вариант появился потому, что раньше этот случай возвращался
+    /// как `Ok(ExecStream { exit: -1, .. })` — то есть обрезанный на середине
+    /// гигабайтный архив приезжал как штатно закрытый поток. Обрыв обязан быть
+    /// ошибкой: «сколько байт успело» тут не итог, а размер потери.
+    #[error(
+        "connection lost after {bytes} bytes — the channel ended before the command \
+         reported an exit status; whatever was written is incomplete"
+    )]
+    Disconnected { bytes: u64 },
     #[error("session: {0}")]
     Session(String),
 }
@@ -119,6 +147,51 @@ pub fn append_known_host(path: &Path, host_port: &str, fingerprint: &str) -> io:
     Ok(())
 }
 
+/// Раз в столько тишины клиент шлёт серверу keepalive-запрос.
+///
+/// До этой правки keepalive был выключен вовсе: `russh::client::Config`
+/// собирался с одним `inactivity_timeout`. Тот сбрасывается на любом витке
+/// цикла сессии, кроме витка отправки самого keepalive (`client/mod.rs`,
+/// хвост цикла `run_inner`), — но у молчащей команды витков нет вовсе, ни
+/// входящих, ни исходящих. Получасовой `tar` и пятиминутный `certificates
+/// create-le` не шлют ничего, и единственным способом их пережить было
+/// раздувать inactivity до часов, то есть перестать замечать оборванную связь
+/// вовсе. Keepalive разрывает эту связку: тишину заполняет он, а inactivity
+/// остаётся сторожем настоящего обрыва.
+///
+/// ВНИМАНИЕ: это меняет поведение ВСЕХ SSH-операций продукта, а не только
+/// бэкапов. В лучшую сторону — мёртвый сервер опознаётся за две с половиной
+/// минуты (russh шлёт запросы на 30/60/90/120 с и объявляет обрыв на 150-й)
+/// вместо «сколько там стоит inactivity у этого вызывающего», то есть до 600 с
+/// у чтения фактов; а живая молчаливая команда перестаёт умирать от
+/// собственной молчаливости. Но это изменение, и принято оно сознательно
+/// (`plans/2026-08-19-bekapy-domena.md`, решение 3).
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Столько неотвеченных keepalive подряд russh терпит, прежде чем объявить
+/// связь мёртвой (`russh::Error::KeepaliveTimeout`).
+pub const KEEPALIVE_MAX: usize = 3;
+
+/// Сколько молчания сервера обязана переживать сессия, чтобы keepalive успел
+/// израсходовать всю свою квоту попыток.
+///
+/// Это `KEEPALIVE_INTERVAL × (KEEPALIVE_MAX + 1)`: к этому моменту отправлены
+/// все `KEEPALIVE_MAX` запросов и у последнего был целый интервал на ответ.
+/// Нужна вызывающим: их `session_timeout` уходит в `inactivity_timeout`, и
+/// поставленный ниже этого бюджета он убьёт сессию раньше, чем keepalive
+/// доиграет свою партию — то есть запаса на пропущенный ответ не останется
+/// вовсе. Связь с константами выше держит тест
+/// `keepalive_budget_is_the_interval_times_every_attempt`.
+pub const KEEPALIVE_BUDGET: Duration = Duration::from_secs(120);
+
+/// Потолок буфера stderr у [`SshSession::exec_to_writer`].
+///
+/// Stderr гигабайтного `tar` может быть сам гигабайтным (`file changed as we
+/// read it` на каждый файл), а держим мы его в памяти — в отличие от stdout,
+/// который уходит в writer. 8 KiB хватает на диагностику и не хватает на то,
+/// чтобы съесть машину.
+const STREAM_STDERR_CAP: usize = 8 * 1024;
+
 pub struct ConnectOptions<'a> {
     pub host: &'a str,
     pub port: u16,
@@ -133,6 +206,29 @@ pub struct SshSession {
 }
 
 pub async fn connect(opts: ConnectOptions<'_>) -> Result<SshSession, SshError> {
+    connect_with_keepalive_override(opts, Some(KEEPALIVE_INTERVAL)).await
+}
+
+/// То же соединение, но с явно заданным интервалом keepalive (`None` — выключить).
+///
+/// Существует РАДИ ДОКАЗАТЕЛЬСТВА, а не ради настройки, и продуктовый код обязан
+/// звать [`connect`]. Единственный вызывающий — интеграционный тест
+/// `keepalive_carries_a_silent_command_past_the_inactivity_timeout`: утверждение
+/// «keepalive держит молчащую команду» непроверяемо без пары «с ним / без него»
+/// — зелёный тест был бы зелёным и с выключенным keepalive, если бы inactivity
+/// просто оказался больше паузы. Интервал параметром по той же причине: с
+/// продуктовыми 30 с такой тест шёл бы двумя минутами живого ожидания, а
+/// доказываемый механизм (ответ на keepalive сдвигает inactivity) от величины
+/// интервала не зависит — сами же 30 с и `KEEPALIVE_BUDGET` закреплены юнит-тестами
+/// здесь и у каждого session-таймаута в `commands/`.
+///
+/// Отдельная функция, а не поле в [`ConnectOptions`]: поле выставляется где
+/// угодно и копипастится вместе с остальными опциями, а функцию с таким именем
+/// в продуктовом коде видно грепом.
+pub async fn connect_with_keepalive_override(
+    opts: ConnectOptions<'_>,
+    keepalive_interval: Option<Duration>,
+) -> Result<SshSession, SshError> {
     let pending = Arc::new(Mutex::new(None));
     let handler = ClientHandler {
         known_hosts_path: opts.known_hosts_path.clone(),
@@ -141,6 +237,11 @@ pub async fn connect(opts: ConnectOptions<'_>) -> Result<SshSession, SshError> {
     };
     let config = Arc::new(client::Config {
         inactivity_timeout: Some(opts.timeout),
+        // Без этих двух строк inactivity считает только принятые байты, и
+        // молчащая живая команда неотличима от мёртвой связи — см.
+        // `KEEPALIVE_INTERVAL`, там же и про то, что правка сквозная.
+        keepalive_interval,
+        keepalive_max: KEEPALIVE_MAX,
         ..Default::default()
     });
 
@@ -175,6 +276,63 @@ pub async fn connect(opts: ConnectOptions<'_>) -> Result<SshSession, SshError> {
         });
     }
     Ok(SshSession { handle })
+}
+
+/// Итог потоковой команды: код возврата, сколько байт ушло в writer, хвост
+/// stderr и сигнал, которым команду убили (если убили).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecStream {
+    pub exit: i32,
+    pub bytes: u64,
+    pub stderr: String,
+    /// Имя сигнала из `ChannelMsg::ExitSignal` — `KILL`, `TERM`, `PIPE`…
+    ///
+    /// Убитая команда кода возврата НЕ присылает, и без этого поля OOM-killer,
+    /// съевший гигабайтный `tar`, выглядел бы ровно как «код не доехал» —
+    /// то есть как исторический баг с `Eof`, который мы уже чинили.
+    pub signal: Option<String>,
+}
+
+/// Накопитель stderr с жёстким потолком `STREAM_STDERR_CAP`.
+///
+/// Отдельный тип, а не проверка длины по месту, ради проверяемости: `ChannelMsg`
+/// руками не собрать, мок всего russh ради одного `if` не стоит своей цены, а
+/// потолок — то немногое в потоковом цикле, что можно проверить без сети.
+///
+/// Держим НАЧАЛО, а не хвост. Первая строка stderr — причина, всё остальное
+/// обычно следствие; вдобавок «оставить начало» стоит O(1) на любом объёме, а
+/// «оставить хвост» заставляло бы двигать буфер на каждом чанке гигабайтного
+/// потока предупреждений. Чем кончилось дело, говорят `exit` и `signal`, а не
+/// stderr.
+#[derive(Default)]
+struct CappedStderr {
+    buf: Vec<u8>,
+    dropped: u64,
+}
+
+impl CappedStderr {
+    fn push(&mut self, chunk: &[u8]) {
+        let room = STREAM_STDERR_CAP.saturating_sub(self.buf.len());
+        let take = room.min(chunk.len());
+        self.buf.extend_from_slice(&chunk[..take]);
+        self.dropped = self.dropped.saturating_add((chunk.len() - take) as u64);
+    }
+
+    /// Отдать текст. Усечение НАЗЫВАЕТСЯ вслух: молча обрезанный stderr читается
+    /// как «сервер больше ничего не сказал», а это разные вещи.
+    ///
+    /// `from_utf8_lossy` здесь уместен (в отличие от stdout, ради которого весь
+    /// метод и затевался): stderr — текст для человека, а не байты файла.
+    fn finish(self) -> String {
+        let mut out = String::from_utf8_lossy(&self.buf).into_owned();
+        if self.dropped > 0 {
+            out.push_str(&format!(
+                "\n… stderr truncated at {STREAM_STDERR_CAP} bytes, {} more dropped",
+                self.dropped
+            ));
+        }
+        out
+    }
 }
 
 impl SshSession {
@@ -235,6 +393,183 @@ impl SshSession {
         Ok((exit, String::from_utf8_lossy(&output).into_owned()))
     }
 
+    /// Выполнить команду, отдавая её stdout В ПОТОК, а не в строку.
+    ///
+    /// Живёт рядом с [`exec`](Self::exec), а не вместо него, потому что `exec`
+    /// для бинарного гигабайта непригоден трижды:
+    /// - копит вывод в `Vec<u8>` и отдаёт `String::from_utf8_lossy` — каждый
+    ///   невалидный UTF-8 стал бы U+FFFD, то есть архив был бы испорчен целиком;
+    /// - сливает stdout и stderr в один буфер — одно предупреждение `tar`
+    ///   вклеилось бы в середину файла;
+    /// - его дедлайн суммарный (`now + timeout`), а не по бездействию — здоровая
+    ///   многоминутная выгрузка обрывалась бы на середине.
+    ///
+    /// Здесь всё три наоборот: stdout уходит в `out` байт в байт, stderr копится
+    /// отдельно и с потолком, а `idle_timeout` меряет ТИШИНУ — дедлайн
+    /// сдвигается на каждом принятом сообщении, поэтому длительность команды не
+    /// ограничена ничем, а замолчавший канал ловится за `idle_timeout`.
+    ///
+    /// Почему не крейт `russh-sftp`: SFTP закрывает один шаг из тринадцати —
+    /// `tar`, `mysqldump`, `sha256sum`, замок и `rm -rf` всё равно идут через
+    /// `exec`; исторический баг с `Eof`/`exit-status` оплачен именно в
+    /// exec-цикле (см. комментарий внутри `exec` и план
+    /// `plans/2026-08-06-ssh-exit-status-poteryan.md`), и цикл ниже это знание
+    /// наследует, а SFTP-путь завёл бы свой набор граблей, не покрытый нашими
+    /// тестами. Плюс ноль новых зависимостей.
+    ///
+    /// Исходов у выгрузки три, и они намеренно различимы: [`SshError::Cancelled`]
+    /// — передумали сами, `SshError::Session("stream idle…")` — сервер молчит
+    /// дольше `idle_timeout`, [`SshError::Disconnected`] — связь оборвалась, и
+    /// написанное неполно. Нормальным концом считается только тот, при котором
+    /// доехал итог команды (`exit-status` или сигнал).
+    ///
+    /// `on_progress` зовётся после каждой записи в `out` с накопленным числом
+    /// байт; `ControlFlow::Break` останавливает выгрузку и даёт
+    /// [`SshError::Cancelled`] — закрывается только канал, сессия остаётся живой
+    /// и годной для следующей команды (после гигабайта на половине пути это
+    /// важнее, чем кажется: переподключение стоило бы ещё одного TOFU-круга).
+    ///
+    /// Псевдотерминала здесь нет и быть не может — в отличие от `exec`, где это
+    /// параметр: pty переводит `\n` в `\r\n`, то есть тихо портит каждый байт
+    /// 0x0A. В текстовом выводе это косметика, в архиве — порча.
+    pub async fn exec_to_writer<W, F>(
+        &mut self,
+        cmd: &str,
+        idle_timeout: Duration,
+        out: &mut W,
+        mut on_progress: F,
+    ) -> Result<ExecStream, SshError>
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send,
+        F: FnMut(u64) -> ControlFlow<()> + Send,
+    {
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::Session(e.to_string()))?;
+        channel
+            .exec(true, cmd.as_bytes())
+            .await
+            .map_err(|e| SshError::Session(e.to_string()))?;
+
+        let mut stderr = CappedStderr::default();
+        let mut bytes: u64 = 0;
+        let mut exit: i32 = -1;
+        let mut signal: Option<String> = None;
+        // Доехал ли до нас ИТОГ команды (`exit-status` или сигнал). Отличает
+        // нормальный конец канала от оборванной связи: и то и другое приходит
+        // к нам одинаково — концом потока сообщений.
+        let mut ended = false;
+        // Выходим не через `return` из `select!`, а флагом: writer обязан быть
+        // сброшен в любом исходе, иначе последний кусок остаётся в буфере.
+        let mut stop: Option<SshError> = None;
+
+        loop {
+            // Дедлайн считается ЗАНОВО на каждом витке, то есть сдвигается на
+            // каждом принятом сообщении. В этом вся разница с `exec`: там
+            // `deadline` фиксирован один раз и ограничивает длительность
+            // команды, здесь — только паузу между сообщениями.
+            let deadline = tokio::time::Instant::now() + idle_timeout;
+            tokio::select! {
+                msg = channel.wait() => {
+                    match msg {
+                        Some(ChannelMsg::Data { data }) => {
+                            // Не `?`: выход по нему миновал бы и `flush`, и
+                            // закрытие канала — то есть нарушил бы инвариант,
+                            // объявленный при `stop`.
+                            if let Err(e) = out.write_all(data.as_ref()).await {
+                                stop = Some(SshError::Io(e));
+                                break;
+                            }
+                            bytes = bytes.saturating_add(data.len() as u64);
+                            if on_progress(bytes).is_break() {
+                                stop = Some(SshError::Cancelled { bytes });
+                                break;
+                            }
+                        }
+                        // Вот ради этой строки метод и существует: в `exec`
+                        // stderr идёт в тот же буфер, что stdout.
+                        Some(ChannelMsg::ExtendedData { data, .. }) => stderr.push(data.as_ref()),
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            exit = exit_status as i32;
+                            ended = true;
+                        }
+                        // Убитая команда кода не присылает — присылает сигнал.
+                        // Без этой ветки OOM-killer на гигабайтном `tar` был бы
+                        // неотличим от «код не доехал».
+                        Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
+                            signal = Some(match signal_name {
+                                russh::Sig::Custom(name) => name,
+                                known => format!("{known:?}"),
+                            });
+                            // Законный конец наравне с `exit-status`: требуй
+                            // мы кода и от убитой команды — записали бы её в
+                            // оборванные, а она честно доложила, как умерла.
+                            ended = true;
+                        }
+                        // EOF — НЕ конец разговора. OpenSSH закрывает поток вывода
+                        // раньше, чем сообщает код возврата: сначала `Eof`, затем
+                        // `exit-status`. Выход из цикла по `Eof` терял код у
+                        // КАЖДОЙ команды (см. подробный разбор в `exec` выше и
+                        // план 2026-08-06) — здесь та же ловушка и тот же ответ
+                        // на неё: ждём настоящего конца канала.
+                        Some(ChannelMsg::Eof) => {}
+                        // Страховка, а не рабочий путь: на russh 0.45 эта ветка
+                        // не срабатывает НИ РАЗУ. Приняв `CHANNEL_CLOSE`, russh
+                        // выкидывает канал из своей карты, не переслав наружу
+                        // `ChannelMsg::Close` (`client/encrypted.rs`, ветка
+                        // `msg::CHANNEL_CLOSE`), — и до нас доходит не `Close`,
+                        // а конец потока. Оставлена на случай, если russh это
+                        // поведение поменяет; смысл у неё тот же, что у `None`.
+                        Some(ChannelMsg::Close) => break,
+                        Some(_) => {}
+                        // Единственный настоящий выход из цикла — и, вот
+                        // ловушка, ОДИНАКОВЫЙ у нормального конца и у обрыва
+                        // связи. Кто из двух — решает `ended` после цикла.
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    // Текст намеренно не «exec timeout»: ту строку разбирают
+                    // `exec_error`/`db_error` в `commands::provision`, и значит
+                    // она обещает «команда не уложилась», а здесь случилось
+                    // другое — канал замолчал.
+                    stop = Some(SshError::Session(format!(
+                        "stream idle: no data from the server for {idle_timeout:?}"
+                    )));
+                    break;
+                }
+            }
+        }
+
+        // Канал кончился, а итога не было — связь оборвалась. Раньше здесь
+        // возвращался `Ok` с `exit: -1`, и обрезанный на середине архив был
+        // неотличим от штатно закрытого потока.
+        if stop.is_none() && !ended {
+            stop = Some(SshError::Disconnected { bytes });
+        }
+
+        // Сброс — до разбора исхода, чтобы инвариант «writer сброшен в любом
+        // случае» выполнялся и на пути ошибки. Но сама ошибка сброса НЕ
+        // затирает уже установленную причину: отмена, превратившаяся в `Io`,
+        // читалась бы как обрыв — ровно то, от чего её отделяли.
+        let flushed = out.flush().await;
+        if let Some(e) = stop {
+            // Канал закрываем, сессию — нет: ни отмена, ни замолчавшая команда
+            // не повод рвать соединение, по нему ещё пойдёт уборка (`rm -rf`).
+            let _ = channel.close().await;
+            return Err(e);
+        }
+        flushed?;
+        Ok(ExecStream {
+            exit,
+            bytes,
+            stderr: stderr.finish(),
+            signal,
+        })
+    }
+
     pub async fn disconnect(&mut self) -> Result<(), SshError> {
         self.handle
             .disconnect(russh::Disconnect::ByApplication, "", "English")
@@ -284,5 +619,84 @@ mod tests {
         // который парольный вход не принимает вовсе.
         assert!(msg.contains("root"), "{msg}");
         assert!(msg.contains("PasswordAuthentication"), "{msg}");
+    }
+
+    // Бюджет — не третья независимая цифра, а следствие первых двух. Тест
+    // держит их вместе: подняв `KEEPALIVE_MAX` и забыв про бюджет, автор
+    // получил бы у всех вызывающих проверку соотношения по устаревшему числу.
+    #[test]
+    fn keepalive_budget_is_the_interval_times_every_attempt() {
+        assert_eq!(
+            KEEPALIVE_BUDGET,
+            KEEPALIVE_INTERVAL * (KEEPALIVE_MAX as u32 + 1),
+            "бюджет обязан равняться интервалу × (попытки + 1)"
+        );
+    }
+
+    // Stderr короче потолка обязан доезжать дословно: приписка про усечение —
+    // утверждение о потере, и на месте, где терять было нечего, она врала бы.
+    #[test]
+    fn stderr_under_the_cap_arrives_verbatim() {
+        let mut acc = CappedStderr::default();
+        acc.push(b"tar: /var/www/x: file changed as we read it\n");
+        acc.push(b"gzip: broken pipe\n");
+        let out = acc.finish();
+        assert_eq!(
+            out,
+            "tar: /var/www/x: file changed as we read it\ngzip: broken pipe\n"
+        );
+        assert!(!out.contains("truncated"), "{out}");
+    }
+
+    // Потолок: гигабайтный stderr `tar` держится в памяти (в отличие от stdout),
+    // поэтому обрезан он быть обязан — и обязан об этом сказать.
+    #[test]
+    fn stderr_over_the_cap_is_cut_and_says_how_much_was_lost() {
+        let mut acc = CappedStderr::default();
+        acc.push(&vec![b'e'; STREAM_STDERR_CAP - 1]);
+        acc.push(b"XY"); // первый байт влезает, второй — уже нет
+        acc.push(&vec![b'z'; 1000]);
+        let out = acc.finish();
+
+        // Сохранено НАЧАЛО: первая строка stderr — причина, остальное следствие.
+        assert!(
+            out.starts_with(&"e".repeat(STREAM_STDERR_CAP - 1)),
+            "начало потеряно"
+        );
+        assert!(out.contains('X'), "последний влезающий байт потерян");
+        assert!(!out.contains('z'), "потолок не сработал");
+        // Потеря названа и посчитана: 1 байт "Y" + 1000 байт "z".
+        assert!(out.contains("truncated"), "{}", &out[out.len() - 80..]);
+        assert!(out.contains("1001 more"), "{}", &out[out.len() - 80..]);
+    }
+
+    // Отмена и обрыв — разные события, и текст обязан их различать: иначе
+    // человек, сам нажавший «отмена», пойдёт чинить сеть.
+    #[test]
+    fn cancelled_reads_as_a_stopped_transfer_not_as_a_broken_link() {
+        let msg = SshError::Cancelled { bytes: 4096 }.to_string();
+        assert!(msg.contains("cancelled"), "{msg}");
+        // Сколько успели — не украшение: по этому числу видно, что удалять.
+        assert!(msg.contains("4096"), "{msg}");
+        // Прямым текстом сказано, что связь цела.
+        assert!(msg.contains("connection is fine"), "{msg}");
+        // И это не тот таймаут, который разбирают в `commands::provision`.
+        assert!(!msg.contains("timeout"), "{msg}");
+    }
+
+    // Третий исход. Раньше обрыв возвращался как `Ok(exit: -1)` — то есть
+    // обрезанный архив выглядел штатно закрытым потоком. Теперь это ошибка, и
+    // её текст обязан говорить главное: написанное НЕПОЛНО.
+    #[test]
+    fn disconnect_says_the_written_bytes_are_incomplete() {
+        let msg = SshError::Disconnected { bytes: 1_048_576 }.to_string();
+        assert!(msg.contains("connection lost"), "{msg}");
+        assert!(msg.contains("1048576"), "{msg}");
+        assert!(msg.contains("incomplete"), "{msg}");
+        // Три исхода — три разных текста: обрыв не выдаёт себя ни за отмену,
+        // ни за простой, иначе в аудите они слились бы в один случай.
+        let cancelled = SshError::Cancelled { bytes: 1 }.to_string();
+        assert!(!msg.contains("cancelled"), "{msg}");
+        assert!(!cancelled.contains("connection lost"), "{cancelled}");
     }
 }

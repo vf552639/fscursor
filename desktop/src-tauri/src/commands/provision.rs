@@ -1965,6 +1965,48 @@ mod tests {
         );
     }
 
+    // Второй инвариант тех же таймаутов — против keepalive-бюджета
+    // (`ssh::client::KEEPALIVE_*`). Inactivity, поставленный ниже бюджета,
+    // отнимает у keepalive запас на пропущенный ответ: сессия умрёт раньше,
+    // чем он израсходует свои попытки, и молчащая установка оборвётся ровно
+    // так же, как до keepalive. Обе долгие сессии проверяем одним тестом:
+    // и та и другая живут через паузы в минуты.
+    #[test]
+    fn long_session_timeouts_outlive_the_keepalive_budget() {
+        use crate::ssh::client::KEEPALIVE_BUDGET;
+        for (name, t) in [
+            ("PROVISION_SESSION_TIMEOUT", PROVISION_SESSION_TIMEOUT),
+            ("FP_SESSION_TIMEOUT", FP_SESSION_TIMEOUT),
+        ] {
+            assert!(
+                t > KEEPALIVE_BUDGET,
+                "{name} = {t:?} must exceed keepalive budget {KEEPALIVE_BUDGET:?}"
+            );
+        }
+    }
+
+    // Листинг — отдельный случай, и потому отдельный тест с более слабой
+    // границей. Его сессия НЕ переживает keepalive-бюджет (60 с против 120 с),
+    // и это осознанно: за листингом стоит кнопка, ему нужно опознавать мёртвый
+    // сервер быстро, а не терпеть три пропущенных keepalive. Обязательное же
+    // здесь другое — успеть спросить и получить ответ хотя бы раз: ответ
+    // сервера сдвигает inactivity, и живой молчаливый листинг от собственной
+    // молчаливости не умрёт. Двойной интервал — запас на RTT и на занятый
+    // цикл событий. Опустите таймаут под него — keepalive станет мёртвым
+    // грузом, и тест это скажет.
+    #[test]
+    fn list_sites_session_timeout_still_lets_keepalive_ask_once() {
+        use crate::ssh::client::{KEEPALIVE_BUDGET, KEEPALIVE_INTERVAL};
+        assert!(
+            LIST_SITES_SESSION_TIMEOUT >= KEEPALIVE_INTERVAL * 2,
+            "list-sites session {LIST_SITES_SESSION_TIMEOUT:?} must leave room for a keepalive round ({KEEPALIVE_INTERVAL:?})"
+        );
+        assert!(
+            LIST_SITES_SESSION_TIMEOUT < KEEPALIVE_BUDGET,
+            "если листинг дорос до полного бюджета — перенесите его в тест выше"
+        );
+    }
+
     fn ssl_info(has: bool, expires_at: Option<chrono::DateTime<chrono::Utc>>) -> SslInfo {
         SslInfo {
             has_certificate: has,

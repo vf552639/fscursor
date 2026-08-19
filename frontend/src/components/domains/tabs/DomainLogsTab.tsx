@@ -7,7 +7,7 @@ import { isTauri } from "../../../lib/runtime";
 import { Btn } from "../../ui/Primitives";
 import { formatBytes } from "../../../lib/format";
 import { SnapshotLine } from "../facts/SnapshotLine";
-import { TabBody } from "./TabLayout";
+import { EmptyPanel, TabBody } from "./TabLayout";
 
 /** Один файл из снимка — то, что о нём знает провод (`lib/domainFacts`). */
 type LogFile = DomainFacts["logs"][number];
@@ -59,32 +59,6 @@ export interface DomainLogsTabProps {
   now: number;
 }
 
-/**
- * Пустое тело вкладки: пунктирная рамка макета (его же состояние «Log file is
- * empty») с одной фразой посередине.
- *
- * Пунктир — не украшение: он рисует место, где ПОЯВИТСЯ содержимое, и тем
- * отличает «сюда ещё нечего положить» от карточки с данными. Все состояния
- * пустоты (нет снимка, путей не прочитали, веб, файла на сервере нет, ещё не
- * жали Refresh, файл пуст) выглядят одинаково намеренно — различает их фраза
- * внутри, а не рамка.
- */
-function Placeholder({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        border: "1px dashed #cbd5e1",
-        borderRadius: 12,
-        padding: 40,
-        textAlign: "center",
-        color: "#94a3b8",
-        fontSize: 13,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
 
 /**
  * Чип одного файла: подпись, бейдж и выбор.
@@ -501,7 +475,7 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
           смысл: «файл пуст» под отсутствующим снимком было бы измерением,
           которого никто не делал. */}
       {noSnapshot ? (
-        <Placeholder>Log files are listed from the server snapshot, and none has been taken yet.</Placeholder>
+        <EmptyPanel>Log files are listed from the server snapshot, and none has been taken yet.</EmptyPanel>
       ) : logs.length === 0 || !selected ? (
         /* Снимок есть, а список путей пуст — и это НЕ «логов у сайта нет».
            Причин у пустоты как минимум четыре, и НИ ОДНУ из них экран назвать
@@ -523,34 +497,34 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
            упавшей команде значило бы придумать диагноз (принцип №6 CLAUDE.md).
            Ровно то же различие, ради которого у полей-списков заведён `list` в
            `FactRow`: прочерк там читался бы как «спросили, там пусто». */
-        <Placeholder>
+        <EmptyPanel>
           The last snapshot brought no log paths for this site, so we do not know where its logs are.
-        </Placeholder>
+        </EmptyPanel>
       ) : !desktop ? (
         /* Веб — читалка (принцип №3): SSH-пароль здесь непрозрачный блоб, и
            расшифровать его может только десктоп. Фраза называет ровно это, а не
            «пока не готово»: функция есть, её просто нет ЗДЕСЬ. */
-        <Placeholder>Reading log contents requires the desktop app.</Placeholder>
+        <EmptyPanel>Reading log contents requires the desktop app.</EmptyPanel>
       ) : !selected.exists ? (
         /* Файла нет по снимку — на сервер не ходим вовсе. Гейт пути в Rust
            отверг бы и такой запрос, но отвергнутый запрос стоил бы SSH-сессии
            и секунд ожидания ради ответа, который уже лежит на экране в бейдже. */
-        <Placeholder>This file does not exist on the server.</Placeholder>
+        <EmptyPanel>This file does not exist on the server.</EmptyPanel>
       ) : !tail ? (
         /* Ещё не читали. Ошибка при пустом результате уже напечатана выше —
            повторять под ней приглашение «нажмите Refresh» незачем: экран и так
            говорит, что делать, а два сообщения об одном спорили бы. */
-        tailError ? null : <Placeholder>Press Refresh to read the last {TAIL_LINES} lines.</Placeholder>
+        tailError ? null : <EmptyPanel>Press Refresh to read the last {TAIL_LINES} lines.</EmptyPanel>
       ) : !tail.exists ? (
         /* Файл исчез МЕЖДУ снимком и чтением (сайт переехал, владелец
            сменился). Чип при этом ещё показывает старый размер — это не
            противоречие: размер помечен возрастом снимка, а это ответ сервера
            только что. */
-        <Placeholder>This file does not exist on the server.</Placeholder>
+        <EmptyPanel>This file does not exist on the server.</EmptyPanel>
       ) : tail.lines.length === 0 ? (
         /* Пустой файл — это ИЗМЕРЕНИЕ, а не отсутствие ответа: пустая консоль
            на его месте читалась бы как «не загрузилось». */
-        <Placeholder>Log file is empty.</Placeholder>
+        <EmptyPanel>Log file is empty.</EmptyPanel>
       ) : (
         <LogConsole tail={tail} />
       )}

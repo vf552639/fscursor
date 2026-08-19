@@ -13,6 +13,7 @@ mod registrars;
 pub mod ssh;
 mod sync;
 
+use commands::domain_backup::BackupRuns;
 use commands::sync_cmd::SyncHandle;
 use sync::http::ApiClient;
 
@@ -34,6 +35,10 @@ pub fn run() {
         // (подробности у зависимости в `Cargo.toml`).
         .plugin(tauri_plugin_dialog::init())
         .manage(SyncHandle(Mutex::new(None)))
+        // Второй слой идемпотентности бэкапа: один прогон на домен в пределах
+        // этого десктопа (первый — замок-каталог на сервере, третий —
+        // `runExclusive` во фронте).
+        .manage(BackupRuns::default())
         .manage(api)
         .invoke_handler(tauri::generate_handler![
             commands::api::api_request,
@@ -56,6 +61,8 @@ pub fn run() {
             commands::provision::install_fastpanel,
             commands::provision::server_list_sites,
             commands::domain_facts::domain_read_facts,
+            commands::domain_backup::domain_backup_create,
+            commands::domain_backup::domain_backup_cancel,
             commands::domain_logs::domain_read_log_tail,
             commands::cloudflare::cf_verify_token,
             commands::cloudflare::cf_list_zones,

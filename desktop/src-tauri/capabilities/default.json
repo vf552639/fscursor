@@ -6,6 +6,7 @@
     "core:default",
     "shell:default",
     "deep-link:default",
-    "dialog:allow-ask"
+    "dialog:allow-ask",
+    "dialog:allow-save"
   ]
 }
