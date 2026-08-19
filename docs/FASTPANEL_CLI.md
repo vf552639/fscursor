@@ -442,8 +442,15 @@ Databases, Users, Email, User transfer) — страницы про логи с�
 ## 8. Что мы отправляем сегодня — инвентарь команд
 
 Все команды, которые SDMP-десктоп реально шлёт в FastPanel/на сервер. Источники:
-`desktop/src-tauri/src/ssh/fastpanel.rs` (операции по SSH) и
-`desktop/src-tauri/src/provision/fastpanel_install.rs` (установка панели).
+`desktop/src-tauri/src/ssh/fastpanel.rs` (операции по SSH),
+`desktop/src-tauri/src/provision/fastpanel_install.rs` (установка панели),
+`desktop/src-tauri/src/ssh/fastpanel_logs.rs` (хвост лога) и — с этой ветки —
+`desktop/src-tauri/src/ssh/backup_run.rs`, `ssh/backup_download.rs`,
+`commands/domain_backup.rs` (бэкап домена).
+
+**Сессия идёт под тем пользователем, что записан у сервера (`ssh_user`, по умолчанию
+`root`).** То есть всё ниже читается как «что SDMP может сделать с сервером под root», и
+раздел ценен именно этим.
 
 ### Чтение (read-only)
 
@@ -481,6 +488,64 @@ user-agent'ы, а `fp_facts` — открытая JSON-колонка в Postgre
 | `<fp> sites regenerate-config --server-name=<d> \|\| (nginx -t && systemctl reload nginx)` | `revoke_ssl_certificate` | не сверено |
 | `<fp> sites regenerate-config --server-name=<d> \|\| systemctl reload nginx` | `apply_nginx_override` | не сверено |
 | `rm -rf /etc/letsencrypt/{live,archive}/<d> /etc/letsencrypt/renewal/<d>.conf` | `revoke_ssl_certificate` | не сверено |
+
+### Бэкап домена (`backup_run.rs`, `backup_download.rs`, `commands/domain_backup.rs`)
+
+Шаги идут в этом порядке, все — через `q()`, все с `pty: false`. `<work>` =
+`/var/tmp/sdmp-backup/<домен>` (имя домена санируется `safe_component`), `<archive>` =
+`/var/tmp/sdmp-backup/<домен>-<штамп>.tar`.
+
+| Команда (argv) | Функция | Мутация | Сверено |
+|---|---|---|---|
+| `<fp> sites list --json` (тот же вызов, что у чтения фактов) | `resolve_target` | — | ✅ 2026-08-16 |
+| `<fp> databases list --json` | `databases_for_backup` | — | ✅ 2026-08-16 |
+| `for t in tar gzip sha256sum du df [mysqldump] nice ionice; do command -v "$t" …; done` | `probe_tools` | — | ⚠️ форма |
+| `printf 'SDMP_DU\n'; du -sk <site_path> 2>/dev/null; printf 'SDMP_DF\n'; df -Pk /var/tmp` | `check_space` | — | ⚠️ форма |
+| `if [ -d <work> ]; then … stat -c %Y <work> … date +%s …; fi` | `acquire_lock` (диагностика занятого замка) | — | ⚠️ форма |
+| `mkdir -m 700 -p /var/tmp/sdmp-backup && chmod 700 /var/tmp/sdmp-backup && mkdir -m 700 <work>` | `acquire_lock` | **ДА** | ⚠️ форма |
+| `set -o pipefail; umask 077; [nice -n 19] [ionice -c3] tar --warning=no-file-changed -cf - -C <родитель> -- <каталог сайта> \| gzip -1 > <work>/site.tar.gz; <хвост PIPESTATUS>` | `run_locked` | **ДА** | ⚠️ форма |
+| `set -o pipefail; umask 077; mysqldump --single-transaction --quick --routines --triggers --events -- <db> \| gzip -1 > <work>/db-<db>.sql.gz; <хвост PIPESTATUS>` | `run_locked`, по одной на базу | **ДА** | ⚠️ форма |
+| `cd <work> && sha256sum <части…>` | `run_locked` (входы манифеста) | — | ⚠️ форма |
+| `umask 077; printf '%s\n' <манифест JSON> > <work>/manifest.json && tar -cf <archive> -C <work> manifest.json site.tar.gz db-<имя>.sql.gz …` (имена перечислены поимённо, glob'а в команде нет) | `run_locked` | **ДА** | ⚠️ форма |
+| `sha256sum <archive> && stat -c %s <archive>` | `run_locked` (сумма до выгрузки) | — | ⚠️ форма |
+| `rm -rf <work>` — и `rm -rf <work> <archive>` на пути отказа | `cleanup` | **ДА** | ⚠️ форма |
+| `cat <archive>` (поток в `exec_to_writer`, без pty) | `download_archive` | — | ✅ на живом ssh |
+| `rm -f <archive>` | `commands/domain_backup.rs` после выгрузки | **ДА** | ⚠️ форма |
+
+**Что именно эти команды меняют на сервере — и чего они не трогают.** Меняется РОВНО одно
+место: `/var/tmp/sdmp-backup/`. Там создаётся каталог с правами 700 (он же замок прогона), в
+нём появляются `site.tar.gz`, по одному `db-<имя>.sql.gz` на базу и `manifest.json`, рядом
+кладётся сам `<archive>`. Всё это удаляется нами же: рабочий каталог — сразу после упаковки,
+архив — после выгрузки (или после отмены). Ни каталог сайта, ни базы, ни конфиги nginx, ни
+сущности панели, ни службы не трогаются вовсе: `tar` и `mysqldump` только читают, а записи
+идут исключительно под `/var/tmp/sdmp-backup/`.
+
+**Про `rm` под root — три ограничителя, потому что цена ошибки тут не «неудобно», а
+«сервер».** Первый: путь собирается из `BACKUP_WORK_ROOT` и санированного имени домена
+(`safe_component` убивает `/`, `..` и ведущую точку), а не из чего-либо, пришедшего с сервера
+или из вебвью. Второй: всё уходит через `q()`. Третий: удаление архива с десктопной стороны
+проходит `build_remote_archive_rm_cmd`, который пускает только файл НЕПОСРЕДСТВЕННО в
+`/var/tmp/sdmp-backup/` — без глобов, без `-r`, без вложенных путей; чужой путь не удаляется
+вовсе (на это есть тесты с `/`, `/etc/passwd` и вложенным путём).
+
+**Почему рабочий каталог именно `/var/tmp`, а не под сайтом.** Всё, что лежит под document
+root, отдаётся веб-сервером по HTTP кому угодно, пока оно там лежит, — то есть архив с
+дампами баз можно было бы просто скачать по прямой ссылке; вдобавок он попадал бы внутрь
+следующего `tar` самого себя. И именно `/var/tmp`, а не `/tmp`: последний на многих сборках
+tmpfs (то есть ОЗУ) и агрессивно чистится systemd, а гигабайтный архив живёт минутами.
+
+**Пароля БД в argv нет ни в одной строке.** `mysqldump` ходит через root-сокет, как и
+`databases list`; `-p<пароль>` виден в `ps` всем пользователям сервера на всё время дампа —
+это хуже разового эха argv у FastPanel (§7.3), потому что длится минуты. Не сработал
+сокет — честный отказ, а не тихий фоллбэк на пароль в argv.
+
+**Замок не снимается автоматически.** Просроченный (старше 6 часов) каталог даёт действенную
+ошибку с путём и командой, но SDMP не сносит его сам: замок, выглядящий брошенным, может
+быть чужим ИДУЩИМ бэкапом, и автоснос убил бы его на середине.
+
+**Не сверено живьём** ничего из помеченного ⚠️ — это фаза 9 плана
+`plans/2026-08-19-bekapy-domena.md`. Инвентарь при этом снят с кода, а не с прогона: формы
+команд здесь — те самые строки, что собирают `build_*`-функции, и они под юнит-тестами.
 
 ### Установка панели (`fastpanel_install.rs`)
 
