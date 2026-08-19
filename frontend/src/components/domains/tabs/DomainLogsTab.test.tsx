@@ -5,7 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import DomainLogsTab from "./DomainLogsTab";
 import { queryClient } from "../../../api/queryClient";
-import type { DomainFacts } from "../../../lib/domainFacts";
+import type { DomainFacts, LogTail } from "../../../lib/domainFacts";
 import { luminanceOfRgb } from "../../../test/colors";
 import { setTauri, setBlobUser, clearBlobUser } from "../../../test/secretBlobKit";
 
@@ -26,12 +26,23 @@ import { setTauri, setBlobUser, clearBlobUser } from "../../../test/secretBlobKi
  * трёх состояниях говорит словами, а не рисует выдуманные строки лога.
  */
 
-const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn(), invokeIfTauri: vi.fn() }));
 
 vi.mock("../../../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
+}));
+
+/**
+ * Чтение хвоста идёт мимо `invokeSynced` намеренно, и мок здесь ВТОРОЙ именно
+ * поэтому: `syncLocalCache()` перед каждым Refresh был бы кругом в сеть ради
+ * строки, которая уже в кэше. Два разных мока держат это правило под тестом —
+ * попади хвост на `invokeSynced`, тесты ниже перестали бы видеть вызов.
+ */
+vi.mock("../../../lib/tauri-invoke", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  invokeIfTauri: mocks.invokeIfTauri,
 }));
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -58,6 +69,11 @@ function facts(over: Partial<DomainFacts> = {}): DomainFacts {
     logs: LOGS,
     ...over,
   };
+}
+
+/** Ответ команды чтения хвоста — форма провода (`lib/domainFacts`). */
+function tail(over: Partial<LogTail> = {}): LogTail {
+  return { exists: true, size_bytes: 2048, lines: ["GET /one 200", "GET /two 500"], truncated: false, ...over };
 }
 
 function domain(over: Record<string, unknown> = {}) {
@@ -258,22 +274,26 @@ describe("выбор пережил перечитывание снимка", ()
 });
 
 describe("тело вкладки — честное состояние", () => {
-  it("файлы есть, но их содержимое мы читать не умеем — и говорим это", () => {
+  it("файлы есть, содержимое ещё не читали — и вкладка зовёт нажать Refresh", () => {
+    setTauri(true);
     showWithSnapshot();
-    expect(screen.getByText(/Reading log contents is not wired up yet/)).toBeTruthy();
-    // Ни таблицы access, ни тёмной консоли, ни единой выдуманной строки лога.
+    expect(screen.getByText(/Press Refresh to read the last 200 lines/)).toBeTruthy();
+    // До нажатия — ни таблицы access, ни тёмной консоли, ни единой выдуманной
+    // строки лога: пустое место честнее правдоподобного содержимого.
     expect(screen.queryByRole("table")).toBeNull();
     expect(screen.queryByText(/\[error\]/)).toBeNull();
   });
 
-  it("ни «Refresh», ни «Download»: кнопка, которая ничего не делает, обещает функцию", () => {
+  it("«Download» нет: `exec` буферизует вывод в память, и лог на полгигабайта убил бы десктоп", () => {
+    // Refresh появился, Download — нет, и это не забывчивость: честная выгрузка
+    // — поток по SFTP в файл, а `cat` в память роняет приложение. Кнопка,
+    // которая роняет приложение, хуже отсутствующей.
     setTauri(true);
     showWithSnapshot();
-    expect(screen.queryByText("Refresh")).toBeNull();
+    expect(screen.getByText("Refresh")).toBeTruthy();
     expect(screen.queryByText("Download")).toBeNull();
-    // Кнопок на вкладке со снимком нет вовсе — только чипы выбора файла.
-    const buttons = screen.getAllByRole("button");
-    expect(buttons).toHaveLength(LOGS.length);
+    // Кнопок на вкладке со снимком ровно две группы: чипы и один Refresh.
+    expect(screen.getAllByRole("button")).toHaveLength(LOGS.length + 1);
   });
 
   it("снимок есть, а список пуст — это «не знаем, где они лежат», а не «логов нет»", () => {
@@ -285,7 +305,7 @@ describe("тело вкладки — честное состояние", () => 
     showWithSnapshot({ logs: [] });
     expect(screen.queryByRole("group", { name: "Log files" })).toBeNull();
     expect(screen.getByText(/no log paths for this site/)).toBeTruthy();
-    expect(screen.queryByText(/Reading log contents is not wired up yet/)).toBeNull();
+    expect(screen.queryByText(/Press Refresh/)).toBeNull();
     // Диагноза, которого мы поставить не можем, на экране нет.
     expect(screen.queryByText(/owner/i)).toBeNull();
   });
@@ -405,3 +425,149 @@ describe("свежесть снимка", () => {
   });
 });
 
+
+describe("чтение хвоста лога", () => {
+  /** Кнопка Refresh — одна на вкладку и стоит в ряду с путём, а не в чипах. */
+  const refresh = () => screen.getByText("Refresh");
+
+  /** Строки консоли лежат в одном `<pre>`, поэтому ищем по подстроке. */
+  const console_ = () => screen.getByLabelText("Log contents");
+
+  it("Refresh читает ВЫБРАННЫЙ файл и печатает приехавшие строки", async () => {
+    // Путь в аргументах — не формальность: команда в Rust сверяет его со
+    // списком из снимка, и подай вкладка чужой, чтение отвергнется до коннекта.
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValue(tail({ lines: ["GET /a 200", "GET /b 500"] }));
+    showWithSnapshot();
+
+    fireEvent.click(chip(/^Frontend error/));
+    fireEvent.click(refresh());
+
+    await waitFor(() =>
+      expect(mocks.invokeIfTauri).toHaveBeenCalledWith("domain_read_log_tail", {
+        userId: "user-1",
+        domainId: "42",
+        path: LOGS[1].path,
+      }),
+    );
+    await waitFor(() => expect(console_().textContent).toContain("GET /b 500"));
+    // Синхронизации локального кэша перед чтением нет: строка домена уже в нём
+    // — ею и нарисованы чипы.
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  it("шапка консоли называет число строк и свежий размер, а срез помечен", async () => {
+    // Размер тут СВЕЖИЙ (снят той же командой), а не из снимка: именно им
+    // меряется, сработал ли байтовый кап, и снимок бывает недельной давности.
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValue(tail({ lines: ["a", "b", "c"], size_bytes: 48128, truncated: true }));
+    showWithSnapshot();
+    fireEvent.click(refresh());
+
+    expect(await screen.findByText(/last 3 lines/)).toBeTruthy();
+    expect(screen.getByText(/47 KB/)).toBeTruthy();
+    expect(screen.getByText("truncated")).toBeTruthy();
+  });
+
+  it("смена чипа стирает строки прежнего файла", async () => {
+    // Строки одного лога под подписью другого — не косметика, а неверный ответ
+    // на вопрос «что в этом файле».
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValue(tail({ lines: ["frontend access line"] }));
+    showWithSnapshot();
+    fireEvent.click(refresh());
+    await waitFor(() => expect(console_().textContent).toContain("frontend access line"));
+
+    fireEvent.click(chip(/^Backend access/));
+
+    expect(screen.queryByLabelText("Log contents")).toBeNull();
+    expect(screen.getByText(/Press Refresh to read the last 200 lines/)).toBeTruthy();
+  });
+
+  it("результат, приехавший ПОСЛЕ смены чипа, под новой подписью не появляется", async () => {
+    // Тот самый кадр, ради которого результат хранится вместе с путём, а не
+    // сбрасывается эффектом: эффект отработал бы на такт позже показа.
+    setTauri(true);
+    let land: (t: LogTail) => void = () => {};
+    mocks.invokeIfTauri.mockImplementation(
+      () =>
+        new Promise<LogTail>((resolve) => {
+          land = resolve;
+        }),
+    );
+    showWithSnapshot();
+    fireEvent.click(refresh());
+    await waitFor(() => expect(mocks.invokeIfTauri).toHaveBeenCalled());
+
+    // Чтение идёт секундами — за это время чип успевают переключить.
+    fireEvent.click(chip(/^Backend access/));
+    await act(async () => {
+      land(tail({ lines: ["line of the FIRST file"] }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/line of the FIRST file/)).toBeNull();
+    expect(screen.getByText(/Press Refresh to read the last 200 lines/)).toBeTruthy();
+  });
+
+  it("пустой файл назван словами, а не пустой консолью", async () => {
+    // Пустота лога — измерение; пустая рамка на её месте читалась бы как «не
+    // загрузилось».
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValue(tail({ lines: [], size_bytes: 0 }));
+    showWithSnapshot();
+    fireEvent.click(refresh());
+
+    expect(await screen.findByText(/Log file is empty/)).toBeTruthy();
+    expect(screen.queryByLabelText("Log contents")).toBeNull();
+  });
+
+  it("файла нет по снимку — на сервер не ходим вовсе", async () => {
+    setTauri(true);
+    showWithSnapshot();
+    fireEvent.click(chip(/^Backend error/));
+
+    expect(screen.getByText(/This file does not exist on the server/)).toBeTruthy();
+    // Кнопка есть, но погашена: клик по ней не должен открывать SSH-сессию
+    // ради ответа, который уже напечатан в бейдже чипа.
+    fireEvent.click(refresh());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(mocks.invokeIfTauri).not.toHaveBeenCalled();
+  });
+
+  it("файл исчез между снимком и чтением — говорим это, а не рисуем пустоту", async () => {
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValue(tail({ exists: false, size_bytes: null, lines: [] }));
+    showWithSnapshot();
+    fireEvent.click(refresh());
+
+    expect(await screen.findByText(/This file does not exist on the server/)).toBeTruthy();
+    // «Файла нет» и «файл пуст» — разные новости, и вторая тут была бы враньём.
+    expect(screen.queryByText(/Log file is empty/)).toBeNull();
+  });
+
+  it("в вебе кнопки Refresh нет: чтение идёт по SSH", () => {
+    setTauri(false);
+    showWithSnapshot();
+    expect(screen.queryByText("Refresh")).toBeNull();
+    expect(screen.getByText(/Reading log contents requires the desktop app/)).toBeTruthy();
+  });
+
+  it("провал печатает ошибку и НЕ стирает уже показанные строки", async () => {
+    // «Прочитать не удалось» и «в файле ничего нет» — разные новости: стерев
+    // консоль, вкладка выдала бы первую за вторую.
+    setTauri(true);
+    mocks.invokeIfTauri.mockResolvedValueOnce(tail({ lines: ["old but real line"] }));
+    showWithSnapshot();
+    fireEvent.click(refresh());
+    await waitFor(() => expect(console_().textContent).toContain("old but real line"));
+
+    mocks.invokeIfTauri.mockRejectedValueOnce(new Error("api: connection refused"));
+    fireEvent.click(refresh());
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("api: connection refused"));
+    expect(console_().textContent).toContain("old but real line");
+  });
+});
