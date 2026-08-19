@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use sdmp_desktop_lib::ssh::backup_download::{
+    download_archive, part_path, DownloadError,
+};
 use sdmp_desktop_lib::ssh::backup_run::{
     build_cleanup_cmd, build_lock_cmd, build_lock_probe_cmd, parse_lock_probe,
     parse_pipeline_status, PIPE_STATUS_TAIL,
@@ -509,5 +512,138 @@ async fn the_pipeline_marker_survives_a_real_login_shell() {
     let (_, out) = s.exec(&cmd, Duration::from_secs(30), false).await.unwrap();
     assert_eq!(parse_pipeline_status(&out), Some(vec![0, 5]), "{out:?}");
 
+    let _ = s.disconnect().await;
+}
+
+// --- фаза 4: выгрузка архива на диск ----------------------------------------
+
+/// Настоящий поток гигабайтной формы (уменьшенный): файл на сервере →
+/// `download_archive` → файл под настоящим именем.
+///
+/// Доказывает три вещи, которых юнит-тест доказать не может, потому что все три
+/// живут на стыке сети и диска: `HashingWriter` считает хеш ТОГО, что записано
+/// (сверка идёт с sha256, посчитанным самим сервером, а не нами); `.part`
+/// исчезает; под настоящим именем лежит ровно то, что было на сервере.
+#[tokio::test]
+#[ignore = "requires docker ssh on SDMP_SSH_TEST_HOST:SDMP_SSH_TEST_PORT"]
+async fn a_downloaded_archive_gets_its_real_name_only_after_the_server_checksum_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut s = trusted_session(&kh, Duration::from_secs(60), Some(KEEPALIVE_INTERVAL)).await;
+
+    // 3 МБ случайных байт: заведомо больше одного чанка (32 KiB), то есть
+    // частичные записи и многократный `poll_write` — настоящие.
+    let remote = "/tmp/sdmp-download-test.bin";
+    let make = format!("head -c 3000000 /dev/urandom > {remote}; sha256sum {remote}; stat -c %s {remote}");
+    let (code, out) = s.exec(&make, Duration::from_secs(60), false).await.unwrap();
+    assert_eq!(code, 0, "{out}");
+    let mut lines = out.split_whitespace();
+    let server_sha = lines.next().unwrap().to_string();
+    let _path = lines.next();
+    let server_bytes: u64 = lines.next().unwrap().parse().unwrap();
+    assert_eq!(server_bytes, 3_000_000);
+
+    let dest = tmp.path().join("archive.tar");
+    let part = part_path(&dest);
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let seen_c = seen.clone();
+    let got = download_archive(
+        &mut s,
+        remote,
+        &dest,
+        &server_sha,
+        server_bytes,
+        Duration::from_secs(30),
+        move |done| {
+            seen_c.store(done, std::sync::atomic::Ordering::SeqCst);
+            ControlFlow::Continue(())
+        },
+    )
+    .await
+    .expect("выгрузка");
+
+    assert_eq!(got.bytes, server_bytes);
+    assert_eq!(got.sha256, server_sha, "хеш считался не по тому, что записано");
+    assert!(dest.exists(), "файла под настоящим именем нет");
+    assert!(!part.exists(), "огрызок `.part` остался на диске");
+    assert_eq!(std::fs::metadata(&dest).unwrap().len(), server_bytes);
+    // Хеш файла НА ДИСКЕ, посчитанный заново, — последняя точка доверия.
+    let on_disk = std::fs::read(&dest).unwrap();
+    assert_eq!(hex::encode(Sha256::digest(&on_disk)), server_sha);
+    // Прогресс доезжал: без этого троттлинг фазы 4 показывал бы пустую строку.
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), server_bytes);
+
+    let _ = s.exec(&format!("rm -f {remote}"), Duration::from_secs(30), false).await;
+    let _ = s.disconnect().await;
+}
+
+/// Не сошёлся хеш — на диске не остаётся НИЧЕГО похожего на архив.
+///
+/// Ради этого правила `.part` и существует: файл с правильным именем и
+/// расширением, но битым содержимым, выглядит рабочим архивом, и узнают об
+/// этом в момент восстановления, то есть в худший из возможных.
+#[tokio::test]
+#[ignore = "requires docker ssh on SDMP_SSH_TEST_HOST:SDMP_SSH_TEST_PORT"]
+async fn a_checksum_that_does_not_match_leaves_no_file_at_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut s = trusted_session(&kh, Duration::from_secs(60), Some(KEEPALIVE_INTERVAL)).await;
+
+    let remote = "/tmp/sdmp-download-bad.bin";
+    let (code, out) = s
+        .exec(
+            &format!("head -c 100000 /dev/urandom > {remote}"),
+            Duration::from_secs(60),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{out}");
+
+    let dest = tmp.path().join("archive.tar");
+    let wrong = "0".repeat(64);
+    let err = download_archive(
+        &mut s,
+        remote,
+        &dest,
+        &wrong,
+        100_000,
+        Duration::from_secs(30),
+        never_cancels,
+    )
+    .await
+    .expect_err("битый хеш обязан быть отказом");
+    assert!(
+        matches!(err, DownloadError::ChecksumMismatch { .. }),
+        "{err}"
+    );
+    assert!(!dest.exists(), "битый файл лёг под настоящим именем");
+    assert!(!part_path(&dest).exists(), "огрызок `.part` остался");
+
+    // И размер: сервер насчитал больше, чем есть, — тоже отказ и тоже пусто.
+    let (real_sha, _) = {
+        let (_, out) = s
+            .exec(&format!("sha256sum {remote}"), Duration::from_secs(30), false)
+            .await
+            .unwrap();
+        let sha = out.split_whitespace().next().unwrap().to_string();
+        (sha, ())
+    };
+    let err = download_archive(
+        &mut s,
+        remote,
+        &dest,
+        &real_sha,
+        100_001,
+        Duration::from_secs(30),
+        never_cancels,
+    )
+    .await
+    .expect_err("недоехавший размер обязан быть отказом");
+    assert!(matches!(err, DownloadError::SizeMismatch { .. }), "{err}");
+    assert!(!dest.exists());
+    assert!(!part_path(&dest).exists());
+
+    let _ = s.exec(&format!("rm -f {remote}"), Duration::from_secs(30), false).await;
     let _ = s.disconnect().await;
 }
