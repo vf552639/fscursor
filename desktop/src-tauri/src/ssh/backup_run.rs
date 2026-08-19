@@ -46,17 +46,35 @@ use crate::ssh::fastpanel_facts::find_site_row;
 /// пережить их на диске.
 pub const BACKUP_WORK_ROOT: &str = "/var/tmp/sdmp-backup";
 
-/// Предел на короткий шаг (резолв, инвентарь инструментов, место, замок,
-/// контрольная сумма, уборка). Ровно как в плане.
+/// Предел на шаг, который НЕ трогает содержимое архива: резолв, инвентарь
+/// инструментов, место, замок, уборка. Все они — обмен парой строк.
 pub const BACKUP_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Предел на шаг, который реально работает с гигабайтами: `tar`, `mysqldump`,
-/// упаковка. Час — это «сайт на 100 ГБ при 30 МБ/с», а не запас на всякий случай.
+/// Предел на шаг, который читает или пишет гигабайты: `tar`, `mysqldump`,
+/// упаковка и **обе контрольные суммы**. Час — это «сайт на 100 ГБ при 30 МБ/с»,
+/// а не запас на всякий случай.
+///
+/// `sha256sum` здесь не по недосмотру, а потому, что архив читается целиком
+/// ТРИЖДЫ: `tar`, сумма частей, сумма готового архива. Стоварная минута на
+/// суммах означала бы, что сайт, ради которого выставлен час на `tar`,
+/// гарантированно падает на последнем шаге — после часа работы и с уборкой,
+/// уносящей уже готовый архив. Соответствие шагов бюджетам держит тест
+/// `every_step_gets_the_budget_its_work_needs`.
 pub const BACKUP_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Во сколько раз (в процентах) свободного места должно быть больше оценки.
-/// Оценка — размер каталога сайта до сжатия; 1.2× закрывает дампы баз и
-/// промежуточную копию при упаковке.
+///
+/// **Оценка — это ТОЛЬКО размер каталога сайта** (`du -sk`), и запас в 20 %
+/// покрывает лишь неточность самой оценки. Размер баз в неё не входит вовсе:
+/// узнать его до дампа нечем, кроме отдельного запроса в `information_schema`,
+/// а он у нас не делается. Значит для сайта «100 МБ файлов и база на 20 ГБ»
+/// проверка соврёт на два порядка и пропустит прогон, которому места не хватит.
+///
+/// Это осознанно и закрыто с другой стороны: настоящая защита от кончившегося
+/// диска — не эта арифметика, а код возврата `gzip` в `PIPESTATUS`. Он делает
+/// нехватку места ОТКАЗОМ на том самом шаге, где она случилась, а не молча
+/// обрезанным архивом. Проверка места здесь — дешёвая ранняя остановка «даже
+/// файлы не влезут», и обещать больше она не должна.
 pub const BACKUP_SPACE_FACTOR_PERCENT: u64 = 120;
 
 /// Старше этого возраста замок выглядит брошенным. **Это только формулировка
@@ -117,12 +135,12 @@ const DU_MARKER: &str = "SDMP_DU";
 const DF_MARKER: &str = "SDMP_DF";
 const LOCK_MARKER: &str = "SDMP_LOCK";
 
-/// Шесть элементов ниже (`PIPE_STATUS_TAIL`, `parse_pipeline_status`, замок и
-/// уборка) объявлены `pub`, а не `pub(crate)`, РАДИ ДОКАЗАТЕЛЬСТВА: они
-/// проверяются интеграционными тестами в `tests/ssh_integration.rs`, а это
-/// отдельный крейт, и `pub(crate)` ему не виден. Юнит-тест их формы проверить
-/// может, а вот «`mkdir` второй раз действительно падает» и «`PIPESTATUS`
-/// доезжает через настоящий exec-канал» — только живой сервер.
+// Шесть элементов ниже (`PIPE_STATUS_TAIL`, `parse_pipeline_status`, замок и
+// уборка) объявлены `pub`, а не `pub(crate)`, РАДИ ДОКАЗАТЕЛЬСТВА: они
+// проверяются интеграционными тестами в `tests/ssh_integration.rs`, а это
+// отдельный крейт, и `pub(crate)` ему не виден. Юнит-тест их формы проверить
+// может, а вот «`mkdir` второй раз действительно падает» и «`PIPESTATUS`
+// доезжает через настоящий exec-канал» — только живой сервер.
 
 /// Хвост, который печатает коды ВСЕХ звеньев конвейера.
 ///
@@ -204,9 +222,16 @@ pub struct BackupPart {
 }
 
 /// Готовый архив НА СЕРВЕРЕ. Ни байта содержимого, ни сырого вывода команд.
+///
+/// **Файл по `path` остаётся на сервере после возврата, и удалить его обязан
+/// вызывающий** — после подтверждённой выгрузки (сошлись sha256 и размер).
+/// Модуль этого сделать не может: он не знает ни адресата, ни того, довезли ли
+/// файл. Не снести — значит копить многогигабайтные тарболлы в `/var/tmp`
+/// живого сервера; см. `cleanup`.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct BackupArtifact {
-    /// Полный путь на сервере.
+    /// Полный путь на сервере. Файл живёт там до тех пор, пока его не удалит
+    /// вызывающий.
     pub path: String,
     pub file_name: String,
     pub bytes: u64,
@@ -320,6 +345,12 @@ pub(crate) fn site_path_is_sane(path: &str) -> bool {
         && path.matches('/').count() >= 3
 }
 
+/// `id` строки сайта — по нему и связываются базы.
+pub(crate) fn site_id_from_row(row: &serde_json::Value) -> Option<i64> {
+    let v = row.get("id")?;
+    v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())
+}
+
 /// Базы домена из `databases list --json` — строже, чем при чтении фактов.
 ///
 /// `Some(vec![])` здесь значит РОВНО «панель ответила понятной формой, и баз у
@@ -333,13 +364,23 @@ pub(crate) fn site_path_is_sane(path: &str) -> bool {
 /// - разбираем сами, а не зовём `list_site_databases`;
 /// - правило `ftp_accounts_from_json` переносится дословно: массив непуст, а ни
 ///   одной УЗНАВАЕМОЙ строки (со `site.domain`) в нём нет → форма чужая → `None`;
+/// - связь берётся по `site.id` резолвнутой строки сайта, а домен — только
+///   фолбэк. Иначе остаётся последняя дорога к «пустому архиву, который выглядит
+///   полным»: `find_site_row` находит сайт по любому из `domain|domain_name|
+///   server_name|name`, а фильтр сравнивал бы со ЗАПРОШЕННОЙ строкой домена, —
+///   разойдись они, и вышло бы `recognized > 0`, `names == []`, то есть
+///   уверенное «баз нет»;
 /// - строка нашего домена без `name` → `None`: молча потерять одну базу из трёх
 ///   хуже, чем отказать;
 /// - mysql-фолбэка нет вовсе. В `fastpanel_facts` он фильтрует по префиксу
 ///   имени, а на этой сборке имена БД захешированы (`skonloedb`) и с доменом не
 ///   совпадают — то есть фолбэк почти наверняка вернул бы пусто, и это было бы
 ///   «не знаем», выданное за «нет».
-pub(crate) fn databases_for_backup(raw: &str, domain: &str) -> Option<Vec<String>> {
+pub(crate) fn databases_for_backup(
+    raw: &str,
+    domain: &str,
+    site_id: Option<i64>,
+) -> Option<Vec<String>> {
     let mut v: serde_json::Value = serde_json::from_str(json_slice(raw)).ok()?;
     if let Some(obj) = v.as_object_mut() {
         for key in ["result", "databases", "data"] {
@@ -358,18 +399,28 @@ pub(crate) fn databases_for_backup(raw: &str, domain: &str) -> Option<Vec<String
     let mut recognized = 0usize;
     let mut names = Vec::new();
     for item in arr {
-        let site_domain = item
-            .get("site")
+        let site = item.get("site");
+        let row_id = site
+            .and_then(|s| s.get("id"))
+            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+        let row_domain = site
             .and_then(|s| s.get("domain"))
             .and_then(|d| d.as_str())
             .map(|d| d.trim().to_lowercase())
             .filter(|d| !d.is_empty());
-        let Some(site_domain) = site_domain else {
+        // Узнаваема строка, у которой есть ХОТЬ ОДНА привязка к сайту. Ни той,
+        // ни другой — форма чужая, и такие строки в счёт не идут.
+        if row_id.is_none() && row_domain.is_none() {
             continue;
-        };
+        }
         recognized += 1;
-        // Сравнение целиком, а не по префиксу: `example.com.old` — другой домен.
-        if site_domain != want {
+        let ours = match (site_id, row_id) {
+            (Some(want_id), Some(got_id)) => want_id == got_id,
+            // Сравнение домена целиком, а не по префиксу: `example.com.old` —
+            // другой домен.
+            _ => row_domain.as_deref() == Some(want.as_str()),
+        };
+        if !ours {
             continue;
         }
         let name = item
@@ -388,6 +439,8 @@ pub(crate) fn databases_for_backup(raw: &str, domain: &str) -> Option<Vec<String
 /// Имя базы, которое не стыдно положить в имя файла внутри архива.
 pub(crate) fn db_name_is_safe(name: &str) -> bool {
     !name.is_empty()
+        // Ведущий дефис — это опция, а не имя. См. `build_dump_db_cmd`.
+        && !name.starts_with('-')
         && name.len() <= 64
         && name
             .chars()
@@ -444,12 +497,13 @@ pub(crate) async fn resolve_target(
             reason: format!("`databases list --json` exited {c2}"),
         });
     }
-    let databases =
-        databases_for_backup(&o2, domain).ok_or_else(|| BackupError::DatabasesUnknown {
+    let databases = databases_for_backup(&o2, domain, site_id_from_row(&row)).ok_or_else(|| {
+        BackupError::DatabasesUnknown {
             domain: domain.to_string(),
             reason: "the output of `databases list --json` did not have a shape we recognise"
                 .to_string(),
-        })?;
+        }
+    })?;
     for db in &databases {
         if !db_name_is_safe(db) {
             return Err(BackupError::UnsafeDatabaseName { name: db.clone() });
@@ -533,11 +587,15 @@ pub(crate) async fn probe_tools(
 ///
 /// `df` спрашивается про РОДИТЕЛЯ рабочего каталога (`/var/tmp`): сам
 /// `/var/tmp/sdmp-backup` до первого прогона не существует, а `df` на
-/// несуществующем пути падает.
+/// несуществующем пути падает. Родитель, а не литерал `/var/tmp`, чтобы
+/// переезд `BACKUP_WORK_ROOT` не оставил проверку места смотреть на чужую ФС;
+/// связь «корень лежит внутри `/var/tmp`» закреплена тестом
+/// `the_work_root_lives_one_level_under_a_real_mount_point`.
 pub(crate) fn build_space_cmd(site_path: &str, work_root: &str) -> String {
     let df_target = Path::new(work_root)
         .parent()
         .and_then(|p| p.to_str())
+        .filter(|p| p.starts_with('/') && p.len() > 1)
         .unwrap_or("/var/tmp");
     format!(
         "printf '{DU_MARKER}\\n'; du -sk {} 2>/dev/null; printf '{DF_MARKER}\\n'; df -Pk {}",
@@ -546,8 +604,11 @@ pub(crate) fn build_space_cmd(site_path: &str, work_root: &str) -> String {
     )
 }
 
-/// Килобайты из секции `du`. Строки-жалобы `du: cannot read …` не начинаются с
-/// числа и отсеиваются сами.
+/// Килобайты из секции `du`: первое же число в ней.
+///
+/// Жалобы `du` мы глушим (`2>/dev/null`), но `exec` сливает stdout и stderr в
+/// один буфер, так что в секцию всё равно может попасть чужой текст — от
+/// шелла, от `printf`, от чего угодно. Любая нечисловая строка проходит мимо.
 pub(crate) fn parse_du_kb(output: &str) -> Option<u64> {
     section(output, DU_MARKER, DF_MARKER)
         .lines()
@@ -555,21 +616,28 @@ pub(crate) fn parse_du_kb(output: &str) -> Option<u64> {
         .find_map(|tok| tok.parse::<u64>().ok())
 }
 
-/// Свободные килобайты из секции `df -Pk`: колонка `Available` (четвёртая).
-/// Заголовок отсеивается тем, что в нём числа не парсятся.
+/// Свободные килобайты из секции `df -Pk`: колонка `Available`.
+///
+/// Считаем не от начала строки и не от конца, а от колонки `Capacity` — она
+/// единственная опознаётся по виду (оканчивается на `%`), а `Available` стоит
+/// ровно перед ней. Оба «естественных» способа хуже: с конца ломается точка
+/// монтирования с пробелом (`/mnt/my disk`), с начала — имя устройства с
+/// пробелом. Заголовок отсеивается сам: `Capacity` на `%` не оканчивается.
 pub(crate) fn parse_df_avail_kb(output: &str) -> Option<u64> {
     for line in section(output, DF_MARKER, "\u{0}").lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 6 {
+        let Some(cap) = f.iter().position(|t| {
+            t.ends_with('%') && t.len() > 1 && t[..t.len() - 1].parse::<u64>().is_ok()
+        }) else {
+            continue;
+        };
+        if cap < 3 {
             continue;
         }
-        let n = f.len();
-        // Имя устройства может содержать пробелы, поэтому считаем с конца:
-        // …, 1024-blocks, Used, Available, Capacity, Mounted on.
         if let (Ok(_), Ok(_), Ok(avail)) = (
-            f[n - 5].parse::<u64>(),
-            f[n - 4].parse::<u64>(),
-            f[n - 3].parse::<u64>(),
+            f[cap - 3].parse::<u64>(),
+            f[cap - 2].parse::<u64>(),
+            f[cap - 1].parse::<u64>(),
         ) {
             return Some(avail);
         }
@@ -689,13 +757,17 @@ pub(crate) fn lock_state_text(age_secs: Option<i64>) -> String {
     match age_secs {
         None => "age unknown".to_string(),
         Some(a) if a < 0 => "created in the future (the server clock moved)".to_string(),
+        // Не «created», а «last touched»: измеряется mtime каталога, а его
+        // обновляет запись каждой новой части внутрь. Живой прогон поэтому
+        // выглядит моложе, чем он есть, — ошибка в безопасную сторону
+        // (просроченным замок объявляется позже, а не раньше).
         Some(a) if a >= stale => format!(
-            "created {}h ago, past the {}h staleness mark — most likely left over from a run that died",
+            "last touched {}h ago, past the {}h staleness mark — most likely left over from a run that died",
             a / 3600,
             stale / 3600
         ),
         Some(a) => format!(
-            "created {} min ago — a backup of this domain is most likely still running",
+            "last touched {} min ago — a backup of this domain is most likely still running",
             a / 60
         ),
     }
@@ -762,7 +834,10 @@ pub(crate) fn build_archive_files_cmd(
         prefix.push_str("ionice -c3 ");
     }
     Some(format!(
-        "set -o pipefail; umask 077; {prefix}tar --warning=no-file-changed -cf - -C {} {} | gzip -1 > {}; {PIPE_STATUS_TAIL}",
+        // `--` перед именем не украшение: `q()` не навешивает кавычки на токен
+        // из безобидных символов, и имя, начинающееся с дефиса, ушло бы к `tar`
+        // как опция.
+        "set -o pipefail; umask 077; {prefix}tar --warning=no-file-changed -cf - -C {} -- {} | gzip -1 > {}; {PIPE_STATUS_TAIL}",
         q(parent),
         q(base),
         q(&format!("{work}/{SITE_PART}"))
@@ -780,8 +855,12 @@ pub(crate) fn build_archive_files_cmd(
 /// `db_password_blob_id` мы не расшифровываем вовсе.
 pub(crate) fn build_dump_db_cmd(db: &str, work: &str) -> String {
     format!(
+        // `--` закрывает разбор опций (my_getopt так умеет). Без него база с
+        // именем вида `--all-databases` утащила бы в архив весь сервер: `q()`
+        // такой токен не кавычит, потому что кавычить в нём нечего. Вторая
+        // защита — `db_name_is_safe`, он ведущий дефис не пропускает вовсе.
         "set -o pipefail; umask 077; mysqldump --single-transaction --quick --routines \
-         --triggers --events {} | gzip -1 > {}; {PIPE_STATUS_TAIL}",
+         --triggers --events -- {} | gzip -1 > {}; {PIPE_STATUS_TAIL}",
         q(db),
         q(&format!("{}/{}", work, db_part_name(db)))
     )
@@ -867,7 +946,7 @@ pub(crate) fn parse_sha256_lines(output: &str) -> Vec<(String, String)> {
     output
         .lines()
         .filter_map(|l| {
-            let mut it = l.trim().split_whitespace();
+            let mut it = l.split_whitespace();
             let hash = it.next()?;
             let name = it.next()?;
             if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -953,6 +1032,14 @@ pub(crate) fn parse_archive_checksum(output: &str) -> Option<(String, u64)> {
 ///
 /// Рабочий каталог он же замок, поэтому уборка — это ещё и снятие замка; они
 /// обязаны быть одним действием, иначе однажды останется одно без другого.
+///
+/// **Готовый архив уборка не трогает, и это оставляет обязанность вызывающему.**
+/// На успехе `<домен>-<штамп>.tar` остаётся лежать в `/var/tmp/sdmp-backup/`, и
+/// снести его обязан тот, кто его забрал, — сразу после того, как выгрузка
+/// подтверждена (совпали и sha256, и размер). Иначе `/var/tmp` продакшн-сервера
+/// набивается многогигабайтными тарболлами и однажды роняет живые сайты. Здесь
+/// этого сделать нельзя по построению: модуль не знает, довезли архив или нет,
+/// и вообще не знает, что у него есть адресат.
 pub fn build_cleanup_cmd(work: &str, archive: Option<&str>) -> String {
     match archive {
         Some(a) => format!("rm -rf {} {}", q(work), q(a)),
@@ -977,9 +1064,21 @@ async fn cleanup(
         )
         .await?;
     if code != 0 {
+        // Сырого вывода сервера здесь НЕТ намеренно, в отличие от остальных
+        // шагов: текст этой ошибки — единственный, который уезжает в
+        // `BackupArtifact.warnings`, то есть в `Serialize`-структуру на
+        // УСПЕШНОМ пути. Правило `CreateSiteResult` — «нет поля, нет пути
+        // утечки»; здесь путь есть, поэтому по нему не должно течь ничего,
+        // кроме нашего же шага и кода возврата. Секрета в выводе `rm` сегодня
+        // взяться неоткуда, но это свойство сервера, а не наше.
+        let _ = out;
         return Err(BackupError::Step {
             step: "cleanup",
-            detail: format!("rm -rf exited {code}: {}", trim_detail(&out)),
+            detail: format!(
+                "rm -rf exited {code} — the working directory {} is still on the server, \
+                 and so is the backup lock",
+                paths.work
+            ),
         });
     }
     Ok(())
@@ -1108,10 +1207,12 @@ async fn run_locked(
     }
 
     // 3. Суммы частей — вход манифеста.
+    // Часовой бюджет, а не минутный: `sha256sum` читает ровно те же гигабайты,
+    // что писал `tar`. См. `BACKUP_ARCHIVE_TIMEOUT`.
     let (code, out) = s
         .run(
             &build_hash_parts_cmd(&paths.work, &part_names),
-            BACKUP_STEP_TIMEOUT,
+            BACKUP_ARCHIVE_TIMEOUT,
         )
         .await?;
     if code != 0 {
@@ -1172,7 +1273,7 @@ async fn run_locked(
     //    любой выгрузки: только так скачавший может доказать, что довёз файл
     //    целиком (фаза 4 сверяет с ней локально посчитанную).
     let (code, out) = s
-        .run(&build_checksum_cmd(&paths.archive), BACKUP_STEP_TIMEOUT)
+        .run(&build_checksum_cmd(&paths.archive), BACKUP_ARCHIVE_TIMEOUT)
         .await?;
     if code != 0 {
         return Err(BackupError::Step {
@@ -1248,6 +1349,10 @@ mod tests {
     struct FakeServer {
         replies: Vec<(&'static str, i32, String)>,
         seen: Vec<String>,
+        /// Бюджет каждого вызова, параллельно `seen`. Отдельным вектором, а не
+        /// парой в `seen`, чтобы два десятка существующих утверждений про
+        /// ушедшие строки остались читаемыми.
+        budgets: Vec<Duration>,
     }
 
     impl FakeServer {
@@ -1258,6 +1363,7 @@ mod tests {
                     .map(|(p, c, o)| (*p, *c, (*o).to_string()))
                     .collect(),
                 seen: Vec::new(),
+                budgets: Vec::new(),
             }
         }
 
@@ -1296,8 +1402,9 @@ mod tests {
 
     #[async_trait]
     impl Exec for FakeServer {
-        async fn run(&mut self, cmd: &str, _t: Duration) -> Result<(i32, String), SshError> {
+        async fn run(&mut self, cmd: &str, t: Duration) -> Result<(i32, String), SshError> {
             self.seen.push(cmd.to_string());
+            self.budgets.push(t);
             for (pat, code, out) in &self.replies {
                 if cmd.contains(pat) {
                     return Ok((*code, out.clone()));
@@ -1322,9 +1429,14 @@ mod tests {
 
     // ---- квотирование -------------------------------------------------------
 
-    // Домен с пробелом и апострофом — единственный способ доказать, что `q()`
-    // применён ко ВСЕМ интерполяциям, а не к тем, о которых вспомнили. Гоняем
-    // весь прогон и смотрим на РЕАЛЬНО ушедшие строки.
+    // Домен с пробелом и апострофом, прогнанный через ВЕСЬ прогон: смотрим на
+    // реально ушедшие на сервер строки, а не на текст сборщика.
+    //
+    // Он покрывает не всё: домен санируется в имя каталога, поэтому имя базы и
+    // путь уборки через этот тест не проходят. Их квотирование доказывают
+    // `a_hostile_database_name_is_quoted_...` и
+    // `the_removal_command_quotes_...` ниже — обе строки опаснее прочих, и
+    // обе прежде держались на одном лишь `safe_component`.
     #[tokio::test]
     async fn every_interpolation_goes_through_the_shell_quoter() {
         let evil = "a b'c";
@@ -1380,6 +1492,96 @@ mod tests {
         // Пароля в argv дампа нет ни в каком виде — это главное решение шага.
         assert!(!dump.contains("-p"), "подозрение на пароль в argv: {dump}");
         assert!(!dump.contains("password"));
+    }
+
+    // Мутация «снять `q()` с имени базы» проходила зелёной: до этого теста имя
+    // базы в командной строке не проверял никто, а `db_name_is_safe` — вторая
+    // линия, а не первая.
+    #[test]
+    fn a_hostile_database_name_is_quoted_before_it_reaches_the_shell() {
+        let cmd = build_dump_db_cmd("a b'c", "/var/tmp/sdmp-backup/example.com");
+        assert!(quotes_are_balanced(&cmd), "{cmd}");
+        // Имя уходит одним аргументом и после `--`, то есть не может стать ни
+        // второй командой, ни опцией.
+        assert!(cmd.contains("--events -- 'a b'\\''c' | gzip -1"), "{cmd}");
+        assert!(
+            cmd.contains("> '/var/tmp/sdmp-backup/example.com/db-a b'\\''c.sql.gz'"),
+            "{cmd}"
+        );
+        // И то же для файлов сайта: базовое имя после `--`.
+        let files = build_archive_files_cmd(
+            "/var/www/u/data/www/-weird",
+            "/w",
+            BackupTools {
+                nice: false,
+                ionice: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            files.contains("-C /var/www/u/data/www -- -weird |"),
+            "{files}"
+        );
+    }
+
+    // Самая опасная строка модуля: `rm -rf` с двумя интерполяциями. Мутация
+    // «снять `q()`» тоже проходила зелёной — квотирование держалось только на
+    // том, что домен до него санируется.
+    #[test]
+    fn the_removal_command_quotes_both_of_its_paths() {
+        let cmd = build_cleanup_cmd("/var/tmp/x y", Some("/var/tmp/a'b.tar"));
+        assert_eq!(cmd, "rm -rf '/var/tmp/x y' '/var/tmp/a'\\''b.tar'");
+        assert!(quotes_are_balanced(&cmd), "{cmd}");
+        // Без архива — ровно один путь, и он тоже экранирован.
+        assert_eq!(
+            build_cleanup_cmd("/var/tmp/x y", None),
+            "rm -rf '/var/tmp/x y'"
+        );
+    }
+
+    // Мутация «все длинные шаги получили 60 с» проходила зелёной: `FakeServer`
+    // выбрасывал таймаут, а тест констант сверял только их значения между
+    // собой. Теперь бюджет каждого шага сверяется с таблицей плана.
+    #[tokio::test]
+    async fn every_step_gets_the_budget_its_work_needs() {
+        let mut s = FakeServer::happy();
+        let _ = create_backup(&mut s, FP, "example.com", now())
+            .await
+            .unwrap();
+
+        // Час — всему, что читает или пишет содержимое архива. Обе суммы здесь
+        // не по щедрости: `sha256sum` перечитывает те же гигабайты, и минуты
+        // ему хватает ровно до первого большого сайта.
+        let long = [
+            "tar --warning=no-file-changed",
+            "mysqldump",
+            "&& sha256sum",
+            "tar -cf",
+            "stat -c %s",
+        ];
+        // Минута — всему, что обменивается парой строк.
+        let short = [
+            "sites list --json",
+            "databases list --json",
+            "command -v",
+            DU_MARKER,
+            "mkdir -m 700",
+            "rm -rf",
+        ];
+        assert_eq!(s.seen.len(), s.budgets.len());
+        for (cmd, budget) in s.seen.iter().zip(s.budgets.iter()) {
+            // Короткие сверяются ПЕРВЫМИ: инвентарь инструментов перечисляет
+            // в argv и `mysqldump`, и `sha256sum`, то есть подходит под приметы
+            // длинных шагов, оставаясь обменом парой строк.
+            let want = if short.iter().any(|p| cmd.contains(p)) {
+                BACKUP_STEP_TIMEOUT
+            } else if long.iter().any(|p| cmd.contains(p)) {
+                BACKUP_ARCHIVE_TIMEOUT
+            } else {
+                panic!("шаг не описан в таблице бюджетов: {cmd}");
+            };
+            assert_eq!(*budget, want, "не тот бюджет у шага: {cmd}");
+        }
     }
 
     #[test]
@@ -1463,11 +1665,22 @@ mod tests {
 
     #[test]
     fn space_output_is_read_by_section_not_by_luck() {
-        let out = "SDMP_DU\ndu: cannot read '/x'\n204800\t/var/www/u/data/www/example.com\n\
+        let out =
+            "SDMP_DU\nbash: warning: setlocale failed\n204800\t/var/www/u/data/www/example.com\n\
                    SDMP_DF\nFilesystem 1024-blocks Used Available Capacity Mounted on\n\
                    /dev/sda1 50000000 1000000 40000000 3% /var";
         assert_eq!(parse_du_kb(out), Some(204800));
         assert_eq!(parse_df_avail_kb(out), Some(40000000));
+        // Колонка ищется по проценту: и точка монтирования с пробелом, и имя
+        // устройства с пробелом читаются одинаково верно.
+        assert_eq!(
+            parse_df_avail_kb("SDMP_DF\n/dev/sda1 100 40 60 40% /mnt/my disk"),
+            Some(60)
+        );
+        assert_eq!(
+            parse_df_avail_kb("SDMP_DF\nmy nas:/vol 100 40 60 40% /mnt"),
+            Some(60)
+        );
         // Размер сайта не должен утечь в «свободно» и наоборот.
         assert_eq!(parse_du_kb("SDMP_DF\n/dev/sda1 1 2 3 4% /"), None);
     }
@@ -1494,40 +1707,54 @@ mod tests {
 
     #[test]
     fn the_database_filter_does_not_catch_a_lookalike_domain() {
+        // Без `id` (фолбэк) — по домену, целиком, а не по префиксу.
         assert_eq!(
-            databases_for_backup(DB_JSON, "example.com"),
+            databases_for_backup(DB_JSON, "example.com", None),
             Some(vec!["exmpldb".to_string()])
         );
         assert_eq!(
-            databases_for_backup(DB_JSON, "example.com.old"),
+            databases_for_backup(DB_JSON, "example.com.old", None),
             Some(vec!["oldsitedb".to_string()])
         );
         // Домена нет вовсе — это ответ «баз нет», форма при этом понята.
         assert_eq!(
-            databases_for_backup(DB_JSON, "other.tld"),
+            databases_for_backup(DB_JSON, "other.tld", None),
             Some(Vec::<String>::new())
+        );
+        // С `id` строку домена не спрашивают вовсе: у панели связь по нему.
+        assert_eq!(
+            databases_for_backup(DB_JSON, "не важно", Some(3)),
+            Some(vec!["exmpldb".to_string()])
         );
     }
 
     #[test]
     fn unknown_output_shape_is_not_an_empty_list() {
         // Массив пуст — панель ответила «баз нет».
-        assert_eq!(databases_for_backup("[]", "example.com"), Some(vec![]));
+        assert_eq!(
+            databases_for_backup("[]", "example.com", None),
+            Some(vec![])
+        );
         // Массив непуст, но ни одной узнаваемой строки — форма чужая.
         assert_eq!(
-            databases_for_backup(r#"[{"db":"x"},{"db":"y"}]"#, "example.com"),
+            databases_for_backup(r#"[{"db":"x"},{"db":"y"}]"#, "example.com", None),
             None
         );
         // Наша строка есть, а имени в ней нет — потерять базу молча нельзя.
         assert_eq!(
-            databases_for_backup(r#"[{"site":{"domain":"example.com"}}]"#, "example.com"),
+            databases_for_backup(
+                r#"[{"site":{"domain":"example.com"}}]"#,
+                "example.com",
+                None
+            ),
             None
         );
         // Не JSON вовсе.
         assert_eq!(
             databases_for_backup(
                 "error: expected command but got \"database\"",
-                "example.com"
+                "example.com",
+                None
             ),
             None
         );
@@ -1551,6 +1778,30 @@ mod tests {
             // Ни `tar`, ни замка: отказ случился до всего.
             assert!(!s.seen.iter().any(|c| c.contains("mkdir -m 700")));
         }
+    }
+
+    // Последняя дорога к «пустому архиву, который выглядит полным»:
+    // `find_site_row` находит сайт по `server_name`, а базы связаны с ним по
+    // `id`, и строка `site.domain` у них своя. Фильтруй мы по запрошенному
+    // домену — получили бы уверенное «баз нет».
+    #[tokio::test]
+    async fn databases_are_tied_to_the_site_row_by_id_not_by_the_domain_string() {
+        let sites = r#"[{"id":3,"server_name":"example.com",
+            "index_dir":"/var/www/u/data/www/example.com"}]"#;
+        let dbs = r#"[{"id":1,"name":"exmpldb","site":{"id":3,"domain":"www.example.com"}}]"#;
+        let mut s = FakeServer::happy();
+        s.reply("sites list --json", 0, sites)
+            .reply("databases list --json", 0, dbs);
+        // Домен в строке базы («www.example.com») со спрошенным не совпадает —
+        // связь держится на `id`.
+        assert_eq!(
+            databases_for_backup(dbs, "example.com", None),
+            Some(Vec::<String>::new())
+        );
+        let art = create_backup(&mut s, FP, "example.com", now())
+            .await
+            .unwrap();
+        assert_eq!(art.databases, vec!["exmpldb".to_string()]);
     }
 
     #[test]
@@ -1795,8 +2046,16 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            art.warnings.iter().any(|w| w.contains("cleanup")),
+            art.warnings.iter().any(|w| w.contains("rm -rf exited 1")),
             "{:?}",
+            art.warnings
+        );
+        // И ни байта сырого вывода сервера: `warnings` уезжает в
+        // `Serialize`-структуру на УСПЕШНОМ пути, а правило `CreateSiteResult` —
+        // «нет пути, нет утечки».
+        assert!(
+            !art.warnings.iter().any(|w| w.contains("cannot remove")),
+            "сырой stderr в warnings: {:?}",
             art.warnings
         );
     }
@@ -1951,6 +2210,9 @@ mod tests {
         assert!(!db_name_is_safe(""));
         assert!(!db_name_is_safe("../etc/passwd"));
         assert!(!db_name_is_safe("db name"));
+        // `--all-databases` — не имя базы, а опция `mysqldump`.
+        assert!(!db_name_is_safe("--all-databases"));
+        assert!(!db_name_is_safe("-x"));
         assert_eq!(db_part_name("exmpldb"), "db-exmpldb.sql.gz");
     }
 
@@ -2035,6 +2297,17 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("137"), "{err}");
         assert!(s.seen.iter().any(|c| c.contains("rm -rf")));
+    }
+
+    // `build_space_cmd` спрашивает `df` про РОДИТЕЛЯ корня. Пока корень
+    // `/var/tmp/sdmp-backup`, родитель — `/var/tmp`, как в спеке; сделай кто-то
+    // корень одноуровневым, и проверка места молча ушла бы смотреть на `/`.
+    #[test]
+    fn the_work_root_lives_one_level_under_a_real_mount_point() {
+        assert_eq!(BACKUP_WORK_ROOT, "/var/tmp/sdmp-backup");
+        let cmd = build_space_cmd("/var/www/u/data/www/example.com", BACKUP_WORK_ROOT);
+        assert!(cmd.contains("df -Pk /var/tmp"), "{cmd}");
+        assert!(!cmd.contains("df -Pk /\n"), "{cmd}");
     }
 
     #[test]
