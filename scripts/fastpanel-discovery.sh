@@ -15,8 +15,8 @@
 # `plans/2026-08-19-bekapy-domena.md`).
 #
 # ТОЛЬКО ЧТЕНИЕ. Ни одна команда здесь ничего не создаёт, не меняет и не удаляет:
-# `--help`, `list`, `test`, `ls`, `find`, `cat`, `grep`, `command -v`, `df`,
-# `systemctl list-timers`, а из `mysql` — только `SHOW`, `DESCRIBE` и
+# `--help`, `--version`, `list`, `test`, `ls`, `find`, `cat`, `grep`, `command -v`,
+# `df`, `systemctl list-timers`, а из `mysql` — только `SHOW`, `DESCRIBE` и
 # `SELECT COUNT(*)`. Скрипт идёт на живой продакшн, и это требование жёстче любого
 # удобства — новую команду сюда можно добавлять только убедившись, что она читающая.
 #
@@ -228,8 +228,9 @@ usage() {
           Не передан — берётся первый сайт с сервера.
 
 Без 2>&1: так предупреждение о логинах и путях останется на экране.
-Скрипт только читает: --help, list, test, ls, find, cat, grep, command -v, df,
-systemctl list-timers и mysql SHOW/DESCRIBE/SELECT COUNT(*). Запускать от root.
+Скрипт только читает: --help, --version (tar), list, test, ls, find, cat, grep,
+command -v, df, systemctl list-timers и mysql SHOW/DESCRIBE/SELECT COUNT(*).
+Запускать от root.
 USAGE
 }
 
@@ -446,7 +447,7 @@ fi
 # Домен, приехавший с сервера, проходит ту же проверку формы, что и аргумент: в
 # пути и в `find` он попадает одинаково.
 if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-  note "домен «$DOMAIN» отброшен: не похож на домен"
+  note "домен «${DOMAIN}» отброшен: не похож на домен"
   DOMAIN=''
 fi
 
@@ -627,13 +628,24 @@ fi
 # TABLES`, `DESCRIBE` и `SELECT COUNT(*)` — форма и объём без содержимого.
 run 'backup-mysql-databases' mysql -N -B -e "SHOW DATABASES LIKE '%fastpanel%'"
 
+# Первая ПОДХОДЯЩАЯ строка, а не просто первая. `run` сливает stderr в тот же
+# буфер, а mysql охотно ворчит туда перед данными («[Warning] World readable config
+# file …», «[Warning] Using a password …»). Слепой `head -1` взял бы это ворчание,
+# оно не прошло бы проверку формы — и самая важная группа секций молча ушла бы в
+# skip при найденной базе. Поэтому строки, не похожие на имя базы, здесь шум и
+# пропускаются; упрощать разбор обратно до первой строки нельзя.
 FP_DB=''
-if [ "$LAST_CODE" -eq 0 ]; then read -r FP_DB <<<"$LAST_OUT" || FP_DB=''; fi
-# Имя базы уходит дальше в argv `mysql`; форму проверяем, потому что строка приехала
-# с чужой машины, а не потому, что ждём подвоха от `SHOW DATABASES`.
-if [ -n "$FP_DB" ] && ! [[ "$FP_DB" =~ ^[A-Za-z0-9_]+$ ]]; then
-  note "имя внутренней БД «$FP_DB» отброшено: не похоже на имя базы"
-  FP_DB=''
+if [ "$LAST_CODE" -eq 0 ]; then
+  while IFS= read -r mysql_line; do
+    [[ "$mysql_line" =~ ^[A-Za-z0-9_]+$ ]] || continue
+    FP_DB="$mysql_line"
+    break
+  done <<<"$LAST_OUT"
+  # Ответ был, а имени в нём не нашлось — это отдельный факт, и он должен быть
+  # назван: иначе «панель ответила непонятным» неотличимо от «mysql не ответил».
+  if [ -z "$FP_DB" ] && [ -n "$LAST_OUT" ]; then
+    note 'в ответе mysql не нашлось строки, похожей на имя базы — см. секцию выше'
+  fi
 fi
 
 BACKUP_TABLES=''
@@ -641,7 +653,7 @@ if [ -n "$FP_DB" ]; then
   # `grep -i backup` вернёт код 1, если таблиц с таким именем нет, — и это ответ, а
   # не сбой: «панель не хранит бэкапы в своей БД» тоже результат разведки.
   run_sh 'backup-mysql-tables' \
-    "mysql $(printf '%q' "$FP_DB") -N -B -e 'SHOW TABLES' | grep -i backup"
+    "mysql $(printf '%q' "$FP_DB") -N -B -e 'SHOW TABLES' | grep -i backup | head -n $MAX_LIST_LINES"
   if [ "$LAST_CODE" -eq 0 ]; then BACKUP_TABLES="$LAST_OUT"; fi
 else
   skip_section 'backup-mysql-tables' 'внутренняя БД панели не найдена'
@@ -650,12 +662,17 @@ fi
 # Нумерованные секции по образцу `*-conf-N`: таблиц может не быть ни одной, а может
 # быть несколько, и `backup-mysql-table-0` — это «разбирать было нечего».
 backup_table_n=0
+backup_table_rejected=0
 if [ -n "$BACKUP_TABLES" ]; then
   while IFS= read -r backup_table; do
-    # Имя уходит в argv `mysql`, поэтому форму проверяем; отброшенное имя называем
-    # вслух — молчаливый пропуск выглядел бы как «таблицы не было».
+    # Имя уходит в argv `mysql`, поэтому форму проверяем. Разбор так же устойчив к
+    # шуму, как и разбор имени базы выше, и по той же причине: `run_sh` сливает в
+    # буфер stderr всей подоболочки, а он идёт мимо `grep` — предупреждение mysql
+    # попадает сюда, ни разу не побывав в конвейере. Пропущенную строку называем
+    # вслух: молчаливый пропуск выглядел бы как «такой строки и не было».
     if ! [[ "$backup_table" =~ ^[A-Za-z0-9_]+$ ]]; then
-      note "имя таблицы «$backup_table» отброшено: не похоже на имя таблицы"
+      note "строка «${backup_table}» пропущена: не похожа на имя таблицы"
+      backup_table_rejected=$((backup_table_rejected + 1))
       continue
     fi
     backup_table_n=$((backup_table_n + 1))
@@ -664,11 +681,17 @@ if [ -n "$BACKUP_TABLES" ]; then
       -e "DESCRIBE $backup_table; SELECT COUNT(*) FROM $backup_table"
   done <<<"$BACKUP_TABLES"
 fi
+# Три разные причины «нечего разбирать» — три разные формулировки. «Таблиц нет»,
+# сказанное там, где имена были и их отбраковала проверка формы, — это незнание,
+# нарисованное отсутствием, ровно то, чего проект не делает.
 if [ "$backup_table_n" -eq 0 ]; then
-  if [ -n "$FP_DB" ]; then
-    skip_section 'backup-mysql-table-0' "таблиц с backup в имени в $FP_DB нет"
-  else
+  if [ -z "$FP_DB" ]; then
     skip_section 'backup-mysql-table-0' 'внутренняя БД панели не найдена'
+  elif [ "$backup_table_rejected" -gt 0 ]; then
+    skip_section 'backup-mysql-table-0' \
+      "в ответе по $FP_DB строки были, но ни одна не похожа на имя таблицы"
+  else
+    skip_section 'backup-mysql-table-0' "подходящих таблиц с backup в имени в $FP_DB нет"
   fi
 fi
 
