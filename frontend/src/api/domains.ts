@@ -1,11 +1,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 
 import { apiDelete, apiGet, apiPost, apiPut, http } from "./client";
 import { trimDnsName } from "../lib/cfZoneMatch";
-import { type DomainFacts } from "../lib/domainFacts";
+import { type DomainFacts, type LogTail } from "../lib/domainFacts";
 import { invokeSynced } from "../lib/localCache";
 import { desktopOnly, isTauri } from "../lib/runtime";
 import { BLOB_KIND, putSecretBlob } from "../lib/secretBlob";
+import { invokeIfTauri } from "../lib/tauri-invoke";
 import { noteNsPush } from "./nsPush";
 import { queryClient } from "./queryClient";
 import { runExclusive, useRunPending } from "./runGate";
@@ -305,6 +307,97 @@ export function useReadDomainFacts(domainId: number) {
     pending,
     run: () => {
       void runReadDomainFacts(domainId);
+    },
+  };
+}
+
+/**
+ * Ключ гейта чтения хвоста — домен И ПУТЬ.
+ *
+ * Путь в ключе не для порядка: два разных файла одного сайта читать
+ * одновременно можно (это две независимые сессии за разными ответами), а один
+ * и тот же дважды — нельзя, второй прогон вернул бы те же строки. Стой в ключе
+ * один домен, и Refresh на frontend.access гасил бы кнопку у backend.error.
+ */
+export function readLogTailKey(domainId: number, path: string) {
+  return ["read-log-tail", domainId, path] as const;
+}
+
+/**
+ * Прочитать последние строки лог-файла. ТОЛЬКО десктоп: команда резолвит домен
+ * и сервер из локального кэша, расшифровывает SSH-блоб и ходит по SSH.
+ *
+ * **Почему хук держит результат у себя, а сосед — нет.** `useReadDomainFacts`
+ * наружу не возвращает ничего: снимок уезжает write-back'ом в БД и приезжает
+ * обратно ресинком списка, поэтому хуку достаточно дёрнуть `invalidateQueries`.
+ * Здесь такого пути нет и не будет: в access-логе лежат чужие IP, URL с query
+ * string и user-agent, и решение плана — содержимое НЕ уезжает на сервер (ни в
+ * `fp_facts`, ни в SQLCipher-кэш, ни в аудит). Раз хранить результат негде,
+ * кроме памяти, его держит стейт хука. Это техническое следствие приватного
+ * решения, а не удобство — вернётся write-back, исчезнет и стейт.
+ *
+ * По той же причине `invalidateQueries` здесь НЕ зовётся ни на одном исходе: на
+ * сервере ничего не изменилось, и перетягивать список доменов после чтения
+ * файла значило бы обещать, что от Refresh что-то в БД поменялось.
+ *
+ * `invokeIfTauri`, а не `invokeSynced`: `syncLocalCache()` перед каждым Refresh
+ * — круг в сеть ради строки, которая уже в кэше (её только что прочитала
+ * вкладка, чтобы нарисовать чипы). Гейт пути в Rust сверяется с тем же кэшем,
+ * что нарисовал чип, — разойтись им не с чем.
+ *
+ * Результат хранится ВМЕСТЕ с путём, для которого он получен, и наружу отдаётся
+ * только при совпадении с текущим `path`. Это и есть защита от «строки
+ * backend.error под подписью frontend.access»: чтение идёт секундами, чип за
+ * это время могут переключить, и ответ обязан лечь под ТОТ файл, для которого
+ * запрошен. Сбросом по `useEffect` то же не делается: эффект отрабатывает на
+ * такт позже, и один кадр строки простояли бы под чужим именем.
+ *
+ * Ошибка отдаётся строкой как есть — включая сентинел `HOST_KEY_UNKNOWN` и
+ * текст `CommandError` (`formatInvokeError` внутри `invokeIfTauri`). Прятать
+ * тут нечего: в argv команды пароля нет (мы читаем, а не мутируем), а наружу —
+ * это только в десктоп, на сервер не уходит ничего.
+ */
+export function useReadLogTail(
+  domainId: number,
+  path: string | null,
+): { pending: boolean; tail: LogTail | null; error: string | null; run: () => void } {
+  const [result, setResult] = useState<{ path: string; tail: LogTail | null; error: string | null } | null>(null);
+  // Пустая строка вместо `null` — только чтобы ключ был ключом: при `path ===
+  // null` кнопки на экране нет и `run` ничего не запускает.
+  const pending = useRunPending(readLogTailKey(domainId, path ?? ""));
+  const shown = result && result.path === path ? result : null;
+
+  return {
+    pending,
+    tail: shown?.tail ?? null,
+    error: shown?.error ?? null,
+    run: () => {
+      if (!path) return;
+      void runExclusive(readLogTailKey(domainId, path), async () => {
+        const userId = useAuthStore.getState().userId;
+        if (!userId) {
+          setResult({ path, tail: null, error: "Desktop: unlock session (user id missing)" });
+          return;
+        }
+        try {
+          const tail = await invokeIfTauri<LogTail>("domain_read_log_tail", {
+            userId,
+            domainId: String(domainId),
+            path,
+          });
+          setResult({ path, tail, error: null });
+        } catch (e: unknown) {
+          // Провал НЕ стирает уже показанные строки: «прочитать не удалось» и
+          // «в файле ничего нет» — разные новости, и вторую нельзя выдавать за
+          // первую. Прежние строки при этом помечены своей ошибкой над ними, а
+          // возраст у них — с прошлого удачного чтения.
+          setResult((prev) => ({
+            path,
+            tail: prev && prev.path === path ? prev.tail : null,
+            error: e instanceof Error ? e.message : String(e),
+          }));
+        }
+      });
     },
   };
 }

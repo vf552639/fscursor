@@ -1,7 +1,7 @@
-import React, { useId, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 
-import { Domain, useReadDomainFacts } from "../../../api/domains";
-import { DomainFacts, snapshotOf } from "../../../lib/domainFacts";
+import { Domain, useReadDomainFacts, useReadLogTail } from "../../../api/domains";
+import { DomainFacts, LogTail, snapshotOf } from "../../../lib/domainFacts";
 import { logFileLabel } from "../../../lib/logFiles";
 import { isTauri } from "../../../lib/runtime";
 import { Btn } from "../../ui/Primitives";
@@ -16,20 +16,27 @@ type LogFile = DomainFacts["logs"][number];
  * Вкладка Logs — перечень лог-файлов сайта из того же снимка сервера, что и
  * вкладка Server, и честный ответ о том, чего мы про них НЕ знаем.
  *
- * Показываем ровно то, что измерено: путь каждого файла, есть ли он и сколько
- * весит. Макет рисует здесь ещё три вещи, и ни одна из них сюда не приехала —
- * это не упрощение вёрстки, а отказ печатать выдуманное:
+ * Показываем ровно то, что измерено: путь каждого файла, есть ли он, сколько
+ * весит — и по кнопке Refresh последние строки выбранного файла. Макет рисует
+ * здесь ещё три вещи, и они сюда не приехали — это не упрощение вёрстки, а
+ * отказ печатать выдуманное:
  *
  * - **Число строк в бейдже чипа.** Мы его не считали: команда снимка делает
  *   `test -f` и `stat -c %s` (`ssh/fastpanel_facts.rs`), то есть знает
- *   существование и РАЗМЕР. Он в бейдже и стоит.
- * - **Таблица access-лога и тёмная консоль ошибок с их строками.** Содержимое
- *   логов не читает никто: ни бэкенд (и не сможет — SSH-пароль это блоб,
- *   принцип №1), ни десктоп (команды с `tail` пока нет). Тело вкладки говорит
- *   это словами, а не рисует правдоподобные строки, которых на сервере нет.
- * - **Кнопки «Refresh» и «Download».** Ни та, ни другая сегодня не может
- *   ничего сделать; кнопка, которая ничего не делает, — обещание функции
- *   (та же причина, по которой на карточке нет «Create Site»).
+ *   существование и РАЗМЕР. Он в бейдже и стоит. Свежий размер из чтения
+ *   хвоста печатается в шапке консоли, а не в бейдже: один обновлённый чип
+ *   рядом с тремя из старого снимка врал бы про общий возраст, а возраст у
+ *   чипов один на всех и назван `SnapshotLine`.
+ * - **Таблица access-лога и тёмная консоль ошибок с разобранными полями.**
+ *   Строки мы теперь читаем — но показываем СЫРЫМИ, моноширинным, без разбора
+ *   в колонки и без раскраски. Формат access-лога не сверен ни с одной
+ *   директивой на сервере (`grep` за ними вернул пустоту), а колонка «status»,
+ *   собранная по угаданной позиции поля, — это выдуманный диагноз (принцип №6
+ *   CLAUDE.md), причём выдуманный убедительно.
+ * - **Кнопка «Download».** Её нет и сегодня: `SshSession::exec` буферизует весь
+ *   вывод в память, и `cat` над логом в полгигабайта убил бы десктоп. Честная
+ *   выгрузка — поток по SFTP прямо в файл, то есть отдельная работа, а не
+ *   вторая кнопка рядом. Кнопка, которая роняет приложение, хуже отсутствующей.
  *
  * Кнопка снятия снимка тут ОДНА и только в состоянии «ни разу не читали»; её
  * исход виден на месте — провал последней попытки печатает общая шапка снимка
@@ -57,9 +64,10 @@ export interface DomainLogsTabProps {
  * empty») с одной фразой посередине.
  *
  * Пунктир — не украшение: он рисует место, где ПОЯВИТСЯ содержимое, и тем
- * отличает «сюда ещё нечего положить» от карточки с данными. Три разных
- * состояния (нет снимка, путей не прочитали, содержимое не умеем) выглядят
- * одинаково намеренно — различает их фраза внутри, а не рамка.
+ * отличает «сюда ещё нечего положить» от карточки с данными. Все состояния
+ * пустоты (нет снимка, путей не прочитали, веб, файла на сервере нет, ещё не
+ * жали Refresh, файл пуст) выглядят одинаково намеренно — различает их фраза
+ * внутри, а не рамка.
  */
 function Placeholder({ children }: { children: React.ReactNode }) {
   return (
@@ -191,6 +199,108 @@ function badgeText(f: LogFile): string {
   return formatBytes(f.size_bytes);
 }
 
+/**
+ * Сколько строк читает команда — то же число, что `LOG_TAIL_LINES` в Rust
+ * (`ssh/fastpanel_logs.rs`). Копия константы, а не импорт: провод отдаёт
+ * СТРОКИ, а не свой лимит, и связать их можно только словом. Здесь она нужна
+ * ровно затем, чтобы обещание кнопки («last 200 lines») называло то же число,
+ * которое приедет.
+ */
+const TAIL_LINES = 200;
+
+/**
+ * Консоль с сырыми строками лога.
+ *
+ * Моно — СИСТЕМНЫЙ (`ui-monospace`), как у пути под чипами и как везде в
+ * приложении: вебфонт из макета (`IBM Plex Mono`) ради одной модалки не
+ * подключаем — это вопрос уровня всего приложения (`design-brief.md` §5) и
+ * лишняя сетевая зависимость в Tauri.
+ *
+ * `white-space: pre` — потому что в логе значима КАЖДАЯ позиция: перенос по
+ * словам склеил бы столбцы стек-трейса и превратил бы одну строку файла в
+ * несколько строк экрана, то есть соврал бы про сам предмет. Отсюда и
+ * `overflow-x: auto`, и он стоит ВНУТРИ этого блока: горизонтальную полосу
+ * `design-brief.md` §11 запрещает странице, а не блоку, — а у `Modal` стоит
+ * `overflowY: auto`, из-за чего неограниченная консоль дала бы полосу всей
+ * карточке.
+ *
+ * Высота фиксированная, прокрутка — к низу после каждой загрузки: свежие
+ * строки лога лежат в конце файла, и открывать его на первой строке значило бы
+ * прятать ровно то, ради чего пришли. Ровно то же делает терминал.
+ *
+ * Строки не подсвечиваем и не раскрашиваем: см. шапку файла — формат access-лога
+ * не сверен, и раскраска по угаданной позиции поля была бы диагнозом, а не
+ * измерением.
+ */
+function LogConsole({ tail }: { tail: LogTail }) {
+  const box = useRef<HTMLPreElement>(null);
+
+  // Прокрутка — работа над УЗЛОМ, а не над состоянием, поэтому здесь эффект
+  // уместен (в отличие от сброса прочитанного при смене чипа: тот отработал бы
+  // на такт позже показа и один кадр держал бы строки под чужой подписью).
+  useEffect(() => {
+    const el = box.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [tail]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#94a3b8" }}>
+        {/* Число строк — НАПЕЧАТАННОЕ, а не лимит: «last 200 lines» под файлом
+            из семи строк было бы обещанием, а не отчётом. Совпадает с лимитом
+            ровно тогда, когда лимит и сработал.
+
+            Размер — свежий, снятый той же командой рядом с чтением, а не взятый
+            из снимка: снимок бывает недельной давности, и именно этим размером
+            меряется, сработал ли байтовый кап. */}
+        <span>
+          {`last ${tail.lines.length} lines`}
+          {tail.size_bytes === null ? "" : ` · ${formatBytes(tail.size_bytes)}`}
+        </span>
+        {tail.truncated ? (
+          <span
+            title="The file is larger than one read: the first shown line is not the beginning of the file"
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: "#92400e",
+              background: "#fef3c7",
+              borderRadius: 99,
+              padding: "1px 7px",
+            }}
+          >
+            truncated
+          </span>
+        ) : null}
+      </div>
+      <pre
+        ref={box}
+        // Прокручиваемая область — не читается клавиатурой, пока не станет
+        // фокусируемой; `tabIndex` даёт стрелки и PageDown внутри неё.
+        tabIndex={0}
+        aria-label="Log contents"
+        style={{
+          margin: 0,
+          height: 260,
+          overflowX: "auto",
+          overflowY: "auto",
+          fontFamily: "ui-monospace, monospace",
+          fontSize: 12,
+          lineHeight: 1.5,
+          whiteSpace: "pre",
+          color: "#334155",
+          background: "#f8fafc",
+          border: "1px solid #e2e8f0",
+          borderRadius: 12,
+          padding: 12,
+        }}
+      >
+        {tail.lines.join("\n")}
+      </pre>
+    </div>
+  );
+}
+
 export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
   /**
    * Разбор снимка — общий (`lib/domainFacts`), а не свой: гейт `fp_facts_at` над
@@ -229,6 +339,17 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
    * несколько, и статический id связал бы все чипы с первой строкой.
    */
   const pathId = useId();
+
+  /**
+   * Чтение хвоста ВЫБРАННОГО файла. Путь уходит в хук, и хук же отдаёт результат
+   * только для него: содержимое одного файла под подписью другого — не мелочь
+   * вёрстки, а неверный ответ на вопрос «что в этом логе». Переключение чипа
+   * поэтому стирает прочитанное само собой, без сбрасывающего эффекта.
+   */
+  const { tail, error: tailError, pending: tailPending, run: readTail } = useReadLogTail(
+    domain.id,
+    selected?.path ?? null,
+  );
 
   return (
     <TabBody>
@@ -308,23 +429,80 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
               (`design-brief.md` §5) и лишняя сетевая зависимость в Tauri.
               Названный, но не подключённый, он всё равно откатился бы к
               системному — то есть был бы строкой, которая ничего не делает. */}
-          <div
-            id={pathId}
-            style={{
-              fontFamily: "ui-monospace, monospace",
-              fontSize: 12,
-              color: "#94a3b8",
-              overflowWrap: "anywhere",
-            }}
-          >
-            {selected.path}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div
+              id={pathId}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontFamily: "ui-monospace, monospace",
+                fontSize: 12,
+                color: "#94a3b8",
+                overflowWrap: "anywhere",
+              }}
+            >
+              {selected.path}
+            </div>
+
+            {/* Refresh стоит ЗДЕСЬ, в ряду с путём, а не в `SnapshotLine`: та
+                строка про снимок (возраст, ошибка последней попытки, размеры
+                чипов), а эта кнопка — про содержимое одного файла. Поставь её
+                в шапку снимка, и она обещала бы, что от неё обновятся и бейджи
+                чипов, — а они остаются со своим прежним возрастом.
+
+                Только десктоп: чтение идёт по SSH (принцип №3). Гаснет на
+                несуществующем файле — на сервер за ним ходить незачем, и это
+                же говорит тело вкладки словами. */}
+            {desktop ? (
+              <Btn
+                size="sm"
+                variant="secondary"
+                onClick={readTail}
+                disabled={tailPending || !selected.exists}
+                title={
+                  selected.exists
+                    ? `Read the last ${TAIL_LINES} lines of this file over SSH`
+                    : "This file was not on the server when the snapshot was taken"
+                }
+              >
+                {tailPending ? "Reading…" : "Refresh"}
+              </Btn>
+            ) : null}
           </div>
         </>
       ) : null}
 
+      {/* Ошибка чтения хвоста — НАД телом и отдельно от `fp_check_error` в
+          шапке: это разные измерения. Провал чтения содержимого не двигает
+          снимок (ни `fp_checked_at`, ни `fp_check_error` команда не трогает),
+          и печатать его в строке снимка значило бы приписать снимку попытку,
+          которой не было. Ниже консоль при этом остаётся: «прочитать не
+          удалось» не отменяет того, что уже прочитано раньше. */}
+      {tailError ? (
+        <div
+          role="alert"
+          style={{
+            fontSize: 12,
+            color: "#b91c1c",
+            background: "#fef2f2",
+            border: "1px solid #fecaca",
+            borderRadius: 8,
+            padding: "6px 10px",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {tailError}
+        </div>
+      ) : null}
+
+      {/* Состояния тела — строго по порядку проверки: сначала то, чего мы не
+          знаем (снимка нет, путей нет), потом то, чего не можем (веб), потом
+          то, чего нет на сервере, и только затем содержимое. Порядок и есть
+          смысл: «файл пуст» под отсутствующим снимком было бы измерением,
+          которого никто не делал. */}
       {noSnapshot ? (
         <Placeholder>Log files are listed from the server snapshot, and none has been taken yet.</Placeholder>
-      ) : logs.length === 0 ? (
+      ) : logs.length === 0 || !selected ? (
         /* Снимок есть, а список путей пуст — и это НЕ «логов у сайта нет».
            Причин у пустоты как минимум четыре, и НИ ОДНУ из них экран назвать
            не может, потому что ни одна не доезжает сюда отличимой от других:
@@ -348,8 +526,33 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
         <Placeholder>
           The last snapshot brought no log paths for this site, so we do not know where its logs are.
         </Placeholder>
+      ) : !desktop ? (
+        /* Веб — читалка (принцип №3): SSH-пароль здесь непрозрачный блоб, и
+           расшифровать его может только десктоп. Фраза называет ровно это, а не
+           «пока не готово»: функция есть, её просто нет ЗДЕСЬ. */
+        <Placeholder>Reading log contents requires the desktop app.</Placeholder>
+      ) : !selected.exists ? (
+        /* Файла нет по снимку — на сервер не ходим вовсе. Гейт пути в Rust
+           отверг бы и такой запрос, но отвергнутый запрос стоил бы SSH-сессии
+           и секунд ожидания ради ответа, который уже лежит на экране в бейдже. */
+        <Placeholder>This file does not exist on the server.</Placeholder>
+      ) : !tail ? (
+        /* Ещё не читали. Ошибка при пустом результате уже напечатана выше —
+           повторять под ней приглашение «нажмите Refresh» незачем: экран и так
+           говорит, что делать, а два сообщения об одном спорили бы. */
+        tailError ? null : <Placeholder>Press Refresh to read the last {TAIL_LINES} lines.</Placeholder>
+      ) : !tail.exists ? (
+        /* Файл исчез МЕЖДУ снимком и чтением (сайт переехал, владелец
+           сменился). Чип при этом ещё показывает старый размер — это не
+           противоречие: размер помечен возрастом снимка, а это ответ сервера
+           только что. */
+        <Placeholder>This file does not exist on the server.</Placeholder>
+      ) : tail.lines.length === 0 ? (
+        /* Пустой файл — это ИЗМЕРЕНИЕ, а не отсутствие ответа: пустая консоль
+           на его месте читалась бы как «не загрузилось». */
+        <Placeholder>Log file is empty.</Placeholder>
       ) : (
-        <Placeholder>Reading log contents is not wired up yet.</Placeholder>
+        <LogConsole tail={tail} />
       )}
     </TabBody>
   );

@@ -47,6 +47,30 @@ export type DomainFacts = {
   logs: { path: string; exists: boolean; size_bytes: number | null }[];
 };
 
+/**
+ * Хвост лог-файла, прочитанный по требованию (Tauri-команда
+ * `domain_read_log_tail`).
+ *
+ * Живёт здесь, рядом с `DomainFacts`, по той же причине: это КОНТРАКТ ПРОВОДА,
+ * точная копия serde-формы Rust (`ssh/fastpanel_logs.rs`), а не деталь
+ * компонента — имена полей менять нельзя.
+ *
+ * И главное отличие от соседа: `DomainFacts` едет на сервер и лежит в колонке
+ * `domains.fp_facts`, а ЭТО не едет никуда. В access-логе стоят чужие IP, URL
+ * с query string и user-agent — чужие персональные данные; они живут только в
+ * памяти десктопа, поэтому у типа нет ни поля в `Domain`, ни ключа в кэше.
+ */
+export type LogTail = {
+  /** Файл на сервере на момент чтения. `false` — исчез после снимка. */
+  exists: boolean;
+  /** Размер, снятый ЗАНОВО (не из снимка): им же меряется, сработал ли кап. */
+  size_bytes: number | null;
+  /** Сырые строки, как они лежат в файле. Разбора и раскраски нет намеренно. */
+  lines: string[];
+  /** Кап по байтам сработал: показано не с начала файла. */
+  truncated: boolean;
+};
+
 /** Состояние SSL так, как его честно можно назвать. */
 export type SslState = "unchecked" | "missing" | "expired" | "expiring" | "valid" | "error";
 
