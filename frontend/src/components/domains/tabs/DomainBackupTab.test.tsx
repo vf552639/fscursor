@@ -2,10 +2,10 @@ import React from "react";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, within } from "@testing-library/react";
 
-import DomainBackupTab from "./DomainBackupTab";
+import DomainBackupTab, { EMPTY_TEXT } from "./DomainBackupTab";
 import { fmtDT } from "../../ui/Primitives";
 import { desktopOnly } from "../../../lib/runtime";
-import type { BackupsFacts, DomainBackup, DomainFacts } from "../../../lib/domainFacts";
+import { DESKTOP_READS_BACKUPS, type BackupsFacts, type DomainBackup, type DomainFacts } from "../../../lib/domainFacts";
 import { setTauri } from "../../../test/secretBlobKit";
 
 /**
@@ -101,15 +101,43 @@ afterEach(() => {
 });
 
 describe("четыре состояния пустоты — четыре разных ответа", () => {
-  it("каждое состояние говорит своё, и ни одно не повторяет соседа", () => {
-    const said: Record<string, string> = {};
+  it("ни одна фраза не повторяет соседнюю", () => {
+    // Сравниваются сами фразы, а не текст отрендеренной панели: у состояний
+    // различается ещё и строка возраста снимка («Never checked» против
+    // «Checked 2h ago»), и по полному тексту две СЛИТЫЕ фразы всё равно дали бы
+    // разные страницы — то есть проверка прошла бы мимо той единственной
+    // поломки, ради которой написана.
+    const texts = Object.values(EMPTY_TEXT);
+    expect(new Set(texts).size).toBe(texts.length);
+  });
+
+  it("каждому состоянию достаётся его собственная фраза, а не соседняя", () => {
+    // Вторая половина того же правила: фразы могут быть разными и при этом
+    // разъехаться по состояниям. Проверяется отображение состояние → фраза,
+    // поэтому текст берётся из той же карты, что и у компонента: сочинить свою
+    // формулировку тест не разрешает никому.
     for (const [state, over] of Object.entries(EMPTY_STATES)) {
-      const { container } = show(over);
-      said[state] = container.textContent ?? "";
+      show(over);
+      const key = state === "listed-empty" ? "listed" : state;
+      expect(screen.getByText(EMPTY_TEXT[key as keyof typeof EMPTY_TEXT])).toBeTruthy();
       cleanup();
     }
-    const texts = Object.values(said);
-    expect(new Set(texts).size).toBe(texts.length);
+  });
+
+  it("пока список читать нечем, оба достижимых состояния говорят это прямо", () => {
+    // Достижимы сегодня два состояния из четырёх — `no-snapshot` и
+    // `not-in-snapshot`, — и новый снимок не лечит ни одно. «Сервер ещё не
+    // читали» само по себе правда, но без оговорки читается как «прочитай, и
+    // узнаем»: та же болезнь, что кнопка-обещание, только выраженная фразой.
+    //
+    // Импликатуру машиной не проверить, поэтому проверяется наличие самой
+    // оговорки — она и есть то, что снимает ложное обещание. Сними гейт с любой
+    // из двух фраз, и тест покраснеет. При `DESKTOP_READS_BACKUPS = true`
+    // правило обратное (там как раз нужно звать переснять), и тест выключается
+    // вместе с константой.
+    if (DESKTOP_READS_BACKUPS) return;
+    expect(EMPTY_TEXT["no-snapshot"]).toMatch(/does not read/i);
+    expect(EMPTY_TEXT["not-in-snapshot"]).toMatch(/does not read/i);
   });
 
   it("«копий нет» звучит РОВНО в одном состоянии — там, где панель ответила", () => {
@@ -200,6 +228,20 @@ describe("домен без сервера", () => {
     expect(rows()).toHaveLength(1);
     expect(document.body.textContent).not.toMatch(/not bound to a server/);
   });
+
+  it("снимок есть, а привязки нет — отвечает снимок, а не наша колонка", () => {
+    // Домен отвязали ПОСЛЕ съёмки: «not bound to a server» под строкой «Checked
+    // 2h ago» спорит сам с собой и прячет настоящий ответ панели. Правило «факт
+    // важнее записи» действует и на пустой список, а не только на непустой.
+    show({ ...EMPTY_STATES["listed-empty"], server_id: null });
+    expect(screen.getByText(EMPTY_TEXT.listed)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/not bound to a server/);
+    // И то же самое для «поля нет» — это тоже ответ про снимок, а не про запись.
+    cleanup();
+    show({ ...EMPTY_STATES["not-in-snapshot"], server_id: null });
+    expect(screen.getByText(EMPTY_TEXT["not-in-snapshot"])).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/not bound to a server/);
+  });
 });
 
 describe("список копий", () => {
@@ -249,6 +291,18 @@ describe("список копий", () => {
     showListed([backup({ size_bytes: undefined })]);
     const dash = within(rows()[0]).getByLabelText("size not read");
     expect(dash.textContent).toBe("—");
+  });
+
+  it("непонятный размер с провода — тот же прочерк, и он тоже назван словом", () => {
+    // `formatBytes` отвечает прочерком не только на отсутствие: отрицательное и
+    // нефинитное — тоже «не размер». Спроси мы про ТИП поля, такой прочерк
+    // остался бы немым, и различие ушло бы в канал, которого у скринридера нет.
+    for (const bytes of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      showListed([backup({ size_bytes: bytes })]);
+      const dash = within(rows()[0]).getByLabelText("size not read");
+      expect(dash.textContent).toBe("—");
+      cleanup();
+    }
   });
 
   it("настоящий ноль — «0 B», а не прочерк и не «не прочитали»", () => {

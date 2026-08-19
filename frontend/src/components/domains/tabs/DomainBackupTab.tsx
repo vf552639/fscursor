@@ -77,10 +77,22 @@ export interface DomainBackupTabProps {
  *
  * Живут в одном объекте, а не по месту показа, чтобы их можно было прочитать
  * подряд и увидеть: утверждение об ОТСУТСТВИИ копий стоит ровно в одной из них.
+ * Экспортированы затем же: тест сравнивает сами фразы, а не текст отрендеренной
+ * панели, — иначе «две фразы слились в одну» пряталось бы за соседними
+ * строками вкладки, которые у разных состояний и так разные.
  */
-const EMPTY_TEXT = {
-  "no-snapshot":
-    "The server has not been read for this domain yet, so nothing here is known about its backup copies.",
+export const EMPTY_TEXT = {
+  /**
+   * Гейт `DESKTOP_READS_BACKUPS` стоит и здесь, а не только у соседа снизу.
+   * Достижимых состояний сегодня два — это и `not-in-snapshot`, — и новый
+   * снимок не лечит ни одно: «сервер ещё не читали» само по себе правда, но
+   * рядом со списком копий оно читается как «прочитай, и узнаем», а мы не
+   * узнаем. Ложная импликатура — та же болезнь, что кнопка, обещающая починку,
+   * только выраженная фразой; на неё правило распространяется тоже.
+   */
+  "no-snapshot": DESKTOP_READS_BACKUPS
+    ? "The server has not been read for this domain yet, so nothing here is known about its backup copies."
+    : "The server has not been read for this domain yet — and reading it would not bring copies either: SDMP does not read what FastPanel keeps.",
   /**
    * Фраза зависит от того, лечится ли состояние новым снимком, — а это ровно
    * то, что говорит `DESKTOP_READS_BACKUPS`. Сегодня не лечится, и предлагать
@@ -95,10 +107,17 @@ const EMPTY_TEXT = {
   /** ЕДИНСТВЕННОЕ утверждение об отсутствии копий во всём продукте. */
   listed: "FastPanel shows no backup copies for this site.",
   /**
-   * Не состояние снимка, а его причина: читать копии не с чего. Стоит впереди
-   * четырёх выше, потому что отвечает раньше них — но только когда списка
-   * действительно нет: приехавший список показывается всегда, чем бы ни была
-   * заполнена наша колонка `server_id`.
+   * Не состояние снимка, а его причина: читать копии не с чего. Заменяет собой
+   * ровно одну фразу — `no-snapshot`, — и только её: там мы и правда ничего не
+   * спрашивали, а пустая привязка объясняет, почему и не спросим.
+   *
+   * Ко всем остальным состояниям она не применяется, хотя `server_id` может
+   * быть пуст и при них: снимок-то есть. Сказать «домен не привязан к серверу»
+   * под строкой «Checked 2h ago» значит поспорить с самим собой и спрятать
+   * настоящий ответ панели за нашей записью — а карточка домена устроена
+   * наоборот, факт важнее записи (`lib/domainDrift`). Домен, отвязанный ПОСЛЕ
+   * снимка, — обычный случай, и ответ у него прежний: что панель показала, то и
+   * показано.
    */
   "no-server": "This domain is not bound to a server, so there is nothing to read backup copies from.",
 } as const;
@@ -114,13 +133,17 @@ function dateText(iso: string | undefined): string {
   return Number.isNaN(ts) ? "date unknown" : fmtDT(iso);
 }
 
+/** Глиф «размер не прочитан». Он же — признак: см. `BackupRow`. */
+const SIZE_UNKNOWN = "—";
+
 /** Размер копии по дисциплине бейджа логов: «—» ≠ «0 B». */
 function sizeText(bytes: number | undefined): string {
   // `undefined` — размер не прочитан, и печатать его нулём значило бы выдумать
   // пустой архив. Настоящий ноль (файл есть, он пуст) печатается как «0 B».
-  // Проверяем тип, а не `!= null`: с провода в это поле может приехать строка,
-  // и `formatBytes` вернул бы на ней прочерк молча, без пометки для слуха.
-  if (typeof bytes !== "number") return "—";
+  // Проверяем тип, а не `!= null`: с провода в это поле может приехать строка.
+  if (typeof bytes !== "number") return SIZE_UNKNOWN;
+  // `formatBytes` сам отвечает прочерком на отрицательное и нефинитное — это
+  // тоже «не размер», и различать эти два прочерка нечем и незачем.
   return formatBytes(bytes);
 }
 
@@ -139,7 +162,13 @@ function backupLabel(b: DomainBackup): string {
  * «что это за файл» задаётся к одной строке за раз.
  */
 function BackupRow({ backup }: { backup: DomainBackup }) {
-  const sizeKnown = typeof backup.size_bytes === "number";
+  // Признак берётся из НАПЕЧАТАННОГО, а не из типа поля: прочерк рисует ещё и
+  // `formatBytes` — на отрицательном и нефинитном числе, — и, спрашивая тип, мы
+  // оставили бы такой прочерк без слова. Тогда единственным каналом различия
+  // остался бы сам глиф, которого у скринридера нет. Правило простое: печатаем
+  // «—» — говорим, что это значит.
+  const size = sizeText(backup.size_bytes);
+  const sizeKnown = size !== SIZE_UNKNOWN;
   return (
     <li
       title={backup.path}
@@ -165,7 +194,7 @@ function BackupRow({ backup }: { backup: DomainBackup }) {
           aria-label={sizeKnown ? undefined : "size not read"}
           style={{ fontSize: 12, color: "#64748b", minWidth: 56, textAlign: "right" }}
         >
-          {sizeText(backup.size_bytes)}
+          {size}
         </span>
       </span>
     </li>
@@ -184,13 +213,18 @@ export default function DomainBackupTab({ domain, now }: DomainBackupTabProps) {
   const desktop = isTauri();
 
   /**
-   * Список показывается всегда, когда он есть, — даже если наша колонка
-   * `server_id` пуста. Данные приехали из снимка, то есть с настоящего сервера;
-   * спрятать их из-за нашей же записи значило бы отдать предпочтение записи
-   * перед фактом, а карточка домена устроена ровно наоборот (`lib/domainDrift`).
+   * Ответ снимка сильнее нашей записи о сервере — и это правило применяется до
+   * конца, а не только к непустому списку. Пустая колонка `server_id`
+   * подменяет собой единственную фразу, `no-snapshot`: там нам действительно
+   * нечего сказать, и «домен не привязан к серверу» — лучший ответ, какой у нас
+   * есть. Как только снимок появился, говорит он: и «поля нет», и «не
+   * разобрали», и сам список — это ответы про сервер, а `server_id` — наша
+   * колонка, которую могли очистить уже после съёмки.
    */
   const emptyText =
-    domain.server_id == null ? EMPTY_TEXT["no-server"] : EMPTY_TEXT[view.state];
+    view.state === "no-snapshot" && domain.server_id == null
+      ? EMPTY_TEXT["no-server"]
+      : EMPTY_TEXT[view.state];
 
   return (
     <TabBody>
