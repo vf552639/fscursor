@@ -138,16 +138,18 @@ function renderModal(d = domain()) {
 }
 
 /**
- * Кнопка смены NS. Вкладок у карточки нет: NS живут на том же экране, что и
- * аккаунт Cloudflare, — поэтому открывать перед действием нечего, надо только
- * дождаться отрисовки.
+ * Кнопка смены NS. Открывать перед действием нечего: вкладки у карточки есть,
+ * но NS живут на Overview — той, с которой она открывается, — и на том же
+ * экране, что и аккаунт Cloudflare. Надо только дождаться отрисовки.
  */
 async function nsButton() {
   return (await screen.findByText(/Set NS/)).closest("button") as HTMLButtonElement;
 }
 
 function nsField() {
-  return screen.getByLabelText(/Nameservers/i) as HTMLTextAreaElement;
+  // Ярлык поля — «One per line»: предмет называет шапка карточки
+  // (`SectionCard` «Nameservers»), и поле не повторяет её слово.
+  return screen.getByLabelText(/one per line/i) as HTMLTextAreaElement;
 }
 
 function setNsCalls() {
@@ -225,7 +227,7 @@ describe("Set NS — десктоп выполняет", () => {
   it("поздний ответ Cloudflare не затирает уже набранное руками", async () => {
     setTauri(true);
     mocks.mutate.mockResolvedValue(true);
-    // Ровно та гонка, ради которой заведён флаг `nsEdited`: пользователь
+    // Ровно та гонка, ради которой заведён флаг `edited` (`useNsDraft`): пользователь
     // печатает, ПОКА `cf_list_zones` ещё летит. Правка «поверх подставленного»
     // этого не проверяет — там ответ уже пришёл.
     let releaseZones: (zones: any[]) => void = () => {};
@@ -569,7 +571,7 @@ describe("Set NS — веб только смотрит", () => {
   });
 });
 
-describe("карточка домена — один экран без вкладок", () => {
+describe("вкладки не разводят Cloudflare и nameservers", () => {
   it("не предлагает DB / SSL / NGINX и Create Site и не ходит по их роутам", async () => {
     setTauri(true);
 
@@ -579,21 +581,39 @@ describe("карточка домена — один экран без вкла�
     // Роутов `create-site`, `create-db`, `db-credentials`, `ssl-request`,
     // `ssl-cancel`, `refresh-ssl` и `nginx-override` на бэкенде нет — каждая из
     // этих вкладок всегда отвечала 404 в общий баннер. Голый «SSL» из списка
-    // ушёл: теперь это заголовок read-only секции «Server state» (живое чтение
-    // с сервера, без мутаций), а не вкладка-действие. Мёртвые SSL-ДЕЙСТВИЯ
+    // ушёл: теперь это заголовок read-only карточки SSL (живое чтение с
+    // сервера, без мутаций), а не вкладка-действие. Мёртвые SSL-ДЕЙСТВИЯ
     // (Request/Cancel/Refresh SSL) по-прежнему обязаны отсутствовать.
     for (const dead of ["DB", "NGINX", "Create Site", "Create DB", "Request SSL", "Cancel SSL", "Refresh SSL", "Save and Reload nginx"]) {
       expect(screen.queryByText(dead), `${dead} должна быть удалена`).toBeNull();
     }
-    // Переключателя вкладок нет вовсе: NS переехали к аккаунту Cloudflare, а
-    // разложенные по двум экранам они заставляли ходить туда-сюда, чтобы
-    // понять, почему NS не пушатся.
-    for (const tab of ["OVERVIEW", "NS"]) {
-      expect(screen.queryByText(tab), `вкладки ${tab} быть не должно`).toBeNull();
-    }
-    // Поле NS и сроки домена теперь на одном экране, без единого клика.
+    // Отдельной вкладки NS нет и не появилось: разложенные по двум экранам, NS
+    // и аккаунт Cloudflare заставляли ходить туда-сюда, чтобы понять, почему NS
+    // не пушатся. Обе половины вопроса — на первой вкладке; остальные вкладки
+    // отвечают на свои («что на сервере», «какие у сайта логи»).
+    expect(screen.queryByRole("tab", { name: "NS" }), "вкладки NS быть не должно").toBeNull();
+    // И не только буквальное «NS»: строка выше ловит одно точное имя, а
+    // вернуться этот вопрос может «Nameservers», «DNS» или «Delegation».
+    // Поэтому — по образцу имени, а не по равенству всему списку вкладок.
+    // Полный список сторожит `DomainDetailModal.tabs.test.tsx`, и дублировать
+    // его здесь смысла нет: тест про NS краснел бы от любой новой вкладки, а
+    // чинилось бы это вставкой строки в массив — то есть проверка молча
+    // выродилась бы в ритуал. Образец же срабатывает ровно тогда, когда
+    // смотреть ДЕЙСТВИТЕЛЬНО надо: когда у новой вкладки NS-шное имя.
+    //
+    // `\b` вокруг `NS` обязательны: голое `/ns/i` совпало бы с «Insights» и с
+    // любым словом, где есть эти две буквы подряд.
+    expect(
+      screen
+        .getAllByRole("tab")
+        .map((t) => t.textContent ?? "")
+        .filter((n) => /\bNS\b|nameserver|dns|delegation/i.test(n)),
+      "вкладки под вопрос про NS не должно быть ни под каким именем",
+    ).toEqual([]);
+    // Поле NS и сроки домена по-прежнему на одном экране, без единого клика.
     expect(nsField()).toBeTruthy();
     expect(screen.getByText("Expires:")).toBeTruthy();
+    expect(screen.getByLabelText("Cloudflare account")).toBeTruthy();
 
     // По домену карточка не ходит НИ ПО ОДНОМУ роуту: креды БД и
     // nginx-override тянулись `useQuery` с `enabled: !!domainId` прямо при

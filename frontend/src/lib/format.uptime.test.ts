@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { formatUptime, mbToGb } from "./Primitives";
+import { formatUptime, mbToGb } from "./format";
 
 /**
  * Форматирование показаний железа — одно на весь продукт.

@@ -91,13 +91,17 @@ export default function DomainRegistrarField({ domain }: DomainRegistrarFieldPro
     update.mutate({ registrar_id: next });
   }
 
-  // `minWidth: 0` — плашка ряда связей это grid-элемент шириной в треть модалки
+  // `minWidth: 0` — карточка ряда связей это grid-элемент шириной в треть модалки
   // (~215px), а его минимальная ширина по умолчанию равна ширине содержимого:
   // без этого длинное имя аккаунта в селекте распирало бы колонку, а не
   // упиралось в неё.
+  //
+  // Видимого ярлыка «Registrar:» перед селектом нет: его печатает шапка-полоска
+  // карточки, в которую поле вставлено (`DomainLinks`), и второй такой же рядом
+  // был бы одним словом дважды. Скринридер имя поля при этом не теряет — оно на
+  // самом селекте (`aria-label`), а не в этой строке.
   return (
     <div style={{ minWidth: 0 }}>
-      <b>Registrar:</b>{" "}
       <Sel
         aria-label="Registrar account"
         aria-describedby={noteId}
@@ -128,7 +132,7 @@ export default function DomainRegistrarField({ domain }: DomainRegistrarFieldPro
       </Sel>
       {update.isError ? (
         // `overflowWrap` — чужая ошибка приезжает телом ответа: URL или JSON без
-        // единого пробела не перенесётся сам и уедет за край плашки.
+        // единого пробела не перенесётся сам и уедет за край карточки.
         <div
           role="alert"
           style={{ fontSize: 12, color: ERROR_TEXT, marginTop: 4, overflowWrap: "anywhere" }}
@@ -257,7 +261,7 @@ function noteBody({
       <ProviderAvatar m={meta} size={22} />
       {/* `minWidth: 0` + клип: в ветке сырой строки `ProviderLabel` ставит
           `white-space: pre` — такой текст не переносится в принципе и вылез бы
-          из плашки целиком. Полная строка остаётся в его же тултипе. */}
+          из карточки целиком. Полная строка остаётся в его же тултипе. */}
       <span style={{ minWidth: 0, overflow: "hidden", overflowWrap: "anywhere" }}>
         <ProviderLabel m={meta} />
       </span>

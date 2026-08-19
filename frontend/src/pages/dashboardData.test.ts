@@ -70,7 +70,7 @@ describe("serverMetrics", () => {
 
 // Своей реализации `formatUptime` у дашборда больше нет — она была второй
 // записью того же числа («2 days» против «2d 0h»). Границы и «данных нет»
-// проверяются там, где функция теперь живёт: `Primitives.uptime.test.ts`.
+// проверяются там, где функция теперь живёт: `lib/format.uptime.test.ts`.
 
 describe("auditRowToActivity", () => {
   it("labels a known action and picks the type icon", () => {

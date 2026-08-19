@@ -42,3 +42,24 @@ export function relativeLuminance(hex: string): number {
   const b = channel(parseInt(clean.slice(4, 6), 16));
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
+
+/**
+ * То же, что `relativeLuminance`, но на вход принимает `rgb(r, g, b)` — форму,
+ * в которой jsdom отдаёт `element.style.color`.
+ *
+ * Живёт рядом с ней, а не в файле теста: тесты, которые проверяют «это
+ * различимо», а не «это вот такой хекс», нужны каждому экрану со своей
+ * приглушённой строкой, и переписывать разбор `rgb(...)` в каждом — тот же
+ * способ развести копии, ради которого заведён сам модуль.
+ */
+export function luminanceOfRgb(rgb: string): number {
+  const parts = rgb.match(/\d+/g);
+  if (!parts || parts.length < 3) {
+    throw new Error(`luminanceOfRgb: ожидается "rgb(r, g, b)", получено "${rgb}"`);
+  }
+  const hex = parts
+    .slice(0, 3)
+    .map((v) => Number(v).toString(16).padStart(2, "0"))
+    .join("");
+  return relativeLuminance(`#${hex}`);
+}

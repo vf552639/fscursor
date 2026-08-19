@@ -112,19 +112,21 @@ export default function DomainCloudflareField({
     });
   }
 
+  // Видимого ярлыка «Cloudflare:» перед селектом нет по той же причине, что и у
+  // соседа-регистратора: его печатает шапка-полоска карточки (`DomainLinks`).
+  // Имя для скринридера при этом стоит на самом селекте (`aria-label`).
   return (
     <div>
-      <b>Cloudflare:</b>{" "}
       <Sel
         id="cf-account"
         aria-label="Cloudflare account"
         value={accountId == null ? "" : String(accountId)}
         onChange={(e: ChangeEvent<HTMLSelectElement>) => pickAccount(e.target.value)}
         disabled={update.isPending}
-        // `maxWidth` — поле стоит в плашке ряда связей шириной в треть модалки
+        // `maxWidth` — поле стоит в карточке ряда связей шириной в треть модалки
         // (~200px), а `<select>` тянется по самой широкой опции и наружу из
         // своей колонки: grid-элемент содержимое не клипует. Без ограничения
-        // длинное имя аккаунта наезжало бы на соседнюю плашку, а `overflowY`
+        // длинное имя аккаунта наезжало бы на соседнюю карточку, а `overflowY`
         // модалки (он превращает `overflow-x` из `visible` в `auto`) добавлял
         // бы к этому горизонтальный скролл всей карточки. То же лечение, что у
         // соседнего поля регистратора.
@@ -139,7 +141,7 @@ export default function DomainCloudflareField({
       </Sel>
       {update.isError ? (
         // `overflowWrap` — чужая ошибка приезжает телом ответа: URL или JSON без
-        // единого пробела не перенесётся сам и уедет за край плашки.
+        // единого пробела не перенесётся сам и уедет за край карточки.
         <div
           role="alert"
           style={{ fontSize: 12, color: ERROR_TEXT, marginTop: 4, overflowWrap: "anywhere" }}
@@ -194,9 +196,9 @@ function ZoneNote({
   saveFailed: boolean;
 }) {
   // `overflowWrap` — в текстах ниже сидят неразрывные токены: 32-символьный id
-  // зоны («Saved zone {zoneId} is not in this account») и имя домена. В плашке
+  // зоны («Saved zone {zoneId} is not in this account») и имя домена. В карточке
   // ряда связей (~200px) такая строка вылезала бы за её край; у обеих соседних
-  // плашек их подписи уже переносятся по любому месту.
+  // карточек их подписи уже переносятся по любому месту.
   const note = (color: string, text: React.ReactNode) => (
     <div style={{ fontSize: 12, color, marginTop: 3, overflowWrap: "anywhere" }}>{text}</div>
   );

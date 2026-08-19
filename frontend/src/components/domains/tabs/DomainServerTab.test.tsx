@@ -1,24 +1,36 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
-import DomainServerFacts from "./DomainServerFacts";
-import { queryClient } from "../../api/queryClient";
-import type { DomainFacts } from "../../lib/domainFacts";
-import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from "../../test/secretBlobKit";
+import DomainServerTab from "./DomainServerTab";
+import { queryClient } from "../../../api/queryClient";
+import type { DomainFacts } from "../../../lib/domainFacts";
+import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from "../../../test/secretBlobKit";
 
 /**
- * Секция «Server state» карточки домена: витрина прочитанного с сервера с
- * честной свежестью — и, после фазы 4, ЕДИНСТВЕННОЕ место карточки, отвечающее
- * на вопрос «что с сайтом». Проверяем продуктовые правила обеих фаз.
+ * Вкладка Server карточки домена: витрина прочитанного с сервера с честной
+ * свежестью — и ЕДИНСТВЕННОЕ место карточки, отвечающее на вопрос «что с
+ * сайтом». Проверяем продуктовые правила всех фаз, которые её собрали.
+ *
+ * Нумерация фаз ниже — из ПРЕЖНЕГО плана карточки домена (там их было четыре);
+ * раскладку по вкладкам делает следующий план, и его правила названы здесь
+ * словами, а не номером, чтобы две нумерации не читались как одна.
+ *
+ * Раскладка вкладок: секция стала двумя карточками (`FTP Access` и `Site`) плюс
+ * заглушкой `Backups`, а перечень логов из этого же снимка принадлежит вкладке
+ * Logs — здесь его быть не должно, иначе на один вопрос отвечают два места.
  *
  * Фаза 3 (свежесть и секреты):
  *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
  *  - свежесть считается от `fp_facts_at`, «never checked» — отдельное слово;
  *  - провал последней попытки виден, но снимок остаётся;
- *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет;
- *  - лестница SSL: протухший снимок не зелёный, «нет сертификата» отличимо.
+ *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет.
+ *
+ * Про SSL здесь больше нет ничего: карточка сертификата уехала на вкладку
+ * Overview вместе со своей половиной правила расхождений, и проверяется она там
+ * же — `DomainSslCard.test.tsx` (лестница состояний) и
+ * `DomainDetailModal.overview.test.tsx` (бейдж шапки и карточка не расходятся).
  *
  * Фаза 4 (наша запись против факта):
  *  - строка «при развёртывании: X» есть при расхождении и отсутствует при
@@ -34,7 +46,7 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
 
 const mocks = vi.hoisted(() => ({ invokeSynced: vi.fn(), invokeIfTauri: vi.fn(), apiPut: vi.fn() }));
 
-vi.mock("../../lib/localCache", async (importOriginal) => ({
+vi.mock("../../../lib/localCache", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeSynced: mocks.invokeSynced,
   syncLocalCache: vi.fn(async () => {}),
@@ -44,12 +56,12 @@ vi.mock("../../lib/localCache", async (importOriginal) => ({
 // тест обязан ВИДЕТЬ, что уехало в блоб (плейнтекст) и что — в тело PUT (только
 // blobId). Заглушка над `putSecretBlob`/`useSecretSave` пропустила бы регрессию,
 // прокидывающую пароль в `variables` мутации домена.
-vi.mock("../../lib/tauri-invoke", async (importOriginal) => ({
+vi.mock("../../../lib/tauri-invoke", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   invokeIfTauri: mocks.invokeIfTauri,
 }));
 
-vi.mock("../../api/client", async (importOriginal) => ({
+vi.mock("../../../api/client", async (importOriginal) => ({
   ...(await importOriginal<any>()),
   apiPut: mocks.apiPut,
 }));
@@ -118,7 +130,7 @@ function rowText(label: string): string {
 function show(over: Record<string, unknown> = {}, server = SERVER) {
   render(
     <QueryClientProvider client={queryClient}>
-      <DomainServerFacts domain={domain(over)} server={server} now={Date.now()} />
+      <DomainServerTab domain={domain(over)} server={server} now={Date.now()} />
     </QueryClientProvider>,
   );
 }
@@ -178,31 +190,24 @@ describe("свежесть", () => {
 
 describe("ошибка последней попытки", () => {
   it("показана, а снимок остаётся (свежесть — от fp_facts_at)", () => {
-    show({ fp_facts: facts(), fp_facts_at: ago(2 * HOUR), fp_check_error: "ssh: connection refused" });
-    expect(screen.getByText(/ssh: connection refused/)).toBeTruthy();
-    // Снимок жив: SSL по-прежнему «Valid», ошибка его не стёрла.
-    expect(screen.getByText("Valid")).toBeTruthy();
-  });
-});
-
-describe("SSL по лестнице", () => {
-  it("свежий валидный сертификат — «Valid» (зелёный)", () => {
-    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
-    expect(screen.getByText("Valid")).toBeTruthy();
-  });
-
-  it("протухший снимок валидного сертификата — «Not checked», а не «Valid»", () => {
-    show({ fp_facts: facts(), fp_facts_at: ago(8 * DAY) });
-    expect(screen.getByText("Not checked")).toBeTruthy();
-    expect(screen.queryByText("Valid")).toBeNull();
-  });
-
-  it("свежий снимок без сертификата — «No certificate», отличимо от «не проверяли»", () => {
+    // `fp_checked_at` стоит В ФИКСТУРЕ и НАМЕРЕННО свежее снимка: без него имя
+    // теста обещало то, чего он не проверял. Считай возраст от последней
+    // ПОПЫТКИ — и строка сказала бы «Checked 1m ago» над данными двухчасовой
+    // давности, то есть проваленная проверка молодила бы снимок. Общее правило
+    // живёт в `lib/domainFacts` и проверено ещё и у карточки SSL, но здесь у
+    // подписи свой потребитель и свой единственный экземпляр на вкладке.
     show({
-      fp_facts: facts({ ssl: { has_certificate: false, expires_at: null, issuer: null, is_letsencrypt: false } }),
-      fp_facts_at: ago(HOUR),
+      fp_facts: facts(),
+      fp_facts_at: ago(2 * HOUR),
+      fp_checked_at: ago(60_000),
+      fp_check_error: "ssh: connection refused",
     });
-    expect(screen.getByText("No certificate")).toBeTruthy();
+    expect(screen.getByText(/Checked/).textContent).toMatch(/2h/);
+    expect(screen.getByText(/ssh: connection refused/)).toBeTruthy();
+    // Снимок жив: поля по-прежнему из него, ошибка его не стёрла. Раньше это
+    // проверялось по бейджу «Valid» — он уехал на карточку SSL вместе с ней, а
+    // утверждение осталось тем же и спрашивает теперь соседнее поле снимка.
+    expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
   });
 });
 
@@ -266,12 +271,73 @@ describe("пароль FTP", () => {
 });
 
 describe("данные сайта", () => {
-  it("путь, PHP с обработчиком, БД и логи из фактов", () => {
+  it("путь, PHP с обработчиком и БД из фактов", () => {
     show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
     expect(screen.getByText("/var/www/example.com")).toBeTruthy();
     expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
     expect(screen.getByText("example_db")).toBeTruthy();
-    expect(screen.getByText("/var/log/nginx/example.com.error.log")).toBeTruthy();
+  });
+
+  it("перечня логов на вкладке Server нет: он предмет вкладки Logs", () => {
+    // Утверждение-дубль прежнего: раньше здесь проверялось, что строка `Logs`
+    // печатает пути из снимка. Логи читаются из того же `fp_facts.logs`, что и
+    // всё остальное, и по плану вкладок принадлежат вкладке Logs — два места,
+    // печатающие один и тот же перечень, разъехались бы в первый же день,
+    // когда одно из них поправят. Поэтому правило осталось, только с обратным
+    // знаком, и переживёт приезд самой вкладки.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(screen.queryByText("/var/log/nginx/example.com.error.log")).toBeNull();
+    expect(screen.queryByText("Logs")).toBeNull();
+  });
+});
+
+describe("раскладка макета: карточки, а не сплошная секция", () => {
+  it("две именованные карточки — FTP Access и Site", () => {
+    // Именно `role="group"` с именем: карточка `SectionCard` — единица, по
+    // которой скринридер прыгает и к которой относит поля. Ряд из полей без
+    // группировки — это лента, где непонятно, чей `Login` и чей `Path`.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    expect(screen.getByRole("group", { name: "FTP Access" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Site" })).toBeTruthy();
+    // Поля стоят каждое в своей карточке, а не рядом друг с другом.
+    const ftp = screen.getByRole("group", { name: "FTP Access" }).textContent ?? "";
+    expect(ftp).toContain("Host");
+    expect(ftp).toContain("Password");
+    expect(ftp).not.toContain("Databases");
+    const site = screen.getByRole("group", { name: "Site" }).textContent ?? "";
+    expect(site).toContain("Databases");
+    expect(site).not.toContain("Password");
+  });
+
+  it("свежесть и карточки — одна названная область, заглушка Backups снаружи", () => {
+    // Подпись возраста стоит ОТДЕЛЬНОЙ строкой над карточками: глазами близость
+    // всё объясняет, на слух — ничего. Область «Server snapshot» и связывает их:
+    // войдя в неё, человек слышит имя, а первой внутри стоит сама подпись.
+    // Заглушка Backups снаружи намеренно — к снимку она отношения не имеет, и
+    // `aria-label` над ней обещал бы, что и она измерена.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    const region = screen.getByRole("region", { name: "Server snapshot" });
+    expect(within(region).getByText(/Checked/)).toBeTruthy();
+    expect(within(region).getByRole("group", { name: "FTP Access" })).toBeTruthy();
+    expect(within(region).getByRole("group", { name: "Site" })).toBeTruthy();
+    expect(within(region).queryByRole("group", { name: "Backups" })).toBeNull();
+    // И сама заглушка при этом на экране есть — снаружи области, а не вместо неё.
+    expect(screen.getByRole("group", { name: "Backups" })).toBeTruthy();
+  });
+
+  it("Backups — честная заглушка: пилюля COMING SOON и ни одного мёртвого органа управления", () => {
+    // Отступление 1 плана: макет рисует здесь два селекта (частота и место),
+    // поле пути и кнопки «Backup now»/«Save», а также мету «Last backup: … ·
+    // 412 MB». О резервных копиях продукт не знает ничего — ни модели, ни
+    // колонки, ни поля в снимке, — поэтому селект, который ничего не
+    // сохраняет, обещал бы настройку, которой нет.
+    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
+    const backups = screen.getByRole("group", { name: "Backups" });
+    expect(backups.textContent).toContain("COMING SOON");
+    expect(within(backups).queryAllByRole("combobox")).toEqual([]);
+    expect(within(backups).queryAllByRole("button")).toEqual([]);
+    expect(within(backups).queryAllByRole("textbox")).toEqual([]);
+    expect(backups.textContent).not.toMatch(/Last backup/i);
   });
 });
 
@@ -293,7 +359,6 @@ describe("расхождение нашей записи с фактом", () =>
       site_path: "/var/www/example.com/", // хвостовой слэш — не расхождение
       site_user: "example_usr",
       db_name: "example_db",
-      ssl_issuer: "Let's Encrypt",
     });
     expect(screen.queryByText(/при развёртывании/)).toBeNull();
   });
@@ -304,21 +369,21 @@ describe("расхождение нашей записи с фактом", () =>
     expect(screen.getByText(/при развёртывании: 7\.4/)).toBeTruthy();
   });
 
-  it("путь, владелец, издатель и база расходятся каждый своей строкой", () => {
+  it("путь, владелец и база расходятся каждый своей строкой", () => {
+    // Издатель сертификата был здесь четвёртым и уехал на карточку SSL вместе
+    // с ней (`DomainSslCard.test.tsx` проверяет его тем же утверждением).
     show({
       ...fresh,
       site_path: "/var/www/old.example.com",
       site_user: "old_usr",
-      ssl_issuer: "ZeroSSL",
       db_name: "old_db",
     });
     // Множеством, а не списком в DOM-порядке: перестановка колонок — вопрос
     // вёрстки, и красить ею тест про поведение незачем.
     const notes = screen.getAllByText(/при развёртывании/).map((n) => n.textContent);
-    expect(notes).toHaveLength(4);
+    expect(notes).toHaveLength(3);
     expect(new Set(notes)).toEqual(
       new Set([
-        "при развёртывании: ZeroSSL",
         "при развёртывании: /var/www/old.example.com",
         "при развёртывании: old_usr",
         "при развёртывании: old_db",
@@ -345,36 +410,6 @@ describe("расхождение нашей записи с фактом", () =>
     show({ ...fresh, fp_facts: facts({ ftp_accounts: [{ login: "server_ftp", home: null }] }), ftp_user: "   " });
     expect(rowText("Login")).toContain("server_ftp");
     expect(sourceOf("Login")).toBe("agree");
-  });
-
-  it("срок сертификата сверяется по дате, а наша запись печатается по-человечески", () => {
-    // Часы задаём ЛОКАЛЬНЫЕ: «тот же день» не должен зависеть от зоны CI.
-    const at = (days: number, hour: number) => {
-      const d = new Date();
-      d.setDate(d.getDate() + days);
-      d.setHours(hour, 0, 0, 0);
-      return d;
-    };
-    const base = {
-      fp_facts: facts({
-        ssl: { has_certificate: true, expires_at: at(60, 9).toISOString(), issuer: "Let's Encrypt", is_letsencrypt: true },
-      }),
-      fp_facts_at: ago(HOUR),
-    };
-
-    // Тот же день, другое время — не расхождение (наша запись сделана в момент
-    // выпуска, сервер отдаёт то, что написано в сертификате).
-    show({ ...base, ssl_expires_at: at(60, 18).toISOString() });
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
-
-    cleanup();
-    // Другой день — расхождение, и в строке стоит ДАТА, а не сырой ISO: иначе
-    // она читалась бы расхождением с форматированным значением над ней.
-    const other = at(62, 9);
-    show({ ...base, ssl_expires_at: other.toISOString() });
-    const note = screen.getByText(/при развёртывании/).textContent ?? "";
-    expect(note).toContain(other.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }));
-    expect(note).not.toContain("T");
   });
 });
 
@@ -453,6 +488,11 @@ describe("снимка не было ни разу", () => {
     // поля снимка спрятаны целиком, потому что прочерк в них читался бы как
     // «спросили, там пусто».
     expect(screen.queryAllByText("—")).toEqual([]);
+    // И «not read» — тоже ни одного: так помечен ПУСТОЙ СПИСОК под снимком
+    // («спросили, не прочитали»), а здесь спрашивать мы не ходили вовсе, и
+    // легенда строкой выше уже сказала это словами. Утверждение общее на обе
+    // карточки: список печатают и `Login` (аккаунты FTP), и `Databases`.
+    expect(screen.queryAllByText("not read")).toEqual([]);
   });
 
   it("известное из provision показано как наша запись, а подпись дана легендой один раз", () => {
@@ -464,10 +504,38 @@ describe("снимка не было ни разу", () => {
       expect(screen.getByText(v)).toBeTruthy();
     }
     // Подпись плана дана дословно, но ОДИН раз — легендой над сеткой, а не
-    // восемью одинаковыми строками под каждым полем (принцип №2).
+    // одинаковой строкой под каждым полем (принцип №2).
     expect(screen.getAllByText(/из provision, на сервере не проверено/)).toHaveLength(1);
     // И ни одно значение не выдано за расхождение: сверять было не с чем.
     expect(screen.queryByText(/при развёртывании/)).toBeNull();
+  });
+
+  it("карточке Site нечего сказать — она говорит это словом, а не пустой рамкой", () => {
+    // Импортированный домен: ни снимка, ни записей provision. Все пять строк
+    // карточки прячутся (прочерк читался бы как «спросили, там пусто»), и без
+    // этой фразы на экране остаётся пустая коробка с рамкой и крашеной шапкой,
+    // растянутая соседкой по ряду на её высоту, — вёрстка, читающаяся поломкой.
+    // Легенда вкладки объясняет ВКЛАДКУ, а не то, почему у карточки нет ни
+    // строки.
+    show({ ftp_user: null });
+    const site = screen.getByRole("group", { name: "Site" });
+    expect(site.textContent).toContain("No site details recorded for this domain yet.");
+  });
+
+  it("есть хоть одна запись из provision — фразы нет, есть строка", () => {
+    // Условие точное, а не «похоже на пустоту»: одна запись из provision — и
+    // карточке уже есть что показать, приглушённым значением.
+    show({ ftp_user: null, site_path: "/var/www/example.com" });
+    const site = screen.getByRole("group", { name: "Site" });
+    expect(site.textContent).not.toContain("No site details recorded");
+    expect(sourceOf("Path")).toBe("recorded-only");
+  });
+
+  it("под снимком фразы не бывает: пустое поле списка само говорит «not read»", () => {
+    show({ fp_facts: facts({ databases: [], ftp_accounts: [] }), fp_facts_at: ago(HOUR) });
+    expect(screen.getByRole("group", { name: "Site" }).textContent).not.toContain(
+      "No site details recorded",
+    );
   });
 
   it("факты без отметки времени не печатаются вопреки легенде", () => {
@@ -486,7 +554,7 @@ describe("снимка не было ни разу", () => {
     // `show` подставляет сервер по умолчанию, поэтому рендерим напрямую.
     render(
       <QueryClientProvider client={queryClient}>
-        <DomainServerFacts domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
+        <DomainServerTab domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
       </QueryClientProvider>,
     );
     expect(screen.getByText("Host").parentElement?.textContent).toContain("—");

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { formatAgo, formatAgoStale } from "./Primitives";
+import { formatAgo, formatAgoStale } from "./format";
 
 /**
  * Возраст показания словами — чистая функция, и проверяется она отдельно от
