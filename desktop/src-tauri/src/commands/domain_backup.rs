@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -73,6 +73,9 @@ pub const BACKUP_STEP_ARCHIVE: &str = "archive";
 pub const BACKUP_STEP_DOWNLOAD: &str = "download";
 /// Уборка архива на сервере — после выгрузки, чем бы она ни кончилась.
 pub const BACKUP_STEP_REMOTE_CLEANUP: &str = "remote_cleanup";
+/// Убрать архив не вышло, он остался на сервере. В `note` — путь и что делать.
+/// Единственный канал этой вести на пути отмены: `warnings` там не доживают.
+pub const BACKUP_STEP_REMOTE_CLEANUP_FAILED: &str = "remote_cleanup_failed";
 /// Пересъёмка снимка домена, чтобы успех стал виден на экране.
 pub const BACKUP_STEP_FACTS: &str = "facts";
 /// Пересъёмка не удалась. Сам бэкап при этом УДАЛСЯ — см. `facts_refreshed`.
@@ -100,14 +103,20 @@ const BACKUP_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 /// сама собой, а вставший сервер ловится за две минуты.
 const BACKUP_DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Не чаще этого шлём события прогресса выгрузки.
+/// Промежуточное событие прогресса не чаще, чем раз в столько времени.
 ///
 /// Чанк у `exec_to_writer` ≤ 32 KiB, то есть ~32 тысячи событий на гигабайт.
 /// Без троттлинга это не «много событий», а очередь IPC, в которой вебвью
 /// захлебнётся раньше, чем докачается файл.
 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
-/// Второй порог — по объёму: на быстром канале 250 мс это уже десятки мегабайт,
-/// и без него полоса дёргалась бы редкими скачками.
+/// …ИЛИ раз в столько байт — что наступит раньше.
+///
+/// Внимание, это порог не того же знака: он частоту не снижает, а ПОВЫШАЕТ.
+/// На медленном канале работает время (4 раза в секунду и ни разу больше), на
+/// быстром — объём: гигабайт за десять секунд дал бы по времени 40 событий, а
+/// по объёму даёт 256, то есть полосу, которая едет плавно, а не прыгает через
+/// треть шкалы. Оба порога вместе (`OR`) держат частоту в коридоре между
+/// «дёргается» и «захлёбывается».
 const PROGRESS_MIN_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Что уехало наружу после удачного бэкапа.
@@ -285,6 +294,16 @@ pub(crate) struct ProgressThrottle {
 }
 
 impl ProgressThrottle {
+    /// Троттлинг, у которого «предыдущее событие» уже было: им открывает шаг
+    /// [`StepProgress`]. Без этого первый же `tick` уходил бы вторым событием
+    /// подряд — троттлинг по умолчанию всегда пропускает первое.
+    pub(crate) fn primed(now: Instant) -> Self {
+        ProgressThrottle {
+            last_at: Some(now),
+            last_bytes: 0,
+        }
+    }
+
     pub(crate) fn should_emit(&mut self, now: Instant, bytes: u64) -> bool {
         let by_time = match self.last_at {
             None => true,
@@ -300,13 +319,15 @@ impl ProgressThrottle {
     }
 }
 
-fn emit_progress(
-    app: &AppHandle,
+/// Тело события прогресса. Отдельно от отправки, потому что `AppHandle` в
+/// тесте не поднять, а форма события — контракт с фазой 7.
+pub(crate) fn progress_payload(
     domain_id: &str,
     step: &str,
     done_bytes: Option<u64>,
     total_bytes: Option<u64>,
-) {
+    note: Option<&str>,
+) -> serde_json::Value {
     let mut payload = serde_json::json!({ "domain_id": domain_id, "step": step });
     if let Some(d) = done_bytes {
         payload["done_bytes"] = serde_json::json!(d);
@@ -315,7 +336,123 @@ fn emit_progress(
     if let Some(t) = total_bytes {
         payload["total_bytes"] = serde_json::json!(t);
     }
-    let _ = app.emit(BACKUP_PROGRESS_EVENT, payload);
+    if let Some(n) = note {
+        payload["note"] = serde_json::json!(n);
+    }
+    payload
+}
+
+/// Строка прогресса ОДНОГО шага: троттлит промежуточные события и обязательно
+/// выдаёт последнее.
+///
+/// Хвост шага живёт в `Drop`, а не отдельной строкой в конце выгрузки, — и это
+/// главное решение типа. «Последнее событие шага — всегда» иначе держится на
+/// том, что автор не удалил вызов: удаление проходит зелёным на всех тестах, а
+/// на экране полоса навсегда замирает на предпоследнем значении троттлинга —
+/// то есть на цифре, которой прогон не кончался. В `Drop` этот вызов удалить
+/// нельзя, не сломав тест: `Drop` и есть проверяемая форма инварианта.
+///
+/// Сбрасывается ровно один раз и не дублирует уже ушедшее событие: если
+/// последний `tick` совпал с итогом, хвост молчит.
+pub(crate) struct StepProgress<F: FnMut(u64, Option<u64>)> {
+    emit: F,
+    total: Option<u64>,
+    throttle: ProgressThrottle,
+    done: u64,
+    last_emitted: Option<u64>,
+}
+
+impl<F: FnMut(u64, Option<u64>)> StepProgress<F> {
+    /// Открывает шаг событием с нулём: без него на экране не было бы видно, что
+    /// шаг вообще начался (а начинается он с многоминутной тишины).
+    /// Часы параметром — по той же причине, что у [`ProgressThrottle`]: иначе
+    /// «открывающее событие не считается за предыдущее» пришлось бы проверять
+    /// `sleep`'ами.
+    pub(crate) fn start(mut emit: F, total: Option<u64>, now: Instant) -> Self {
+        emit(0, total);
+        StepProgress {
+            emit,
+            total,
+            throttle: ProgressThrottle::primed(now),
+            done: 0,
+            last_emitted: Some(0),
+        }
+    }
+
+    /// Прогресс доехал до `done` байт. Событие уйдёт, только если разрешит
+    /// троттлинг; итог запомнится в любом случае.
+    pub(crate) fn tick(&mut self, now: Instant, done: u64) {
+        self.done = done;
+        if self.throttle.should_emit(now, done) {
+            (self.emit)(done, self.total);
+            self.last_emitted = Some(done);
+        }
+    }
+}
+
+impl<F: FnMut(u64, Option<u64>)> Drop for StepProgress<F> {
+    fn drop(&mut self) {
+        if self.last_emitted != Some(self.done) {
+            (self.emit)(self.done, self.total);
+        }
+    }
+}
+
+/// Весть о неубранном архиве — или `None`, если уборка прошла.
+///
+/// Чистая функция, потому что это единственное, что можно проверить в тесте:
+/// сам `rm` требует сервера.
+pub(crate) fn remote_cleanup_note(
+    path: &str,
+    outcome: Result<(i32, String), SshError>,
+) -> Option<String> {
+    match outcome {
+        Ok((0, _)) => None,
+        Ok((code, _)) => Some(format!(
+            "the archive is still on the server at {path} (rm exited {code}) — remove it by hand"
+        )),
+        Err(e) => Some(format!(
+            "the archive is still on the server at {path} ({e}) — remove it by hand"
+        )),
+    }
+}
+
+/// Сказать о неубранном архиве всеми каналами сразу.
+///
+/// Каналов два, и второй не дублирует первый: `warnings` доживают до человека
+/// ТОЛЬКО на успешном пути (на отмене и на отказе результат не возвращается
+/// вовсе и вместе со стеком выбрасывается). А отказ уборки как раз вероятнее
+/// всего именно там: сессия после отмены могла уже развалиться. Поэтому весть
+/// уходит ещё и событием, и в лог — иначе многогигабайтный тарболл остался бы
+/// в `/var/tmp` продакшна, и об этом не знал бы никто и нигде.
+pub(crate) fn report_cleanup_note(
+    note: &str,
+    warnings: &mut Vec<String>,
+    notify: &mut dyn FnMut(&str),
+) {
+    tracing::warn!(target: "backup", "{note}");
+    notify(note);
+    warnings.push(note.to_string());
+}
+
+fn emit_progress(
+    app: &AppHandle,
+    domain_id: &str,
+    step: &str,
+    done_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+) {
+    let _ = app.emit(
+        BACKUP_PROGRESS_EVENT,
+        progress_payload(domain_id, step, done_bytes, total_bytes, None),
+    );
+}
+
+fn emit_note(app: &AppHandle, domain_id: &str, step: &str, note: &str) {
+    let _ = app.emit(
+        BACKUP_PROGRESS_EVENT,
+        progress_payload(domain_id, step, None, None, Some(note)),
+    );
 }
 
 /// Отмена как ошибка команды: одна строка-маркер на все места, где она может
@@ -582,7 +719,7 @@ async fn run_backup(
         .ok_or_else(|| CommandError::Api("fastpanel is not installed on the server".into()))?;
 
     emit_progress(app, domain_id, BACKUP_STEP_ARCHIVE, None, None);
-    let artifact = {
+    let mut artifact = {
         // Обёртка живёт ровно столько, сколько идёт сборка: дальше сессия
         // нужна нам самим (выгрузка, уборка, факты), и отменять эти шаги
         // обёрткой было бы неверно — уборку отменять нельзя.
@@ -591,24 +728,25 @@ async fn run_backup(
             .await
             .map_err(backup_error_to_command)?
     };
-    let mut warnings = artifact.warnings.clone();
+    let mut warnings = std::mem::take(&mut artifact.warnings);
 
     // Выгрузка. Отмена читается в `on_progress`, то есть после каждого чанка.
+    //
+    // Открывающее и завершающее события шага не пишутся здесь руками: их
+    // держит `StepProgress` (последнее — в `Drop`, см. его комментарий), и
+    // потерять их поэтому нельзя, не сломав тест.
     let total = artifact.bytes;
-    let seen = Arc::new(AtomicU64::new(0));
-    emit_progress(
-        app,
-        domain_id,
-        BACKUP_STEP_DOWNLOAD,
-        Some(0),
-        Some(total),
-    );
     let download = {
         let app_c = app.clone();
         let did = domain_id.to_string();
         let flag = cancel.clone();
-        let seen_c = seen.clone();
-        let mut throttle = ProgressThrottle::default();
+        let mut progress = StepProgress::start(
+            move |done, total| {
+                emit_progress(&app_c, &did, BACKUP_STEP_DOWNLOAD, Some(done), total)
+            },
+            Some(total),
+            Instant::now(),
+        );
         backup_download::download_archive(
             session,
             &artifact.path,
@@ -617,34 +755,15 @@ async fn run_backup(
             artifact.bytes,
             BACKUP_DOWNLOAD_IDLE_TIMEOUT,
             move |done| {
-                seen_c.store(done, Ordering::SeqCst);
+                progress.tick(Instant::now(), done);
                 if flag.load(Ordering::SeqCst) {
                     return ControlFlow::Break(());
-                }
-                if throttle.should_emit(Instant::now(), done) {
-                    emit_progress(
-                        &app_c,
-                        &did,
-                        BACKUP_STEP_DOWNLOAD,
-                        Some(done),
-                        Some(total),
-                    );
                 }
                 ControlFlow::Continue(())
             },
         )
         .await
     };
-    // Последнее событие шага — ВСЕГДА, чем бы шаг ни кончился: иначе на экране
-    // навсегда осталось бы предпоследнее значение троттлинга, то есть цифра,
-    // которой прогон не кончался.
-    emit_progress(
-        app,
-        domain_id,
-        BACKUP_STEP_DOWNLOAD,
-        Some(seen.load(Ordering::SeqCst)),
-        Some(total),
-    );
 
     // Архив на сервере — наш мусор, и убрать его обязаны мы: ядро на успехе
     // сносит рабочий каталог, но сам `<домен>-<штамп>.tar` оставляет лежать в
@@ -662,27 +781,24 @@ async fn run_backup(
     let remove_remote = should_remove_remote_archive(download.as_ref());
     if remove_remote {
         emit_progress(app, domain_id, BACKUP_STEP_REMOTE_CLEANUP, None, None);
-        match build_remote_archive_rm_cmd(&artifact.path) {
-            Some(cmd) => match session.run(&cmd, BACKUP_STEP_TIMEOUT).await {
-                Ok((0, _)) => {}
-                // Не роняем удавшийся бэкап из-за неубранного архива, но и не
-                // молчим: место на диске сервера кончится молча, а тут
-                // написано, где именно лежит гигабайт.
-                Ok((code, _)) => warnings.push(format!(
-                    "the archive is still on the server at {} (rm exited {code}) — remove it by hand",
-                    artifact.path
-                )),
-                Err(e) => warnings.push(format!(
-                    "the archive is still on the server at {} ({e}) — remove it by hand",
-                    artifact.path
-                )),
-            },
+        let note = match build_remote_archive_rm_cmd(&artifact.path) {
+            Some(cmd) => remote_cleanup_note(
+                &artifact.path,
+                session.run(&cmd, BACKUP_STEP_TIMEOUT).await,
+            ),
             // Путь, не похожий на наш собственный, мы не удаляем вовсе: `rm` по
             // строке, пришедшей не оттуда, откуда мы думаем, — это не уборка.
-            None => warnings.push(format!(
+            None => Some(format!(
                 "refused to remove {} on the server: it is not a path SDMP created",
                 artifact.path
             )),
+        };
+        if let Some(note) = note {
+            // Всеми каналами сразу — см. `report_cleanup_note`. На пути отмены
+            // `warnings` не доживут, и событие с логом остаются единственными.
+            report_cleanup_note(&note, &mut warnings, &mut |n| {
+                emit_note(app, domain_id, BACKUP_STEP_REMOTE_CLEANUP_FAILED, n)
+            });
         }
     }
 
@@ -705,6 +821,17 @@ async fn run_backup(
     // самого домена, а здесь чтение было нашей попутной услугой, о которой
     // человек не просил. Запись отодвинула бы `fp_checked_at` и объявила
     // домен непрочитанным по итогам действия, которое удалось.
+    //
+    // Асимметрия при этом есть, и назвать её надо прямо: удачный write-back
+    // двигает `fp_checked_at` и ОБНУЛЯЕТ `fp_check_error` (это делает
+    // `apply_facts` на бэкенде), то есть попутная услуга умеет объявить домен
+    // здоровым, но не умеет признать, что не смогла его прочитать. Оставлено
+    // так намеренно: обнуление на успехе — не осветление, а правда, потому что
+    // сервер действительно только что прочитан целиком; а вот наш провал ещё
+    // не значит, что домен нездоров (сессия могла умереть после выгрузки
+    // гигабайта), и объявлять его непрочитанным по этому поводу — врать в
+    // другую сторону. Направление ошибки безопасное: снимок остаётся СТАРЫМ,
+    // и его возраст на экране сам скажет, что данным верить рано.
     emit_progress(app, domain_id, BACKUP_STEP_FACTS, None, None);
     let facts_refreshed =
         refresh_facts(session, api, domain_id, domain_name, site_user, &fp).await;
@@ -943,6 +1070,82 @@ mod tests {
         assert!(format!("{e}").contains("/var/tmp/sdmp-backup/example.com"), "{e}");
     }
 
+    // ---- хвост шага ---------------------------------------------------------
+
+    /// Записывает события вместо отправки в вебвью.
+    fn recorder(sink: &std::cell::RefCell<Vec<(u64, Option<u64>)>>) -> impl FnMut(u64, Option<u64>) + '_ {
+        move |done, total| sink.borrow_mut().push((done, total))
+    }
+
+    // Главный инвариант шага, и единственный, который нельзя проверить, глядя
+    // на экран: сколько бы ни съел троттлинг, ПОСЛЕДНЕЕ значение доезжает.
+    // Убери сброс в `Drop` — этот тест краснеет, а раньше не краснело ничего.
+    //
+    // Настоящего времени в тесте нет ни в одном сравнении, и это условие его
+    // существования, а не деталь: `t0` берётся ОДИН раз и уходит и в
+    // `start` (там им заводится троттлинг), и в оба `tick`, поэтому
+    // `duration_since` внутри равен нулю по построению — при любой нагрузке на
+    // машину, любом планировщике и любой паузе между строками. Плавающий замок
+    // на месте единственного жирного пункта спеки был бы хуже отсутствующего:
+    // он приучил бы перезапускать прогон вместо того, чтобы читать красное.
+    #[test]
+    fn the_last_value_of_a_step_always_arrives() {
+        let sink = std::cell::RefCell::new(Vec::new());
+        {
+            let t0 = Instant::now();
+            let mut p = StepProgress::start(recorder(&sink), Some(100), t0);
+            // Оба тика — внутри окна троттлинга: ни один не уходит сам.
+            p.tick(t0, 30);
+            p.tick(t0, 60);
+        }
+        assert_eq!(
+            sink.into_inner(),
+            vec![(0, Some(100)), (60, Some(100))],
+            "хвост шага не доехал"
+        );
+    }
+
+    // …но и не дублирует: если последний тик уже ушёл, хвост молчит. Иначе
+    // фронт получал бы два одинаковых события на каждый шаг.
+    #[test]
+    fn the_tail_does_not_repeat_an_event_that_already_went() {
+        let sink = std::cell::RefCell::new(Vec::new());
+        {
+            let t0 = Instant::now();
+            let mut p = StepProgress::start(recorder(&sink), Some(100), t0);
+            p.tick(t0 + Duration::from_millis(300), 60);
+        }
+        assert_eq!(sink.into_inner(), vec![(0, Some(100)), (60, Some(100))]);
+    }
+
+    // Шаг, не сдвинувшийся ни на байт (сервер умер на первом чанке), — одно
+    // событие, а не два одинаковых нуля.
+    #[test]
+    fn a_step_that_moved_nothing_reports_once() {
+        let sink = std::cell::RefCell::new(Vec::new());
+        {
+            // Часы те же и здесь — тик ни одного, сравнивать нечего, но
+            // единый приём во всех трёх тестах не оставляет сомнений читателю.
+            let _p = StepProgress::start(recorder(&sink), Some(100), Instant::now());
+        }
+        assert_eq!(sink.into_inner(), vec![(0, Some(100))]);
+    }
+
+    // Знаменателя нет — его нет и в событии: полоса «на глаз» это тот же
+    // зелёный бейдж вместо «не проверяли» (принцип №6).
+    #[test]
+    fn a_step_without_a_denominator_does_not_invent_one() {
+        let v = progress_payload("d1", BACKUP_STEP_ARCHIVE, None, None, None);
+        assert_eq!(v["domain_id"], "d1");
+        assert_eq!(v["step"], BACKUP_STEP_ARCHIVE);
+        assert!(v.get("total_bytes").is_none(), "{v}");
+        assert!(v.get("done_bytes").is_none(), "{v}");
+
+        let v = progress_payload("d1", BACKUP_STEP_DOWNLOAD, Some(5), Some(10), None);
+        assert_eq!(v["done_bytes"], 5);
+        assert_eq!(v["total_bytes"], 10);
+    }
+
     // ---- уборка архива на сервере -------------------------------------------
 
     // Главное правило: снос — только когда файл у человека проверен и уже
@@ -1043,6 +1246,58 @@ mod tests {
         assert!(cmd.contains("a b"), "{cmd}");
     }
 
+    // Провал уборки обязан быть НАЗВАН, а не только записан в `warnings`:
+    // `warnings` уезжают в результате, а результата на пути отмены и отказа
+    // нет вовсе. Убери `notify` — красное здесь.
+    #[test]
+    fn the_leftover_note_goes_out_even_when_the_result_will_be_thrown_away() {
+        let mut warnings: Vec<String> = Vec::new();
+        let mut told: Vec<String> = Vec::new();
+        let note = remote_cleanup_note(
+            "/var/tmp/sdmp-backup/example.com-20260819T103000Z.tar",
+            Err(SshError::Session("channel closed".into())),
+        )
+        .expect("провал уборки обязан давать весть");
+        report_cleanup_note(&note, &mut warnings, &mut |n| told.push(n.to_string()));
+
+        assert_eq!(told.len(), 1, "весть не ушла отдельным каналом");
+        assert!(told[0].contains("/var/tmp/sdmp-backup/"), "{}", told[0]);
+        assert_eq!(warnings, told, "каналы разошлись");
+    }
+
+    // Форма самой вести: путь и что делать. Удачная уборка молчит — иначе
+    // каждый успешный бэкап приносил бы предупреждение ни о чём.
+    #[test]
+    fn a_cleanup_that_worked_says_nothing_and_a_failed_one_names_the_path() {
+        let path = "/var/tmp/sdmp-backup/example.com-20260819T103000Z.tar";
+        assert!(remote_cleanup_note(path, Ok((0, String::new()))).is_none());
+
+        let n = remote_cleanup_note(path, Ok((1, "permission denied".into()))).unwrap();
+        assert!(n.contains(path), "{n}");
+        assert!(n.contains("rm exited 1"), "{n}");
+        assert!(n.contains("by hand"), "{n}");
+
+        let n = remote_cleanup_note(path, Err(SshError::Cancelled { bytes: 0 })).unwrap();
+        assert!(n.contains(path), "{n}");
+    }
+
+    // Весть о неубранном архиве доезжает событием — с путём внутри.
+    #[test]
+    fn the_leftover_event_carries_the_path() {
+        let v = progress_payload(
+            "d1",
+            BACKUP_STEP_REMOTE_CLEANUP_FAILED,
+            None,
+            None,
+            Some("the archive is still on the server at /var/tmp/sdmp-backup/x.tar"),
+        );
+        assert_eq!(v["step"], BACKUP_STEP_REMOTE_CLEANUP_FAILED);
+        assert!(
+            v["note"].as_str().unwrap().contains("/var/tmp/sdmp-backup/x.tar"),
+            "{v}"
+        );
+    }
+
     // ---- троттлинг ----------------------------------------------------------
 
     // 32 KiB чанки без троттлинга — ~32 тысячи событий на гигабайт. Порог по
@@ -1059,10 +1314,8 @@ mod tests {
                 emitted += 1;
             }
         }
-        // Первое событие + по одному на каждые 4 MiB.
         // Первое событие + по одному на каждые 4 MiB после него.
         assert_eq!(emitted, 8, "событий {emitted}");
-        assert!(emitted < 20, "троттлинг не сработал: {emitted}");
     }
 
     // Медленный канал: объёма не набирается, но линия жизни нужна — её даёт

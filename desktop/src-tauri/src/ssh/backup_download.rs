@@ -28,10 +28,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWrite;
 
-use crate::ssh::client::{SshError, SshSession};
+use crate::ssh::client::{ExecStream, SshError, SshSession};
 use crate::ssh::fastpanel::q;
 
 /// Суффикс недоделанного файла. Публичный: по нему же уборка ищет мусор.
@@ -93,6 +94,43 @@ pub struct DownloadOutcome {
     pub sha256: String,
 }
 
+/// «Вылей команду сервера в этот writer» — ровно то, чем пользуется выгрузка.
+///
+/// Существует ради проверяемости, а не ради абстракции (та же мотивация, что у
+/// `fastpanel::Exec`, и единственный прод-реализатор тут тоже один —
+/// [`SshSession`]). Но правило «файл под целевым именем существует, только если
+/// он целый» — центральное для модуля, а проверить его на живом SSH значит
+/// проверять только там, где поднят докер. С трейтом обе сверки, разбор
+/// `exit`/сигнала и судьба `.part` разыгрываются фейковым сервером в обычном
+/// `cargo test`.
+#[async_trait]
+pub trait ArchiveStream: Send {
+    async fn stream(
+        &mut self,
+        cmd: &str,
+        idle_timeout: Duration,
+        out: &mut (dyn AsyncWrite + Unpin + Send),
+        on_progress: &mut (dyn FnMut(u64) -> ControlFlow<()> + Send),
+    ) -> Result<ExecStream, SshError>;
+}
+
+#[async_trait]
+impl ArchiveStream for SshSession {
+    async fn stream(
+        &mut self,
+        cmd: &str,
+        idle_timeout: Duration,
+        out: &mut (dyn AsyncWrite + Unpin + Send),
+        on_progress: &mut (dyn FnMut(u64) -> ControlFlow<()> + Send),
+    ) -> Result<ExecStream, SshError> {
+        // Пересадка `dyn` в дженерик: `exec_to_writer` требует `Sized`, а
+        // `&mut dyn AsyncWrite` им и является (и сам реализует `AsyncWrite`).
+        let mut w = out;
+        self.exec_to_writer(cmd, idle_timeout, &mut w, on_progress)
+            .await
+    }
+}
+
 /// Писатель, который считает sha256 ПО ХОДУ записи.
 ///
 /// Второго прохода по гигабайтам нет и быть не должно: перечитать файл целиком
@@ -121,7 +159,18 @@ impl<W> HashingWriter<W> {
 
     /// Хеш в hex и число записанных байт.
     pub fn finish(self) -> (String, u64) {
-        (hex::encode(self.hasher.finalize()), self.written)
+        let (_, sha, bytes) = self.into_parts();
+        (sha, bytes)
+    }
+
+    /// То же, но с возвратом самого writer'а — он нужен, чтобы дожать файл на
+    /// диск (`sync_all`) до переименования.
+    pub fn into_parts(self) -> (W, String, u64) {
+        (
+            self.inner,
+            hex::encode(self.hasher.finalize()),
+            self.written,
+        )
     }
 }
 
@@ -190,6 +239,15 @@ pub fn validate_dest_path(dest: &str) -> Result<PathBuf, DownloadError> {
 /// Именно суффикс к полному имени, а не подмена расширения: рядом с
 /// `site.tar` должен лежать `site.tar.part`, чтобы человек, увидевший его в
 /// файловом менеджере, понял, чей это огрызок.
+///
+/// Имя огрызка определяется ТОЛЬКО путём назначения, и это известная дыра в
+/// экзотическом случае: два бэкапа РАЗНЫХ доменов, которым человек выбрал один
+/// и тот же `dest_path`, пишут в один `.part`, и сторож одного снесёт файл
+/// другого. Замок на сервере сюда не достаёт (он на домен), реестр прогонов
+/// тоже (ключ — домен). Не чинится штампом в имени намеренно: тогда после
+/// падения на диске оставались бы `site.tar.a1b2.part`, которые никто никогда
+/// не уберёт, — а лечится это тем, что путь приходит из нативной панели
+/// сохранения, где два одинаковых имени подряд надо выбрать руками.
 pub fn part_path(dest: &Path) -> PathBuf {
     let mut s = dest.as_os_str().to_os_string();
     s.push(PART_SUFFIX);
@@ -240,8 +298,8 @@ impl Drop for PartGuard {
 /// `ControlFlow::Break`, вызывающий отменяет выгрузку — реакция мгновенная, а
 /// не «на следующем шаге». Троттлинг событий — забота вызывающего: сюда чанки
 /// приходят по 32 KiB, то есть ~32 тысячи раз на гигабайт.
-pub async fn download_archive<F>(
-    session: &mut SshSession,
+pub async fn download_archive<S, F>(
+    session: &mut S,
     remote_path: &str,
     dest: &Path,
     expected_sha256: &str,
@@ -250,6 +308,7 @@ pub async fn download_archive<F>(
     on_progress: F,
 ) -> Result<DownloadOutcome, DownloadError>
 where
+    S: ArchiveStream + ?Sized,
     F: FnMut(u64) -> ControlFlow<()> + Send,
 {
     let part = part_path(dest);
@@ -279,8 +338,8 @@ where
 
 /// Тело выгрузки: поток → `.part` → сверка. Вынесено, чтобы у сторожа из
 /// [`download_archive`] был ровно один выход и ни одного забытого `?`.
-async fn stream_into_part<F>(
-    session: &mut SshSession,
+async fn stream_into_part<S, F>(
+    session: &mut S,
     remote_path: &str,
     part: &Path,
     expected_sha256: &str,
@@ -289,6 +348,7 @@ async fn stream_into_part<F>(
     on_progress: F,
 ) -> Result<DownloadOutcome, DownloadError>
 where
+    S: ArchiveStream + ?Sized,
     F: FnMut(u64) -> ControlFlow<()> + Send,
 {
     let file = tokio::fs::File::create(part).await?;
@@ -300,11 +360,12 @@ where
     // `exec_to_writer` — там нет ни pty, ни `from_utf8_lossy`), а всё
     // остальное добавило бы преобразование, которое нечем проверить.
     let cmd = format!("cat {}", q(remote_path));
+    let mut on_progress = on_progress;
     let stream = session
-        .exec_to_writer(&cmd, idle_timeout, &mut writer, on_progress)
+        .stream(&cmd, idle_timeout, &mut writer, &mut on_progress)
         .await?;
 
-    let (sha256, bytes) = writer.finish();
+    let (buffered, sha256, bytes) = writer.into_parts();
 
     // Убитая команда приезжает как `Ok` с сигналом и `exit: -1` — она честно
     // доложила, как умерла. Проверять один только `exit` здесь мало: `cat`,
@@ -337,6 +398,18 @@ where
             got: sha256,
         });
     }
+
+    // `fsync` перед переименованием — решение, а не привычка. `exec_to_writer`
+    // гарантирует `flush`, то есть «байты отданы ядру», но не «байты на диске»:
+    // между записью и `rename` пропавшее питание оставило бы файл под ЦЕЛЕВЫМ
+    // именем с дырами внутри — ровно то, против чего построен `.part`. Платим
+    // за это одним ожиданием сброса кеша (на гигабайтах — секунды) и платим
+    // только здесь: на пути отказа файл всё равно будет снесён.
+    //
+    // Дальше `rename` — метаданная операция; порядок «сначала данные, потом
+    // имя» и есть весь смысл: переименование не может опередить содержимое.
+    let file = buffered.into_inner();
+    file.sync_all().await?;
 
     Ok(DownloadOutcome { bytes, sha256 })
 }
@@ -423,6 +496,247 @@ mod tests {
             hash,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // ---- выгрузка целиком, на фейковом сервере ------------------------------
+
+    /// Сервер, который отдаёт заданные куски и заканчивается заданным исходом.
+    ///
+    /// Куски — несколько, а не один: только так в дело идут повторные
+    /// `poll_write`, накопление хеша и колбэк прогресса.
+    struct FakeStream {
+        chunks: Vec<Vec<u8>>,
+        exit: i32,
+        signal: Option<String>,
+        stderr: String,
+        /// Оборвать поток после N-го куска (обрыв связи).
+        die_after: Option<usize>,
+    }
+
+    impl FakeStream {
+        fn serving(chunks: &[&[u8]]) -> Self {
+            FakeStream {
+                chunks: chunks.iter().map(|c| c.to_vec()).collect(),
+                exit: 0,
+                signal: None,
+                stderr: String::new(),
+                die_after: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ArchiveStream for FakeStream {
+        async fn stream(
+            &mut self,
+            _cmd: &str,
+            _idle: Duration,
+            out: &mut (dyn AsyncWrite + Unpin + Send),
+            on_progress: &mut (dyn FnMut(u64) -> ControlFlow<()> + Send),
+        ) -> Result<ExecStream, SshError> {
+            let mut done: u64 = 0;
+            for (i, c) in self.chunks.iter().enumerate() {
+                out.write_all(c).await?;
+                done += c.len() as u64;
+                if on_progress(done).is_break() {
+                    out.flush().await?;
+                    return Err(SshError::Cancelled { bytes: done });
+                }
+                if self.die_after == Some(i + 1) {
+                    out.flush().await?;
+                    return Err(SshError::Disconnected { bytes: done });
+                }
+            }
+            out.flush().await?;
+            Ok(ExecStream {
+                exit: self.exit,
+                bytes: done,
+                stderr: self.stderr.clone(),
+                signal: self.signal.clone(),
+            })
+        }
+    }
+
+    fn body() -> Vec<u8> {
+        (0..=255u8).cycle().take(70_000).collect()
+    }
+
+    fn served(data: &[u8]) -> FakeStream {
+        // Три куска, последний неровный — как оно и приходит по сети.
+        let (a, rest) = data.split_at(32_768);
+        let (b, c) = rest.split_at(32_768);
+        FakeStream::serving(&[a, b, c])
+    }
+
+    /// Скачать `data` в `dir/archive.tar`, обещав сервером `(sha, bytes)`.
+    async fn download_to(
+        dir: &Path,
+        mut src: FakeStream,
+        expected_sha: &str,
+        expected_bytes: u64,
+    ) -> (PathBuf, Result<DownloadOutcome, DownloadError>) {
+        let dest = dir.join("archive.tar");
+        let r = download_archive(
+            &mut src,
+            "/var/tmp/sdmp-backup/example.com-20260819T103000Z.tar",
+            &dest,
+            expected_sha,
+            expected_bytes,
+            Duration::from_secs(5),
+            |_| ControlFlow::Continue(()),
+        )
+        .await;
+        (dest, r)
+    }
+
+    // Здоровый путь: файл под настоящим именем, огрызка нет, содержимое то же.
+    #[tokio::test]
+    async fn a_stream_the_server_vouched_for_lands_under_the_real_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let (dest, r) = download_to(dir.path(), served(&data), &sha_hex(&data), data.len() as u64)
+            .await;
+        let got = r.expect("выгрузка");
+        assert_eq!(got.bytes, data.len() as u64);
+        assert_eq!(got.sha256, sha_hex(&data));
+        assert!(dest.exists());
+        assert!(!part_path(&dest).exists(), "огрызок остался");
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+    }
+
+    // Размер не тот, что обещал сервер, — отказ, и на диске НИЧЕГО. Это
+    // отдельная от хеша сверка: убери её, и усечённый архив, чей хеш никто не
+    // сверял бы с правильным, доехал бы под настоящим именем.
+    #[tokio::test]
+    async fn a_size_the_server_did_not_promise_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        // Хеш — настоящий, размер сервер насчитал больше: ровно так выглядит
+        // усечённая на сервере выгрузка.
+        let (dest, r) = download_to(
+            dir.path(),
+            served(&data),
+            &sha_hex(&data),
+            data.len() as u64 + 1,
+        )
+        .await;
+        let e = r.expect_err("размер обязан быть сверен");
+        assert!(matches!(e, DownloadError::SizeMismatch { .. }), "{e}");
+        assert!(!dest.exists(), "битый файл лёг под настоящим именем");
+        assert!(!part_path(&dest).exists(), "огрызок остался");
+    }
+
+    // Байт столько же, содержимое другое — вторая сверка, и она тоже одна на
+    // весь модуль.
+    #[tokio::test]
+    async fn a_body_the_server_did_not_promise_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let (dest, r) = download_to(dir.path(), served(&data), &"0".repeat(64), data.len() as u64)
+            .await;
+        let e = r.expect_err("хеш обязан быть сверен");
+        assert!(matches!(e, DownloadError::ChecksumMismatch { .. }), "{e}");
+        assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    // Убитая команда приезжает `Ok`'ом с сигналом — и всё сошлось бы по
+    // размеру и хешу, потому что сервер отдал ровно то, что успел. Проверять
+    // один `exit` тут мало.
+    #[tokio::test]
+    async fn a_command_that_was_killed_is_not_a_finished_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let mut src = served(&data);
+        src.exit = -1;
+        src.signal = Some("KILL".into());
+        let (dest, r) = download_to(dir.path(), src, &sha_hex(&data), data.len() as u64).await;
+        let e = r.expect_err("сигнал обязан быть отказом");
+        assert!(matches!(e, DownloadError::RemoteFailed { .. }), "{e}");
+        assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    #[tokio::test]
+    async fn a_nonzero_exit_is_not_a_finished_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let mut src = served(&data);
+        src.exit = 1;
+        src.stderr = "cat: no such file".into();
+        let (dest, r) = download_to(dir.path(), src, &sha_hex(&data), data.len() as u64).await;
+        let e = r.expect_err("ненулевой код обязан быть отказом");
+        assert!(format!("{e}").contains("no such file"), "{e}");
+        assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    // Оборванная связь: доехало меньше, чем обещано. Ни файла, ни огрызка.
+    #[tokio::test]
+    async fn a_broken_link_leaves_neither_the_file_nor_the_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let mut src = served(&data);
+        src.die_after = Some(1);
+        let (dest, r) = download_to(dir.path(), src, &sha_hex(&data), data.len() as u64).await;
+        let e = r.expect_err("обрыв обязан быть отказом");
+        assert!(
+            matches!(e, DownloadError::Ssh(SshError::Disconnected { .. })),
+            "{e}"
+        );
+        assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    // Отмена посреди выгрузки: тоже пусто на диске, но исход опознаётся иначе.
+    #[tokio::test]
+    async fn a_cancelled_download_leaves_no_file_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let dest = dir.path().join("archive.tar");
+        let mut src = served(&data);
+        let r = download_archive(
+            &mut src,
+            "/var/tmp/sdmp-backup/example.com-20260819T103000Z.tar",
+            &dest,
+            &sha_hex(&data),
+            data.len() as u64,
+            Duration::from_secs(5),
+            // Ломаемся на первом же чанке — так это и выглядит у человека,
+            // нажавшего «отмена» на второй минуте.
+            |_| ControlFlow::Break(()),
+        )
+        .await;
+        let e = r.expect_err("отмена обязана быть отказом");
+        assert!(e.is_cancelled(), "{e}");
+        assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    // Прогресс доезжает до вызывающего нарастающим итогом — на этом стоит и
+    // троттлинг, и реакция на отмену.
+    #[tokio::test]
+    async fn progress_arrives_as_a_running_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = body();
+        let dest = dir.path().join("archive.tar");
+        let mut seen: Vec<u64> = Vec::new();
+        let mut src = served(&data);
+        download_archive(
+            &mut src,
+            "/var/tmp/x.tar",
+            &dest,
+            &sha_hex(&data),
+            data.len() as u64,
+            Duration::from_secs(5),
+            |done| {
+                seen.push(done);
+                ControlFlow::Continue(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(seen, vec![32_768, 65_536, 70_000]);
     }
 
     // `.part` — суффикс к полному имени, а не подмена расширения.
