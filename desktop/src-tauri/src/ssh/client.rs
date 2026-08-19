@@ -54,6 +54,24 @@ pub enum SshError {
     /// чинить сеть после того, как сам же нажал «отмена».
     #[error("cancelled by the caller after {bytes} bytes — the transfer was stopped on purpose, the connection is fine")]
     Cancelled { bytes: u64 },
+    /// Канал кончился, не сообщив, чем кончилась команда.
+    ///
+    /// Третий исход рядом с отменой и простоем, и путать их нельзя: простой —
+    /// «сервер молчит дольше, чем мы согласны ждать», отмена — «мы сами
+    /// передумали», а это — «связь оборвалась на середине». Именно так
+    /// выглядит смерть сессии по `inactivity_timeout` или по keepalive: russh
+    /// роняет `Session::run`, отправитель сообщений канала исчезает, и
+    /// `Channel::wait()` отдаёт `None`.
+    ///
+    /// Отдельный вариант появился потому, что раньше этот случай возвращался
+    /// как `Ok(ExecStream { exit: -1, .. })` — то есть обрезанный на середине
+    /// гигабайтный архив приезжал как штатно закрытый поток. Обрыв обязан быть
+    /// ошибкой: «сколько байт успело» тут не итог, а размер потери.
+    #[error(
+        "connection lost after {bytes} bytes — the channel ended before the command \
+         reported an exit status; whatever was written is incomplete"
+    )]
+    Disconnected { bytes: u64 },
     #[error("session: {0}")]
     Session(String),
 }
@@ -132,12 +150,14 @@ pub fn append_known_host(path: &Path, host_port: &str, fingerprint: &str) -> io:
 /// Раз в столько тишины клиент шлёт серверу keepalive-запрос.
 ///
 /// До этой правки keepalive был выключен вовсе: `russh::client::Config`
-/// собирался с одним `inactivity_timeout`, а он считает ПРИНЯТЫЕ байты.
-/// Молчащая команда — получасовой `tar`, пятиминутный `certificates create-le`
-/// — не шлёт ни байта, и единственным способом её пережить было раздувать
-/// inactivity до часов, то есть перестать замечать оборванную связь вовсе.
-/// Keepalive разрывает эту связку: тишину держит он, а inactivity остаётся
-/// сторожем настоящего обрыва.
+/// собирался с одним `inactivity_timeout`. Тот сбрасывается на любом витке
+/// цикла сессии, кроме витка отправки самого keepalive (`client/mod.rs`,
+/// хвост цикла `run_inner`), — но у молчащей команды витков нет вовсе, ни
+/// входящих, ни исходящих. Получасовой `tar` и пятиминутный `certificates
+/// create-le` не шлют ничего, и единственным способом их пережить было
+/// раздувать inactivity до часов, то есть перестать замечать оборванную связь
+/// вовсе. Keepalive разрывает эту связку: тишину заполняет он, а inactivity
+/// остаётся сторожем настоящего обрыва.
 ///
 /// ВНИМАНИЕ: это меняет поведение ВСЕХ SSH-операций продукта, а не только
 /// бэкапов. В лучшую сторону — мёртвый сервер опознаётся за две с половиной
@@ -397,6 +417,12 @@ impl SshSession {
     /// наследует, а SFTP-путь завёл бы свой набор граблей, не покрытый нашими
     /// тестами. Плюс ноль новых зависимостей.
     ///
+    /// Исходов у выгрузки три, и они намеренно различимы: [`SshError::Cancelled`]
+    /// — передумали сами, `SshError::Session("stream idle…")` — сервер молчит
+    /// дольше `idle_timeout`, [`SshError::Disconnected`] — связь оборвалась, и
+    /// написанное неполно. Нормальным концом считается только тот, при котором
+    /// доехал итог команды (`exit-status` или сигнал).
+    ///
     /// `on_progress` зовётся после каждой записи в `out` с накопленным числом
     /// байт; `ControlFlow::Break` останавливает выгрузку и даёт
     /// [`SshError::Cancelled`] — закрывается только канал, сессия остаётся живой
@@ -431,6 +457,10 @@ impl SshSession {
         let mut bytes: u64 = 0;
         let mut exit: i32 = -1;
         let mut signal: Option<String> = None;
+        // Доехал ли до нас ИТОГ команды (`exit-status` или сигнал). Отличает
+        // нормальный конец канала от оборванной связи: и то и другое приходит
+        // к нам одинаково — концом потока сообщений.
+        let mut ended = false;
         // Выходим не через `return` из `select!`, а флагом: writer обязан быть
         // сброшен в любом исходе, иначе последний кусок остаётся в буфере.
         let mut stop: Option<SshError> = None;
@@ -445,7 +475,13 @@ impl SshSession {
                 msg = channel.wait() => {
                     match msg {
                         Some(ChannelMsg::Data { data }) => {
-                            out.write_all(data.as_ref()).await?;
+                            // Не `?`: выход по нему миновал бы и `flush`, и
+                            // закрытие канала — то есть нарушил бы инвариант,
+                            // объявленный при `stop`.
+                            if let Err(e) = out.write_all(data.as_ref()).await {
+                                stop = Some(SshError::Io(e));
+                                break;
+                            }
                             bytes = bytes.saturating_add(data.len() as u64);
                             if on_progress(bytes).is_break() {
                                 stop = Some(SshError::Cancelled { bytes });
@@ -455,7 +491,10 @@ impl SshSession {
                         // Вот ради этой строки метод и существует: в `exec`
                         // stderr идёт в тот же буфер, что stdout.
                         Some(ChannelMsg::ExtendedData { data, .. }) => stderr.push(data.as_ref()),
-                        Some(ChannelMsg::ExitStatus { exit_status }) => exit = exit_status as i32,
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            exit = exit_status as i32;
+                            ended = true;
+                        }
                         // Убитая команда кода не присылает — присылает сигнал.
                         // Без этой ветки OOM-killer на гигабайтном `tar` был бы
                         // неотличим от «код не доехал».
@@ -464,16 +503,30 @@ impl SshSession {
                                 russh::Sig::Custom(name) => name,
                                 known => format!("{known:?}"),
                             });
+                            // Законный конец наравне с `exit-status`: требуй
+                            // мы кода и от убитой команды — записали бы её в
+                            // оборванные, а она честно доложила, как умерла.
+                            ended = true;
                         }
                         // EOF — НЕ конец разговора. OpenSSH закрывает поток вывода
                         // раньше, чем сообщает код возврата: сначала `Eof`, затем
-                        // `exit-status`, и только потом `Close`. Выход из цикла по
-                        // `Eof` терял код у КАЖДОЙ команды (см. подробный разбор в
-                        // `exec` выше и план 2026-08-06) — здесь та же ловушка и
-                        // тот же ответ на неё: ждём `Close`.
+                        // `exit-status`. Выход из цикла по `Eof` терял код у
+                        // КАЖДОЙ команды (см. подробный разбор в `exec` выше и
+                        // план 2026-08-06) — здесь та же ловушка и тот же ответ
+                        // на неё: ждём настоящего конца канала.
                         Some(ChannelMsg::Eof) => {}
+                        // Страховка, а не рабочий путь: на russh 0.45 эта ветка
+                        // не срабатывает НИ РАЗУ. Приняв `CHANNEL_CLOSE`, russh
+                        // выкидывает канал из своей карты, не переслав наружу
+                        // `ChannelMsg::Close` (`client/encrypted.rs`, ветка
+                        // `msg::CHANNEL_CLOSE`), — и до нас доходит не `Close`,
+                        // а конец потока. Оставлена на случай, если russh это
+                        // поведение поменяет; смысл у неё тот же, что у `None`.
                         Some(ChannelMsg::Close) => break,
                         Some(_) => {}
+                        // Единственный настоящий выход из цикла — и, вот
+                        // ловушка, ОДИНАКОВЫЙ у нормального конца и у обрыва
+                        // связи. Кто из двух — решает `ended` после цикла.
                         None => break,
                     }
                 }
@@ -490,13 +543,25 @@ impl SshSession {
             }
         }
 
-        out.flush().await?;
+        // Канал кончился, а итога не было — связь оборвалась. Раньше здесь
+        // возвращался `Ok` с `exit: -1`, и обрезанный на середине архив был
+        // неотличим от штатно закрытого потока.
+        if stop.is_none() && !ended {
+            stop = Some(SshError::Disconnected { bytes });
+        }
+
+        // Сброс — до разбора исхода, чтобы инвариант «writer сброшен в любом
+        // случае» выполнялся и на пути ошибки. Но сама ошибка сброса НЕ
+        // затирает уже установленную причину: отмена, превратившаяся в `Io`,
+        // читалась бы как обрыв — ровно то, от чего её отделяли.
+        let flushed = out.flush().await;
         if let Some(e) = stop {
             // Канал закрываем, сессию — нет: ни отмена, ни замолчавшая команда
             // не повод рвать соединение, по нему ещё пойдёт уборка (`rm -rf`).
             let _ = channel.close().await;
             return Err(e);
         }
+        flushed?;
         Ok(ExecStream {
             exit,
             bytes,
@@ -617,5 +682,21 @@ mod tests {
         assert!(msg.contains("connection is fine"), "{msg}");
         // И это не тот таймаут, который разбирают в `commands::provision`.
         assert!(!msg.contains("timeout"), "{msg}");
+    }
+
+    // Третий исход. Раньше обрыв возвращался как `Ok(exit: -1)` — то есть
+    // обрезанный архив выглядел штатно закрытым потоком. Теперь это ошибка, и
+    // её текст обязан говорить главное: написанное НЕПОЛНО.
+    #[test]
+    fn disconnect_says_the_written_bytes_are_incomplete() {
+        let msg = SshError::Disconnected { bytes: 1_048_576 }.to_string();
+        assert!(msg.contains("connection lost"), "{msg}");
+        assert!(msg.contains("1048576"), "{msg}");
+        assert!(msg.contains("incomplete"), "{msg}");
+        // Три исхода — три разных текста: обрыв не выдаёт себя ни за отмену,
+        // ни за простой, иначе в аудите они слились бы в один случай.
+        let cancelled = SshError::Cancelled { bytes: 1 }.to_string();
+        assert!(!msg.contains("cancelled"), "{msg}");
+        assert!(!cancelled.contains("connection lost"), "{cancelled}");
     }
 }

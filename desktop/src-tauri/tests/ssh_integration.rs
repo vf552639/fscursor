@@ -387,10 +387,15 @@ async fn keepalive_carries_a_silent_command_past_the_inactivity_timeout() {
     let e = without
         .exec_to_writer(silent, Duration::from_secs(60), &mut buf, never_cancels)
         .await;
-    assert!(
-        e.is_err(),
-        "без keepalive молчащие 12 с обязаны были убить сессию с inactivity 5 с"
-    );
+    // Именно `Disconnected`, а не «хоть какая-нибудь ошибка»: первая редакция
+    // возвращала здесь `Ok(exit: -1)` — обрыв связи был неотличим от нормально
+    // закрытого потока, и тест на keepalive падал не потому, что keepalive не
+    // работает, а потому, что смерть сессии не считалась смертью.
+    match e {
+        Err(SshError::Disconnected { bytes }) => assert_eq!(bytes, 0, "команда молчала"),
+        Ok(r) => panic!("обрыв сессии вернулся как успех: {r:?}"),
+        Err(other) => panic!("не тот класс ошибки: {other}"),
+    }
 
     let mut with = trusted_session(&kh, inactivity, Some(Duration::from_secs(2))).await;
     let mut buf2: Vec<u8> = Vec::new();
