@@ -34,6 +34,13 @@ pub fn ssh_accept_host_key(
         .map_err(|e| CommandError::Api(e.to_string()))
 }
 
+/// Inactivity-таймаут одиночной проверки связи («SSH Test»).
+///
+/// Раньше стоял безымянным литералом. Имя понадобилось, чтобы соотношение с
+/// keepalive проверялось тестом: это тоже session timeout, просто самый
+/// короткий из всех (см. тест внизу файла).
+const SSH_TEST_SESSION_TIMEOUT: Duration = Duration::from_secs(45);
+
 #[tauri::command]
 pub async fn ssh_exec(
     app: AppHandle,
@@ -50,7 +57,7 @@ pub async fn ssh_exec(
         user: &user,
         password: password.as_bytes(),
         known_hosts_path: path,
-        timeout: Duration::from_secs(45),
+        timeout: SSH_TEST_SESSION_TIMEOUT,
     };
     let mut session = match connect(opts).await {
         Err(SshError::HostKeyUnknown { fingerprint }) => {
@@ -115,5 +122,25 @@ pub async fn ssh_connect_session_with_timeout(
         }
         Err(e) => Err(CommandError::Api(e.to_string())),
         Ok(s) => Ok(s),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssh::client::KEEPALIVE_INTERVAL;
+
+    // Самый короткий session timeout продукта. Полного keepalive-бюджета он не
+    // переживает и не должен: за ним стоит кнопка проверки связи, ей нужен
+    // быстрый ответ, а не терпение к трём пропущенным keepalive. Но спросить и
+    // получить ответ keepalive обязан успеть хотя бы раз — иначе он здесь
+    // мёртвый груз, а первая же секунда тишины убивает проверку. Тест ломается,
+    // если таймаут опустят к интервалу вплотную.
+    #[test]
+    fn ssh_test_timeout_still_lets_keepalive_ask_once() {
+        assert!(
+            SSH_TEST_SESSION_TIMEOUT >= KEEPALIVE_INTERVAL + Duration::from_secs(10),
+            "{SSH_TEST_SESSION_TIMEOUT:?} leaves no room for a keepalive round ({KEEPALIVE_INTERVAL:?})"
+        );
     }
 }

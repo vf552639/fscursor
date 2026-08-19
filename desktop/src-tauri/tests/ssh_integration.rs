@@ -8,10 +8,16 @@
 //!
 //! Run: `cargo test -p sdmp-desktop --features ssh_integration --test ssh_integration -- --ignored --nocapture`
 
-use std::path::PathBuf;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sdmp_desktop_lib::ssh::client::{append_known_host, connect, read_known_host, ConnectOptions, SshError};
+use sha2::{Digest, Sha256};
+
+use sdmp_desktop_lib::ssh::client::{
+    append_known_host, connect, connect_with_keepalive_override, read_known_host, ConnectOptions,
+    SshError, SshSession, KEEPALIVE_INTERVAL,
+};
 
 fn ssh_addr() -> (&'static str, u16) {
     let host = std::env::var("SDMP_SSH_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
@@ -22,6 +28,49 @@ fn ssh_addr() -> (&'static str, u16) {
     // linuxserver image uses host string in tests — leak Box::leak for static ref simplicity
     let host: &'static str = Box::leak(host.into_boxed_str());
     (host, port)
+}
+
+fn opts<'a>(host: &'a str, port: u16, kh: &Path, timeout: Duration) -> ConnectOptions<'a> {
+    ConnectOptions {
+        host,
+        port,
+        user: "test",
+        password: b"testpass",
+        known_hosts_path: kh.to_path_buf(),
+        timeout,
+    }
+}
+
+/// TOFU и подключение одной строкой: первый `connect` отдаёт отпечаток, кладём
+/// его в known_hosts и подключаемся всерьёз.
+///
+/// Ровно эту последовательность проверяет `tofu_then_exec_uname`; остальным
+/// тестам она — прелюдия, и повторять её в каждом значит проверять TOFU шесть
+/// раз вместо одного. `keepalive_interval` пробрасывается наружу только ради
+/// теста keepalive (см. его комментарий), все прочие берут продуктовое значение.
+async fn trusted_session(
+    kh: &Path,
+    timeout: Duration,
+    keepalive_interval: Option<Duration>,
+) -> SshSession {
+    let (host, port) = ssh_addr();
+    let hp = format!("{host}:{port}");
+    if read_known_host(kh, &hp).unwrap().is_none() {
+        match connect(opts(host, port, kh, timeout)).await {
+            Err(SshError::HostKeyUnknown { fingerprint }) => {
+                append_known_host(kh, &hp, &fingerprint).unwrap()
+            }
+            Ok(_) => panic!("expected unknown host on empty known_hosts"),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    connect_with_keepalive_override(opts(host, port, kh, timeout), keepalive_interval)
+        .await
+        .expect("connect")
+}
+
+fn never_cancels(_: u64) -> ControlFlow<()> {
+    ControlFlow::Continue(())
 }
 
 #[tokio::test]
@@ -109,4 +158,247 @@ async fn host_key_mismatch() {
     };
     let r = connect(opts).await;
     assert!(matches!(r, Err(SshError::HostKeyMismatch)));
+}
+
+/// Три мегабайта случайных байт обязаны доехать байт в байт.
+///
+/// Ловит сразу обе порчи, ради которых `exec_to_writer` и появился:
+/// `from_utf8_lossy` из `exec` заменил бы каждый невалидный UTF-8 на U+FFFD, а
+/// псевдотерминал превратил бы каждый 0x0A в 0x0D 0x0A. И то и другое на
+/// текстовом выводе незаметно, а здесь ломает и длину, и sha256.
+#[tokio::test]
+#[ignore = "requires docker ssh"]
+async fn exec_to_writer_hands_over_binary_bytes_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut sess = trusted_session(&kh, Duration::from_secs(30), Some(KEEPALIVE_INTERVAL)).await;
+
+    // Эталон считает сам сервер: сравнение «поток против sha256sum на той
+    // стороне» не зависит ни от одной нашей строчки разбора.
+    let (code, sum) = sess
+        .exec(
+            "head -c 3000000 /dev/urandom > /tmp/sdmp-blob && sha256sum /tmp/sdmp-blob | cut -d' ' -f1",
+            Duration::from_secs(60),
+            false,
+        )
+        .await
+        .expect("make blob");
+    assert_eq!(code, 0, "{sum}");
+    let expected = sum.trim().to_string();
+
+    let mut buf: Vec<u8> = Vec::new();
+    let r = sess
+        .exec_to_writer(
+            "cat /tmp/sdmp-blob",
+            Duration::from_secs(30),
+            &mut buf,
+            never_cancels,
+        )
+        .await
+        .expect("stream blob");
+
+    assert_eq!(r.exit, 0);
+    assert_eq!(r.bytes, 3_000_000, "счётчик байт разошёлся с файлом");
+    assert_eq!(buf.len(), 3_000_000, "длина потока разошлась с файлом");
+    assert_eq!(
+        hex::encode(Sha256::digest(&buf)),
+        expected,
+        "байты испорчены"
+    );
+    assert!(r.stderr.is_empty(), "stderr взялся ниоткуда: {}", r.stderr);
+    assert_eq!(r.signal, None);
+
+    let _ = sess
+        .exec("rm -f /tmp/sdmp-blob", Duration::from_secs(30), false)
+        .await;
+    let _ = sess.disconnect().await;
+}
+
+/// Stderr не имеет права попасть в файл.
+///
+/// Прямая защита от болезни `exec`, который копит оба потока в один буфер: там
+/// предупреждение `tar` вклеилось бы в середину архива. Три байта stdout взяты
+/// нулевые и неотображаемые нарочно — на них видно и слияние потоков, и любую
+/// текстовую обработку по дороге.
+#[tokio::test]
+#[ignore = "requires docker ssh"]
+async fn stderr_never_lands_in_the_stream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut sess = trusted_session(&kh, Duration::from_secs(30), Some(KEEPALIVE_INTERVAL)).await;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let r = sess
+        .exec_to_writer(
+            r#"echo noise >&2; printf '\000\001\002'"#,
+            Duration::from_secs(30),
+            &mut buf,
+            never_cancels,
+        )
+        .await
+        .expect("stream");
+
+    assert_eq!(buf, vec![0u8, 1, 2], "в файл попало лишнее");
+    assert_eq!(r.bytes, 3);
+    assert!(r.stderr.contains("noise"), "stderr потерян: {}", r.stderr);
+    assert_eq!(r.exit, 0);
+    let _ = sess.disconnect().await;
+}
+
+/// Ненулевой код обязан доехать и здесь.
+///
+/// Прямой наследник бага с `Eof`: OpenSSH закрывает поток вывода раньше, чем
+/// сообщает `exit-status`, и цикл, выходящий по `Eof`, вернул бы -1 при целом
+/// прочитанном байте. Один байт stdout здесь нужен затем, чтобы `Eof` пришёл
+/// после данных, а не вместо них.
+#[tokio::test]
+#[ignore = "requires docker ssh"]
+async fn nonzero_exit_survives_the_eof_that_comes_before_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut sess = trusted_session(&kh, Duration::from_secs(30), Some(KEEPALIVE_INTERVAL)).await;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let r = sess
+        .exec_to_writer(
+            "printf x; exit 7",
+            Duration::from_secs(30),
+            &mut buf,
+            never_cancels,
+        )
+        .await
+        .expect("stream");
+
+    assert_eq!(r.exit, 7, "код возврата не доехал");
+    assert_eq!(r.bytes, 1);
+    assert_eq!(buf, b"x");
+    let _ = sess.disconnect().await;
+}
+
+/// `idle_timeout` меряет тишину, а не длительность.
+///
+/// Пять секунд работы под полуторасекундным таймаутом обязаны пройти, потому
+/// что пауза между кусками — секунда; ровно то, чего не умеет суммарный дедлайн
+/// `exec`, на котором здоровая многочасовая выгрузка обрывалась бы на середине.
+/// `/bin/echo` по полному пути, а не встроенный: отдельный процесс завершается
+/// и тем гарантированно сбрасывает буфер, иначе шелл мог бы отдать все пять
+/// кусков разом — и тест доказывал бы не то, что написано.
+#[tokio::test]
+#[ignore = "requires docker ssh"]
+async fn idle_timeout_measures_silence_not_duration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut sess = trusted_session(&kh, Duration::from_secs(60), Some(KEEPALIVE_INTERVAL)).await;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let r = sess
+        .exec_to_writer(
+            "for i in 1 2 3 4 5; do /bin/echo x; sleep 1; done",
+            Duration::from_millis(1500),
+            &mut buf,
+            never_cancels,
+        )
+        .await
+        .expect("медленный, но говорящий поток обязан был дойти");
+    assert_eq!(r.exit, 0);
+    assert_eq!(r.bytes, 10, "пять раз по \"x\\n\"");
+
+    // Та же граница, но тишина вместо кусков — обязана оборваться.
+    let mut buf2: Vec<u8> = Vec::new();
+    let e = sess
+        .exec_to_writer(
+            "sleep 5; printf x",
+            Duration::from_millis(1500),
+            &mut buf2,
+            never_cancels,
+        )
+        .await
+        .expect_err("замолчавший канал обязан был оборваться");
+    assert!(
+        matches!(&e, SshError::Session(m) if m.contains("idle")),
+        "не тот класс ошибки: {e}"
+    );
+    // Не отмена: человек ничего не нажимал.
+    assert!(!matches!(e, SshError::Cancelled { .. }));
+    let _ = sess.disconnect().await;
+}
+
+/// Отмена останавливает выгрузку и НЕ роняет сессию.
+///
+/// Второе важнее первого: после отмены по этой же сессии идёт уборка (`rm -rf`
+/// рабочего каталога), и если бы отмена рвала соединение, мусор оставался бы на
+/// сервере ровно в том случае, когда мы точно знаем, что он не нужен.
+#[tokio::test]
+#[ignore = "requires docker ssh"]
+async fn cancelling_stops_the_stream_and_leaves_the_session_usable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let mut sess = trusted_session(&kh, Duration::from_secs(60), Some(KEEPALIVE_INTERVAL)).await;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let e = sess
+        .exec_to_writer("cat /dev/zero", Duration::from_secs(10), &mut buf, |n| {
+            if n > 0 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .await
+        .expect_err("отмена обязана быть ошибкой, а не тихим успехом");
+
+    match e {
+        SshError::Cancelled { bytes } => assert!(bytes > 0, "отменили, не приняв ни байта"),
+        other => panic!("не тот класс ошибки: {other}"),
+    }
+
+    let (code, out) = sess
+        .exec("echo alive", Duration::from_secs(30), false)
+        .await
+        .expect("сессия обязана была пережить отмену");
+    assert_eq!(code, 0);
+    assert!(out.contains("alive"), "{out}");
+    let _ = sess.disconnect().await;
+}
+
+/// Единственное доказательство keepalive: молчащая команда переживает
+/// inactivity, который без keepalive её убивал.
+///
+/// Пара обязательна. Один зелёный прогон «с keepalive» ничего не значил бы —
+/// он был бы таким же зелёным, окажись inactivity просто больше паузы; смысл
+/// появляется только рядом с красным прогоном «без».
+///
+/// Числа маленькие (5 с inactivity, 12 с тишины, 2 с интервал) нарочно:
+/// доказываемый механизм — «ответ сервера на keepalive сдвигает inactivity» —
+/// от величины интервала не зависит, а с продуктовыми 30 с этот тест шёл бы
+/// двумя минутами живого ожидания. Сами продуктовые числа держат юнит-тесты:
+/// `keepalive_budget_is_the_interval_times_every_attempt` в `ssh::client` и
+/// проверки соотношения у каждого session-таймаута в `commands/`.
+#[tokio::test]
+#[ignore = "requires docker ssh"]
+async fn keepalive_carries_a_silent_command_past_the_inactivity_timeout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kh = tmp.path().join("known_hosts");
+    let inactivity = Duration::from_secs(5);
+    let silent = "sleep 12; printf done";
+
+    let mut without = trusted_session(&kh, inactivity, None).await;
+    let mut buf: Vec<u8> = Vec::new();
+    let e = without
+        .exec_to_writer(silent, Duration::from_secs(60), &mut buf, never_cancels)
+        .await;
+    assert!(
+        e.is_err(),
+        "без keepalive молчащие 12 с обязаны были убить сессию с inactivity 5 с"
+    );
+
+    let mut with = trusted_session(&kh, inactivity, Some(Duration::from_secs(2))).await;
+    let mut buf2: Vec<u8> = Vec::new();
+    let r = with
+        .exec_to_writer(silent, Duration::from_secs(60), &mut buf2, never_cancels)
+        .await
+        .expect("с keepalive та же команда обязана была дойти");
+    assert_eq!(r.exit, 0);
+    assert_eq!(buf2, b"done");
+    let _ = with.disconnect().await;
 }

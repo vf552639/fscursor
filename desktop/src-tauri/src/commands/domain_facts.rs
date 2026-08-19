@@ -216,6 +216,7 @@ async fn record_facts_error(api: &ApiClient, domain_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh::client::{KEEPALIVE_BUDGET, KEEPALIVE_INTERVAL};
     use crate::ssh::fastpanel_facts::{FACTS_EXEC_TIMEOUT, FACTS_READ_COMMANDS};
 
     // inactivity сессии заведомо больше суммы exec-бюджета снимка — иначе russh
@@ -227,6 +228,21 @@ mod tests {
             FACTS_SESSION_TIMEOUT > FACTS_EXEC_TIMEOUT * FACTS_READ_COMMANDS,
             "session {FACTS_SESSION_TIMEOUT:?} must exceed {FACTS_READ_COMMANDS} × {FACTS_EXEC_TIMEOUT:?}"
         );
+    }
+
+    // Второе соотношение того же таймаута — теперь с keepalive. Inactivity
+    // ниже keepalive-бюджета отнимает у keepalive запас на пропущенный ответ:
+    // сессия умрёт раньше, чем он израсходует свои попытки, и молчащий снимок
+    // оборвётся ровно так же, как до keepalive. Тест ломается, если этот
+    // таймаут опустят под бюджет — или если бюджет поднимут над ним.
+    #[test]
+    fn session_timeout_outlives_the_keepalive_budget() {
+        assert!(
+            FACTS_SESSION_TIMEOUT > KEEPALIVE_BUDGET,
+            "session {FACTS_SESSION_TIMEOUT:?} must exceed keepalive budget {KEEPALIVE_BUDGET:?}"
+        );
+        // Нижняя граница, без которой keepalive не успел бы даже спросить.
+        assert!(FACTS_SESSION_TIMEOUT > KEEPALIVE_INTERVAL);
     }
 
     // Ветвление правки #2: только `HOST_KEY_UNKNOWN` — не провал (его проброс без
