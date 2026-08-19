@@ -17,9 +17,11 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
  * раскладку по вкладкам делает следующий план, и его правила названы здесь
  * словами, а не номером, чтобы две нумерации не читались как одна.
  *
- * Раскладка вкладок: секция стала двумя карточками (`FTP Access` и `Site`) плюс
- * заглушкой `Backups`, а перечень логов из этого же снимка принадлежит вкладке
- * Logs — здесь его быть не должно, иначе на один вопрос отвечают два места.
+ * Раскладка вкладок: секция стала двумя карточками (`FTP Access` и `Site`), а
+ * перечень логов из этого же снимка принадлежит вкладке Logs — здесь его быть
+ * не должно, иначе на один вопрос отвечают два места. Резервные копии, стоявшие
+ * тут заглушкой `Backups`, уехали на свою вкладку Backup по той же причине, и
+ * тест ниже сторожит, что заглушка не вернулась.
  *
  * Фаза 3 (свежесть и секреты):
  *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
@@ -309,35 +311,19 @@ describe("раскладка макета: карточки, а не сплош�
     expect(site).not.toContain("Password");
   });
 
-  it("свежесть и карточки — одна названная область, заглушка Backups снаружи", () => {
+  it("свежесть и карточки — одна названная область, и заглушки Backups в ней нет", () => {
     // Подпись возраста стоит ОТДЕЛЬНОЙ строкой над карточками: глазами близость
     // всё объясняет, на слух — ничего. Область «Server snapshot» и связывает их:
     // войдя в неё, человек слышит имя, а первой внутри стоит сама подпись.
-    // Заглушка Backups снаружи намеренно — к снимку она отношения не имеет, и
-    // `aria-label` над ней обещал бы, что и она измерена.
     show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
     const region = screen.getByRole("region", { name: "Server snapshot" });
     expect(within(region).getByText(/Checked/)).toBeTruthy();
     expect(within(region).getByRole("group", { name: "FTP Access" })).toBeTruthy();
     expect(within(region).getByRole("group", { name: "Site" })).toBeTruthy();
-    expect(within(region).queryByRole("group", { name: "Backups" })).toBeNull();
-    // И сама заглушка при этом на экране есть — снаружи области, а не вместо неё.
-    expect(screen.getByRole("group", { name: "Backups" })).toBeTruthy();
-  });
-
-  it("Backups — честная заглушка: пилюля COMING SOON и ни одного мёртвого органа управления", () => {
-    // Отступление 1 плана: макет рисует здесь два селекта (частота и место),
-    // поле пути и кнопки «Backup now»/«Save», а также мету «Last backup: … ·
-    // 412 MB». О резервных копиях продукт не знает ничего — ни модели, ни
-    // колонки, ни поля в снимке, — поэтому селект, который ничего не
-    // сохраняет, обещал бы настройку, которой нет.
-    show({ fp_facts: facts(), fp_facts_at: ago(HOUR) });
-    const backups = screen.getByRole("group", { name: "Backups" });
-    expect(backups.textContent).toContain("COMING SOON");
-    expect(within(backups).queryAllByRole("combobox")).toEqual([]);
-    expect(within(backups).queryAllByRole("button")).toEqual([]);
-    expect(within(backups).queryAllByRole("textbox")).toEqual([]);
-    expect(backups.textContent).not.toMatch(/Last backup/i);
+    // Карточки Backups больше нет НИГДЕ на вкладке: копии читаются из того же
+    // снимка, но отвечает за них своя вкладка Backup. Оставшись здесь, заглушка
+    // стала бы вторым ответом на вопрос, у которого уже есть первый.
+    expect(screen.queryByRole("group", { name: "Backups" })).toBeNull();
   });
 });
 

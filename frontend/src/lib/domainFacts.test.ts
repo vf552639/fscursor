@@ -1,11 +1,14 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  backupsOf,
   FACTS_STALE_MS,
   isFactsStale,
   snapshotOf,
   SSL_BADGE,
   sslState,
+  type BackupsFacts,
+  type DomainBackup,
   type DomainFacts,
 } from "./domainFacts";
 
@@ -204,5 +207,109 @@ describe("snapshotOf", () => {
     // Пустая строка на экране неотличима от «мы не напечатали возраст», то есть
     // выдавала бы незнание за отсутствие вопроса.
     expect(snapshotOf(null, null, NOW).freshness).toBe("Never checked");
+  });
+});
+
+/**
+ * Разбор списка копий: четыре состояния и своя сортировка.
+ *
+ * Сердце этих тестов — то, что «пусто» бывает двух сортов. `state: "unknown"`
+ * означает «спросили, разобрать не смогли», и превратить его в пустой список
+ * значит соврать про сервер: единственное утверждение об отсутствии копий во
+ * всём продукте — это `listed` с пустыми `entries`.
+ */
+
+/** Копия, у которой есть всё; поля перекрываются по одному. */
+function backup(over: Partial<DomainBackup> = {}): DomainBackup {
+  return { id: "b1", name: "backup-1.tar", created_at: ago(HOUR), size_bytes: 1024, source: "site_row", ...over };
+}
+
+function withBackups(backups: BackupsFacts | undefined) {
+  const facts = { ftp_accounts: [], databases: [], logs: [], backups } as unknown as DomainFacts;
+  return snapshotOf(facts, ago(HOUR), NOW);
+}
+
+describe("backupsOf — четыре состояния, и «не знаем» ≠ «нет»", () => {
+  it("снимка не было ни разу → no-snapshot", () => {
+    expect(backupsOf(snapshotOf(null, null, NOW))).toEqual({ state: "no-snapshot" });
+  });
+
+  it("снимок есть, поля backups в нём нет → not-in-snapshot", () => {
+    // Старый снимок (снят сборкой, которая читать копии не умела) — это про
+    // НАС, а не про сервер, и с «копий нет» не имеет ничего общего.
+    expect(backupsOf(withBackups(undefined))).toEqual({ state: "not-in-snapshot" });
+  });
+
+  it("отметка есть, а фактов нет → not-in-snapshot, а не «сервер не читали»", () => {
+    // Пару «facts: null при живом fp_facts_at» гасит сам `snapshotOf`. Сказать
+    // на ней «сервер не читали» значило бы спорить с подписью «Checked 1h ago»,
+    // которая стоит на экране строкой выше.
+    expect(backupsOf(snapshotOf(null, ago(HOUR), NOW))).toEqual({ state: "not-in-snapshot" });
+  });
+
+  it("state: unknown → unreadable, даже когда entries пуст", () => {
+    const view = backupsOf(withBackups({ state: "unknown", entries: [], probed: ["site_row"] }));
+    expect(view).toEqual({ state: "unreadable" });
+  });
+
+  it("state: unknown с записями всё равно unreadable — частичному списку веры нет", () => {
+    // Правило `ftp_accounts_from_json`: разобрали меньше, чем было, — значит
+    // читаем неправильно, и показывать огрызок опаснее, чем не показывать.
+    const view = backupsOf(withBackups({ state: "unknown", entries: [backup()], probed: [] }));
+    expect(view).toEqual({ state: "unreadable" });
+  });
+
+  it("state: known с пустым списком → listed без записей (единственное «копий нет»)", () => {
+    expect(backupsOf(withBackups({ state: "known", entries: [], probed: ["plan_cli"] }))).toEqual({
+      state: "listed",
+      items: [],
+    });
+  });
+});
+
+describe("backupsOf — сортировка", () => {
+  const listed = (entries: DomainBackup[]) =>
+    backupsOf(withBackups({ state: "known", entries, probed: [] }));
+
+  it("новые сверху", () => {
+    const view = listed([
+      backup({ id: "old", created_at: ago(3 * DAY) }),
+      backup({ id: "new", created_at: ago(HOUR) }),
+      backup({ id: "mid", created_at: ago(DAY) }),
+    ]);
+    expect(view.state === "listed" && view.items.map((b) => b.id)).toEqual(["new", "mid", "old"]);
+  });
+
+  it("копия без даты уходит в конец, а не претендует на «самую свежую»", () => {
+    const view = listed([
+      backup({ id: "undated", created_at: undefined }),
+      backup({ id: "dated", created_at: ago(3 * DAY) }),
+    ]);
+    expect(view.state === "listed" && view.items.map((b) => b.id)).toEqual(["dated", "undated"]);
+  });
+
+  it("неразобранная дата считается отсутствующей, а не сегодняшней", () => {
+    const view = listed([
+      backup({ id: "garbage", created_at: "вчера вечером" }),
+      backup({ id: "dated", created_at: ago(30 * DAY) }),
+    ]);
+    expect(view.state === "listed" && view.items.map((b) => b.id)).toEqual(["dated", "garbage"]);
+  });
+
+  it("порядок бездатных копий сохраняется тем, каким его отдал десктоп", () => {
+    const view = listed([
+      backup({ id: "u1", created_at: undefined }),
+      backup({ id: "u2", created_at: undefined }),
+      backup({ id: "u3", created_at: undefined }),
+    ]);
+    expect(view.state === "listed" && view.items.map((b) => b.id)).toEqual(["u1", "u2", "u3"]);
+  });
+
+  it("исходный массив снимка не переставляется на месте", () => {
+    // Снимок приезжает из кэша React Query и живёт дольше рендера: сортировка
+    // на месте перетасовала бы то, что читают другие экраны.
+    const entries = [backup({ id: "old", created_at: ago(3 * DAY) }), backup({ id: "new", created_at: ago(HOUR) })];
+    backupsOf(withBackups({ state: "known", entries, probed: [] }));
+    expect(entries.map((b) => b.id)).toEqual(["old", "new"]);
   });
 });

@@ -4,7 +4,7 @@ import { Domain, useReadDomainFacts } from "../../../api/domains";
 import { Server } from "../../../api/servers";
 import { snapshotOf } from "../../../lib/domainFacts";
 import { isTauri } from "../../../lib/runtime";
-import { Badge, Btn, SectionCard } from "../../ui/Primitives";
+import { Btn } from "../../ui/Primitives";
 import DomainFtpCard from "../DomainFtpCard";
 import DomainSiteCard from "../DomainSiteCard";
 import { HasSnapshot, RecordedNoteInLegend } from "../facts/fields";
@@ -37,8 +37,10 @@ import { CardRow, TabBody, TabGroup } from "./TabLayout";
  *    вовсе. Второй разбор внутри карточки совпадал бы с этим ровно до
  *    ближайшей правки.
  *
- * Пятое, что здесь стоит, — заглушка Backups; она не про снимок и не про
- * раскладку, а про честность обещаний, и объяснена у себя внизу файла.
+ * Пятого здесь больше нет. Им стояла заглушка Backups — карточка `COMING SOON`
+ * про резервные копии, — и она дожила до своей функции: копии переехали на
+ * собственную вкладку Backup (`DomainBackupTab`), которая читает их из того же
+ * снимка. Осталась вкладка ровно про то, чем она названа.
  *
  * Правил о состоянии домена вкладка не заводит: порог протухания — в
  * `lib/domainFacts`, правило расхождения нашей записи с фактом — в
@@ -97,9 +99,10 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
           карточки, и повторить подпись в каждой значило бы завести два ответа
           про один снимок.
 
-          Заглушка Backups стоит СНАРУЖИ области намеренно: к снимку она
-          отношения не имеет, и включать её в «Server snapshot» значило бы
-          назвать её частью измерения. */}
+          Область названа, хотя сегодня она — всё содержимое вкладки: рядом с
+          ней стояла заглушка Backups, и «Server snapshot» отделяло измеренное
+          от неё. Имя остаётся не по инерции — оно и есть то, что связывает
+          подпись возраста с карточками под ней на слух. */}
       <TabGroup label="Server snapshot">
         {/* Возраст снимка, провал последней попытки и кнопка чтения — общая
             шапка снимка (`facts/SnapshotLine`), одна на все вкладки, которые
@@ -153,24 +156,6 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
           </RecordedNoteInLegend.Provider>
         </HasSnapshot.Provider>
       </TabGroup>
-
-      {/* Backups — заглушка макета, и единственная её честная форма: о резервных
-          копиях продукт сегодня не знает НИЧЕГО. Ни модели на бэкенде, ни
-          колонки у домена, ни поля в снимке `fp_facts`; у самого FastPanel
-          команда `backup:plan` в CLI есть, но мы её ни разу не звали и формы
-          вывода не снимали (`docs/FASTPANEL_CLI.md`).
-
-          Макет рисует здесь два селекта (частота и место хранения), поле
-          своего пути и кнопки «Backup now» / «Save». Селекты, которые ничего не
-          сохраняют, — это обещание настройки, которой нет, а мета «Last backup:
-          … · 412 MB» была бы ещё и измерением, которого никто не делал (принцип
-          №6 CLAUDE.md). Поэтому пилюля `COMING SOON` и одна фраза — так же, как
-          у заглушки DMCA на Overview. */}
-      <SectionCard title="Backups" right={<Badge variant="gray">COMING SOON</Badge>}>
-        <div style={{ fontSize: 13, color: "#94a3b8" }}>
-          Backup schedule and restore points for this site will appear here in a future update.
-        </div>
-      </SectionCard>
     </TabBody>
   );
 }

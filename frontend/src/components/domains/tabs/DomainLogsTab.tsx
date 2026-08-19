@@ -7,7 +7,7 @@ import { isTauri } from "../../../lib/runtime";
 import { Btn } from "../../ui/Primitives";
 import { formatBytes } from "../../../lib/format";
 import { SnapshotLine } from "../facts/SnapshotLine";
-import { TabBody } from "./TabLayout";
+import { EmptyPanel, TabBody } from "./TabLayout";
 
 /** Один файл из снимка — то, что о нём знает провод (`lib/domainFacts`). */
 type LogFile = DomainFacts["logs"][number];
@@ -50,32 +50,6 @@ export interface DomainLogsTabProps {
    * снимка здесь обязан совпадать с тем, что печатают Server и карточка SSL.
    */
   now: number;
-}
-
-/**
- * Пустое тело вкладки: пунктирная рамка макета (его же состояние «Log file is
- * empty») с одной фразой посередине.
- *
- * Пунктир — не украшение: он рисует место, где ПОЯВИТСЯ содержимое, и тем
- * отличает «сюда ещё нечего положить» от карточки с данными. Три разных
- * состояния (нет снимка, путей не прочитали, содержимое не умеем) выглядят
- * одинаково намеренно — различает их фраза внутри, а не рамка.
- */
-function Placeholder({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        border: "1px dashed #cbd5e1",
-        borderRadius: 12,
-        padding: 40,
-        textAlign: "center",
-        color: "#94a3b8",
-        fontSize: 13,
-      }}
-    >
-      {children}
-    </div>
-  );
 }
 
 /**
@@ -233,8 +207,8 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
   return (
     <TabBody>
       {/* Отдельной названной области (`TabGroup`), как на вкладке Server, здесь
-          нет намеренно: там она отделяла прочитанное с сервера от заглушки
-          Backups, стоящей рядом, — а тут ВСЁ содержимое панели про один снимок,
+          нет намеренно: там она отделяет прочитанное с сервера от соседних
+          блоков вкладки, — а тут ВСЁ содержимое панели про один снимок,
           и панель уже названа своей вкладкой (`role="tabpanel"` +
           `aria-labelledby` в `ui/Tabs`). Вторая обёртка добавила бы к «Logs»
           ещё один заголовок про то же самое. */}
@@ -323,7 +297,7 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
       ) : null}
 
       {noSnapshot ? (
-        <Placeholder>Log files are listed from the server snapshot, and none has been taken yet.</Placeholder>
+        <EmptyPanel>Log files are listed from the server snapshot, and none has been taken yet.</EmptyPanel>
       ) : logs.length === 0 ? (
         /* Снимок есть, а список путей пуст — и это НЕ «логов у сайта нет».
            Причин у пустоты как минимум четыре, и НИ ОДНУ из них экран назвать
@@ -345,11 +319,11 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
            упавшей команде значило бы придумать диагноз (принцип №6 CLAUDE.md).
            Ровно то же различие, ради которого у полей-списков заведён `list` в
            `FactRow`: прочерк там читался бы как «спросили, там пусто». */
-        <Placeholder>
+        <EmptyPanel>
           The last snapshot brought no log paths for this site, so we do not know where its logs are.
-        </Placeholder>
+        </EmptyPanel>
       ) : (
-        <Placeholder>Reading log contents is not wired up yet.</Placeholder>
+        <EmptyPanel>Reading log contents is not wired up yet.</EmptyPanel>
       )}
     </TabBody>
   );
