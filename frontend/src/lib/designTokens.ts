@@ -29,6 +29,11 @@
  * с «поменял вид» в одном коммите.
  */
 
+// `import type` — не `import`: `ReturnType<typeof …>` нужен только компилятору,
+// и обычный импорт затащил бы лестницу статусов в рантайм-зависимости палитры.
+// Модуль показа не должен ничего исполнять из модуля правил.
+import type { domainStatusVariant } from "./domainStatus";
+
 /**
  * Цвет текста — лестница по светлоте, от самого тёмного к самому бледному.
  *
@@ -160,16 +165,22 @@ const radius = {
 export const tokens = { text, border, surface, semantic, radius } as const;
 
 /**
- * Вариант пилюли статуса. Строки те же, что отдаёт `domainStatusVariant`
- * (`lib/domainStatus`), и объявлены здесь заново лишь потому, что там тип не
- * экспортирован.
+ * Вариант пилюли статуса — ВЫВЕДЕН из самой лестницы, а не переписан сюда
+ * руками.
+ *
+ * Тип `BadgeVariant` в `lib/domainStatus` не экспортирован, и соблазн был
+ * скопировать union пяти строк. Копия компилировалась бы ровно так же — и
+ * молчала бы в тот день, когда в лестницу добавят шестой вариант: карта ниже
+ * осталась бы без него, а сборка не сказала бы ни слова. Это ровно тот сорт
+ * расхождения, против которого написан весь модуль, поэтому ключи берутся с
+ * возврата `domainStatusVariant`: добавят вариант — `STATUS_PILL` перестанет
+ * собираться, пока в неё не допишут цвета.
  *
  * ВАЖНО, где проходит граница: какой статус какого цвета — знание `domainStatus`
  * и остаётся там; здесь только то, КАК этот цвет выглядит. Перетащить сюда
- * лестницу — значит завести её вторую копию, ровно ту ошибку, от которой
- * `domainStatus` и лечили.
+ * лестницу — значит завести её вторую копию.
  */
-export type StatusPillVariant = "gray" | "blue" | "green" | "yellow" | "red";
+export type StatusPillVariant = ReturnType<typeof domainStatusVariant>;
 
 /** Тройка цветов пилюли: текст, заливка, рамка. */
 export interface StatusPillColors {
@@ -180,6 +191,16 @@ export interface StatusPillColors {
 
 /**
  * Показ пилюли статуса в палитре макета.
+ *
+ * Потребителя у карты пока нет, и это не мёртвый код: рисовать по ней будет
+ * `domains/DomainStatusBadge`, который в ходе редизайна строки списка заведёт
+ * собственную пилюлю вместо общего `Badge`. До тех пор в репозитории живут две
+ * карты одних и тех же пяти ключей, и вторая исчезнет вместе с переездом.
+ *
+ * Общий `Badge` (`ui/Primitives`) при этом остаётся на своей, старой палитре
+ * НАМЕРЕННО: его рисуют Servers, Cloudflare, Settings и ещё полдесятка экранов,
+ * и перекрасить его значило бы протащить редизайн Domains на всё приложение
+ * заодно — правку вида в местах, которых никто не смотрел и не проверял.
  *
  * Рамка есть у всех пяти, включая серую: без неё пилюля на светлой заливке
  * теряет края и перестаёт читаться как пилюля — становится подкрашенным
@@ -195,7 +216,13 @@ export interface StatusPillColors {
  */
 export const STATUS_PILL: Record<StatusPillVariant, StatusPillColors> = {
   gray: { color: text.secondary, bg: surface.page, border: border.light },
-  blue: { color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+  /*
+   * Заливка — тот же `surface.rowFocus`, что и у выделенной строки, а не
+   * выведенный из семейства `#eff6ff`: два синих, различающихся на две единицы,
+   * не различает глаз, зато синяя пилюля на подсвеченной строке пропадала бы в
+   * фоне вовсе. Один синий на оба случая — и он утверждён макетом.
+   */
+  blue: { color: "#1d4ed8", bg: surface.rowFocus, border: "#bfdbfe" },
   green: { color: semantic.successText, bg: semantic.successBg, border: "#a7f3d0" },
   yellow: { color: semantic.warningText, bg: "#fffbeb", border: "#fde68a" },
   red: { color: semantic.dangerText, bg: semantic.dangerBg, border: semantic.dangerBorder },
