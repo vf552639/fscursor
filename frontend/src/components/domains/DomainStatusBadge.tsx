@@ -1,6 +1,6 @@
 import React from "react";
 
-import { STATUS_PILL } from "../../lib/designTokens";
+import { STATUS_PILL, tokens } from "../../lib/designTokens";
 import { domainStatusLabel, domainStatusVariant } from "../../lib/domainStatus";
 
 /**
@@ -19,9 +19,12 @@ import { domainStatusLabel, domainStatusVariant } from "../../lib/domainStatus";
  * `Badge` держит старую палитру приложения и остаётся на ней намеренно: его
  * рисуют Servers, Cloudflare, Settings и ещё полдесятка экранов, и перекрасить
  * его значило бы протащить редизайн вкладки Domains на всё приложение заодно.
- * Форма же у пилюли макета своя (радиус 99 против 6 у `Badge`, свой шрифт и
- * разрядка), и пропсом её в общий примитив не занести — это был бы `Badge` с
- * переключателем «выглядеть как другой Badge».
+ * Форма же у пилюли макета своя (полная капля `radius.pill` против 6 у `Badge`
+ * и у обеих пилюль строки, свой шрифт и разрядка), и пропсом её в общий
+ * примитив не занести — это был бы `Badge` с переключателем «выглядеть как
+ * другой Badge». Радиус — из палитры, а не числом: 99 стояло здесь литералом
+ * при готовом `radius.pill` ровно с тем же значением, то есть третьей копией
+ * знания о форме на одной странице.
  *
  * Цвета — из `STATUS_PILL` (`lib/designTokens`), и ключи там выведены из самой
  * лестницы: добавят вариант — карта перестанет собираться, пока в неё не
@@ -43,7 +46,7 @@ export default function DomainStatusBadge({
       style={{
         display: "inline-block",
         padding: "3px 10px",
-        borderRadius: 99,
+        borderRadius: tokens.radius.pill,
         fontSize: 11,
         fontWeight: 600,
         letterSpacing: ".03em",

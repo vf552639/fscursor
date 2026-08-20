@@ -407,28 +407,47 @@ type RowAction = {
  * рисуют Servers, ServerDetail, Cloudflare и шапки полудюжины карточек, и
  * перекрасить его всем сразу значило бы протащить редизайн одной вкладки на
  * всё приложение — правку вида в местах, которых никто не смотрел. Умолчание
- * `"blue"` — ровно сегодняшний вид, до последнего хекса.
+ * `"default"` — ровно сегодняшний вид, до последнего хекса.
+ *
+ * **Имена — по роли, а не по цвету** (то же правило, по которому названы
+ * токены, — см. шапку `lib/designTokens`). Сначала тона звались `blue` и
+ * `slate`, то есть прямо цветом, а имя цвета врёт при первой же правке макета:
+ * `slate` перестанет быть шиферным ровно в тот день, когда палитру подкрутят, и
+ * переименовывать его будет уже поздно. `inverted` называет то, что тон ДЕЛАЕТ,
+ * — переворачивает кнопку (тёмная плашка, светлый глиф), — и переживёт любой
+ * оттенок. Пара `legacy`/`redesign` тоже рассматривалась и отвергнута: она
+ * называет происхождение, а происхождение стареет — сегодняшний «редизайн»
+ * через год станет обычным видом, и имя начнёт врать точно так же.
  *
  * Различаются только цвета ХОВЕРА. Геометрия (28×28, радиус 6, рамка, шрифт) и
  * покой у обоих тонов общие: кнопка обязана оставаться той же кнопкой, иначе
  * два экрана рядом читаются как два разных продукта — а это ровно та беда, из-за
  * которой редизайн и затевался.
  */
-export type RowActionsTone = "blue" | "slate";
+export type RowActionsTone = "default" | "inverted";
 
 /** Цвета ховера по тону: заливка, глиф и рамка — отдельно для обычного и опасного. */
 const ROW_ACTION_HOVER: Record<RowActionsTone, { normal: {bg: string; color: string; border: string}; danger: {bg: string; color: string; border: string} }> = {
-  // Как было и как останется на всех экранах, кроме списка доменов.
-  blue:  { normal: {bg:"#eff4ff",color:"#2563eb",border:"#e5e7eb"}, danger: {bg:"#fef2f2",color:"#dc2626",border:"#e5e7eb"} },
+  // Как было и как останется на всех экранах, кроме списка доменов. Хексы здесь
+  // ЛИТЕРАЛЫ намеренно и на токены не переезжают: это замороженная палитра
+  // прочих экранов, и подставить ей роль из `designTokens` значило бы связать
+  // вид Servers и Cloudflare с правками макета Domains — то есть завести ровно
+  // ту связь, которой необязательность этого пропа и избегает.
+  default:  { normal: {bg:"#eff4ff",color:"#2563eb",border:"#e5e7eb"}, danger: {bg:"#fef2f2",color:"#dc2626",border:"#e5e7eb"} },
   // Макет вкладки Domains: обычное действие ИНВЕРТИРУЕТСЯ (тёмная плашка,
-  // белый глиф), опасное краснеет целиком — включая рамку, которой синему тону
-  // трогать нечем.
-  slate: { normal: {bg:"#0f172a",color:"#fff",border:"#0f172a"},   danger: {bg:"#fee2e2",color:"#b91c1c",border:"#fecaca"} },
+  // белый глиф), опасное краснеет целиком — включая рамку, которой тон по
+  // умолчанию трогать нечем. Все пять значений — из палитры под именами ролей,
+  // а не хексами: это новый код редизайна, и шесть его копий одних и тех же
+  // хексов — ровно то, против чего заведён `designTokens`.
+  inverted: {
+    normal: {bg:tokens.text.ink,color:tokens.surface.base,border:tokens.text.ink},
+    danger: {bg:tokens.semantic.danger.bg,color:tokens.semantic.danger.text,border:tokens.semantic.danger.border},
+  },
 };
 
 const ROW_ACTION_BORDER = "#e5e7eb";
 
-export function RowActions({ actions = [], tone = "blue" }: { actions: RowAction[]; tone?: RowActionsTone }) {
+export function RowActions({ actions = [], tone = "default" }: { actions: RowAction[]; tone?: RowActionsTone }) {
   const hover = ROW_ACTION_HOVER[tone];
   return <div style={{display:"flex",gap:5}}>
     {actions.map((a, i) => {

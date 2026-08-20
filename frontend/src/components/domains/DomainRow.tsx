@@ -5,7 +5,7 @@ import { Server } from "../../api/servers";
 import { RegistrarAccount } from "../../api/registrars";
 import { CloudflareAccount } from "../../api/cloudflare";
 import { CF_HINT_TITLE } from "../../lib/cfZoneMatch";
-import { tokens } from "../../lib/designTokens";
+import { SemanticTone, STATUS_PILL, StatusPillColors, tokens } from "../../lib/designTokens";
 import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, formatExpiry, formatExpiryDate } from "../../lib/domainExpiry";
 import DomainStatusBadge from "./DomainStatusBadge";
 import { DomainUI, RowCfHint } from "./types";
@@ -17,31 +17,54 @@ const CELL: React.CSSProperties = {
 };
 
 /**
+ * Геометрия пилюли строки — ОДНА на все пилюли строки.
+ *
+ * Заведена потому, что их тут две (метка происхождения и тег сертификата) и
+ * обе рисовались своим набором чисел: одинаковые скругление и кегль стояли в
+ * двух местах и разъехались бы на первой правке — ровно так же, как разъезжались
+ * копии хексов до `designTokens`. Различия, которые ТЗ задало явно (отбивка и
+ * насыщенность у тега сертификата), остаются переопределениями по месту: они
+ * НАЗВАНЫ в макете, а не случились.
+ *
+ * `borderRadius` — `xs` (6), и это не тот же радиус, что у пилюли статуса
+ * (`DomainStatusBadge`, `radius.pill` = 99). Расхождение намеренное и описано
+ * там же: пилюля статуса — единственная капля в строке, и форма её отличает.
+ */
+const ROW_PILL: React.CSSProperties = {
+  display: "inline-block",
+  borderRadius: tokens.radius.xs,
+  fontSize: 11,
+  whiteSpace: "nowrap",
+};
+
+/**
  * Мелкая метка под именем домена: сервер и регистратор.
  *
  * Общая форма у обоих намеренно — различает их только заливка. Это не два
  * разных элемента, а один и тот же ответ на вопрос «где эта строка живёт», и
  * разная геометрия читалась бы как разная важность.
  *
+ * Тип тона — `SemanticTone` из палитры, а не тройка полей, объявленная здесь
+ * инлайном: обе метки этот тон и получают оттуда (`semantic.server`,
+ * `semantic.registrar`), а своя копия формы молча разъехалась бы с исходной в
+ * день, когда в тон добавят четвёртое поле.
+ *
  * `cursor: help` вместе с `title` — потому что метка показывает ТОЛЬКО значение
  * («web-01», «hostiq»), без подписи, чем оно является. Значение без подписи
  * экономит место в строке, которой и так тесно, но требует, чтобы подпись была
  * достижима: курсор со знаком вопроса — единственное, что об этом сообщает.
  */
-function RowBadge({ tone, title, children }: { tone: { text: string; bg: string; border: string }; title: string; children: React.ReactNode }) {
+function RowBadge({ tone, title, children }: { tone: SemanticTone; title: string; children: React.ReactNode }) {
   return (
     <span
       title={title}
       style={{
-        display: "inline-block",
+        ...ROW_PILL,
         padding: "1px 7px",
-        borderRadius: tokens.radius.xs,
-        fontSize: 11,
         color: tone.text,
         background: tone.bg,
         border: `1px solid ${tone.border}`,
         cursor: "help",
-        whiteSpace: "nowrap",
         maxWidth: "100%",
         overflow: "hidden",
         textOverflow: "ellipsis",
@@ -53,11 +76,31 @@ function RowBadge({ tone, title, children }: { tone: { text: string; bg: string;
 }
 
 /**
- * Тон метки сервера. Своего семантического тона у неё нет и быть не должно:
- * имя машины ничего не утверждает — ни про здоровье, ни про срок, — и цвет ему
- * нужен нейтральный. Собран из тех же токенов, что шапка карточки.
+ * Тег сертификата: два состояния, оба — из карты пилюль макета.
+ *
+ * Своей палитры у ячейки больше нет. Собранная руками, она была четвёртой на
+ * странице, где карта `STATUS_PILL` уже описывает ровно это: «есть и живой» —
+ * зелёная пилюля, «нет» — нейтральная. Рамка приезжает вместе с цветом и это
+ * ГЛАВНОЕ, что чинится: заливка «No SSL» (`surface.page`) совпадает с
+ * разлиновкой строк (`border.hairline` объявлен ей равным), то есть без рамки у
+ * пилюли не было краёв по построению — она читалась пятном, а не тегом.
+ *
+ * РАСХОЖДЕНИЕ С КАРТОЙ, одно и названное: текст «No SSL» — `text.faint`
+ * (#94a3b8), а не `text.secondary` (#475569), которым карта красит нейтральную
+ * пилюлю. Так назвал ТЗ вкладки, и вид по ТЗ здесь важнее единообразия с
+ * картой: тег отвечает «сертификата нет», и в списке на две сотни строк он
+ * обязан быть тише зелёного соседа, иначе колонка превращается в ряд одинаково
+ * громких меток. Цена расхождения посчитана, а не примерена на глаз: 2.34:1
+ * против 6.92:1 у `text.secondary` — ниже любого порога WCAG. Терпимо ровно
+ * потому, что весь смысл тега продублирован: точный `ssl_status` лежит в
+ * `title`, а «сертификат есть» опознаётся зелёным, которое читается и без
+ * чтения слова. Захочет дизайн читаемости — правка здесь в одну строку: убрать
+ * переопределение `color`.
  */
-const SERVER_TONE = { text: tokens.text.body, bg: tokens.surface.cardHeader, border: tokens.border.card };
+const SSL_PILL: Record<"valid" | "none", StatusPillColors> = {
+  valid: STATUS_PILL.green,
+  none: { ...STATUS_PILL.gray, color: tokens.text.faint },
+};
 
 /**
  * Событие, дальше которого клик по строке не идёт.
@@ -156,6 +199,7 @@ function DomainRow({
   // доходит намеренно — см. `RowCfHint`.
   const cfHintAccount = !cf && cfHint?.outcome === "matched" ? cfHint.account : null;
   const sslValid = d.ssl_status === "active";
+  const sslTone = SSL_PILL[sslValid ? "valid" : "none"];
   return <tr
     onClick={() => onOpenDetail(d.id)}
     style={{ cursor: "pointer", ...(focused ? { background: tokens.surface.rowFocus } : null) }}
@@ -186,7 +230,7 @@ function DomainRow({
           Servers, ServerDetail и Dashboard. */}
       {(srv || reg?.provider) ? (
         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4,maxWidth:"100%"}}>
-          {srv ? <RowBadge tone={SERVER_TONE} title="Server this domain is hosted on">{srv.name}</RowBadge> : null}
+          {srv ? <RowBadge tone={tokens.semantic.server} title="Server this domain is hosted on">{srv.name}</RowBadge> : null}
           {reg?.provider ? (
             <RowBadge tone={tokens.semantic.registrar} title="Domain provider (registrar) this domain was purchased from">{reg.provider}</RowBadge>
           ) : null}
@@ -243,14 +287,12 @@ function DomainRow({
       <span
         title={`SSL status: ${d.ssl_status || "none"}`}
         style={{
-          display:"inline-block",
+          ...ROW_PILL,
           padding:"2px 8px",
-          borderRadius:tokens.radius.xs,
-          fontSize:11,
           fontWeight:600,
-          whiteSpace:"nowrap",
-          color: sslValid ? tokens.semantic.success.text : tokens.text.faint,
-          background: sslValid ? tokens.semantic.success.bg : tokens.surface.page,
+          color: sslTone.color,
+          background: sslTone.bg,
+          border: `1px solid ${sslTone.border}`,
         }}
       >
         {sslValid ? "Valid" : "No SSL"}
@@ -290,7 +332,7 @@ function DomainRow({
         показывает. */}
     <td style={CELL} onClick={stop}>
       <RowActions
-        tone="slate"
+        tone="inverted"
         actions={[
           { icon: "⚙", title: "Open domain settings", onClick: () => onOpenDetail(d.id) },
           {

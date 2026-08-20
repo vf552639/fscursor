@@ -176,7 +176,7 @@ export default function DomainTable({
         и React ругался бы на дублирующийся ключ. Порядок здесь и есть
         тождество колонки, переставлять её без перестановки заголовка нельзя. */}
     <colgroup>{COL_WIDTHS.map((w,i)=><col key={i} style={{width:w}}/>)}</colgroup>
-    <thead><tr><th style={{...TH_STYLE,padding:"10px 16px"}}><input type="checkbox" checked={selectedIds.size===rows.length&&rows.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
+    <thead><tr><th style={TH_STYLE}><input type="checkbox" checked={selectedIds.size===rows.length&&rows.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
       {COLUMNS.map((c)=>c.key
         ? <SortableTh key={c.label} k={c.key} label={c.label} sort={sort} onSort={onSort}/>
         : <PlainTh key={c.label}>{c.label}</PlainTh>)}
