@@ -12,7 +12,12 @@ import type { ProvisionOutcome } from "../api/domains";
 import { useAuthStore } from "../store/auth";
 
 /**
- * Provision из строки таблицы. Три отдельные гарантии, которые легко спутать:
+ * Provision одного домена — весь путь от кнопки до аргументов команды.
+ *
+ * Путь сменился (редизайн вкладки Domains, фаза 4): иконки ⚙ в строке больше
+ * нет, вход один — карточка домена → вкладка Server → «Provision». Гарантии от
+ * этого не изменились ни одной, и переписаны тесты именно так, чтобы это было
+ * видно: те же четыре утверждения, другая дорога до кнопки.
  *
  * 1. Опциональная БД достижима из UI: чекбокс диалога доезжает до `invoke`
  *    аргументом `withDb`, причём в обе стороны (включённый и выключенный).
@@ -21,6 +26,13 @@ import { useAuthStore } from "../store/auth";
  * 3. Результат не теряется при размонтировании страницы: колбэк захвачен
  *    замыканием `mutationFn`, а не передан per-call через `mutate(…, {onSuccess})`,
  *    который react-query глушит через `hasListeners()`.
+ * 4. Диалог доступен ПОВЕРХ карточки: у обеих модалок `zIndex:100`, и порядок в
+ *    разметке страницы — единственное, что решает, кто кого перекрывает.
+ *
+ * Карточка домена здесь НЕ замокана, в отличие от соседних сценариев страницы:
+ * с заглушкой вместо неё эти тесты проверяли бы заглушку, а именно на дороге
+ * «строка → карточка → вкладка → кнопка» и живёт единственный вход в диалог с
+ * галочкой «создать БД».
  */
 
 const mocks = vi.hoisted(() => ({
@@ -48,8 +60,13 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 // Тяжёлые соседи страницы, которых этот сценарий не открывает вовсе. Их деревья
 // (crypto, argon2, поллинг задач) к provision отношения не имеют, а импорт стоит
 // времени всему прогону — файл и так поднимает страницу целиком.
+//
+// `DomainDetailModal` в этом списке БОЛЬШЕ НЕТ и быть не должен: с фазы 4 вход в
+// provision живёт на её вкладке Server, и заглушка вместо карточки оставила бы
+// весь файл зелёным при полностью оторванной кнопке. `RevealSecret` остаётся
+// замоканным — карточка FTP внутри вкладки тащит за собой argon2 и libsodium, а
+// расшифровка пароля к provision отношения не имеет.
 vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
-vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 
 const DB_PASSWORD = "db-pw-Nx9-secret";
@@ -151,19 +168,64 @@ function renderWorkspace(rows: Array<{ id: number; name: string }>) {
   return render(<Workspace rows={rows} />);
 }
 
-/** Открыть диалог provision у единственной строки таблицы. */
-async function openProvisionDialog() {
-  fireEvent.click(await screen.findByRole("button", { name: "Provision domain" }));
+/**
+ * Открыть карточку домена на вкладке Server — единственный вход в provision с
+ * фазы 4. Имя домена в строке — кнопка, вкладки карточки — настоящий `tablist`.
+ */
+async function openServerTab(domain = "example.com") {
+  fireEvent.click(await screen.findByRole("button", { name: domain }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Server" }));
+}
+
+/** Кнопка Provision на открытой вкладке Server. */
+function tabProvisionButton() {
+  const line = screen.getByRole("button", { name: "Проверить на сервере" }).parentElement!;
+  return within(line).getByRole("button", { name: /^Provision(ing…)?$/ }) as HTMLButtonElement;
+}
+
+/** Открыть диалог provision у единственной строки таблицы. Возвращает чекбокс БД. */
+async function openProvisionDialog(domain = "example.com") {
+  await openServerTab(domain);
+  fireEvent.click(tabProvisionButton());
   return (await screen.findByLabelText(/Also create a database/i)) as HTMLInputElement;
 }
 
-/** Запустить provision у строки конкретного домена (диалог → БД → Provision). */
+/**
+ * Панель открытого диалога provision.
+ *
+ * Скоуп обязателен, и это не придирка к тесту, а прямое следствие переезда:
+ * диалог открывается ПОВЕРХ карточки, кнопка «Provision» вкладки Server
+ * остаётся в DOM, и `getByRole` без скоупа нашёл бы две кнопки с этим именем.
+ * Панель берётся от чекбокса «создать БД» — он живёт только в диалоге, а
+ * `Modal` кладёт детей прямо в панель, так что родитель его `label` и есть она.
+ */
+function provisionDialog(cb: HTMLElement): HTMLElement {
+  return cb.closest("label")!.parentElement as HTMLElement;
+}
+
+/** Нажать «Provision» именно в диалоге. */
+function confirmProvision(cb: HTMLElement) {
+  fireEvent.click(within(provisionDialog(cb)).getByRole("button", { name: "Provision" }));
+}
+
+/**
+ * Закрыть карточку домена: без этого до строки соседнего домена не добраться.
+ *
+ * Крестик ищется ВНУТРИ карточки, а не по всему экрану: «Close» на странице
+ * доменов не один (крестики баннеров), и глобальный поиск нашёл бы их все.
+ */
+function closeCard() {
+  const card = screen
+    .getByRole("tablist", { name: "Domain card sections" })
+    .closest('[style*="z-index"]') as HTMLElement;
+  fireEvent.click(within(card).getByRole("button", { name: "Close" }));
+}
+
+/** Запустить provision конкретного домена (карточка → Server → диалог → БД → Provision). */
 async function provisionRow(domain: string, withDb: boolean) {
-  const row = (await screen.findByText(domain)).closest("tr") as HTMLElement;
-  fireEvent.click(within(row).getByRole("button", { name: "Provision domain" }));
-  const cb = (await screen.findByLabelText(/Also create a database/i)) as HTMLInputElement;
+  const cb = await openProvisionDialog(domain);
   if (withDb) fireEvent.click(cb);
-  fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+  confirmProvision(cb);
 }
 
 /** Результат provision с узнаваемым паролем БД. */
@@ -212,7 +274,7 @@ describe("Domains — provision: чекбокс withDb", () => {
     const cb = await openProvisionDialog();
     expect(cb.checked).toBe(false); // БД — осознанный выбор, а не умолчание
     fireEvent.click(cb);
-    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    confirmProvision(cb);
 
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
     // Полная форма аргументов: проверять «вызвано» мало — флаг терялся именно
@@ -230,8 +292,7 @@ describe("Domains — provision: чекбокс withDb", () => {
     mocks.invokeSynced.mockResolvedValue({ ...PROVISION_RESULT, db: undefined });
 
     renderPage();
-    await openProvisionDialog();
-    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    confirmProvision(await openProvisionDialog());
 
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
     expect(mocks.invokeSynced).toHaveBeenCalledWith("provision_domain", {
@@ -249,9 +310,12 @@ describe("Domains — provision: чекбокс withDb", () => {
     renderPage();
     const cb = await openProvisionDialog();
     fireEvent.click(cb);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(provisionDialog(cb)).getByRole("button", { name: "Cancel" }));
 
-    const again = await openProvisionDialog();
+    // Карточка под диалогом никуда не делась — второй раз в диалог входим прямо
+    // с её вкладки Server, и именно так его открывает пользователь.
+    fireEvent.click(tabProvisionButton());
+    const again = (await screen.findByLabelText(/Also create a database/i)) as HTMLInputElement;
     expect(again.checked).toBe(false);
   });
 });
@@ -265,7 +329,7 @@ describe("Domains — provision: пароли", () => {
     const { container } = renderPage(onResult);
     const cb = await openProvisionDialog();
     fireEvent.click(cb);
-    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    confirmProvision(cb);
 
     await waitFor(() =>
       expect(onResult).toHaveBeenCalledWith({ domain: "example.com", result: PROVISION_RESULT }),
@@ -297,8 +361,7 @@ describe("Domains — provision: пароли", () => {
     const onResult = vi.fn();
 
     renderPage(onResult);
-    await openProvisionDialog();
-    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    confirmProvision(await openProvisionDialog());
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
     // Пользователь ушёл со страницы, пока шёл provision (минуты SSH и certbot).
@@ -319,37 +382,47 @@ describe("Domains — provision: повторный запуск", () => {
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
     const { remount } = renderPage();
-    await openProvisionDialog();
-    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    confirmProvision(await openProvisionDialog());
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
     remount();
 
+    // Карточка после перемонтирования закрыта — открываем заново тем же путём,
+    // каким её открывает вернувшийся пользователь.
+    await openServerTab();
+
     // Летящую мутацию новая страница находит по mutationKey в MutationCache:
     // без ключа перемонтированный observer её не видит, и второй клик запустил
     // бы вторую SSH-сессию с create_site/create_ftp_account/certbot.
-    const btn = (await screen.findByRole("button", { name: "Provisioning…" })) as HTMLButtonElement;
+    const btn = tabProvisionButton();
+    expect(btn.textContent).toBe("Provisioning…");
     expect(btn.disabled).toBe(true);
     fireEvent.click(btn);
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText(/Also create a database/i)).toBeNull();
   });
 });
 
 describe("Domains — provision: web", () => {
-  it("в вебе отдаёт deep link sdmp://provision и ничего не вызывает", async () => {
+  it("в вебе одиночного provision нет ни кнопкой, ни ссылкой", async () => {
     setTauri(false);
     const { container } = renderPage();
 
-    const link = await waitFor(() => {
-      const el = container.querySelector('a[href^="sdmp://provision"]');
-      expect(el).toBeTruthy();
-      return el!;
-    });
-    // Ровно тот адрес, который умеет разобрать parseDeepLinkAction: у хоста
-    // `provision` есть только `domainId`, лишний параметр десктоп молча
-    // проглотит — то есть чекбокс в вебе врал бы.
-    expect(link.getAttribute("href")).toBe("sdmp://provision?domainId=42");
+    // Строка потеряла и ⚙, и ссылку `sdmp://provision?domainId=…`, стоявшую
+    // рядом с ней в вебе. Ссылку не «забыли перенести»: хост `provision` у
+    // `parseDeepLinkAction` знает единственный параметр `domainId` и `with_db`
+    // не принимает, то есть рядом с галочкой «создать БД» она обещала бы выбор,
+    // который десктоп молча проглотит. Массовая ссылка на месте и по одному
+    // домену работает — см. `BulkActionToolbar`.
+    await screen.findByText("example.com");
+    expect(container.querySelector('a[href^="sdmp://provision"]')).toBeNull();
     expect(screen.queryByRole("button", { name: "Provision domain" })).toBeNull();
+
+    // И на карточке кнопки нет: прогон идёт по SSH, а веб не выполняет ничего.
+    await openServerTab();
+    expect(screen.queryByRole("button", { name: "Provision" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Проверить на сервере" })).toBeNull();
+
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
     expect(
       mocks.apiPost.mock.calls.some((c: any[]) => String(c[0]).includes("provision")),
@@ -375,6 +448,10 @@ describe("Domains — provision: два домена подряд", () => {
 
     await provisionRow("a.com", true);
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+    // Карточка a.com осталась открытой поверх списка — до строки b.com иначе не
+    // добраться. Это и есть цена переезда кнопки на карточку, и платится она
+    // ровно здесь, в сценарии «два домена подряд».
+    closeCard();
     // Гейт подоменный: второй домен запускается, пока идёт первый. Это
     // намеренно — но именно поэтому приёмник результата обязан быть очередью.
     await provisionRow("b.com", true);
@@ -413,8 +490,7 @@ describe("Domains — provision: deep link", () => {
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
     renderPage();
-    await openProvisionDialog();
-    fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+    confirmProvision(await openProvisionDialog());
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
     // Парная сторона гейта: кнопку блокирует страница, а ссылка приходит извне
@@ -427,21 +503,74 @@ describe("Domains — provision: deep link", () => {
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
   });
 
-  it("provision из deep link виден странице и блокирует ⚙ той же строки", async () => {
+  it("provision из deep link виден странице и гасит кнопку карточки", async () => {
     setTauri(true);
     mocks.invokeSynced.mockReturnValue(new Promise(() => {}));
 
     renderPage();
     await screen.findByText("example.com");
     // Ссылку обрабатывает DesktopWorkspace, вне рендера страницы. Если этот путь
-    // идёт мимо PROVISION_DOMAIN_KEY, страница его не видит и ⚙ остаётся
-    // активной — клик открыл бы вторую SSH-сессию по тому же домену.
+    // идёт мимо PROVISION_DOMAIN_KEY, страница его не видит, кнопка карточки
+    // остаётся активной — клик открыл бы вторую SSH-сессию по тому же домену.
     void handleSdmpDeepLinkInTauri("sdmp://provision?domainId=42", "user-1", () => true);
 
-    const gear = (await screen.findByRole("button", {
-      name: "Provisioning…",
-    })) as HTMLButtonElement;
-    expect(gear.disabled).toBe(true);
+    await openServerTab();
+    const btn = await waitFor(() => {
+      const b = tabProvisionButton();
+      expect(b.textContent).toBe("Provisioning…");
+      return b;
+    });
+    expect(btn.disabled).toBe(true);
     expect(mocks.invokeSynced).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Переезд кнопки на карточку (фаза 4 редизайна вкладки Domains) целиком: вход
+ * через вкладку Server, диалог поверх карточки, галочка «создать БД» доезжает
+ * до аргументов команды.
+ *
+ * Отдельным блоком, а не припиской к тестам выше, потому что здесь проверяется
+ * то, чего до переезда не существовало как вопроса: диалог теперь открывается
+ * НАД другой модалкой, и работает это на одном лишь порядке в разметке.
+ */
+describe("Domains — provision: диалог поверх карточки", () => {
+  it("открывается кнопкой вкладки Server и лежит в DOM ниже карточки", async () => {
+    setTauri(true);
+    mocks.invokeSynced.mockResolvedValue(PROVISION_RESULT);
+
+    renderPage();
+    const cb = await openProvisionDialog();
+
+    // Ближайшая подложка каждой модалки: `Modal` рисует её инлайновым
+    // `zIndex:100`, поэтому ищется она по самому стилю, а не по вёрстке.
+    const backdropOf = (el: HTMLElement) => el.closest('[style*="z-index"]') as HTMLElement;
+    const cardBackdrop = backdropOf(tabProvisionButton());
+    const dialogBackdrop = backdropOf(provisionDialog(cb));
+
+    // Карточка под диалогом ЖИВА — иначе проверка порядка ничего не значила бы.
+    expect(cardBackdrop).toBeTruthy();
+    expect(dialogBackdrop).not.toBe(cardBackdrop);
+    // z-index у обеих один и тот же, и это не совпадение, а свойство `Modal`.
+    // Именно поэтому кто кого перекрывает, решает порядок в DOM.
+    expect(dialogBackdrop.style.zIndex).toBe(cardBackdrop.style.zIndex);
+    // Диалог обязан идти ПОСЛЕ карточки. Подними его в разметке `Domains`
+    // выше `DomainDetailModal` — он уедет под карточку: невидимый, а клики
+    // соберёт её подложка.
+    expect(
+      cardBackdrop.compareDocumentPosition(dialogBackdrop) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // И он рабочий: галочка «создать БД» с этой дороги доезжает до команды —
+    // ровно то, ради чего кнопку и переносили, а не удаляли вместе со строкой.
+    fireEvent.click(cb);
+    confirmProvision(cb);
+    await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
+    expect(mocks.invokeSynced).toHaveBeenCalledWith("provision_domain", {
+      userId: "user-1",
+      domainId: "42",
+      siteOnly: false,
+      withDb: true,
+    });
   });
 });

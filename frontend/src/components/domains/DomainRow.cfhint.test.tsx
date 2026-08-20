@@ -48,9 +48,7 @@ function renderRow(props: { domain?: DomainUI; cfAccount?: CloudflareAccount; cf
           selected={false}
           onToggleSelected={() => {}}
           focused={false}
-          isProvisioning={false}
           onOpenDetail={() => {}}
-          onProvision={() => {}}
           onDelete={() => {}}
         />
       </tbody>

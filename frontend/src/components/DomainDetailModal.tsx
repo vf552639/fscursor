@@ -59,6 +59,12 @@ import { Tabs } from "./ui/Tabs";
  * вид, что действие есть. Вернуть их можно только новыми Tauri-командами с
  * SSH-логикой, это отдельная функция со своим планом.
  *
+ * Ровно этой меркой на вкладку Server и пришла кнопка **Provision** (переехала
+ * из строки списка доменов): за ней стоит существующая команда
+ * `provision_domain`, она десктоп-онли, как и весь SSH, а результат уходит
+ * НАРУЖУ через `onProvision` — карточка не запускает прогон и не хранит его
+ * пароли. Это не отмена правила, а его выполнение.
+ *
  * А аккаунт Cloudflare и nameservers вкладки НЕ разводят — оба стоят на
  * Overview, и это то самое свойство, ради которого прежние вкладки и были
  * сняты. Это один вопрос («куда домен делегирован и почему не туда»), и
@@ -80,6 +86,8 @@ import { Tabs } from "./ui/Tabs";
 export default function DomainDetailModal({
   domain,
   servers,
+  onProvision,
+  isProvisioning,
   onClose,
 }: {
   domain: Domain;
@@ -93,6 +101,19 @@ export default function DomainDetailModal({
    * состояния списка вместо «нашли/не нашли» — см. `DomainServerField`.
    */
   servers: Server[];
+  /**
+   * Открыть диалог provision — оба пропа карточка только ПЕРЕДАЁТ вкладке
+   * Server и сама ими не пользуется.
+   *
+   * Транзит намеренный: кнопка принадлежит вкладке (там же, где живёт весь
+   * ответ «что развёрнуто на сервере»), а запуск — странице, потому что в
+   * ответе прогона лежат пароли БД и FTP, существующие ровно один раз, а
+   * карточка закрывается кликом по подложке задолго до конца SSH-сессии.
+   * Подробности — у `onProvision` в `DomainServerTab`.
+   */
+  onProvision: () => void;
+  /** Идёт ли provision ЭТОГО домена — гейт страницы по `MutationCache`. */
+  isProvisioning: boolean;
   onClose: () => void;
 }) {
   // Сервер домена: адрес для карточки FTP на вкладке Server.
@@ -307,7 +328,15 @@ export default function DomainDetailModal({
             снимается по кнопке, которая стоит здесь же; карточка SSL на
             Overview читает ТОТ ЖЕ снимок и печатает его возраст у себя в
             шапке, чтобы не выдать протухшее измерение за свежее. */}
-        {tab === "server" ? <DomainServerTab domain={domain} server={server} now={now} /> : null}
+        {tab === "server" ? (
+          <DomainServerTab
+            domain={domain}
+            server={server}
+            now={now}
+            onProvision={onProvision}
+            isProvisioning={isProvisioning}
+          />
+        ) : null}
         {/* Логи читаются из ТОГО ЖЕ снимка, что и вкладка Server, и потому
             получают то же «сейчас»: возраст снимка на двух вкладках обязан
             совпадать. Сервер вкладке не нужен вовсе — пути логов приезжают в

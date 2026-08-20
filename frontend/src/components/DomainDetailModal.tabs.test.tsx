@@ -80,7 +80,7 @@ function domain(over: Record<string, unknown> = {}) {
 function show(over: Record<string, unknown> = {}) {
   render(
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={domain(over)} servers={SERVERS} onClose={() => {}} />
+      <DomainDetailModal domain={domain(over)} servers={SERVERS} onProvision={() => {}} isProvisioning={false} onClose={() => {}} />
     </QueryClientProvider>,
   );
 }

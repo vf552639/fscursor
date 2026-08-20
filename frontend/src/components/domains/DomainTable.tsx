@@ -88,9 +88,7 @@ export default function DomainTable({
   onToggleRow,
   onToggleAll,
   focusDomainId,
-  isProvisioning,
   onOpenDetail,
-  onProvision,
   onDelete,
 }: {
   /**
@@ -117,13 +115,12 @@ export default function DomainTable({
   onToggleAll: () => void;
   focusDomainId: number | null;
   /**
-   * Гейт provision — вопрос всей таблицы, а не строки: он читает `MutationCache`
-   * и живёт на странице. Сюда приезжает предикатом, а строка получает уже
-   * готовый ответ про себя.
+   * Гейта provision здесь больше нет, и это не упрощение: сам запуск уехал на
+   * карточку домена (вкладка Server), а предикат по `MutationCache` как жил на
+   * странице, так и живёт — просто теперь он уезжает в `DomainDetailModal`, а
+   * не через таблицу в каждую из двухсот строк.
    */
-  isProvisioning: (id: number) => boolean;
   onOpenDetail: (id: number) => void;
-  onProvision: (d: DomainUI) => void;
   onDelete: (d: DomainUI) => void;
 }) {
   return <table style={{width:"100%",borderCollapse:"collapse"}}>
@@ -152,9 +149,7 @@ export default function DomainTable({
           selected={selectedIds.has(d.id)}
           onToggleSelected={onToggleRow}
           focused={focusDomainId === d.id}
-          isProvisioning={isProvisioning(d.id)}
           onOpenDetail={onOpenDetail}
-          onProvision={onProvision}
           onDelete={onDelete}
         />
       ))}

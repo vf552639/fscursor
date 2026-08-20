@@ -8,18 +8,8 @@ import { CloudflareAccount } from "../../api/cloudflare";
 import { isCheckStale, serverUiStatus } from "../../lib/serverStatus";
 import { CF_HINT_TITLE } from "../../lib/cfZoneMatch";
 import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, formatExpiry, formatExpiryDate } from "../../lib/domainExpiry";
-import { isTauri } from "../../lib/runtime";
-import { OpenInDesktop } from "../OpenInDesktop";
 import DomainStatusBadge from "./DomainStatusBadge";
 import { DomainUI, RowCfHint } from "./types";
-
-/**
- * Заглушка для обязательного `desktopOnClick` у `OpenInDesktop` там, где сам
- * компонент отрендерен под `!isTauri()`: в вебе он отдаёт ссылку и до колбэка
- * не доходит. Именованная константа — чтобы читатель видел «сюда не попадают», а
- * не второй, конкурирующий вход в то же действие.
- */
-const NOOP_DESKTOP_ONLY_BRANCH = () => {};
 
 /**
  * Тон подсказки живого матча: темнее прочерка (`DIM_TEXT`, «данных нет»), но
@@ -61,14 +51,7 @@ export interface DomainRowProps {
   onToggleSelected: (id: number) => void;
   /** Строка, на которую пришли по ссылке `?domainId=`: подсвечена и не гаснет от курсора. */
   focused: boolean;
-  /**
-   * Идёт ли provision ЭТОГО домена. Готовым флагом, а не предикатом по всей
-   * таблице: гейт (`useMutationState` по `PROVISION_DOMAIN_KEY`) — вопрос
-   * страницы, строка про соседей ничего знать не должна.
-   */
-  isProvisioning: boolean;
   onOpenDetail: (id: number) => void;
-  onProvision: (domain: DomainUI) => void;
   onDelete: (domain: DomainUI) => void;
 }
 
@@ -92,9 +75,7 @@ function DomainRow({
   selected,
   onToggleSelected,
   focused,
-  isProvisioning,
   onOpenDetail,
-  onProvision,
   onDelete,
 }: DomainRowProps) {
   // Оба срока — через один модуль и через одно «сейчас» (`now` выше): своя
@@ -192,54 +173,26 @@ function DomainRow({
       <div style={{marginTop:4,fontSize:11,color:expiryTextColor(sslExpState)}}>{formatExpiry(d.ssl_expires_at, now)}</div>
     </td>
     <td style={{padding:"11px 16px",fontSize:12,color:"#9ca3af"}}>{fmtDate(d.created)}</td>
+    {/* Действий два, и оба про саму строку: открыть карточку и удалить домен.
+        Provision отсюда УЕХАЛ — иконка ⚙ и веб-ссылка `sdmp://provision` жили
+        здесь и стали кнопкой на вкладке Server карточки домена
+        (`DomainServerTab`). Причина не в тесноте: развёртывание отвечает на
+        вопрос «что стоит на сервере», а на этот вопрос на всём продукте
+        отвечает ровно одно место — карточка. В строке же оно было единственным
+        входом в диалог с галочкой «создать БД», из-за чего опциональная БД
+        зависела от того, не прибрался ли кто-нибудь в колонке действий. */}
     <td style={{padding:"11px 16px"}}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <RowActions
-          actions={[
-            { icon: "↗", title: "Open detail", onClick: () => onOpenDetail(d.id) },
-            ...(isTauri()
-              ? [
-                  {
-                    icon: "⚙",
-                    // Второй клик стартовал бы вторую SSH-сессию с
-                    // create_site/create_ftp_account/certbot по тому
-                    // же домену — блокируем на время выполнения.
-                    title: isProvisioning ? "Provisioning…" : "Provision domain",
-                    disabled: isProvisioning,
-                    onClick: () => {
-                      if (isProvisioning) return;
-                      onProvision(d);
-                    },
-                  },
-                ]
-              : []),
-            {
-              icon: "✕",
-              title: "Delete domain",
-              variant: "danger" as const,
-              onClick: () => onDelete(d),
-            },
-          ]}
-        />
-        {!isTauri() ? (
-          // В вебе — только ссылка в десктоп, и БЕЗ чекбокса «создать
-          // БД»: хост `provision` у `parseDeepLinkAction` знает один
-          // параметр `domainId`, лишний десктоп молча проглотит —
-          // то есть галочка, поставленная в вебе, соврала бы.
-          //
-          // Ветка рендерится только в вебе, а `desktopOnClick`,
-          // `disabled` и динамический `label` у `OpenInDesktop`
-          // работают только в десктопе (там компонент отдаёт кнопку
-          // вместо ссылки). Поэтому здесь они не «упрощены», а
-          // недостижимы: вход в диалог один — ⚙ строки выше.
-          <OpenInDesktop
-            action={`provision?domainId=${d.id}`}
-            label="Provision"
-            size="sm"
-            desktopOnClick={NOOP_DESKTOP_ONLY_BRANCH}
-          />
-        ) : null}
-      </div>
+      <RowActions
+        actions={[
+          { icon: "↗", title: "Open detail", onClick: () => onOpenDetail(d.id) },
+          {
+            icon: "✕",
+            title: "Delete domain",
+            variant: "danger" as const,
+            onClick: () => onDelete(d),
+          },
+        ]}
+      />
     </td>
   </tr>;
 }

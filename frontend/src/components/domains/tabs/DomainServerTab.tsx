@@ -44,6 +44,13 @@ import { CardRow, TabBody, TabGroup } from "./TabLayout";
  * собственную вкладку Backup (`DomainBackupTab`), которая читает их из того же
  * снимка. Осталась вкладка ровно про то, чем она названа.
  *
+ * Зато прибавилось шестое, и не про снимок: кнопка **Provision**. Она стоит в
+ * той же строке, что и «Проверить на сервере», потому что отвечает на тот же
+ * вопрос с другой стороны — «что на этом сервере развёрнуто» против «что на нём
+ * развернуть». Приехала она из строки списка доменов, где была иконкой ⚙ и
+ * единственным входом в диалог с галочкой «создать БД»; сам запуск при этом
+ * остался на странице — почему именно, разобрано у пропа `onProvision`.
+ *
  * Правил о состоянии домена вкладка не заводит: порог протухания — в
  * `lib/domainFacts`, правило расхождения нашей записи с фактом — в
  * `lib/domainDrift`, его показ — в `domains/facts/fields`. Три экрана про
@@ -68,9 +75,31 @@ export interface DomainServerTabProps {
    * отвечают про один снимок по-разному — и тест не может задать «сейчас».
    */
   now: number;
+  /**
+   * Открыть диалог запуска provision. Именно ОТКРЫТЬ, а не запустить: диалог
+   * рисует страница, она же и зовёт команду.
+   *
+   * Разделение выглядит лишним ровно до первого прогона. В ответе
+   * `provision_domain` приезжают пароли БД и FTP, и существуют они там
+   * один-единственный раз — на сервере их нет по определению. Показывает их
+   * модалка показа-один-раз, которой владеет `DesktopWorkspace` (страница лишь
+   * передаёт результат наверх через `onProvisionResult`), и владеет она ими
+   * потому, что прогон идёт минутами SSH и certbot, а карточка домена за это
+   * время закроется — её закрывает клик по подложке. Прими результат сюда, и
+   * пароли к уже созданным на сервере аккаунтам терялись бы вместе с карточкой.
+   * Поэтому кнопка здесь, а запуск остался там же, где и был.
+   */
+  onProvision: () => void;
+  /**
+   * Идёт ли provision ЭТОГО домена. Готовым булевым ответом, а не предикатом:
+   * гейт читает `MutationCache` по `PROVISION_DOMAIN_KEY` и принадлежит
+   * странице — она видит и запуск по `sdmp://`-ссылке, и массовый прогон, о
+   * которых карточка знать не может и не должна.
+   */
+  isProvisioning: boolean;
 }
 
-export default function DomainServerTab({ domain, server, now }: DomainServerTabProps) {
+export default function DomainServerTab({ domain, server, now, onProvision, isProvisioning }: DomainServerTabProps) {
   /**
    * Разбор снимка — общий (`lib/domainFacts`), а не свой: гейт `fp_facts_at` над
    * `fp_facts` и порог свежести обязаны быть одинаковыми у этой вкладки и у
@@ -129,17 +158,54 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
           snapshot={snapshot}
           error={domain.fp_check_error}
           right={
-            /* Только десктоп: чтение идёт по SSH, веб этого не умеет. */
+            /* Обе кнопки — только десктоп: и чтение, и развёртывание идут по
+               SSH, а веб на этом продукте не выполняет ничего (принцип №3
+               CLAUDE.md). Раньше в вебе на месте provision стояла ссылка
+               `sdmp://provision` из строки списка; здесь её нет намеренно —
+               хост `provision` у `parseDeepLinkAction` знает один параметр
+               `domainId`, `with_db` он не принимает, и ссылка, поставленная
+               рядом с галочкой «создать БД», обещала бы выбор, который десктоп
+               молча проглотит.
+
+               Чего это стоит вебу, названо честно: одиночной ссылки в десктоп
+               по домену там больше нет. Не осталось ничего — тоже неправда:
+               выделив домен в списке, веб-пользователь получает
+               `sdmp://bulk-provision` в панели массовых действий
+               (`BulkActionToolbar`), и по одному домену она работает. Вернуть
+               одиночную ссылку — отдельная правка, и делать её надо на
+               карточке, а не в строке.
+
+               Стоят они рядом, и это тот же вопрос, а не соседний: «что
+               прочитано с сервера» и «что на сервере развернуть». Кнопка
+               чтения первой — она дешёвая, безопасная и почти всегда нужна
+               раньше; provision второй — он на минуты и создаёт сущности. */
             desktop ? (
-              <Btn
-                size="sm"
-                variant="secondary"
-                onClick={read.run}
-                disabled={read.pending}
-                title="Read SSL, FTP, PHP, site and databases from the server over one SSH session"
-              >
-                {read.pending ? "Checking…" : "Проверить на сервере"}
-              </Btn>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Btn
+                  size="sm"
+                  variant="secondary"
+                  onClick={read.run}
+                  disabled={read.pending}
+                  title="Read SSL, FTP, PHP, site and databases from the server over one SSH session"
+                >
+                  {read.pending ? "Checking…" : "Проверить на сервере"}
+                </Btn>
+                {/* Второй клик стартовал бы вторую SSH-сессию с
+                    create_site/create_ftp_account/certbot по тому же домену —
+                    поэтому на время прогона кнопка и гаснет, и называется тем,
+                    что происходит. `isProvisioning` приезжает со страницы, так
+                    что гаснет она и от запуска по `sdmp://`-ссылке, и от
+                    массового прогона, которых карточка не видит. */}
+                <Btn
+                  size="sm"
+                  variant="secondary"
+                  onClick={onProvision}
+                  disabled={isProvisioning}
+                  title="Create the site, its FTP account and its SSL certificate on the server over SSH"
+                >
+                  {isProvisioning ? "Provisioning…" : "Provision"}
+                </Btn>
+              </div>
             ) : null
           }
         />

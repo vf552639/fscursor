@@ -323,6 +323,20 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     setDetailDomain(domainsData.find((x) => x.id === id) || null);
   }, [domainsData]);
 
+  /**
+   * Живая строка открытой карточки — ОДНА на карточку и на её кнопку provision.
+   *
+   * `detailDomain` — снимок на момент клика, и показывать по нему нельзя (см.
+   * комментарий у самой модалки ниже). Но и запускать provision по снимку
+   * нельзя по той же причине: имя домена уезжает в `onProvisionResult` и
+   * подписывает пароли в модалке показа-один-раз — подпись, взятая из
+   * устаревшего снимка, назвала бы чужой домен. Поэтому строка резолвится
+   * ОДИН раз здесь, а не дважды в разметке.
+   */
+  const detailRow = detailDomain
+    ? domainsData.find((x) => x.id === detailDomain.id) ?? detailDomain
+    : null;
+
   const handleBulkDelete = async () => {
     // Склонение общее с остальными счётчиками доменов (`lib/format`): «Удалить
     // 1 доменов?» — опечатка в вопросе, который человек читает перед необратимым
@@ -439,9 +453,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
           onToggleRow={toggle}
           onToggleAll={()=>setSel(sel.size===filters.filtered.length?new Set():new Set(filters.filtered.map((d: DomainUI)=>d.id)))}
           focusDomainId={focusDomainId}
-          isProvisioning={isProvisioning}
           onOpenDetail={openDetail}
-          onProvision={setProvisionTarget}
           onDelete={handleDeleteDomain}
         />
         )}
@@ -464,11 +476,36 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
 
         `key` — чтобы при переходе с домена на домен модалка пересоздавалась:
         иначе её собственный стейт (набранные NS) пережил бы смену props. */}
-    {detailDomain && (
+    {detailRow && (
       <DomainDetailModal
-        key={detailDomain.id}
-        domain={domainsData.find((x) => x.id === detailDomain.id) ?? detailDomain}
+        /* Ключ с префиксом, и префикс тут несущий. Карточка и диалог provision —
+           СОСЕДИ в этом фрагменте, а с фазы 4 они ещё и открыты одновременно:
+           диалог зовут с карточки. Голые `detailRow.id` и `provisionTarget.id`
+           — это один и тот же номер домена, то есть два ребёнка с одинаковым
+           ключом на одном уровне; React на такое ругается в консоль и
+           дублирует либо теряет узлы (в тестах карточка рисовалась дважды).
+           Пока вход в provision жил в строке списка, столкнуться они не могли
+           — карточка была закрыта. */
+        key={`card-${detailRow.id}`}
+        domain={detailRow}
         servers={servers}
+        /* Кнопка provision живёт на вкладке Server карточки, а запуск — здесь,
+           и разводить их пришлось не ради красоты. В ответе `provision_domain`
+           лежат пароли БД и FTP, которых нет больше НИГДЕ: на сервере их не
+           хранят, в `MutationCache` они не попадают (`useProvisionDomain`
+           возвращает наружу несекретный минимум), а прогон идёт минутами SSH и
+           certbot. Карточка за это время закроется — её закрывает клик по
+           подложке, — и результат, принятый внутрь карточки, пропал бы вместе
+           с ней. Поэтому карточка только ЗОВЁТ колбэк, диалог рисует страница,
+           а сам результат уезжает ещё выше, в `onProvisionResult`, к модалке
+           показа-один-раз `DesktopWorkspace`, которая переживает и уход со
+           страницы.
+
+           `toDomainUI` — существующее и единственное преобразование строки
+           API в строку вкладки (`domains/types`): второе разъехалось бы с ним
+           к ближайшей правке. */
+        onProvision={() => setProvisionTarget(toDomainUI(detailRow))}
+        isProvisioning={isProvisioning(detailRow.id)}
         onClose={() => setDetailDomain(null)}
       />
     )}
@@ -534,11 +571,19 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
         }}
       />
     )}
+    {/* Диалог provision стоит ПОСЛЕДНИМ в разметке, и это не случайность, а
+        условие работоспособности. Открывают его теперь с карточки домена
+        (вкладка Server), то есть на экране он оказывается поверх ещё одной
+        модалки; подложка у обеих одна и та же — `Modal` с `zIndex:100`, — и
+        при равном z-index перекрытие решает ПОРЯДОК В DOM. Подними этот блок
+        выше `DomainDetailModal`, и диалог уедет под карточку: видно его не
+        будет, а клики соберёт подложка карточки. Есть тест. */}
     {provisionTarget && (
       <ProvisionDialog
         // `key` — чтобы выбор «создавать ли БД» не залипал между доменами:
-        // диалог принадлежит домену, а не странице.
-        key={provisionTarget.id}
+        // диалог принадлежит домену, а не странице. Префикс — чтобы не
+        // столкнуться с ключом карточки: см. её `key` выше.
+        key={`provision-${provisionTarget.id}`}
         domain={provisionTarget}
         isProvisioning={isProvisioning(provisionTarget.id)}
         onProvision={(withDb: boolean) => handleProvision(provisionTarget, withDb)}

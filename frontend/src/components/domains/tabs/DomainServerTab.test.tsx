@@ -41,6 +41,12 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
  *  - домен без снимка не показывает решётки прочерков;
  *  - пустой список фактов — «не прочитали», а не измеренная пустота.
  *
+ * Редизайн вкладки Domains (фаза 4): сюда переехала кнопка Provision из строки
+ * списка доменов — десктоп-онли, как и всё, что ходит по SSH, и зовущая
+ * страницу вместо того, чтобы запускать прогон самой. Проверяется отдельным
+ * describe ниже, потому что она была ЕДИНСТВЕННЫМ входом в диалог с галочкой
+ * «создать БД».
+ *
  * Исход правила проверяется по атрибуту `data-source`, а не по инлайн-цвету:
  * цвет уедет в токены вместе с редизайном, а вопрос «показано как факт или как
  * наша запись» останется тем же.
@@ -129,10 +135,26 @@ function rowText(label: string): string {
   return screen.getByText(label).closest("[data-source]")?.textContent ?? "";
 }
 
-function show(over: Record<string, unknown> = {}, server = SERVER) {
+/**
+ * `provision` — пропы кнопки Provision, которой вкладка сама не владеет:
+ * открывает диалог и знает про идущий прогон страница (см. `onProvision` в
+ * самом компоненте). Умолчание — «колбэк есть, прогон не идёт», потому что
+ * подавляющему большинству сценариев ниже кнопка безразлична.
+ */
+function show(
+  over: Record<string, unknown> = {},
+  server = SERVER,
+  provision: { onProvision?: () => void; isProvisioning?: boolean } = {},
+) {
   render(
     <QueryClientProvider client={queryClient}>
-      <DomainServerTab domain={domain(over)} server={server} now={Date.now()} />
+      <DomainServerTab
+        domain={domain(over)}
+        server={server}
+        now={Date.now()}
+        onProvision={provision.onProvision ?? (() => {})}
+        isProvisioning={provision.isProvisioning ?? false}
+      />
     </QueryClientProvider>,
   );
 }
@@ -168,6 +190,56 @@ describe("кнопка «Проверить на сервере» — тольк
         domainId: "42",
       }),
     );
+  });
+});
+
+/**
+ * Кнопка Provision. Приехала сюда из строки списка доменов, где была иконкой ⚙
+ * и ЕДИНСТВЕННЫМ входом в диалог с галочкой «создать БД», — поэтому проверяется
+ * не только её наличие, но и то, чего она НЕ делает.
+ */
+describe("кнопка Provision — только десктоп и только зов наверх", () => {
+  it("в вебе кнопки нет", () => {
+    setTauri(false);
+    show();
+    expect(screen.queryByRole("button", { name: "Provision" })).toBeNull();
+  });
+
+  it("в десктопе стоит рядом с «Проверить на сервере» и ничего не запускает сама", () => {
+    setTauri(true);
+    const onProvision = vi.fn();
+    show({}, SERVER, { onProvision });
+
+    // Обе кнопки — в одной строке шапки снимка: это один вопрос с двух сторон
+    // («что на сервере стоит» и «что на нём развернуть»), и разведённые они
+    // заставляли бы искать вторую половину ответа на другом экране.
+    const read = screen.getByRole("button", { name: "Проверить на сервере" });
+    const provision = screen.getByRole("button", { name: "Provision" });
+    expect(read.parentElement).toBe(provision.parentElement);
+
+    fireEvent.click(provision);
+    // Вкладка только ЗОВЁТ страницу: диалог с галочкой «создать БД» и сам
+    // прогон живут там, потому что в ответе прогона лежат пароли БД и FTP,
+    // существующие ровно один раз, а карточка закрывается кликом по подложке.
+    expect(onProvision).toHaveBeenCalledTimes(1);
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+  });
+
+  it("пока прогон идёт — выключена и называет происходящее", () => {
+    setTauri(true);
+    const onProvision = vi.fn();
+    show({}, SERVER, { onProvision, isProvisioning: true });
+
+    // Второй клик стартовал бы вторую SSH-сессию с
+    // create_site/create_ftp_account/certbot по тому же домену.
+    const btn = screen.getByRole("button", { name: "Provisioning…" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(onProvision).not.toHaveBeenCalled();
+    // Чтение снимка при этом не блокируется: оно ничего не создаёт.
+    expect(
+      (screen.getByRole("button", { name: "Проверить на сервере" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 });
 
@@ -553,7 +625,7 @@ describe("снимка не было ни разу", () => {
     // `show` подставляет сервер по умолчанию, поэтому рендерим напрямую.
     render(
       <QueryClientProvider client={queryClient}>
-        <DomainServerTab domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} />
+        <DomainServerTab domain={domain({ server_id: null, ftp_user: null })} server={undefined} now={Date.now()} onProvision={() => {}} isProvisioning={false} />
       </QueryClientProvider>,
     );
     expect(screen.getByText("Host").parentElement?.textContent).toContain("—");

@@ -73,7 +73,12 @@ vi.mock("./Settings", () => ({ default: () => null }));
 // `Activity`, а она сама подменена на `null` строкой выше, так что модуль в этот
 // прогон не приезжает вовсе. `RevealSecret` — тем же порядком: его импортируют
 // только `ServerDetail` и `Cloudflare`, обе замоканы.
-vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
+// `DomainDetailModal` больше не заглушка: с фазы 4 редизайна вкладки Domains
+// одиночный provision запускается с её вкладки Server, и заглушка вместо
+// карточки оставила бы этот файл зелёным при полностью оторванной кнопке.
+// `RevealSecret` взамен пришлось замокать явно — прежде он не приезжал вовсе, а
+// теперь его тянет карточка FTP внутри вкладки вместе с argon2 и libsodium.
+vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 
 function domainRow(id: number, name: string) {
@@ -148,12 +153,42 @@ function renderWorkspace(rows: Array<{ id: number; name: string }>) {
   );
 }
 
-/** Запустить provision у строки конкретного домена. */
+/**
+ * Открыть карточку домена на вкладке Server — единственный вход в одиночный
+ * provision с фазы 4 редизайна вкладки Domains.
+ */
+async function openServerTab(domain: string) {
+  fireEvent.click(await screen.findByRole("button", { name: domain }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Server" }));
+}
+
+/** Кнопка Provision в шапке снимка на открытой вкладке Server. */
+function tabProvisionButton() {
+  const line = screen.getByRole("button", { name: "Проверить на сервере" })
+    .parentElement as HTMLElement;
+  return within(line).getByRole("button", { name: /^Provision(ing…)?$/ }) as HTMLButtonElement;
+}
+
+/** Закрыть карточку домена — иначе до строки соседнего не добраться. */
+function closeCard() {
+  const card = screen
+    .getByRole("tablist", { name: "Domain card sections" })
+    .closest('[style*="z-index"]') as HTMLElement;
+  fireEvent.click(within(card).getByRole("button", { name: "Close" }));
+}
+
+/** Запустить provision конкретного домена: карточка → Server → диалог с БД. */
 async function provisionRow(domain: string) {
-  const row = (await screen.findByText(domain)).closest("tr") as HTMLElement;
-  fireEvent.click(within(row).getByRole("button", { name: "Provision domain" }));
-  fireEvent.click(await screen.findByLabelText(/Also create a database/i));
-  fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+  await openServerTab(domain);
+  fireEvent.click(tabProvisionButton());
+  // Панель диалога — от чекбокса «создать БД»: он живёт только в диалоге, а
+  // `Modal` кладёт детей прямо в панель. Без скоупа кнопка диалога неотличима
+  // от кнопки вкладки, оставшейся под ним.
+  const cb = await screen.findByLabelText(/Also create a database/i);
+  fireEvent.click(cb);
+  const dialog = cb.closest("label")!.parentElement as HTMLElement;
+  fireEvent.click(within(dialog).getByRole("button", { name: "Provision" }));
+  closeCard();
 }
 
 beforeEach(() => {
@@ -427,7 +462,7 @@ describe("DesktopWorkspace — владелец результатов provision
     expect(await screen.findByText("Bulk provision stopped")).toBeTruthy();
   });
 
-  it("на время bulk-прогона гасит ⚙ у каждого домена набора", async () => {
+  it("на время bulk-прогона гасит кнопку provision у каждого домена набора", async () => {
     let finish: (v: unknown) => void = () => {};
     mocks.invokeSynced.mockImplementation(() => new Promise((r) => (finish = r)));
     mocks.confirmAction.mockResolvedValue(true);
@@ -440,33 +475,33 @@ describe("DesktopWorkspace — владелец результатов provision
     await waitFor(() => expect(mocks.onOpenUrl).toHaveBeenCalled());
     const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
 
-    const rowOf = async (name: string) =>
-      (await screen.findByText(name)).closest("tr") as HTMLElement;
+    /**
+     * Подпись кнопки provision на карточке домена.
+     *
+     * Домены проверяются ПО ОЧЕРЕДИ, а не все сразу, и это прямая цена переезда
+     * кнопки в карточку (фаза 4): раньше три состояния читались с трёх строк
+     * одного экрана, теперь карточка на экране одна. Сам гейт от этого не
+     * изменился — он как был подоменным на странице, так и остался.
+     */
+    const provisionLabelOf = async (name: string) => {
+      await openServerTab(name);
+      const label = tabProvisionButton().textContent;
+      closeCard();
+      return label;
+    };
 
     handler(["sdmp://bulk-provision?ids=1,2"]);
 
-    // Клик по ⚙ домена, который сейчас идёт в bulk, открыл бы вторую SSH-сессию
-    // с create_site/create_ftp_account/certbot по тому же домену.
-    await waitFor(async () =>
-      expect(
-        within(await rowOf("a.com")).getByRole("button", { name: "Provisioning…" }),
-      ).toBeTruthy(),
-    );
-    expect(
-      within(await rowOf("b.com")).getByRole("button", { name: "Provisioning…" }),
-    ).toBeTruthy();
+    // Клик по кнопке домена, который сейчас идёт в bulk, открыл бы вторую
+    // SSH-сессию с create_site/create_ftp_account/certbot по тому же домену.
+    await waitFor(async () => expect(await provisionLabelOf("a.com")).toBe("Provisioning…"));
+    expect(await provisionLabelOf("b.com")).toBe("Provisioning…");
     // Домен вне набора не тронут — гейт подоменный, а не глобальный.
-    expect(
-      within(await rowOf("z.com")).getByRole("button", { name: "Provision domain" }),
-    ).toBeTruthy();
+    expect(await provisionLabelOf("z.com")).toBe("Provision");
 
     finish({ idempotency_key: "k", status: "ok", items: [] });
 
-    // И отпущен после прогона — иначе ⚙ не включится уже никогда.
-    await waitFor(async () =>
-      expect(
-        within(await rowOf("a.com")).getByRole("button", { name: "Provision domain" }),
-      ).toBeTruthy(),
-    );
+    // И отпущен после прогона — иначе кнопка не включится уже никогда.
+    await waitFor(async () => expect(await provisionLabelOf("a.com")).toBe("Provision"));
   });
 });

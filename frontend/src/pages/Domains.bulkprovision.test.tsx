@@ -53,7 +53,14 @@ vi.mock("../lib/localCache", async (importOriginal) => ({
 }));
 
 // Тяжёлые соседи страницы, которых этот сценарий не открывает вовсе.
-vi.mock("../components/DomainDetailModal", () => ({ default: () => null }));
+//
+// `DomainDetailModal` из этого списка ушёл: одиночный provision запускается с её
+// вкладки Server (фаза 4 редизайна вкладки Domains), а сюда он приезжает как
+// СПОСОБ ЗАНЯТЬ ГЕЙТ — проверять массовый прогон против заглушки было бы
+// проверкой заглушки. `RevealSecret` взамен замокан: карточка FTP внутри
+// вкладки тянет argon2 и libsodium, а расшифровка пароля к этому файлу
+// отношения не имеет.
+vi.mock("../components/RevealSecret", () => ({ RevealSecret: () => <span>reveal</span> }));
 vi.mock("../components/DomainBulkImportDialog", () => ({ default: () => null }));
 
 const FTP_PASSWORD_1 = "ftp-pw-A1-secret";
@@ -125,12 +132,32 @@ function renderPage(
   );
 }
 
-/** Запустить одиночный provision строки: ⚙ → диалог → «Provision». */
+/**
+ * Запустить одиночный provision: карточка домена → вкладка Server → «Provision»
+ * → диалог → «Provision».
+ *
+ * Дорога длинная, потому что вход в одиночный прогон ровно один и он там
+ * (фаза 4). Карточка в конце ЗАКРЫВАЕТСЯ, и это не уборка: пока она открыта, на
+ * экране две кнопки с именем «Provision» — её и тулбара, — и `getByRole` в
+ * `selectAllAndFindProvision` нашёл бы обе.
+ */
 async function startSingleProvision(domain: string) {
-  const row = (await screen.findByText(domain)).closest("tr") as HTMLElement;
-  fireEvent.click(within(row).getByRole("button", { name: "Provision domain" }));
-  await screen.findByLabelText(/Also create a database/i);
-  fireEvent.click(screen.getByRole("button", { name: "Provision" }));
+  fireEvent.click(await screen.findByRole("button", { name: domain }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Server" }));
+  const snapshotLine = screen.getByRole("button", { name: "Проверить на сервере" })
+    .parentElement as HTMLElement;
+  fireEvent.click(within(snapshotLine).getByRole("button", { name: "Provision" }));
+  // Панель диалога — от чекбокса «создать БД»: он живёт только в диалоге, а
+  // `Modal` кладёт детей прямо в панель. Без скоупа кнопка «Provision» диалога
+  // неотличима от кнопки вкладки, оставшейся под ним.
+  const cb = await screen.findByLabelText(/Also create a database/i);
+  const dialog = cb.closest("label")!.parentElement as HTMLElement;
+  fireEvent.click(within(dialog).getByRole("button", { name: "Provision" }));
+
+  const card = screen
+    .getByRole("tablist", { name: "Domain card sections" })
+    .closest('[style*="z-index"]') as HTMLElement;
+  fireEvent.click(within(card).getByRole("button", { name: "Close" }));
 }
 
 /** Выделить оба домена шапочным чекбоксом и вернуть кнопку «Provision» тулбара. */

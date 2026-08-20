@@ -138,7 +138,7 @@ function mockInvoke(reads: { zones?: any[]; zonesError?: Error } = {}) {
 function renderModal(d = domain()) {
   return render(
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={d} servers={[]} onClose={() => {}} />
+      <DomainDetailModal domain={d} servers={[]} onProvision={() => {}} isProvisioning={false} onClose={() => {}} />
     </QueryClientProvider>
   );
 }

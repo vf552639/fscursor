@@ -129,7 +129,7 @@ function show(over: Record<string, unknown> = {}, servers: any[] = SERVERS) {
   mockApi(servers);
   render(
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={domain(over)} servers={servers} onClose={() => {}} />
+      <DomainDetailModal domain={domain(over)} servers={servers} onProvision={() => {}} isProvisioning={false} onClose={() => {}} />
     </QueryClientProvider>,
   );
 }
@@ -197,7 +197,7 @@ describe("шапка карточки", () => {
     const onClose = vi.fn();
     render(
       <QueryClientProvider client={queryClient}>
-        <DomainDetailModal domain={domain()} servers={SERVERS} onClose={onClose} />
+        <DomainDetailModal domain={domain()} servers={SERVERS} onProvision={() => {}} isProvisioning={false} onClose={onClose} />
       </QueryClientProvider>,
     );
 

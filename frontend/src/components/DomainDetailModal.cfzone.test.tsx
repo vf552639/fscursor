@@ -146,7 +146,7 @@ function mockReads(
 function card(d: any) {
   return (
     <QueryClientProvider client={queryClient}>
-      <DomainDetailModal domain={d} servers={[]} onClose={() => {}} />
+      <DomainDetailModal domain={d} servers={[]} onProvision={() => {}} isProvisioning={false} onClose={() => {}} />
     </QueryClientProvider>
   );
 }
