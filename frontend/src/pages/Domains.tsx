@@ -28,6 +28,7 @@ import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
 import { confirmAction } from "../lib/confirmDialog";
+import { describeServerBinding } from "../lib/describeServerBinding";
 import { EMPTY_FULL_SETUP_FORM, planFromForm } from "../lib/fullSetupPlan";
 import { isTauri } from "../lib/runtime";
 import { useBulkProvision } from "../hooks/useBulkProvision";
@@ -244,10 +245,22 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     setSel((p: Set<number>) => { const s = new Set<number>(p); s.has(id) ? s.delete(id) : s.add(id); return s; });
   }, []);
 
-  const handleAssignServer = (serverId: string) => {
+  /**
+   * Назначить сервер выделенным. Спрашивает — тем же текстом, что и сверка на
+   * карточке сервера (`describeServerBinding`): действие одно, а этот путь из
+   * трёх самый дорогой — за кликом стоит всё выделение, то есть сотни доменов.
+   */
+  const handleAssignServer = async (serverId: string) => {
     if (!serverId) return;
+    const target = Number(serverId);
+    // Считаем ПЕРЕЕЗЖАЮЩИХ, а не всех выделенных: домен без сервера не теряет
+    // ничего, домен уже на целевом не двигается вовсе — чем это важно, разобрано
+    // у `describeServerBinding`.
+    const moving = domainsData.filter((d) => sel.has(d.id) && d.server_id != null && d.server_id !== target);
+    const serverName = servers.find((s) => s.id === target)?.name ?? `сервер #${target}`;
+    if (!(await confirmAction(describeServerBinding(sel.size, moving.length, serverName)))) return;
     bulkAssignServer.mutate(
-      { domain_ids: Array.from(sel), server_id: Number(serverId) },
+      { domain_ids: Array.from(sel), server_id: target },
       { onSuccess: () => { setShowAssignServer(false); setSel(new Set()); setAssignServerId(""); } }
     );
   };

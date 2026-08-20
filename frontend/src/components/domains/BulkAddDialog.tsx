@@ -206,7 +206,12 @@ export default function BulkAddDialog({
       <label style={{display:"block"}}><span style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign to Server</span><Sel value={bulkServerId} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setBulkServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{serverOptions.map((s)=><option key={s.id} value={s.id}>{s.label}</option>)}</Sel></label>
     </div>
 
-    {bulkTab === "csv" && <p style={{fontSize:12,color:"#6b7280",marginTop:-6,marginBottom:14}}>Подставляются в строки, где второй (регистратор) или третьей (сервер) колонки нет.</p>}
+    {/* По-английски — как обе подсказки выше («Enter one domain per line»,
+        «Paste values in format»). Русский в этом диалоге закреплён за красными
+        коробками, то есть за вердиктами о ВВЕДЁННЫХ строках; эта строка ничего
+        не судит, она поясняет два поля с английскими подписями прямо над ней —
+        и по-русски разрывала бы одну подпись надвое. */}
+    {bulkTab === "csv" && <p style={{fontSize:12,color:"#6b7280",marginTop:-6,marginBottom:14}}>Used for rows where the second (registrar) or third (server) column is missing.</p>}
 
     {/* Список рисуется только на своей вкладке: на «Plain Text» третьей колонки
         нет, и новость про её строки там была бы про чужой ввод. */}

@@ -2,6 +2,7 @@ import React, { ChangeEvent } from "react";
 
 import { Btn, Sel, Modal } from "../ui/Primitives";
 import { Server } from "../../api/servers";
+import { domainWord } from "../../lib/format";
 
 /**
  * Назначить сервер выделенным доменам.
@@ -11,6 +12,10 @@ import { Server } from "../../api/servers";
  * нет. Закрыть его случайно легко, и выбор, сделанный в списке из сотни машин,
  * пропадать от этого не должен. Сам вызов мутации — тоже у страницы: она
  * владеет выделением и снимает его после удачи.
+ *
+ * Там же и вопрос про переезд (`describeServerBinding`): чтобы назвать цену,
+ * надо знать, у кого из выделенных СЕЙЧАС стоит другой сервер, — а сюда едет
+ * одно число `selectedCount`, по которому это неотличимо.
  */
 export default function AssignServerDialog({
   selectedCount,
@@ -31,7 +36,10 @@ export default function AssignServerDialog({
 }) {
   return (
     <Modal title="Assign Server" onClose={onClose} width={400}>
-      <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Назначить сервер для {selectedCount} доменов:</p>
+      {/* Склонение — общим `domainWord`, а не «доменов» шаблоном: «для 1
+          доменов» здесь и стояло, пока функция лежала в трёх строках от этого
+          файла (`lib/format`), но никто её не позвал. */}
+      <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Назначить сервер для {selectedCount} {domainWord(selectedCount)}:</p>
       <Sel value={serverId} onChange={(e: ChangeEvent<HTMLSelectElement>) => onServerChange(e.target.value)} style={{width:"100%"}}>
         <option value="">— Select Server —</option>
         {servers.map((s: Server) => <option key={s.id} value={s.id}>{s.name}</option>)}

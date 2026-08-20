@@ -547,6 +547,21 @@ async def bulk_import_domains(
     default_registrar_id: Optional[int] = Form(None),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkImportResponse:
+    """Заливка доменов файлом (CSV): `domain, registrar_name`.
+
+    **Гарды владения здесь НЕТ, и это известная дыра, а не недосмотр.**
+    `default_registrar_id` приходит формой и доезжает до
+    `bulk_create_structured` мимо `_ensure_links_owned` — чужой id проходит
+    молча, и пачка заводится со ссылкой на чужой аккаунт. Ровно та же дыра
+    закрыта у соседей `/bulk` и `/bulk-structured`; здесь она осталась потому,
+    что у маршрута своё тело (`multipart`), свой парсер и своя форма отчёта об
+    ошибках, — в объём той работы это не бралось.
+
+    Записано долгом в `plans/2026-08-20-privyazka-domena-k-serveru.md`, раздел
+    «Долг». Указатель стоит здесь, а не только в плане: план читает тот, кто
+    открыл план, а гарду ищет тот, кто открыл этот файл, — и, не найдя её у
+    третьего из трёх соседей, решит, что здесь она не нужна.
+    """
     raw = await file.read()
     created, skipped, errors, csv_url = await process_bulk_import(
         db,
