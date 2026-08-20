@@ -3,6 +3,7 @@ import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, STALE_TEXT } from "../components/ui/Primitives";
 import { STALE_SUFFIX, domainWord, formatAgoStale, formatUptime, mbToGb } from "../lib/format";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useServerListSites, ServerSite } from "../api/servers";
+import { describeServerBinding } from "../lib/describeServerBinding";
 import { compareServerSites } from "../lib/serverSites";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
 import { ipError } from "../lib/ipInput";
@@ -133,14 +134,12 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers, assi
   const bindExisting = async () => {
     const ids = cmp.notBoundHere.map((d)=>d.id);
     if (ids.length === 0) return;
-    // Переезд назван своими словами, а не спрятан за общим «привязать»: смена
-    // `server_id` на бэкенде сбрасывает снимок `fp_facts` — сайт за строкой в
-    // базе не переезжает, и держать после переезда FTP-доступ с ПРЕЖНЕЙ машины
-    // означало бы показывать пароль от чужого сервера как рабочий.
-    const move = moving.length
-      ? ` У ${moving.length} из них сейчас стоит другой сервер: привязка переедет, а прочитанные с прежней машины факты (FTP-доступ, пути, PHP) будут сброшены.`
-      : "";
-    if (!(await confirmAction(`Привязать ${ids.length} ${domainWord(ids.length)} к ${serverName}?${move}`))) return;
+    // Текст вопроса — общий с панелью выделенных на странице Domains
+    // (`lib/describeServerBinding`): действие одно, и цена переезда, названная
+    // двумя экранами по-разному, читалась бы как две разные цены. Почему вопрос
+    // вообще есть и почему `moving` считается отдельно от всего набора —
+    // в JSDoc самого хелпера.
+    if (!(await confirmAction(describeServerBinding(ids.length, moving.length, serverName)))) return;
     // Гасится отчёт и СОСЕДНЕЙ кнопки: свой статус react-query сбросит сам на
     // старте мутации, а чужая красная плашка иначе переживёт этот прогон и
     // повиснет над колонками, перерисованными по свежим данным.

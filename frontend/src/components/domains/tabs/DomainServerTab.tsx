@@ -2,6 +2,7 @@ import React from "react";
 
 import { Domain, useReadDomainFacts } from "../../../api/domains";
 import { Server } from "../../../api/servers";
+import { anyRecordedOnly } from "../../../lib/domainDrift";
 import { snapshotOf } from "../../../lib/domainFacts";
 import { isTauri } from "../../../lib/runtime";
 import { Btn } from "../../ui/Primitives";
@@ -29,9 +30,10 @@ import { CardRow, TabBody, TabGroup } from "./TabLayout";
  *    стоит рядом с его возрастом: «проверка упала» и «данные устарели» — разные
  *    новости, и различить их можно, только когда они в одном месте.
  * 3. **Легенда «Сервер ещё не читали»** — один раз словами вместо решётки
- *    прочерков в полях. Её же наличие гасит приписку «из provision, на сервере
- *    не проверено» под полями (`RecordedNoteInLegend`), потому что легенда
- *    несёт те же слова.
+ *    прочерков в полях. Вторая её фраза — про приглушённые значения — печатается
+ *    только когда такие значения на экране ЕСТЬ, и то же условие гасит приписку
+ *    «из provision, на сервере не проверено» под полями
+ *    (`RecordedNoteInLegend`), потому что легенда несёт те же слова.
  * 4. **Разбор снимка — один** (`lib/domainFacts`) и уезжает в обе карточки
  *    пропом, причём урезанным: возраст и протухание карточкам не отдаются
  *    вовсе. Второй разбор внутри карточки совпадал бы с этим ровно до
@@ -82,6 +84,20 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
    */
   const snapshot = snapshotOf(domain.fp_facts, domain.fp_facts_at, now);
   const { noSnapshot } = snapshot;
+  /**
+   * Печатать ли ВТОРУЮ фразу легенды — и то же выражение гасит приписки под
+   * полями: связка ровно та, что у карточки SSL на Overview (`DomainSslCard`),
+   * и разведённые на два условия они разъехались бы в одну из двух сторон —
+   * легенда без единого приглушённого значения либо приписка вдобавок к
+   * легенде, говорящей то же самое.
+   *
+   * Условие не сводится к `noSnapshot`: у домена, ПЕРЕЕХАВШЕГО на другой
+   * сервер, снимка нет и колонок provision тоже нет — бэкенд гасит их все при
+   * смене `server_id`, — и обещать приглушённые значения было бы не о чем.
+   * Первая фраза при этом остаётся: «сервер ещё не читали» объясняет пустые
+   * карточки и верна независимо от provision.
+   */
+  const recordedShown = noSnapshot && anyRecordedOnly(domain, snapshot.facts);
   const desktop = isTauri();
   const read = useReadDomainFacts(domain.id);
 
@@ -130,15 +146,17 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
 
         {/* Снимка не было ни разу — говорим это словами ОДИН раз, вместо того
             чтобы повторять прочерком в каждом поле, а подписью «из provision, на
-            сервере не проверено» — под каждым из них. Легенда несёт ту же подпись
-            дословно и связывает её с приглушённым цветом значений; ЕЁ наличие и
-            гасит приписки у полей (`RecordedNoteInLegend` ниже) — приём, который
-            карточка SSL на Overview повторяет своей легендой, англоязычной и
-            своей. Кнопка чтения — в строке выше (и только в десктопе: SSH в вебе
-            нет). */}
+            сервере не проверено» — под каждым из них. Вторая фраза несёт ту же
+            подпись дословно и связывает её с приглушённым цветом значений; она
+            же и гасит приписки у полей (`RecordedNoteInLegend` ниже) — приём,
+            который карточка SSL на Overview повторяет своей легендой,
+            англоязычной и своей. Печатается вторая фраза только при живых
+            приглушённых значениях (`recordedShown`): у переехавшего домена
+            колонок provision нет вовсе, и объяснять было бы нечего. Кнопка
+            чтения — в строке выше (и только в десктопе: SSH в вебе нет). */}
         {noSnapshot ? (
           <div style={{ fontSize: 12.5, color: "#6b7280" }}>
-            Сервер ещё не читали. Приглушённые значения — из provision, на сервере не проверено.
+            Сервер ещё не читали.{recordedShown ? " Приглушённые значения — из provision, на сервере не проверено." : ""}
           </div>
         ) : null}
 
@@ -148,7 +166,7 @@ export default function DomainServerTab({ domain, server, now }: DomainServerTab
             только под `noSnapshot`. Слитые в один, они гасили приписку и на
             карточке SSL (Overview), где никакой легенды нет. */}
         <HasSnapshot.Provider value={!noSnapshot}>
-          <RecordedNoteInLegend.Provider value={noSnapshot}>
+          <RecordedNoteInLegend.Provider value={recordedShown}>
             <CardRow>
               <DomainFtpCard domain={domain} server={server} snapshot={snapshot} />
               <DomainSiteCard domain={domain} snapshot={snapshot} />

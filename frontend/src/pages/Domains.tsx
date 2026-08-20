@@ -28,6 +28,7 @@ import BulkActionToolbar from "../components/BulkActionToolbar";
 import DomainBulkImportDialog from "../components/DomainBulkImportDialog";
 import DomainDetailModal from "../components/DomainDetailModal";
 import { confirmAction } from "../lib/confirmDialog";
+import { domainWord } from "../lib/format";
 import { describeServerBinding } from "../lib/describeServerBinding";
 import { EMPTY_FULL_SETUP_FORM, planFromForm } from "../lib/fullSetupPlan";
 import { isTauri } from "../lib/runtime";
@@ -323,7 +324,10 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   }, [domainsData]);
 
   const handleBulkDelete = async () => {
-    if (!(await confirmAction(`Удалить ${sel.size} доменов?`))) return;
+    // Склонение общее с остальными счётчиками доменов (`lib/format`): «Удалить
+    // 1 доменов?» — опечатка в вопросе, который человек читает перед необратимым
+    // действием, и живёт она вечно, если её не запереть одной функцией.
+    if (!(await confirmAction(`Удалить ${sel.size} ${domainWord(sel.size)}?`))) return;
     Promise.all(Array.from(sel).map(id => deleteDomain.mutateAsync(id)))
       .then(() => setSel(new Set()));
   };

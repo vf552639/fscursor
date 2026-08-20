@@ -291,3 +291,54 @@ export function dbUserSource(recorded: string | null | undefined): FieldSource {
   const rec = clean(recorded);
   return rec ? { kind: "recorded-only", recorded: rec } : AGREE;
 }
+
+/**
+ * Колонки provision, которые показывают карточки вкладки Server: логин FTP —
+ * `DomainFtpCard`, остальные пять — `DomainSiteCard`.
+ */
+export interface ServerTabRecorded {
+  ftp_user?: string | null;
+  site_path?: string | null;
+  site_user?: string | null;
+  php_version?: string | null;
+  db_name?: string | null;
+  db_user?: string | null;
+}
+
+/**
+ * Есть ли на вкладке Server хоть одно значение, показанное КАК НАША ЗАПИСЬ
+ * (приглушённым, исходом `recorded-only`).
+ *
+ * Вопрос задаёт вкладка, а не карточка: легенда «Приглушённые значения — из
+ * provision, на сервере не проверено» стоит ОДНА над обеими, и печатать её,
+ * когда ни одного приглушённого значения на экране нет, значит объяснять то,
+ * чего не показано. До переезда доменов между серверами такое состояние было
+ * редким (импортированный домен без снимка и без provision); теперь оно
+ * обычное: смена `server_id` гасит на бэкенде все колонки provision разом, и
+ * сразу после переезда легенда обещала бы приглушённые значения, которых нет.
+ *
+ * Спрашиваем ТЕМИ ЖЕ функциями, которыми карточки рисуют свои поля, а не
+ * проверкой «колонка непуста»: правило одно, и второй его редакцией здесь оно
+ * разъехалось бы с показом молча (как уже разъезжались `serverStatus`,
+ * `domainFacts` и сам этот модуль до сведения в один). Список полей —
+ * единственное, что приходится держать в согласии с карточками: заведёте на
+ * вкладке новое поле provision — допишите его сюда, иначе легенда снова начнёт
+ * либо обещать лишнее, либо молчать о показанном.
+ *
+ * SSL здесь нет намеренно: карточка сертификата живёт на Overview и печатает
+ * СВОЮ легенду по тому же правилу (`DomainSslCard`), а на этой вкладке её полей
+ * нет вовсе.
+ */
+export function anyRecordedOnly(
+  recorded: ServerTabRecorded,
+  facts: DomainFacts | null | undefined,
+): boolean {
+  return [
+    ftpLoginSource(recorded.ftp_user, facts),
+    sitePathSource(recorded.site_path, facts),
+    siteOwnerSource(recorded.site_user, facts),
+    phpVersionSource(recorded.php_version, facts),
+    dbNameSource(recorded.db_name, facts),
+    dbUserSource(recorded.db_user),
+  ].some((s) => s.kind === "recorded-only");
+}
