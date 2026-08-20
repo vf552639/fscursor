@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseBulkCsv } from "./bulkCsv";
+import { bulkCsvErrorText, parseBulkCsv } from "./bulkCsv";
 
 /**
  * Разбор CSV массового добавления.
@@ -117,6 +117,41 @@ describe("parseBulkCsv", () => {
     expect(r.items).toEqual([]);
     expect(r.errors).toEqual([]);
     expect(r.commaSeparated).toBe(false);
+  });
+
+  it("второе вхождение домена — ошибка со своим номером строки, а не второй item", () => {
+    // `bulk_create_structured` внутри пачки не дедуплицирует (в отличие от
+    // текстового `bulk_create`), а имя домена уникально глобально: два
+    // одинаковых имени доезжают до commit и дают 500 — без номера строки и без
+    // единого созданного домена.
+    const r = parseBulkCsv("a.com;Reg;web-01\nb.com;Reg;web-01\na.com;Reg;web-02", {
+      servers: SERVERS,
+    });
+    expect(r.errors).toEqual([{ line: 3, value: "a.com", reason: "duplicate" }]);
+    expect(r.items.map((i) => i.domain_name)).toEqual(["a.com", "b.com"]);
+  });
+
+  it("дубль ловится той же нормализацией имени, что и на бэкенде", () => {
+    // `normalize_domain` там — trim + lower + срез точки; своё правило здесь
+    // означало бы «разные домены» на фронте и «один и тот же» в базе.
+    const r = parseBulkCsv("example.com;Reg;web-01\n Example.COM. ;Reg;web-01", {
+      servers: SERVERS,
+    });
+    expect(r.errors.map((e) => e.reason)).toEqual(["duplicate"]);
+    expect(r.items).toHaveLength(1);
+  });
+
+  it("у дубля свой сервер уже не спрашивают — одна строка, одна причина", () => {
+    const r = parseBulkCsv("a.com;Reg;web-01\na.com;Reg;1.2.3.4", { servers: SERVERS });
+    expect(r.errors).toEqual([{ line: 2, value: "a.com", reason: "duplicate" }]);
+  });
+
+  it("у каждой причины своя формулировка, и подлежащее в ней верное", () => {
+    const text = (reason: any, value: string) => bulkCsvErrorText({ line: 1, value, reason });
+    expect(text("not-found", "1.2.3.4")).toContain("сервер");
+    expect(text("ambiguous", "1.2.3.4")).toContain("подходит нескольким");
+    // Дубль — про домен: общий шаблон «сервер «...»» назвал бы домен сервером.
+    expect(text("duplicate", "a.com")).toContain("домен");
   });
 
   it("пустая вторая колонка берёт регистратора из селекта, непустая — побеждает его", () => {

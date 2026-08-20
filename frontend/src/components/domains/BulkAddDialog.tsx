@@ -4,7 +4,7 @@ import { Btn, Sel, Modal } from "../ui/Primitives";
 import { useBulkCreateDomains, useBulkCreateStructuredDomains, Domain } from "../../api/domains";
 import { RegistrarAccount } from "../../api/registrars";
 import { Server } from "../../api/servers";
-import { BulkCsvError, parseBulkCsv } from "../../lib/bulkCsv";
+import { BulkCsvError, bulkCsvErrorText, parseBulkCsv } from "../../lib/bulkCsv";
 import { optionsByLoad } from "../../lib/fullSetupPlan";
 
 /**
@@ -184,10 +184,12 @@ export default function BulkAddDialog({
       <textarea value={bulkText} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>)=>setBulkText(e.target.value)} placeholder={"example.com\nshop.example.com\nblog.example.com"} style={{width:"100%",height:160,padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
     </> : <>
       <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Paste values in format: <code style={{background:"#eee",padding:2}}>domain.com;provider_name;server_ip_or_name</code></p>
-      {/* Правка текста гасит список ошибок: он приговор ПРОШЛОМУ тексту, и
-          строка №4, оставшаяся на экране после того, как её исправили или
-          удалили, показывала бы на чужую строку. */}
-      <textarea value={csvText} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>)=>{setCsvText(e.target.value); if (csvErrors.length) setCsvErrors([]);}} placeholder={"example.com;Namecheap;45.83.194.107\nshop.com;Hostiq;web-01"} style={{width:"100%",height:160,padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
+      {/* Правка текста гасит ОБЕ красные коробки, а не одну: и список строк, и
+          вердикт про разделитель — приговоры ПРОШЛОМУ тексту. Строка №4,
+          оставшаяся после того, как её исправили, показывает на чужую строку, а
+          «вы используете запятые», переживший замену запятых, — просто неправда.
+          Правила у двух одинаковых коробок на одной вкладке обязаны совпадать. */}
+      <textarea value={csvText} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>)=>{setCsvText(e.target.value); if (csvErrors.length) setCsvErrors([]); if (bulkError) setBulkError("");}} placeholder={"example.com;Namecheap;45.83.194.107\nshop.com;Hostiq;web-01"} style={{width:"100%",height:160,padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
     </>}
 
     {/* Селекты — снаружи веток: вопрос «куда селим пачку» одинаков на обеих
@@ -195,11 +197,11 @@ export default function BulkAddDialog({
         как раз и заливают сотнями. На CSV они значат «по умолчанию»: своя
         колонка строки всегда сильнее. */}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,margin:"14px 0"}}>
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign to Registrar</label><Sel aria-label="Assign to Registrar" value={bulkRegId} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setBulkRegId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></div>
+      <label style={{display:"block"}}><span style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign to Registrar</span><Sel value={bulkRegId} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setBulkRegId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{registrars.map((r: RegistrarAccount)=><option key={r.id} value={r.id}>{r.provider} - {r.name}</option>)}</Sel></label>
       {/* Список серверов — тот же, что у мастера полной настройки
           (`optionsByLoad`): подписи с нагрузкой и порядок «наименее загруженные
           сверху». Второй вид одного списка разъехался бы на первой правке. */}
-      <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign to Server</label><Sel aria-label="Assign to Server" value={bulkServerId} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setBulkServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{serverOptions.map((s)=><option key={s.id} value={s.id}>{s.label}</option>)}</Sel></div>
+      <label style={{display:"block"}}><span style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Assign to Server</span><Sel value={bulkServerId} onChange={(e: React.ChangeEvent<HTMLSelectElement>)=>setBulkServerId(e.target.value)} style={{width:"100%"}}><option value="">— None —</option>{serverOptions.map((s)=><option key={s.id} value={s.id}>{s.label}</option>)}</Sel></label>
     </div>
 
     {bulkTab === "csv" && <p style={{fontSize:12,color:"#6b7280",marginTop:-6,marginBottom:14}}>Подставляются в строки, где второй (регистратор) или третьей (сервер) колонки нет.</p>}
@@ -208,11 +210,9 @@ export default function BulkAddDialog({
         нет, и новость про её строки там была бы про чужой ввод. */}
     {bulkTab === "csv" && csvErrors.length > 0 && (
       <div style={{background:"#fef2f2",border:"1px solid #fee2e2",color:"#dc2626",padding:"10px 12px",borderRadius:8,fontSize:13,marginBottom:14}}>
-        <div style={{fontWeight:600,marginBottom:6}}>❌ Ничего не отправлено: не разобрана третья колонка</div>
+        <div style={{fontWeight:600,marginBottom:6}}>❌ Ничего не отправлено — эти строки не приняты:</div>
         {csvErrors.map((e) => (
-          <div key={e.line}>
-            Строка {e.line}: сервер «{e.value}» {e.reason === "ambiguous" ? "подходит нескольким — уточните имя или IP" : "не найден"}
-          </div>
+          <div key={e.line}>Строка {e.line}: {bulkCsvErrorText(e)}</div>
         ))}
       </div>
     )}

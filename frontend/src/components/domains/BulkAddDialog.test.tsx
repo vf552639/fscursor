@@ -75,6 +75,27 @@ function renderDialog() {
   );
 }
 
+/**
+ * Диалог с настоящим `open`, которым распоряжается родитель, — иначе не
+ * проверить ни закрытие, ни обещание «прячется, а не размонтируется».
+ */
+function Harness() {
+  const [open, setOpen] = React.useState(true);
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BulkAddDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        registrars={registrars}
+        servers={servers}
+        domains={[] as any}
+        onCreated={() => {}}
+      />
+      <button onClick={() => setOpen(true)}>Открыть снова</button>
+    </QueryClientProvider>
+  );
+}
+
 const tab = (name: string) => screen.getByRole("button", { name: new RegExp(name) });
 const importBtn = () => screen.getByRole("button", { name: /Import Domains/ });
 
@@ -171,6 +192,8 @@ describe("BulkAddDialog", () => {
     await waitFor(() => expect(screen.getByText(/Строка 1/)).toBeTruthy());
 
     fireEvent.click(tab("Plain Text"));
+    // Коробка — новость про чужой ввод: на этой вкладке третьей колонки нет.
+    expect(screen.queryByText(/Строка 1/)).toBeNull();
     fireEvent.change(screen.getByPlaceholderText(/blog\.example\.com/), {
       target: { value: "example.com" },
     });
@@ -182,12 +205,55 @@ describe("BulkAddDialog", () => {
   it("запятые вместо точек с запятой по-прежнему отменяют отправку", async () => {
     renderDialog();
     fireEvent.click(tab("CSV"));
-    fireEvent.change(screen.getByPlaceholderText(/45\.83\.194\.107/), {
-      target: { value: "example.com,Namecheap,web-01" },
-    });
+    const area = screen.getByPlaceholderText(/45\.83\.194\.107/);
+    fireEvent.change(area, { target: { value: "example.com,Namecheap,web-01" } });
     fireEvent.click(importBtn());
 
     await waitFor(() => expect(screen.getByText(/запятые/)).toBeTruthy());
     expect(mocks.apiPost).not.toHaveBeenCalled();
+
+    // Вердикт про разделитель живёт ровно столько же, сколько список строк:
+    // две одинаковые коробки на одной вкладке с разными правилами — это
+    // «вы используете запятые» над текстом, в котором их больше нет.
+    fireEvent.change(area, { target: { value: "example.com;Namecheap;web-01" } });
+    expect(screen.queryByText(/запятые/)).toBeNull();
+  });
+
+  it("дубль домена в одной вставке держит отправку и называет строку", async () => {
+    renderDialog();
+    fireEvent.click(tab("CSV"));
+    fireEvent.change(screen.getByPlaceholderText(/45\.83\.194\.107/), {
+      target: { value: "a.com;Namecheap;web-01\na.com;Namecheap;web-02" },
+    });
+    fireEvent.click(importBtn());
+
+    // Дошло бы до бэкенда — был бы 500 на уникальном индексе, без номера
+    // строки и без единого созданного домена.
+    await waitFor(() => expect(screen.getByText(/Строка 2/)).toBeTruthy());
+    expect(screen.getByText(/Строка 2/).textContent).toContain("a.com");
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+
+  it("закрытие уносит вердикт прошлой попытки, но не набранный текст", async () => {
+    render(<Harness />);
+    fireEvent.click(tab("CSV"));
+    fireEvent.change(screen.getByPlaceholderText(/45\.83\.194\.107/), {
+      target: { value: "shop.com;Hostiq;1.2.3.4" },
+    });
+    fireEvent.click(importBtn());
+    await waitFor(() => expect(screen.getByText(/Строка 1/)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByPlaceholderText(/45\.83\.194\.107/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть снова" }));
+    // Ошибка описывала отправку, которой больше нет, — показанная снова, она
+    // рассказывала бы о несуществующем событии.
+    expect(screen.queryByText(/Строка 1/)).toBeNull();
+    // А вставленный текст промах по Cancel пережить обязан: диалог прячется,
+    // а не размонтируется.
+    expect((screen.getByPlaceholderText(/45\.83\.194\.107/) as HTMLTextAreaElement).value).toBe(
+      "shop.com;Hostiq;1.2.3.4",
+    );
   });
 });
