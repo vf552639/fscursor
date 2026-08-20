@@ -25,11 +25,11 @@ describe("domainOriginCheck", () => {
   });
 
   it("A-запись ведёт на другой адрес — расхождение и назван чужой origin", () => {
-    // Именно `origin` из записи, а не «не совпало»: в строке карточки стоят оба
-    // адреса, и без первого человеку нечего искать в панели Cloudflare.
+    // Именно адреса из записей, а не «не совпало»: в строке карточки стоят оба
+    // конца, и без чужого человеку нечего искать в панели Cloudflare.
     expect(domainOriginCheck([rec()], "example.com", "5.6.7.8")).toEqual({
       kind: "mismatch",
-      origin: "1.2.3.4",
+      origins: ["1.2.3.4"],
     });
   });
 
@@ -41,17 +41,49 @@ describe("domainOriginCheck", () => {
     expect(domainOriginCheck([proxied], "example.com", "1.2.3.4")).toEqual({ kind: "match" });
     expect(domainOriginCheck([proxied], "example.com", "9.9.9.9")).toEqual({
       kind: "mismatch",
-      origin: "1.2.3.4",
+      origins: ["1.2.3.4"],
     });
   });
 
-  it("берётся ПЕРВАЯ A-запись apex, а не любая подходящая", () => {
-    // Round-robin из двух A: молча выбрав ту, что совпала, сверка объявляла бы
-    // «всё в порядке» на половине конфигураций, где половина трафика идёт мимо.
+  it("одна из нескольких A ведёт на выбранный сервер — это совпадение, а не расхождение", () => {
+    // Round-robin из двух A. Прежнее правило «берём первую» печатало бы здесь
+    // «ведёт не туда», то есть отправляло чинить ВЕРНУЮ запись, которая в зоне
+    // есть. Проверяем оба порядка: ответ Cloudflare их не гарантирует.
     const records = [rec({ content: "9.9.9.9" }), rec({ content: "1.2.3.4" })];
+    expect(domainOriginCheck(records, "example.com", "1.2.3.4")).toEqual({ kind: "match" });
+    expect(domainOriginCheck([...records].reverse(), "example.com", "1.2.3.4")).toEqual({
+      kind: "match",
+    });
+  });
+
+  it("ни одна A не ведёт на сервер — расхождение перечисляет ВСЕ адреса apex", () => {
+    // Строка карточки не вправе отрицать существование соседних записей: «ведёт
+    // на 9.9.9.9» при живом `8.8.8.8` рядом — половина правды, по которой в
+    // панели Cloudflare человек увидит не то, что ему обещали.
+    const records = [rec({ content: "9.9.9.9" }), rec({ content: "8.8.8.8" })];
     expect(domainOriginCheck(records, "example.com", "1.2.3.4")).toEqual({
       kind: "mismatch",
-      origin: "9.9.9.9",
+      origins: ["8.8.8.8", "9.9.9.9"],
+    });
+  });
+
+  it("вывод не зависит от порядка записей в ответе API", () => {
+    // Порядок Cloudflare не гарантирует ничем, а мигающая между двумя видами
+    // строка (или, хуже, между строкой и молчанием) — незнание, нарисованное
+    // здоровьем: после второго раза её перестают читать.
+    const records = [rec({ content: "9.9.9.9" }), rec({ content: "8.8.8.8" })];
+    expect(domainOriginCheck(records, "example.com", "1.2.3.4")).toEqual(
+      domainOriginCheck([...records].reverse(), "example.com", "1.2.3.4"),
+    );
+  });
+
+  it("одинаковые адреса на apex схлопываются в один", () => {
+    // Два одинаковых A — не два адреса, и перечислять их дважды в строке значит
+    // рассказывать про зону то, чего в ней нет.
+    const records = [rec({ content: "9.9.9.9" }), rec({ content: " 9.9.9.9 " })];
+    expect(domainOriginCheck(records, "example.com", "1.2.3.4")).toEqual({
+      kind: "mismatch",
+      origins: ["9.9.9.9"],
     });
   });
 
@@ -127,13 +159,22 @@ describe("domainOriginCheck", () => {
     });
   });
 
+  it("испорченная A рядом с целой в перечень не попадает", () => {
+    // Пустой `content` — не адрес; в строке карточки он стал бы висящей запятой.
+    const records = [rec({ content: "" }), rec({ content: "9.9.9.9" })];
+    expect(domainOriginCheck(records, "example.com", "1.2.3.4")).toEqual({
+      kind: "mismatch",
+      origins: ["9.9.9.9"],
+    });
+  });
+
   it("пустое имя домена — «не знаем», а не совпадение с безымянной записью", () => {
     // Мусорная строка не должна ни с чем совпасть — то же правило, что у
     // `compareServerSites`.
     expect(domainOriginCheck([rec({ name: "" })], "  ", "1.2.3.4")).toEqual({ kind: "unknown" });
   });
 
-  it("A-запись с пустым `content` — «не знаем», а не расхождение с пустотой", () => {
+  it("все A-записи с пустым `content` — «не знаем», а не расхождение с пустотой", () => {
     expect(domainOriginCheck([rec({ content: "" })], "example.com", "1.2.3.4")).toEqual({
       kind: "unknown",
     });

@@ -107,7 +107,10 @@ function show(over: Record<string, unknown> = {}) {
 }
 
 function sel() {
-  return screen.getByLabelText("Server") as HTMLSelectElement;
+  // Имя поля шире имени карточки (`Assigned server` против титула `SERVER`) —
+  // как у обоих соседей ряда связей. Совпади они, обращение по имени было бы
+  // двусмысленным: `role="group"` карточки носит своё имя через `<h3>`.
+  return screen.getByLabelText("Assigned server") as HTMLSelectElement;
 }
 
 /** Тела всех `PUT /domains/42` — то, что поле записало в строку домена. */
@@ -342,6 +345,49 @@ describe("сверка с A-записью", () => {
     expect(screen.queryByText(/A record points to/)).toBeNull();
   });
 
+  it("сервера у домена нет — записи зоны не читаем вовсе", async () => {
+    // Ответ был бы выброшен по построению: без сервера нет и адреса, а значит
+    // `unknown`. Платим за него `sync_now` по кэшу и походом в Cloudflare на
+    // каждое открытие — при `staleTime` 10с и ровно на тех доменах («заведён,
+    // ещё не привязан»), карточку которых открывают чаще всего.
+    setTauri(true);
+    mockDns([aRecord("5.6.7.8")]);
+    show({ ...WITH_ZONE, server_id: null });
+
+    await screen.findByText("web-01");
+    await act(async () => {});
+    expect(mocks.invokeSynced).not.toHaveBeenCalled();
+    // Спрашиваем и КЭШ: `requireDesktop` тут не бросит (десктоп включён), но
+    // запроса не должно быть вовсе, а не «ушёл и не пригодился».
+    expect(queryClient.getQueryState(["cloudflare", CF_ACCOUNT, "zones", ZONE, "dns"])).toBeUndefined();
+  });
+
+  it("несколько A на apex: совпала любая — расхождения нет", async () => {
+    // Round-robin. Правило «берём первую» печатало бы здесь «ведёт не туда» и
+    // отправляло чинить верную запись — а на следующем чтении, с другим
+    // порядком в ответе, строка исчезала бы сама.
+    setTauri(true);
+    mockDns([aRecord("9.9.9.9"), aRecord("10.0.0.3")]);
+    show(WITH_ZONE);
+
+    await screen.findByText("10.0.0.3");
+    await act(async () => {});
+    expect(screen.queryByText(/A record/)).toBeNull();
+  });
+
+  it("несколько A и ни одна не наша — перечислены все, а не первая", async () => {
+    // Строка не вправе отрицать существование соседних записей: «ведёт на
+    // 9.9.9.9» при живом 8.8.8.8 рядом — половина правды.
+    setTauri(true);
+    mockDns([aRecord("9.9.9.9"), aRecord("8.8.8.8")]);
+    show(WITH_ZONE);
+
+    const line = await screen.findByText(/A records point to/);
+    expect(line.textContent).toContain("8.8.8.8");
+    expect(line.textContent).toContain("9.9.9.9");
+    expect(line.textContent).toContain("10.0.0.3");
+  });
+
   it("отказ чтения DNS расхождением не притворяется", async () => {
     // Незнание — не обвинение: строка появляется только на прочитанном ответе.
     setTauri(true);
@@ -354,10 +400,47 @@ describe("сверка с A-записью", () => {
   });
 });
 
+describe("сервер без адреса", () => {
+  it("пустой `ip_address` назван словом, а не пустым местом под селектом", async () => {
+    // Схема пустую строку допускает осознанно, формы продукта её не производят
+    // (`lib/ipInput`) — значит такой сервер приехал прямым вызовом API или из
+    // старых строк. Молчание тут стоит трёх следствий: provision пойдёт в `""`,
+    // карточка FTP покажет пустой Host, сверка с A-записью замолчит.
+    mockServers([{ id: WEB01, name: "web-01", ip_address: "" }]);
+    show();
+
+    expect(await screen.findByText(/No IP address on this server/i)).toBeTruthy();
+    // Именно вместо адреса, а не рядом с ним: пустая строка-адрес читается как
+    // «всё в порядке».
+    const described = document.getElementById(sel().getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).not.toMatch(/10\.0\.0\.3/);
+    // Связь при этом рабочая: сервер выбран, селект не выключен.
+    expect(sel().value).toBe(String(WEB01));
+    expect(sel().disabled).toBe(false);
+  });
+});
+
 describe("смена сервера переносит только запись", () => {
   it("у домена со снимком сказано, что сайт остаётся на прежней машине", async () => {
     show({ fp_facts_at: "2026-08-19T10:00:00Z" });
     expect(await screen.findByText(/moves only the record/i)).toBeTruthy();
+  });
+
+  it("пока запись идёт, молчат ОБЕ нижние строки, а не только диагноз", async () => {
+    // Селект стоит в старом значении, пока ответ не пришёл: и расхождение, и
+    // предупреждение о переезде говорили бы в этот момент про ПРОШЛЫЙ сервер —
+    // то есть отвечали бы на только что сделанный выбор чужой правдой.
+    setTauri(true);
+    mockDns([aRecord("5.6.7.8")]);
+    mocks.apiPut.mockImplementation(() => new Promise(() => {}));
+    show({ ...WITH_ZONE, fp_facts_at: "2026-08-19T10:00:00Z" });
+
+    await screen.findByText(/A record points to 5\.6\.7\.8/);
+    fireEvent.change(sel(), { target: { value: String(WEB02) } });
+
+    expect(await screen.findByText("Saving…")).toBeTruthy();
+    expect(screen.queryByText(/A record points to/)).toBeNull();
+    expect(screen.queryByText(/moves only the record/i)).toBeNull();
   });
 
   it("снимка нет — обещать нечего, строки нет", async () => {

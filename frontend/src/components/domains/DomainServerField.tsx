@@ -94,9 +94,26 @@ export default function DomainServerField({ domain }: DomainServerFieldProps) {
    * предусмотрена вовсе. Гасим на месте вызова, а не правкой хука: у него есть
    * второй потребитель (страница Cloudflare), и его поведение — не объём этой
    * работы.
+   *
+   * **И в десктопе гасим у домена БЕЗ сервера — потому что чтение не бесплатное.**
+   * Это `sync_now` по SQLCipher-кэшу плюс поход в Cloudflare, при глобальном
+   * `staleTime` 10с, то есть практически на каждое открытие карточки. Сверять
+   * при этом не с чем по построению: без `server_id` (а значит и без адреса)
+   * `domainOriginCheck` вернёт `unknown`, и ответ будет выброшен целиком. Платить
+   * им пришлось бы ровно на тех доменах — «заведён, ещё не привязан», — карточку
+   * которых открывают чаще всего.
+   *
+   * Условие именно на `domain.server_id`, а не на `server?.ip_address`, и это не
+   * придирка к букве: `enabled`, зависящий от данных ДРУГОГО запроса, — это
+   * ВОДОПАД. Карточка ждала бы ответа `/servers`, прежде чем начать чтение DNS,
+   * и задержку платили бы все домены. Выигрыш при этом живёт в пересечении трёх
+   * условий сразу (десктоп × холодный кэш × сервер с пустым `ip_address`, см.
+   * `stateNote`) — а на странице Domains список серверов обычно уже в кэше (тот
+   * же `queryKey`), то есть водопад вырождается вместе с самим выигрышем.
+   * Цена — у всех и всегда, выгода — почти ни у кого.
    */
   const dnsQ = useDnsRecords(
-    isTauri() ? domain.cloudflare_account_id : null,
+    isTauri() && domain.server_id != null ? domain.cloudflare_account_id : null,
     domain.cloudflare_zone_id,
   );
   /**
@@ -127,14 +144,16 @@ export default function DomainServerField({ domain }: DomainServerFieldProps) {
   // карточки, в которую поле вставлено (`DomainLinks`). Скринридер имя поля при
   // этом не теряет — оно на самом селекте (`aria-label`).
   //
-  // Имя у селекта и у карточки поэтому ОДНО, и это ловушка для тестов:
-  // `getByLabelText("Server")` находит и `role="group"` карточки
-  // (`aria-labelledby` на её `<h3>`), и сам селект. Спрашивать надо по роли
-  // внутри карточки — см. `serverSelect()` в `DomainDetailModal.overview.test`.
+  // Имя поля ШИРЕ имени карточки («Assigned server» против титула `SERVER`) —
+  // по тому же правилу, что у обоих соседей ряда (`Registrar account`,
+  // `Cloudflare account`). Совпади они, у карточки и у селекта было бы одно имя
+  // на двоих: `role="group"` берёт своё через `aria-labelledby` на `<h3>`, и
+  // обращение по имени становится двусмысленным — и для скринридера, и для
+  // тестов.
   return (
     <div style={{ minWidth: 0 }}>
       <Sel
-        aria-label="Server"
+        aria-label="Assigned server"
         aria-describedby={noteId}
         value={serverId == null ? "" : String(serverId)}
         onChange={(e: ChangeEvent<HTMLSelectElement>) => pickServer(e.target.value)}
@@ -211,6 +230,24 @@ const noteLine = (color: string, text: React.ReactNode, key?: string) => (
 const readFailure = (e: unknown) => `Servers could not be read: ${clip(errorText(e))}`;
 
 /**
+ * Строка расхождения. Оба конца в одной фразе: без чужого адреса человеку не с
+ * чем идти в панель Cloudflare, без своего непонятно, что именно «не тот».
+ *
+ * Форм две, потому что зон две. На единственной A множественное число врало бы
+ * о числе записей; на нескольких — единственное отрицало бы существование
+ * соседних («ведёт на 9.9.9.9» при живом 8.8.8.8 рядом), а это ровно та
+ * половина правды, из-за которой в панели Cloudflare человек увидит не то, что
+ * ему обещали. Адреса приходят уже отсортированными (`domainOriginCheck`): их
+ * порядок обязан зависеть от содержимого зоны, а не от порядка ответа API.
+ */
+function mismatchText(origins: string[], ip: string): string {
+  if (origins.length === 1) {
+    return `A record points to ${origins[0]} — not the selected server (${ip}).`;
+  }
+  return `A records point to ${origins.join(", ")} — none of them the selected server (${ip}).`;
+}
+
+/**
  * Строка под селектом: в каком состоянии связь, куда ведёт DNS и что случится
  * при смене машины.
  *
@@ -231,13 +268,7 @@ function ServerNote(props: ServerNoteProps) {
           про прошлый выбор на только что сделанный. Молчим до ответа, как и
           диагноз выше. */}
       {!saving && origin.kind === "mismatch" && server
-        ? noteLine(
-            WARN_TEXT,
-            // Оба адреса в одной фразе: без второго непонятно, что именно «не
-            // тот», и человеку не с чем идти в панель Cloudflare.
-            `A record points to ${origin.origin} — not the selected server (${server.ip_address}).`,
-            "origin",
-          )
+        ? noteLine(WARN_TEXT, mismatchText(origin.origins, server.ip_address), "origin")
         : null}
       {!saving && hasSnapshot
         ? noteLine(
@@ -311,10 +342,15 @@ function stateNote({
   }
 
   // Адрес — тот же, что карточка FTP на вкладке Server печатает как Host, и из
-  // того же объекта, а не из второго чтения. Пустой `ip_address` схема
-  // допускает, и молчать о нём нельзя: развёртыванию некуда идти ровно так же,
-  // как без сервера вовсе, — и сверка с A-записью на таком сервере молчит по
-  // построению.
+  // того же объекта, а не из второго чтения.
+  //
+  // Пустой `ip_address` схема допускает ОСОЗНАННО (`schemas/server.py`), а формы
+  // продукта его не производят (`lib/ipInput` пустую строку не пропускает) —
+  // значит такой сервер приезжает прямым вызовом API или из строк, заведённых
+  // до валидации. Молчать о нём нельзя: у такого сервера provision пойдёт в
+  // `""`, карточка FTP покажет пустой Host, а сверка с A-записью замолчит по
+  // построению — три следствия и ни одного слова, если вместо строки оставить
+  // пустоту.
   return server.ip_address.trim()
     ? noteLine(NOTE_TEXT, server.ip_address)
     : noteLine(WARN_TEXT, "No IP address on this server.");

@@ -163,13 +163,8 @@ function registrarSelect() {
   return screen.getByLabelText("Registrar account") as HTMLSelectElement;
 }
 
-/**
- * Селект сервера — через карточку, а не через `getByLabelText("Server")`: то же
- * имя носит и сама карточка (`role="group"` с заголовком `SERVER`), и запрос по
- * имени находит их обоих.
- */
-function serverSelect() {
-  return within(plate("Server")).getByRole("combobox") as HTMLSelectElement;
+function serverSel() {
+  return screen.getByLabelText("Assigned server") as HTMLSelectElement;
 }
 
 beforeEach(() => {
@@ -298,7 +293,10 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
     // — что в ряду связей стоит именно оно и что имя приезжает списком.
     show();
     expect(await within(plate("Server")).findByText("web-01")).toBeTruthy();
-    expect(serverSelect().value).toBe("3");
+    // Имя поля шире имени карточки (`Assigned server` против титула `SERVER`) —
+    // как у обоих соседей ряда; совпади они, обращение по имени было бы
+    // двусмысленным и для скринридера, и отсюда.
+    expect(serverSel().value).toBe("3");
     expect(within(plate("Server")).getByText("10.0.0.3")).toBeTruthy();
     // Тот же адрес карточка FTP показывает как Host — и берётся он из того
     // же объекта, а не из второго чтения (карточка живёт на вкладке Server,
@@ -324,7 +322,7 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
     // строкой ниже, так что проверка по `textContent` прошла бы и на селекте,
     // упавшем в «— No server —», — то есть не запирала бы ровно то поведение,
     // ради которого этот тест и написан.
-    expect(serverSelect().value).toBe("3");
+    expect(serverSel().value).toBe("3");
     expect(screen.getByText(/Server #3 is not in the list/)).toBeTruthy();
   });
 
