@@ -772,8 +772,9 @@ function provisionDomainOptions(onResult: (outcome: ProvisionOutcome) => void) {
     // Провижн идёт по SSH из десктопа, а не из webview: `navigator.onLine`
     // ничего про эту сеть не знает. С дефолтным `networkMode: "online"`
     // react-query на «оффлайне» браузера переводит мутацию в `pending`, но
-    // `mutationFn` не запускает вовсе — то есть ⚙ показывал бы «Provisioning…»
-    // для прогона, который не начинался, и гейт держал бы домен занятым.
+    // `mutationFn` не запускает вовсе — то есть кнопка `Provision` на вкладке
+    // Server карточки домена показывала бы «Provisioning…» для прогона, который
+    // не начинался, и гейт держал бы домен занятым.
     networkMode: "always" as const,
     mutationFn: async (vars: ProvisionDomainVars) => {
       if (!isTauri()) {
@@ -812,20 +813,22 @@ export function useProvisionDomain(onResult: (outcome: ProvisionOutcome) => void
  *
  * Не прямой `invokeSynced`, а мутация в том же `MutationCache` и под тем же
  * `PROVISION_DOMAIN_KEY`: иначе страница `Domains` запущенной по ссылке
- * операции не видит (`useMutationState` смотрит именно в кэш), ⚙ той же строки
- * остаётся активной, и клик открывает вторую SSH-сессию с
- * create_site/create_ftp_account/certbot по тому же домену.
+ * операции не видит (`useMutationState` смотрит именно в кэш), кнопка
+ * `Provision` на вкладке Server карточки того же домена остаётся активной, и
+ * клик открывает вторую SSH-сессию с create_site/create_ftp_account/certbot по
+ * тому же домену.
  *
  * Результат возвращается вызывающему — он обязан показать пароли один раз
  * (`ProvisionResultModal`) и не сохранять. В кэше мутаций их нет: туда попадает
  * только возврат `mutationFn`, то есть `{ domain_id }`.
  */
 export async function runProvisionDomain(vars: ProvisionDomainVars): Promise<ProvisionOutcome> {
-  // Парная сторона того же гейта. Кнопку ⚙ блокирует страница, читая этот же
-  // кэш; ссылка приходит извне и о летящей операции не знает, а Rust на этом
-  // пути не страхует: `site_exists`/`ssl_exists` проверяются в начале прогона,
-  // то есть до того, как первая попытка что-то создала. Без проверки ссылка
-  // открывала бы вторую SSH-сессию по домену, который уже провижинится.
+  // Парная сторона того же гейта. Кнопку `Provision` на вкладке Server карточки
+  // домена блокирует страница, читая этот же кэш; ссылка приходит извне и о
+  // летящей операции не знает, а Rust на этом пути не страхует:
+  // `site_exists`/`ssl_exists` проверяются в начале прогона, то есть до того,
+  // как первая попытка что-то создала. Без проверки ссылка открывала бы вторую
+  // SSH-сессию по домену, который уже провижинится.
   const running = queryClient.getMutationCache().find({
     mutationKey: PROVISION_DOMAIN_KEY,
     status: "pending",
@@ -980,8 +983,9 @@ function parseBulkProvisionResult(res: BulkProvisionDesktopResult): BulkProvisio
  *
  * Почему так, а не флагом «идёт bulk». Гейт живёт в `MutationCache` под
  * `PROVISION_DOMAIN_KEY`, и обе его стороны отбирают домен предикатом по
- * `variables.domainId`: страница `Domains` гасит ⚙ (`useMutationState`), а
- * `runProvisionDomain` бросает на летящем домене. Массовый прогон — это один
+ * `variables.domainId`: страница `Domains` гасит кнопку `Provision` на вкладке
+ * Server карточки домена (`useMutationState`), а `runProvisionDomain` бросает
+ * на летящем домене. Массовый прогон — это один
  * вызов с одним `variables`, поэтому предикату он неотличим от чужого домена;
  * чтобы обе стороны увидели каждый домен набора, на каждый заводится
  * собственная pending-мутация, висящая ровно столько, сколько идёт прогон.
@@ -992,7 +996,8 @@ function parseBulkProvisionResult(res: BulkProvisionDesktopResult): BulkProvisio
  * gcTime). Паролям там не место.
  *
  * Возвращает функцию освобождения. Звать её ОБЯЗАТЕЛЬНО на любом исходе, иначе
- * домены останутся «провижинятся» навсегда и ⚙ уже не включится.
+ * домены останутся «провижинятся» навсегда, и кнопка `Provision` на их
+ * карточках уже не включится.
  */
 function claimProvisionGate(domainIds: number[]): () => void {
   let release!: () => void;
@@ -1007,9 +1012,10 @@ function claimProvisionGate(domainIds: number[]): () => void {
         // спасает от худшего: на «оффлайне» браузера retryer ставит мутацию в
         // `pending` и НЕ зовёт `mutationFn`, а значит заявка никогда не дождётся
         // `held` — `release()` в `finally` резолвит промис, которого никто не
-        // ждёт. Заявка так и висит `pending` до возвращения сети: ⚙ на этих
-        // доменах читается как «Provisioning…» бесконечно, каждый повтор
-        // отвечает «already running», и снять это из UI нечем.
+        // ждёт. Заявка так и висит `pending` до возвращения сети: кнопка
+        // `Provision` на карточках этих доменов читается как «Provisioning…»
+        // бесконечно, каждый повтор отвечает «already running», и снять это из
+        // UI нечем.
         networkMode: "always" as const,
         mutationFn: async (vars: ProvisionDomainVars) => {
           await held;
@@ -1022,7 +1028,8 @@ function claimProvisionGate(domainIds: number[]): () => void {
     }
   } catch (e) {
     // Провал на середине набора оставил бы уже поставленные заявки висеть
-    // вечно — то есть навсегда погасил бы ⚙ на части доменов.
+    // вечно — то есть навсегда погасил бы кнопку `Provision` на карточках
+    // части доменов.
     release();
     throw e;
   }
@@ -1049,8 +1056,9 @@ function gateClaimVars(domainId: number): ProvisionDomainVars & { bulkGateClaim:
  * записью литерал сделал бы кнопку живой во время прогона.
  *
  * Признак «идёт массовый прогон» берётся отсюда, а не из локального `useState`,
- * по той же причине, что и подоменный гейт для ⚙: прогон идёт минутами и
- * переживает уход со страницы, а `useState` размонтированной страницы — нет.
+ * по той же причине, что и подоменный гейт кнопки `Provision` на карточке
+ * домена: прогон идёт минутами и переживает уход со страницы, а `useState`
+ * размонтированной страницы — нет.
  */
 export function isBulkGateClaim(vars: unknown): boolean {
   return (vars as { bulkGateClaim?: unknown } | undefined)?.bulkGateClaim === true;
@@ -1076,7 +1084,8 @@ function alreadyProvisioning(domainIds: number[]): number[] {
  *
  * Оба конца гейта одиночного provision соблюдены: набор не стартует, если
  * какой-то из его доменов уже провижинится, и на время прогона каждый домен
- * набора занят для кнопки ⚙ и для `sdmp://provision`.
+ * набора занят и для кнопки `Provision` на его карточке, и для
+ * `sdmp://provision`.
  */
 export async function runBulkProvisionDomains(
   userId: string,

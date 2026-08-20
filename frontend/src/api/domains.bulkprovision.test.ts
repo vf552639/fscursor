@@ -283,7 +283,8 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
       .getMutationCache()
       .findAll({ mutationKey: PROVISION_DOMAIN_KEY, status: "pending" })
       .map((m) => (m.state.variables as { domainId: number }).domainId);
-    // Именно это читает страница `Domains`, гася ⚙ на строке домена.
+    // Именно это читает страница `Domains`, гася кнопку `Provision` на вкладке
+    // Server карточки домена.
     expect(pending).toContain(1);
     expect(pending).toContain(2);
 
@@ -296,7 +297,8 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
     finishBulk(report({ items: [doneItem("1", "PW-1"), doneItem("2", "PW-2")] }));
     await bulk;
 
-    // После прогона гейт отпущен — иначе ⚙ не включится уже никогда.
+    // После прогона гейт отпущен — иначе кнопка `Provision` не включится уже
+    // никогда.
     await vi.waitFor(() =>
       expect(
         queryClient
@@ -307,7 +309,7 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
   });
 
   // Провал на середине набора оставил бы уже поставленные заявки висеть вечно,
-  // то есть навсегда погасил бы ⚙ на части доменов.
+  // то есть навсегда погасил бы кнопку `Provision` на карточках части доменов.
   it("не оставляет висеть заявки, если гейт не удалось занять целиком", async () => {
     const cache = queryClient.getMutationCache();
     const realBuild = cache.build.bind(cache);
@@ -333,8 +335,8 @@ describe("runBulkProvisionDomains — подоменный гейт", () => {
   // из десктопа. С дефолтным `networkMode: "online"` retryer ставит заявку в
   // `pending` и не зовёт её `mutationFn` вовсе: `held` никто не ждёт, `release()`
   // резолвит промис в пустоту, и заявка висит `pending` до возвращения сети —
-  // ⚙ читается как «Provisioning…» бесконечно, а каждый повтор отвечает
-  // «already running», и снять это из UI нечем.
+  // кнопка `Provision` читается как «Provisioning…» бесконечно, а каждый
+  // повтор отвечает «already running», и снять это из UI нечем.
   it("не залипает заявками, когда браузер считает себя оффлайном", async () => {
     onlineManager.setOnline(false);
     mocks.invokeSynced.mockResolvedValue(report({ items: [doneItem("1", "PW-1")] }));

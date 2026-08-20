@@ -188,7 +188,8 @@ export async function handleSdmpDeepLinkInTauri(
     //    войти в которые пользователь не сможет никогда.
     // 2. Гейт. Он подоменный и живёт в `MutationCache`; прямой вызов его не
     //    консультировал, поэтому ссылка спокойно открывала вторую SSH-сессию по
-    //    домену, который уже провижинится кнопкой ⚙ или другой ссылкой.
+    //    домену, который уже провижинится кнопкой `Provision` на карточке
+    //    домена или другой ссылкой.
     const bulkProvision = await runBulkProvisionDomains(userId, action.domainIds);
     return { handled: true, bulkProvision };
   }
