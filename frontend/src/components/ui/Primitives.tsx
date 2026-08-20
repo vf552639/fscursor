@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { tokens } from "../../lib/designTokens";
 
 export const copyText = (v: string) => navigator.clipboard?.writeText(v).catch(()=>{});
 
@@ -218,9 +219,9 @@ export function SectionCard({title, right, children}: {
    */
   const titleId = React.useId();
   return <div role="group" aria-labelledby={titleId} style={{
-    border:"1px solid #dbe3ee",
-    borderRadius:12,
-    background:"#fbfcfe",
+    border:`1px solid ${tokens.border.card}`,
+    borderRadius:tokens.radius.lg,
+    background:tokens.surface.card,
     // Шапка красится фоном до самого края, а край скруглён — без `hidden` её
     // прямые углы вылезают поверх скругления рамки.
     overflow:"hidden",
@@ -231,12 +232,12 @@ export function SectionCard({title, right, children}: {
     // голого `1fr`.
     minWidth:0,
   }}>
-    <div style={{background:"#eef2f7",borderBottom:"1px solid #dbe3ee",padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+    <div style={{background:tokens.surface.cardHeader,borderBottom:`1px solid ${tokens.border.card}`,padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
       {/* Заголовок, а не просто жирный текст: секций на вкладках карточки
           набирается больше десятка, и по `h3` скринридер даёт по ним навигацию,
           которой у `div` нет. `margin:0` обязателен — браузерный отступ `h3`
           иначе распирает шапку-полоску, ломая её высоту 10px 18px. */}
-      <h3 id={titleId} style={{margin:0,fontSize:13,fontWeight:700,color:"#1e293b",letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</h3>
+      <h3 id={titleId} style={{margin:0,fontSize:13,fontWeight:700,color:tokens.text.heading,letterSpacing:"0.06em",textTransform:"uppercase"}}>{title}</h3>
       {right}
     </div>
     <div style={{padding:"16px 18px"}}>{children}</div>
@@ -256,7 +257,12 @@ export function Btn({children, variant="secondary", size="md", onClick, style, d
     ghost:{background:"transparent",color:"#6b7280",border:"none"}
   };
   return <button onClick={onClick} disabled={disabled} title={title}
-    style={{display:"inline-flex",alignItems:"center",gap:6,borderRadius:8,fontFamily:"'Inter',sans-serif",fontWeight:500,cursor:disabled?"not-allowed":"pointer",transition:"all 0.15s",opacity:disabled?0.5:1,...sz[size],...va[variant],...style}}
+    // Семейство шрифта здесь не назначается намеренно: кнопка наследует его от
+    // `index.css` (`input,select,textarea,button`), где шрифт назван ровно один
+    // раз. Раньше тут стоял хардкод `'Inter'` — шрифта, который в приложение
+    // никогда не подключали, так что кнопки и так рисовались системным; вторая
+    // копия имени семейства просто ждала момента разойтись с первой.
+    style={{display:"inline-flex",alignItems:"center",gap:6,borderRadius:8,fontWeight:500,cursor:disabled?"not-allowed":"pointer",transition:"all 0.15s",opacity:disabled?0.5:1,...sz[size],...va[variant],...style}}
     onMouseEnter={e=>{if(!disabled)e.currentTarget.style.filter="brightness(0.93)";}}
     onMouseLeave={e=>{e.currentTarget.style.filter="none";}}
   >{children}</button>;
