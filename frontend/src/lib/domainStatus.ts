@@ -36,7 +36,7 @@ type BadgeVariant = "gray" | "blue" | "green" | "yellow" | "red";
  * один. NS проставлены — это пройденная ступень, а не готовый домен: сайта на
  * сервере ещё нет.
  */
-export const DOMAIN_STATUSES: ReadonlyArray<{ status: string; variant: BadgeVariant }> = [
+export const DOMAIN_STATUSES = [
   { status: "new", variant: "gray" },
   { status: "ns_pending", variant: "yellow" },
   { status: "ns_ok", variant: "blue" },
@@ -45,7 +45,23 @@ export const DOMAIN_STATUSES: ReadonlyArray<{ status: string; variant: BadgeVari
   { status: "ssl_pending", variant: "yellow" },
   { status: "active", variant: "green" },
   { status: "failed", variant: "red" },
-];
+] as const satisfies ReadonlyArray<{ status: string; variant: BadgeVariant }>;
+
+/**
+ * Имя статуса, ИЗВЕСТНОГО лестнице, — выведено из неё же, а не переписано
+ * рядом union'ом из восьми строк.
+ *
+ * Заведено ради тех, кто перечисляет статусы поимённо: чипы вкладки Domains
+ * называют три из восьми (`new`, `active`, `failed`), и до типа опечатка в
+ * таком перечислении компилировалась молча — чип «Active» с фильтром `"actve"`
+ * просто не находил ничего. Теперь имя, которого в лестнице нет, роняет сборку.
+ *
+ * `as const satisfies …` вместо прежней аннотации: аннотация расширяла `status`
+ * до `string` прямо в момент объявления, и литеральные имена терялись, не
+ * дойдя ни до одного потребителя. `satisfies` сохраняет их и при этом
+ * продолжает проверять форму — чужой `variant` по-прежнему не пройдёт.
+ */
+export type DomainStatusName = (typeof DOMAIN_STATUSES)[number]["status"];
 
 /** Подпись статуса. Пустое значение — «UNKNOWN», а не пустое место. */
 export function domainStatusLabel(status: string): string {

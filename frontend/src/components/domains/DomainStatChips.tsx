@@ -1,22 +1,26 @@
 import React, { useMemo, useState } from "react";
 
+import { chipCount, countDomains, DomainCounts, LifecycleStatus } from "../../lib/domainCounts";
 import { tokens } from "../../lib/designTokens";
 import { DomainUI } from "./types";
 
 /**
- * Один чип-фильтр: подпись, значение фильтра `status` и счётчик.
+ * Один чип-фильтр: подпись и значение, которое уедет в фильтр `status`.
  *
- * Именованные поля, а не кортеж, — по той же причине, по какой они появились у
- * карточек, которые этот ряд заменил: у кортежа `[string, string, number]`
- * порядок «значение фильтра, потом подпись» не проверяет никто, а перепутанная
- * пара даёт чип, который подписан «Active», а фильтрует по `"active"`… или по
- * `"Active"`, и компилятор молчит.
+ * Счётчика в объекте НЕТ намеренно — он выводится из `value` (`chipCount`).
+ * Пара, сопоставленная руками (`{ value: "active", count: byStatus.failed }`),
+ * компилировалась бы молча и дала бы чип, который показывает одно, а фильтрует
+ * другое; это тот же класс ошибки, ради которого поля здесь именованные, а не
+ * сложены в кортеж.
+ *
+ * Подпись при этом задаётся руками, и это осознанная граница: `domainStatusLabel`
+ * даёт `ACTIVE`, а макету нужен `Active`, — но перепутанная ПОДПИСЬ видна с
+ * первого взгляда на экран, а перепутанный счётчик неотличим от правды.
  */
 interface Chip {
   label: string;
-  /** Что уедет в фильтр `status`. У «All» — пустая строка, то есть «без среза». */
-  value: string;
-  count: number;
+  /** Пустая строка у «All» — то есть «без среза». */
+  value: LifecycleStatus | "";
 }
 
 /** Один пункт развёрнутой строки: подпись, число и цвет числа. */
@@ -28,6 +32,13 @@ interface Detail {
 
 /**
  * Ряд чипов-фильтров над таблицей доменов и спрятанная за ними строка деталей.
+ *
+ * Компонент несёт ДВЕ вещи, и имя файла честно называет только первую. Вместе
+ * они потому, что это один ответ на вопрос «что сейчас в списке», разложенный
+ * по важности: четыре числа, на которые смотрят всегда, и ещё пять, за которыми
+ * приходят изредка. Развести их по двум компонентам значило бы отдать двоим
+ * один и тот же посчитанный срез — и завести второй проход по списку ради
+ * строки, которая большую часть времени свёрнута.
  *
  * Пришёл на место `DomainStats` — восьми карточек в два ряда. Разница не только
  * в размере: карточки ничего не делали, а чип одновременно ПОКАЗЫВАЕТ число и
@@ -42,9 +53,8 @@ interface Detail {
  * «покажи мне ровно `ssl_pending`» приходит тот, кто уже знает, что ищет, — а
  * ему хватает поиска по имени.
  *
- * Считает сам, а не получает числа пропсами: правила подсчёта (особенно
- * «остаток» ниже) стоят своих комментариев, и держать их отдельно от показа
- * значит развести объяснение и то, что оно объясняет.
+ * Сами правила подсчёта живут в `lib/domainCounts` — там же, где объяснения,
+ * почему они такие. Здесь только показ.
  */
 export default function DomainStatChips({
   domains,
@@ -57,75 +67,37 @@ export default function DomainStatChips({
    * Иначе выбранный чип обнулит счётчики остальных — «Failed 3» после клика по
    * «Active» станет «Failed 0», — и вернуться к ним будет некуда: ряд перестанет
    * быть картой списка и станет описанием текущего среза, то есть тавтологией.
+   * Правка `domains={filters.filtered}` выглядит очевидным улучшением для того,
+   * кто придёт следом, поэтому её сторожит тест (`pages/Domains.chips.test.tsx`).
    */
   domains: DomainUI[];
   /** Текущее значение фильтра `status` (`hooks/useDomainFilters`). */
   status: string;
   onStatusChange: (v: string) => void;
 }) {
-  /**
-   * Срез по жизненному циклу домена.
-   *
-   * «In progress» считается ОСТАТКОМ, а не перечислением промежуточных
-   * статусов, и это не лень: перечисление молча теряет любой статус, которого
-   * автор не вспомнил (а ровно так и потерялся `ns_ok` — см.
-   * `lib/domainStatus`), и ряд переставал бы сходиться с общим числом. Остаток
-   * сходится по построению.
-   */
-  const lifecycle = useMemo(() => {
-    const count = (s: string) => domains.filter((d) => d.status === s).length;
-    const fresh = count("new");
-    const active = count("active");
-    const failed = count("failed");
-    return { fresh, active, failed, inProgress: domains.length - fresh - active - failed };
-  }, [domains]);
-
-  const ns = useMemo(() => {
-    const count = (s: string) => domains.filter((d) => d.ns_status === s).length;
-    return { ok: count("ok"), pending: count("pending"), error: count("error") };
-  }, [domains]);
-
-  /**
-   * Домены, у которых провижининг дошёл до SSL и сертификата не получил.
-   *
-   * Считается по `ssl_status === "error"` — единственному признаку, который
-   * такой прогон о себе действительно оставляет: провал выпуска (как и пропуск
-   * из-за DNS или отсутствия почты) намеренно НЕ роняет провижининг, поэтому
-   * домен остаётся `site_created`, а не `failed`, и в `last_provision_error`
-   * ничего не пишется — там живут только фатальные провалы, и их текст
-   * (`provision failed at {шаг}: {класс}`) слова «ssl» не содержит вовсе.
-   * Прежний предикат (`status === "failed"` И текст ошибки со словом «ssl»)
-   * не мог стать истинным ни при одном прогоне.
-   *
-   * Раньше это был отдельный красный бейдж под карточками; в макете места для
-   * него нет, поэтому счётчик уехал пятым пунктом в строку деталей. Сигнал тот
-   * же и по тому же правилу — новой поверхности под него не заведено, но и
-   * терять его нельзя: провал SSL больше нигде на этом экране не суммируется.
-   */
-  const failedAtSslCount = useMemo(
-    () => domains.filter((d) => d.ssl_status === "error").length,
-    [domains]
-  );
-
+  const counts: DomainCounts = useMemo(() => countDomains(domains), [domains]);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   const chips: Chip[] = [
-    { label: "All", value: "", count: domains.length },
-    { label: "Active", value: "active", count: lifecycle.active },
-    { label: "New", value: "new", count: lifecycle.fresh },
-    { label: "Failed", value: "failed", count: lifecycle.failed },
+    { label: "All", value: "" },
+    { label: "Active", value: "active" },
+    { label: "New", value: "new" },
+    { label: "Failed", value: "failed" },
   ];
 
   const details: Detail[] = [
-    { label: "NS OK", value: ns.ok, color: tokens.semantic.success.text },
-    { label: "NS Pending", value: ns.pending, color: tokens.semantic.warning.text },
-    { label: "NS Errors", value: ns.error, color: tokens.semantic.danger.text },
-    { label: "In progress", value: lifecycle.inProgress, color: tokens.semantic.info.text },
+    { label: "NS OK", value: counts.ns.ok, color: tokens.semantic.success.text },
+    { label: "NS Pending", value: counts.ns.pending, color: tokens.semantic.warning.text },
+    { label: "NS Errors", value: counts.ns.error, color: tokens.semantic.danger.text },
+    { label: "In progress", value: counts.inProgress, color: tokens.semantic.info.text },
   ];
   // Пятый пункт — только когда есть о чём говорить: «Failed at SSL: 0» это не
-  // сигнал, а шум, и красный цвет он тратит впустую.
-  if (failedAtSslCount > 0) {
-    details.push({ label: "Failed at SSL", value: failedAtSslCount, color: tokens.semantic.danger.text });
+  // сигнал, а шум. Условие тут, а не в цвете (как у четырёх соседей выше),
+  // потому что пункт новый: четыре первых держат ширину строки постоянной и
+  // читаются как перечень, а пятый появляется, и появление — это и есть его
+  // сообщение.
+  if (counts.failedAtSsl > 0) {
+    details.push({ label: "Failed at SSL", value: counts.failedAtSsl, color: tokens.semantic.danger.text });
   }
 
   return (
@@ -143,23 +115,29 @@ export default function DomainStatChips({
          * дают из коробки. Кнопки же достижимы Tab'ом сами, а `aria-pressed`
          * честно сообщает «нажат/не нажат».
          *
-         * Оговорка про смысл: `aria-pressed` не обещает взаимного исключения,
+         * Оговорка о смысле: `aria-pressed` не обещает взаимного исключения,
          * хотя нажатым здесь всегда ровно один чип. Это ослабление, и оно
          * осознанное — обещание, которое не выполняется клавиатурой, дороже
-         * обещания, которого не дали.
+         * обещания, которого не дали. А вот второе ожидание от нажатой кнопки —
+         * что повторное нажатие её отожмёт — выполняется честно (см. `onClick`).
          */}
-        <div role="group" aria-label="Фильтр по статусу домена" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div role="group" aria-label="Filter by status" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {chips.map((chip) => {
             const isActive = status === chip.value;
+            const count = chipCount(counts, chip.value);
             // Красный счётчик достаётся только провалам, и только когда они есть:
             // на нуле красное пятно кричало бы о том, чего не случилось.
-            const alarming = chip.value === "failed" && chip.count > 0;
+            const alarming = chip.value === "failed" && count > 0;
             return (
               <button
                 key={chip.label}
                 type="button"
                 aria-pressed={isActive}
-                onClick={() => onStatusChange(chip.value)}
+                // Повторный клик по нажатому чипу снимает срез, а не молчит.
+                // Кнопка с `aria-pressed` обещает именно это, и обещание надо
+                // либо выполнить, либо не давать; выполнить дешевле — тем более
+                // что «снять срез» и «нажать All» здесь одно и то же значение.
+                onClick={() => onStatusChange(isActive ? "" : chip.value)}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -191,7 +169,7 @@ export default function DomainStatChips({
                     color: alarming ? tokens.semantic.danger.text : tokens.text.secondary,
                   }}
                 >
-                  {chip.count}
+                  {count}
                 </span>
               </button>
             );
@@ -245,8 +223,16 @@ export default function DomainStatChips({
                   проверяющего, ни `getByText` — тот собирает только прямых
                   текстовых потомков, и число во вложенном теге для него не
                   существует. Тест, вынужденный лезть внутрь вёрстки, проверяет
-                  вёрстку вместо содержания. */}
-              <span style={{ color: d.color, fontWeight: 600 }}>{`${d.label}: ${d.value}`}</span>
+                  вёрстку вместо содержания.
+
+                  Ноль рисуется приглушённым, а не своим цветом: то же правило,
+                  что у красного счётчика на чипе «Failed», — красное «NS
+                  Errors: 0» и янтарное «NS Pending: 0» кричали бы о том, чего
+                  не случилось, и на здоровом списке вся строка светилась бы
+                  тревогой. Цвет здесь утверждение, а не украшение подписи. */}
+              <span style={{ color: d.value > 0 ? d.color : tokens.text.muted, fontWeight: d.value > 0 ? 600 : 400 }}>
+                {`${d.label}: ${d.value}`}
+              </span>
             </React.Fragment>
           ))}
         </div>
