@@ -9,7 +9,8 @@ import { ipError } from "../lib/ipInput";
 import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
-import { useDomains, useDeleteDomain, useUpdateDomain, Domain } from "../api/domains";
+import { useDomains, useDeleteDomain, useUpdateDomain, useBulkAssignServer, useBulkCreateStructuredDomains, Domain } from "../api/domains";
+import { domainWord } from "../lib/fullSetupPlan";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -46,38 +47,149 @@ function fastpanelUrlOf(server: any): string {
   return `https://${host}:8888`;
 }
 
-/** Одна колонка сверки: заголовок с количеством и список имён (пусто → «—»). */
-function CompareColumn({ title, names, tone }: { title: string; names: string[]; tone: string }) {
+/** Строка колонки сверки: имя домена и, если есть, пояснение к его состоянию. */
+interface CompareItem {
+  name: string;
+  /** Чем эта строка отличается от соседних (например, «сейчас prod-02»). */
+  note?: string;
+}
+
+/**
+ * Одна колонка сверки: заголовок с количеством и список имён (пусто → «—»).
+ * `children` — лекарство группы (кнопка) под списком; у групп без лекарства его
+ * нет, и колонка остаётся такой же, какой была.
+ */
+function CompareColumn({ title, items, tone, children }: { title: string; items: CompareItem[]; tone: string; children?: React.ReactNode }) {
   return (
     <div style={{display:"grid",gap:6,alignContent:"start"}}>
-      <div style={{fontSize:12,fontWeight:700,color:tone,textTransform:"uppercase",letterSpacing:"0.4px"}}>{title} ({names.length})</div>
-      {names.length === 0 ? (
+      <div style={{fontSize:12,fontWeight:700,color:tone,textTransform:"uppercase",letterSpacing:"0.4px"}}>{title} ({items.length})</div>
+      {items.length === 0 ? (
         <div style={{fontSize:12.5,color:"#9ca3af"}}>—</div>
       ) : (
-        names.map((n)=><div key={n} style={{fontSize:12.5,color:"#374151",wordBreak:"break-all"}}>{n}</div>)
+        items.map((it)=>(
+          <div key={it.name} style={{fontSize:12.5,color:"#374151",wordBreak:"break-all"}}>
+            {it.name}{it.note ? <span style={{color:"#9ca3af"}}> · {it.note}</span> : null}
+          </div>
+        ))
       )}
+      {children}
     </div>
   );
 }
 
+/** Общий вид красной плашки внутри баннера — как у ошибок мутаций выше. */
+const COMPARE_ALERT: React.CSSProperties = {marginTop:12, padding:"8px 12px", borderRadius:8, background:"#fee2e2", color:"#991b1b", fontSize:12.5};
+
 /**
- * Сверка «сайты на сервере ↔ домены SDMP». Только показывает расхождение —
- * ничего не ресинкает (принцип №3, веб/сверка не мутируют). Раскладка на три
- * группы — чистая `compareServerSites` (`lib/serverSites`), с тестами; здесь
- * только рендер.
+ * Сверка «сайты на сервере ↔ домены SDMP» плюс два лекарства к ней.
+ *
+ * Раскладка на четыре группы — чистая `compareServerSites` (`lib/serverSites`),
+ * с тестами; здесь рендер и две мутации. Домены приходят ВСЕ, а не только
+ * привязанные к этому серверу: иначе «SDMP о домене не знает» неотличимо от
+ * «домен стоит на другой машине», а лечатся они по-разному.
+ *
+ * Своего гейта на десктоп у кнопок нет — и не надо: баннер показывается только
+ * после удачной сверки, а сверка читает сайты по SSH и живёт только в десктопе.
+ * Второй гейт поверх этого был бы мёртвой веткой, которую нечем проверить.
  */
-function SiteCompareBanner({ sites, domains }: { sites: ServerSite[]; domains: Domain[] }) {
-  const cmp = compareServerSites(sites, domains);
+function SiteCompareBanner({ sites, domains, serverId, serverName, servers }: {
+  sites: ServerSite[];
+  /** ВСЕ домены пользователя (см. JSDoc выше), а не домены этого сервера. */
+  domains: Domain[];
+  serverId: number;
+  serverName: string;
+  /** Чтобы назвать сервер, на котором домен стоит сейчас, именем, а не числом. */
+  servers: { id: number; name: string }[];
+}) {
+  const cmp = compareServerSites(sites, domains, serverId);
+  const assignServer = useBulkAssignServer();
+  const createBound = useBulkCreateStructuredDomains();
+  /**
+   * Имена, которые сервер отказался заводить: такой домен у пользователя уже
+   * есть либо имя не прошло проверку (`bulk_create_structured` кладёт в
+   * `skipped` оба случая, не различая их). Это НЕ успех: привязку пропущенным
+   * никто не поставил, а колонки после инвалидации выглядят как «всё сделано».
+   * Молчать об этом нельзя (принцип №6), поэтому пропущенные названы поимённо.
+   */
+  const [skipped, setSkipped] = useState<string[]>([]);
+
+  const serverNames = new Map(servers.map((x)=>[x.id, x.name]));
+  const noteFor = (d: Domain) =>
+    d.server_id == null ? "без сервера" : `сейчас ${serverNames.get(d.server_id) ?? `сервер #${d.server_id}`}`;
+
+  // Те, кого привязка ПЕРЕВЕЗЁТ. Считаются отдельно от «ни на каком сервере»:
+  // риск у них разный, и вопрос обязан это сказать (см. `bindExisting`).
+  const moving = cmp.notBoundHere.filter((d)=>d.server_id != null);
+
+  const bindExisting = async () => {
+    const ids = cmp.notBoundHere.map((d)=>d.id);
+    if (ids.length === 0) return;
+    // Переезд назван своими словами, а не спрятан за общим «привязать»: смена
+    // `server_id` на бэкенде сбрасывает снимок `fp_facts` — сайт за строкой в
+    // базе не переезжает, и держать после переезда FTP-доступ с ПРЕЖНЕЙ машины
+    // означало бы показывать пароль от чужого сервера как рабочий.
+    const move = moving.length
+      ? ` У ${moving.length} из них сейчас стоит другой сервер: привязка переедет, а прочитанные с прежней машины факты (FTP-доступ, пути, PHP) будут сброшены.`
+      : "";
+    if (!(await confirmAction(`Привязать ${ids.length} ${domainWord(ids.length)} к ${serverName}?${move}`))) return;
+    setSkipped([]);
+    assignServer.mutate({ domain_ids: ids, server_id: serverId });
+  };
+
+  const createAndBind = async () => {
+    const names = cmp.onlyOnServer.map((s)=>s.domain_name);
+    if (names.length === 0) return;
+    if (!(await confirmAction(`Завести в SDMP ${names.length} ${domainWord(names.length)} и привязать к ${serverName}?`))) return;
+    setSkipped([]);
+    createBound.mutate(
+      { items: names.map((domain_name)=>({ domain_name, server_id: serverId })) },
+      { onSuccess: (r)=>setSkipped(r.skipped) },
+    );
+  };
+
   return (
     <div style={{marginBottom:20, padding:"14px 18px", borderRadius:10, background:"#f9fafb", border:"1px solid #e5e7eb"}}>
       <div style={{fontSize:13,fontWeight:600,color:"#111",marginBottom:12}}>
-        Сверка с сервером: на сервере {sites.length}, в SDMP {domains.length}
+        {/* «Привязано сюда», а не «в SDMP»: на вход идут все домены пользователя,
+            и их общее число про этот сервер ничего не говорит. */}
+        Сверка с сервером: на сервере {sites.length}, привязано к {serverName} {cmp.matched.length + cmp.onlyInSdmp.length}
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16}}>
-        <CompareColumn title="Только на сервере" names={cmp.onlyOnServer.map((s)=>s.domain_name)} tone="#b45309" />
-        <CompareColumn title="Совпало" names={cmp.matched.map((m)=>m.domain.domain_name)} tone="#166534" />
-        <CompareColumn title="Только в SDMP" names={cmp.onlyInSdmp.map((d)=>d.domain_name)} tone="#6b7280" />
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
+        <CompareColumn title="Только на сервере" items={cmp.onlyOnServer.map((s)=>({name:s.domain_name}))} tone="#b45309">
+          {cmp.onlyOnServer.length > 0 && (
+            <Btn size="sm" variant="secondary" onClick={createAndBind} disabled={createBound.isPending}>
+              {createBound.isPending ? "Завожу…" : "Завести и привязать"}
+            </Btn>
+          )}
+        </CompareColumn>
+        <CompareColumn title="Не привязано сюда" items={cmp.notBoundHere.map((d)=>({name:d.domain_name, note:noteFor(d)}))} tone="#c2410c">
+          {cmp.notBoundHere.length > 0 && (
+            <Btn size="sm" variant="secondary" onClick={bindExisting} disabled={assignServer.isPending}>
+              {assignServer.isPending ? "Привязываю…" : "Привязать к этому серверу"}
+            </Btn>
+          )}
+        </CompareColumn>
+        <CompareColumn title="Совпало" items={cmp.matched.map((m)=>({name:m.domain.domain_name}))} tone="#166534" />
+        <CompareColumn title="Только в SDMP" items={cmp.onlyInSdmp.map((d)=>({name:d.domain_name}))} tone="#6b7280" />
       </div>
+      {/* Отказ мутации показывается здесь же, у кнопки, которая его вызвала: без
+          этого неудачная привязка выглядела бы как удачная — колонки просто
+          остались бы прежними, и человек нажал бы ещё раз. */}
+      {assignServer.isError && (
+        <div role="alert" style={COMPARE_ALERT}>
+          Не удалось привязать домены: {(assignServer.error as any)?.message || "request error"}
+        </div>
+      )}
+      {createBound.isError && (
+        <div role="alert" style={COMPARE_ALERT}>
+          Не удалось завести домены: {(createBound.error as any)?.message || "request error"}
+        </div>
+      )}
+      {skipped.length > 0 && (
+        <div role="alert" style={COMPARE_ALERT}>
+          Не заведены и не привязаны — такой домен уже есть в SDMP либо имя не прошло проверку: {skipped.join(", ")}
+        </div>
+      )}
     </div>
   );
 }
@@ -156,6 +268,15 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   const { data: serversList } = useServers();
   const { data: domainsData } = useDomains({ server_id: server?.id });
   const domains: Domain[] = domainsData ?? [];
+  // Второй список — ВСЕ домены пользователя, и только для сверки. Первый
+  // (отфильтрованный сервером) отсюда не выводится и им не заменяется: таблица
+  // ниже показывает домены именно этого сервера, а сверке нужны все, иначе
+  // «SDMP о домене не знает» неотличимо от «домен стоит на другой машине». Два
+  // запроса, а не один с фильтром на клиенте: серверный фильтр — это то, что
+  // таблица показывает, и повторять его вручную значит завести второе правило
+  // «чьи домены считать серверными».
+  const { data: allDomainsData } = useDomains();
+  const allDomains: Domain[] = allDomainsData ?? [];
   
   // FastPanel setup
   const isFPInstalled = s?.fastpanel_status === "installed";
@@ -720,7 +841,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         Не удалось прочитать сайты с сервера: {(listSites.error as any)?.message || "request error"}
       </div>
     ) : listSites.data ? (
-      <SiteCompareBanner sites={listSites.data} domains={domains} />
+      /* `key` по времени сверки: новая сверка — новый баннер. Отчёты о
+         привязке (ошибка мутации, список непрошедших имён) живут в состоянии
+         баннера и пережили бы повторное чтение сайтов — то есть висели бы над
+         колонками, которые описывают уже другой прогон. */
+      <SiteCompareBanner key={listSites.submittedAt} sites={listSites.data} domains={allDomains} serverId={s.id} serverName={s.name} servers={serversList?.items || []} />
     ) : null}
     {s.last_check_ok === false && s.last_check_error && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
