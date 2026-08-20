@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import ServerDetail from "./ServerDetail";
@@ -145,11 +145,12 @@ function renderDetail(domains = ALL_DOMAINS, opts: { allDomainsFail?: boolean; s
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <ServerDetail server={{ id: SERVER_ID }} onBack={() => {}} onFastpanelCreds={() => {}} />
     </QueryClientProvider>,
   );
+  return { ...view, client };
 }
 
 /** Прогнать сверку и дождаться баннера. */
@@ -375,6 +376,43 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     fireEvent.click(screen.getByText("Завести и привязать"));
 
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  /**
+   * «Ошибка» и «данных нет» — разные состояния, и упавший ФОНОВЫЙ перезапрос
+   * даёт первое при наличии вторых. Достижимо оно не теоретически: перезапрос
+   * `/domains` запускает инвалидация после самой привязки, то есть в ту же
+   * секунду, когда на экране появляется отчёт `skipped`. Пока ветка отказа
+   * стояла перед успехом, икота бэкенда в этот момент уносила и сверку, и
+   * только что приехавшие имена — ровно то, что чинилось этажом выше.
+   */
+  it("упавший фоновый перезапрос не сносит сверку вместе с отчётом", async () => {
+    setTauri(true);
+    mocks.confirmAction.mockResolvedValue(true);
+    mocks.apiPost.mockResolvedValue({ created: [], skipped: ["ghost.com"] });
+    const { client } = renderDetail();
+    await compare();
+
+    fireEvent.click(screen.getByText("Завести и привязать"));
+    expect((await screen.findByRole("alert")).textContent).toContain("ghost.com");
+
+    // Ровно то, что делает инвалидация после мутации, — только с отказом в ответ.
+    const first = mocks.apiGet.getMockImplementation()!;
+    mocks.apiGet.mockImplementation(async (url: string, cfg?: any) => {
+      if (url === "/domains" && cfg?.params?.server_id == null) throw new Error("502: bad gateway");
+      return first(url, cfg);
+    });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["domains"] }).catch(() => {});
+    });
+
+    // Сверка жива, лечение доступно, отчёт на месте — а про неудачу обновления
+    // сказано отдельно, а не молчанием и не сносом экрана.
+    expect(await screen.findByText(/мог устареть/)).toBeTruthy();
+    expect(screen.getByText(/Сверка с сервером/)).toBeTruthy();
+    expect(screen.getByText("Завести и привязать")).toBeTruthy();
+    expect(screen.queryByText(/не загрузился/)).toBeNull();
+    expect(document.body.textContent ?? "").toContain("ghost.com");
   });
 
   /** Та же симметрия в обратную сторону: гасит ли привязка отчёт заведения. */

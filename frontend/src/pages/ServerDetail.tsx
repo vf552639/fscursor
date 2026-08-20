@@ -897,11 +897,26 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
          вместо непрочитанного — это диагноз «SDMP не знает ни одного домена
          этого сервера», выставленный по отсутствию данных, и лечение под ним
          предлагается такое же уверенное (принцип №6). */
-      allDomainsQ.isError ? (
+      /* `isLoadingError`, а НЕ `isError`: у query-core «ошибка» и «данных нет» —
+         разные вещи, и упавший ФОНОВЫЙ перезапрос даёт `{error, данные есть}`.
+         Перезапрос здесь не редкость и не совпадение: его запускает `onSuccess`
+         самой привязки (`invalidateQueries`), то есть икота бэкенда в эту
+         секунду сносила бы баннер с только что приехавшими именами `skipped` —
+         ровно тот отчёт, ради сохранности которого баннер и перестали
+         размонтировать. Прочитанные данные остаются знанием, даже когда
+         следующее чтение не удалось; сказать надо о том, что они могли
+         устареть, а не выбросить их. */
+      allDomainsQ.isLoadingError ? (
         <div role="alert" style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
           Сайты с сервера прочитаны, но список доменов SDMP не загрузился — сверять не с чем: {(allDomainsQ.error as any)?.message || "request error"}
         </div>
-      ) : allDomainsQ.isSuccess ? (
+      ) : allDomainsQ.data ? (
+        <>
+        {allDomainsQ.isError && (
+          <div style={{marginBottom:8, padding: "8px 12px", borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e", fontSize: 12.5}}>
+            Список доменов SDMP мог устареть: последнее обновление не прошло ({(allDomainsQ.error as any)?.message || "request error"}). Сверка ниже построена на прочитанном раньше.
+          </div>
+        )}
         <SiteCompareBanner
           sites={listSites.data}
           domains={allDomainsQ.data}
@@ -913,6 +928,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
           skipped={compareSkipped}
           onSkipped={setCompareSkipped}
         />
+        </>
       ) : (
         <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb", color: "#6b7280", fontSize: 13}}>
           Сайты с сервера прочитаны; ждём список доменов SDMP, чтобы было с чем сверять.
