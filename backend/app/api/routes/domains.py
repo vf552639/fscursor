@@ -274,8 +274,19 @@ async def bulk_create(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkCreateResponse:
+    """Массовая заливка списком имён. Связки — одни на всю пачку.
+
+    Гарда владения у этого маршрута (и у `/bulk-structured` ниже) не было
+    ВОВСЕ, хотя он стоял на всех остальных путях записи связок: чужой
+    `registrar_id` в теле проходил молча, и сотня доменов заводилась со ссылкой
+    на чужой аккаунт. `server_id` в теле появился той же правкой, что закрыла
+    дыру, поэтому проверяются оба.
+    """
+    await _ensure_links_owned(
+        db, user, server_id=data.server_id, registrar_id=data.registrar_id
+    )
     created, skipped = await domain_service.bulk_create(
-        db, user.id, data.domains_text, data.registrar_id
+        db, user.id, data.domains_text, data.registrar_id, server_id=data.server_id
     )
     # Пишем счётчики, а не список имён: массовая заливка — это сотни доменов,
     # им не место в JSONB-поле аудита. `mode` отличает этот маршрут от
@@ -290,6 +301,9 @@ async def bulk_create(
             "created": len(created),
             "skipped": len(skipped),
             "registrar_id": data.registrar_id,
+            # Связка, с которой домены заведены, — рядом с регистратором: без
+            # неё по журналу не понять, откуда у пачки взялся сервер.
+            "server_id": data.server_id,
         },
     )
     await db.commit()
@@ -309,6 +323,27 @@ async def bulk_create_structured(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkCreateResponse:
+    """Массовая заливка построчно: у каждого домена своя пара связок.
+
+    Владение проверяется по МНОЖЕСТВУ уникальных id, а не по элементу: пачка
+    бывает на сотни строк с одним и тем же сервером, и проверка на элемент
+    означала бы сотни одинаковых SELECT-ов. Проверяются все уникальные, а не
+    первый попавшийся: чужой id в сто первой строке — тот же чужой id.
+
+    `registrar_name` проверять нечего и не в чем: он резолвится (`find_reg_id`)
+    только по аккаунтам этого пользователя, то есть чужого попросту не найдёт.
+
+    Почему гарда здесь раньше не было и что через это проходило — в docstring
+    `bulk_create` выше.
+    """
+    # `sorted` — ради определённости: какая из чужих связок назовётся в 404,
+    # не должно зависеть от порядка обхода множества.
+    for server_id in sorted({i.server_id for i in data.items if i.server_id is not None}):
+        await _ensure_links_owned(db, user, server_id=server_id)
+    for registrar_id in sorted(
+        {i.registrar_id for i in data.items if i.registrar_id is not None}
+    ):
+        await _ensure_links_owned(db, user, registrar_id=registrar_id)
     created, skipped = await domain_service.bulk_create_structured(db, user.id, data.items)
     await audit_service.log(
         db,

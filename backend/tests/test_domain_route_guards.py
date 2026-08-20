@@ -356,3 +356,84 @@ async def test_bulk_create_skips_a_name_too_long_for_the_column():
         body = r.json()
         assert [d["domain_name"] for d in body["created"]] == [good]
         assert body["skipped"] == [too_long]
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_routes_refuse_a_link_that_is_not_mine():
+    """Обе массовые заливки проверяют владение связками. Раньше — не проверяли ВОВСЕ.
+
+    Гард `_ensure_links_owned` стоял на одиночном `POST /domains`, на `PUT` и на
+    обеих массовых привязках, но не на `/domains/bulk` и
+    `/domains/bulk-structured`: чужой `registrar_id` в теле проходил молча, и
+    сотня доменов заводилась со ссылкой на чужой аккаунт. `server_id` в этих
+    телах появился той же правкой, что закрыла дыру, поэтому проверяются оба —
+    и чужой существующий id, и несуществующий (последний иначе доезжает до
+    драйвера нарушением FK, то есть 500).
+
+    Структурная форма несёт связку в КАЖДОМ элементе, и чужой id стоит здесь
+    НЕ в первом: реализация, смотрящая на первый элемент (или на первый
+    непустой `server_id`), выглядела бы рабочей и пропускала бы остальные
+    строки пачки.
+
+    404 подпёрт позитивным контролем: те же тела со своими связками обязаны
+    дать 201, иначе отказ ничего не доказывает.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "bulk-link-owner", key=b"\x99" * 32)
+        foreign_server = await create_server(c)
+        foreign_registrar = await create_registrar(c)
+        await c.post("/api/auth/logout")
+
+        await register_and_login(c, "bulk-link-other")
+        my_server = await create_server(c)
+        my_registrar = await create_registrar(c)
+
+        for body in (
+            {"server_id": foreign_server},
+            {"registrar_id": foreign_registrar},
+            {"server_id": 2_000_000_000},
+            {"registrar_id": 2_000_000_000},
+        ):
+            r = await c.post(
+                "/api/domains/bulk", json={"domains_text": domain_name(), **body}
+            )
+            assert r.status_code == 404, f"/bulk {body}: {r.text}"
+
+            r = await c.post(
+                "/api/domains/bulk-structured",
+                json={
+                    "items": [
+                        {"domain_name": domain_name()},
+                        {"domain_name": domain_name(), **body},
+                    ]
+                },
+            )
+            assert r.status_code == 404, f"/bulk-structured {body}: {r.text}"
+        # Отказ — до записи: ни одна строка пачки не заведена.
+        assert (await c.get("/api/domains")).json() == []
+
+        r = await c.post(
+            "/api/domains/bulk",
+            json={
+                "domains_text": domain_name(),
+                "server_id": my_server,
+                "registrar_id": my_registrar,
+            },
+        )
+        assert r.status_code == 201, f"свои связки в /bulk не работают: {r.text}"
+        assert r.json()["created"][0]["server_id"] == my_server
+        assert r.json()["created"][0]["registrar_id"] == my_registrar
+
+        r = await c.post(
+            "/api/domains/bulk-structured",
+            json={
+                "items": [
+                    {"domain_name": domain_name(), "server_id": my_server},
+                    {"domain_name": domain_name(), "registrar_id": my_registrar},
+                ]
+            },
+        )
+        assert r.status_code == 201, f"свои связки в /bulk-structured не работают: {r.text}"
+        created = r.json()["created"]
+        assert [d["server_id"] for d in created] == [my_server, None]
+        assert [d["registrar_id"] for d in created] == [None, my_registrar]

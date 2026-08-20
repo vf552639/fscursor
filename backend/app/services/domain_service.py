@@ -23,6 +23,19 @@ def _normalize(name: str) -> str:
     return normalize_domain(name)
 
 
+# Снимок состояния домена, обнулённый целиком: и сами факты, и обе отметки
+# времени, и последняя ошибка чтения. Снимок снят с КОНКРЕТНОЙ машины, поэтому
+# переезд обесценивает всю четвёрку разом — оставить хоть одно поле значило бы
+# датировать пустой снимок или показывать ошибку чтения с сервера, к которому
+# домен больше не привязан.
+_FORGOTTEN_FACTS: dict[str, None] = {
+    "fp_facts": None,
+    "fp_facts_at": None,
+    "fp_check_error": None,
+    "fp_checked_at": None,
+}
+
+
 async def get_all(
     db: AsyncSession,
     *,
@@ -161,6 +174,18 @@ async def update(
         mine = await get_by_name(db, patch["domain_name"], user_id)
         if mine is not None and mine.id != domain_id:
             raise DomainNameTaken(existing_id=mine.id)
+    # Переезд на другой сервер (в том числе отвязка) забывает снимок со старой
+    # машины — общее правило всех писателей `server_id`, разобранное в
+    # `_forget_facts_of_previous_server`. Здесь оно исполняется без отдельного
+    # UPDATE: объект уже прочитан, сравнить старое с новым дешевле в Python, а
+    # четыре `None` доедут до строки тем же циклом `setattr` ниже.
+    #
+    # Проверка `in patch`, а не `patch.get(...)`: `patch` собран с
+    # `exclude_unset`, и «поле не прислали» отличается от «прислали null».
+    # Спутав их, любая правка карточки (`{"site_user": ...}`) выглядела бы
+    # отвязкой сервера и стирала бы снимок.
+    if "server_id" in patch and patch["server_id"] != domain.server_id:
+        patch.update(_FORGOTTEN_FACTS)
     # Версия синхронизации — ДО правки полей, и это не косметика порядка.
     # `bump_version` внутри делает SELECT, а любой запрос по грязной сессии
     # запускает autoflush: с новым именем, уже проставленным в объект, конфликт
@@ -236,6 +261,7 @@ async def bulk_create(
     user_id: UUID,
     domains_text: str,
     registrar_id: Optional[int] = None,
+    server_id: Optional[int] = None,
 ) -> tuple[list[Domain], list[str]]:
     names: list[str] = []
     seen: set[str] = set()
@@ -256,7 +282,12 @@ async def bulk_create(
         if name in existing_names:
             skipped.append(name)
             continue
-        domain = Domain(domain_name=name, registrar_id=registrar_id, user_id=user_id)
+        domain = Domain(
+            domain_name=name,
+            registrar_id=registrar_id,
+            server_id=server_id,
+            user_id=user_id,
+        )
         await touch_entity_sync(db, user_id, domain)
         db.add(domain)
         created.append(domain)
@@ -301,7 +332,14 @@ async def bulk_create_structured(
             continue
 
         reg_id = find_reg_id(item)
-        domain = Domain(domain_name=name, registrar_id=reg_id, user_id=user_id)
+        # Сервер — только по id: имени, которое надо было бы резолвить, у
+        # элемента нет (см. `DomainBulkCreateItem`).
+        domain = Domain(
+            domain_name=name,
+            registrar_id=reg_id,
+            server_id=item.server_id,
+            user_id=user_id,
+        )
         await touch_entity_sync(db, user_id, domain)
         db.add(domain)
         created.append(domain)
@@ -332,11 +370,69 @@ async def _set_links(
     return result.rowcount or 0
 
 
+async def _forget_facts_of_previous_server(
+    db: AsyncSession, user_id: UUID, domain_ids: list[int], server_id: Optional[int]
+) -> None:
+    """Обнулить снимок FastPanel у тех, кто переезжает на другой сервер. Без коммита.
+
+    Смена `server_id` — это запись метаданных, а НЕ перенос сайта: файлы,
+    пользователь FTP и база остаются на старой машине. Снимок `fp_facts` снят
+    оттуда же, и оставленный на месте он показывает вкладке Server FTP-логин
+    прежнего сервера рядом с IP нового — реквизиты, которые выглядят рабочими и
+    не работают ни там, ни там. Пустой снимок честнее: он говорит «состояние
+    неизвестно», что после переезда и есть правда (принцип №6).
+
+    Одна функция на всех писателей `server_id`, а не правило в каждом из них:
+    три экрана про сервер в этом проекте уже разъезжались ровно так — правило
+    жило в вызывающем, вызывающих стало трое, и один отстал. Писателей ровно
+    три — `update`, `bulk_assign_server`, `bulk_full_setup`; заведение
+    (`bulk_create`, `bulk_create_structured`) в этот список не входит и войти не
+    может: у только что созданной строки снимка ещё нет.
+
+    Сюда, впрочем, приходят двое из трёх: `update` работает по уже прочитанному
+    объекту и дописывает те же `_FORGOTTEN_FACTS` прямо в патч, чтобы не слать
+    второй UPDATE ради одной строки. Общая у всех троих — константа четвёрки, и
+    именно она держит правило целым.
+
+    Зовётся ДО присвоения нового `server_id`, пока в строках ещё старый: сузить
+    по «сервер отличается» после записи было бы нечем.
+
+    `IS DISTINCT FROM`, а не `!=`: у неразвёрнутого домена `server_id` — NULL, и
+    `!=` на нём даёт NULL, то есть строка тихо выпала бы из UPDATE и увезла
+    снимок с собой. Сужение здесь не оптимизация, а смысл: домен, УЖЕ стоящий
+    на целевом сервере, никуда не едет и снимок терять не должен.
+
+    Сужение по `user_id` — часть запроса, как в `_set_links`: без него массовый
+    UPDATE тянулся бы к чужим строкам по угаданному id.
+
+    Своего `bump_version` здесь нет намеренно. Оба вызывающих ставят её перед
+    `_set_links`, который идёт по тем же (или более широким) строкам в той же
+    транзакции — обнулённая строка по определению не в целевом состоянии,
+    значит она и в его наборе, — и версию синхронизации ей проставляет он.
+    Второй бамп сжёг бы номер и не добавил бы ничего. Правило запёрто тестом:
+    `sync_version` переехавшего домена обязан вырасти.
+    """
+    if not domain_ids:
+        return
+    await db.execute(
+        sa_update(Domain)
+        .where(
+            Domain.id.in_(domain_ids),
+            Domain.user_id == user_id,
+            Domain.server_id.is_distinct_from(server_id),
+        )
+        .values(**_FORGOTTEN_FACTS)
+    )
+
+
 async def bulk_assign_server(
     db: AsyncSession, user_id: UUID, domain_ids: list[int], server_id: Optional[int]
 ) -> int:
     if not domain_ids:
         return 0
+    await _forget_facts_of_previous_server(db, user_id, domain_ids, server_id)
+    # Счётчик считает `_set_links`, а он, в отличие от сброса, не сужен по «а
+    # менялось ли»: `updated` означает «сколько строк тронули», как и раньше.
     updated = await _set_links(db, user_id, domain_ids, {"server_id": server_id})
     await db.commit()
     return updated
@@ -424,6 +520,12 @@ async def bulk_full_setup(
     outdated = [
         row.id for row in rows if any(getattr(row, k) != v for k, v in values.items())
     ]
+    # Переезжающие — до `_set_links`, пока в строках ещё старый сервер
+    # (`_forget_facts_of_previous_server`, там же и причина). У неразвёрнутого
+    # домена снимка нет вовсе, и сброс на нём — no-op; у повторного прогона
+    # список пуст, поэтому идемпотентность full-setup сброс не разрушает.
+    moving = [row.id for row in rows if row.server_id != server_id]
+    await _forget_facts_of_previous_server(db, user_id, moving, server_id)
     if outdated:
         await _set_links(db, user_id, outdated, values)
 

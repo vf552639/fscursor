@@ -209,6 +209,17 @@ class DomainFactsIn(BaseModel):
 class DomainBulkCreate(BaseModel):
     domains_text: str
     registrar_id: Optional[int] = None
+    # Сервер — на одном экране с регистратором и по той же причине: provision
+    # `server_id` не ставит, а ЧИТАЕТ, и без связки падает. Проставлять её
+    # поштучно после заливки сотни доменов — сотня правок вместо одного селекта.
+    #
+    # Поля `server_ip` (и `server_name`) здесь НЕТ намеренно, хотя регистратор
+    # рядом резолвится по имени: резолв «строка → сервер» делает фронт, потому
+    # что только он может назвать НОМЕР ИСХОДНОЙ СТРОКИ ненайденного значения и
+    # не дать отправить пачку. Бэкенд на его месте либо молча заводил бы домен
+    # без сервера, либо ронял всю пачку, не сказав, какая строка виновата.
+    # Существующий контракт регистратора при этом не трогаем (`find_reg_id`).
+    server_id: Optional[int] = None
 
 
 class DomainBulkCreateResponse(BaseModel):
@@ -220,6 +231,9 @@ class DomainBulkCreateItem(BaseModel):
     domain_name: str
     registrar_id: Optional[int] = None
     registrar_name: Optional[str] = None
+    # Сервер построчно: третья колонка CSV. Пары `server_name` к нему нет по той
+    # же причине, что и `server_ip` в `DomainBulkCreate` выше, — резолв на фронте.
+    server_id: Optional[int] = None
 
 
 class DomainBulkStructuredCreate(BaseModel):
