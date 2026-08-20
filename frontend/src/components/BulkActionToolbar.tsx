@@ -4,6 +4,7 @@ import { OpenInDesktop } from "./OpenInDesktop";
 import { Btn } from "./ui/Primitives";
 import { CF_SYNC_TITLE, CF_SYNC_VERB } from "../lib/cfZoneMatch";
 import { isTauri } from "../lib/runtime";
+import { tokens } from "../lib/designTokens";
 
 function idsQuery(ids: number[]): string {
   return ids.length ? `?ids=${ids.map((n) => String(n)).join(",")}` : "";
@@ -80,8 +81,8 @@ export default function BulkActionToolbar({
   return (
     <div
       style={{
-        background: "#eff4ff",
-        border: "1px solid #bfdbfe",
+        background: tokens.surface.cardHeader,
+        border: `1px solid ${tokens.border.card}`,
         borderRadius: 10,
         padding: "10px 16px",
         marginBottom: 12,
@@ -91,7 +92,7 @@ export default function BulkActionToolbar({
         flexWrap: "wrap",
       }}
     >
-      <span style={{ fontSize: 13, fontWeight: 600, color: "#2563eb" }}>{selectedCount} selected</span>
+      <span style={{ fontSize: 13, fontWeight: 600, color: tokens.text.ink }}>{selectedCount} selected</span>
       <OpenInDesktop
         action={`assign-server${q}`}
         label="Assign Server"
