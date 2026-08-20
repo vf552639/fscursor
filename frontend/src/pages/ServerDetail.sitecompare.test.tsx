@@ -121,12 +121,16 @@ const SITES = ["matched.com", "elsewhere.com", "free.com", "ghost.com"].map((dom
   php_version: "8.2",
 }));
 
-function renderDetail(domains = ALL_DOMAINS) {
+function renderDetail(domains = ALL_DOMAINS, opts: { allDomainsFail?: boolean; sites?: typeof SITES } = {}) {
   mocks.apiGet.mockImplementation(async (url: string, cfg?: any) => {
     if (url === `/servers/${SERVER_ID}`) return SERVER;
     if (url === "/servers") return { items: [SERVER, OTHER_SERVER] };
     if (url === "/domains") {
       const sid = cfg?.params?.server_id;
+      // Падает ровно запрос БЕЗ фильтра — тот, из которого живёт сверка.
+      // Таблица сервера при этом читается: состояние «сайты прочитаны, список
+      // доменов — нет» именно такое, а не «страница мертва целиком».
+      if (sid == null && opts.allDomainsFail) throw new Error("500: domains list failed");
       // Фильтр честно серверный: таблица ниже получает домены этого сервера, а
       // сверка — все. Мок, отдающий обоим одно и то же, скрыл бы как раз ту
       // ошибку, ради которой заведён второй запрос.
@@ -135,7 +139,7 @@ function renderDetail(domains = ALL_DOMAINS) {
     throw new Error(`unexpected GET ${url}`);
   });
   mocks.invokeSynced.mockImplementation(async (cmd: string) => {
-    if (cmd === "server_list_sites") return SITES;
+    if (cmd === "server_list_sites") return opts.sites ?? SITES;
     throw new Error(`unexpected command ${cmd}`);
   });
   const client = new QueryClient({
@@ -302,5 +306,107 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     expect(screen.getByText("Совпало (4)")).toBeTruthy();
     expect(screen.queryByText("Привязать к этому серверу")).toBeNull();
     expect(screen.queryByText("Завести и привязать")).toBeNull();
+  });
+
+  /**
+   * Непрочитанный список — не пустой список. Пока сверка получала `data ?? []`,
+   * отказ `GET /domains` давал уверенный диагноз «SDMP не знает про этот сервер
+   * ничего»: все сайты уезжали в «только на сервере», шапка писала «привязано 0»,
+   * а кнопка предлагала завести заново домены, которые уже привязаны сюда. От
+   * порчи данных спасал только UNIQUE на бэкенде (принцип №6).
+   */
+  it("отказ чтения доменов назван словом, а не нарисован нулями", async () => {
+    setTauri(true);
+    renderDetail(ALL_DOMAINS, { allDomainsFail: true });
+    fireEvent.click(await screen.findByText("Сверить домены"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("список доменов SDMP не загрузился");
+    expect(alert.textContent).toContain("domains list failed");
+
+    // Ни колонок с нулями, ни лечения по выдуманному диагнозу.
+    expect(screen.queryByText(/Сверка с сервером/)).toBeNull();
+    expect(screen.queryByText("Завести и привязать")).toBeNull();
+    expect(screen.queryByText("Привязать к этому серверу")).toBeNull();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Перезапуск сверки посреди привязки. Раньше баннер держал и мутацию, и
+   * `skipped`, а новая сверка размонтировала его через `key` — ответ приезжал в
+   * никуда, и имена, которые сервер отказался заводить, не показывались нигде.
+   */
+  it("сверку нельзя перезапустить посреди привязки, и отчёт доезжает", async () => {
+    setTauri(true);
+    mocks.confirmAction.mockResolvedValue(true);
+    let release: (v: any) => void = () => {};
+    mocks.apiPost.mockImplementation(() => new Promise((res) => { release = res; }));
+    renderDetail();
+    await compare();
+
+    fireEvent.click(screen.getByText("Завести и привязать"));
+    // Кнопка сверки гаснет на время лечения — иначе клик по ней снёс бы колонки
+    // из-под ещё не приехавшего ответа.
+    await waitFor(() => expect((screen.getByText("Сверить домены") as HTMLButtonElement).disabled).toBe(true));
+
+    fireEvent.click(screen.getByText("Сверить домены"));
+    release({ created: [], skipped: ["ghost.com"] });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("ghost.com");
+  });
+
+  /**
+   * Отчёты двух кнопок описывают РАЗНЫЕ прогоны, и чужой не должен висеть над
+   * колонками, перерисованными следующим. Свой статус react-query гасит сам,
+   * соседний — никто, поэтому обработчики делают это руками.
+   */
+  it("удачное заведение убирает красную плашку прошлой привязки", async () => {
+    setTauri(true);
+    mocks.confirmAction.mockResolvedValue(true);
+    mocks.apiPost.mockRejectedValueOnce(new Error("500: assign failed"));
+    renderDetail();
+    await compare();
+
+    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+    expect((await screen.findByRole("alert")).textContent).toContain("Не удалось привязать домены");
+
+    mocks.apiPost.mockResolvedValue({ created: [], skipped: [] });
+    fireEvent.click(screen.getByText("Завести и привязать"));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  /** Та же симметрия в обратную сторону: гасит ли привязка отчёт заведения. */
+  it("удачная привязка убирает красную плашку прошлого заведения", async () => {
+    setTauri(true);
+    mocks.confirmAction.mockResolvedValue(true);
+    mocks.apiPost.mockRejectedValueOnce(new Error("500: create failed"));
+    renderDetail();
+    await compare();
+
+    fireEvent.click(screen.getByText("Завести и привязать"));
+    expect((await screen.findByRole("alert")).textContent).toContain("Не удалось завести домены");
+
+    mocks.apiPost.mockResolvedValue({ updated: 2 });
+    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  /**
+   * Оба числа шапки считаются по сверке. Сырой счёт сайтов над колонками, где
+   * дубли схлопнуты, обещал бы четвёртое имя, которого на экране нет.
+   */
+  it("счётчик сайтов не обещает больше имён, чем показано", async () => {
+    setTauri(true);
+    // Пять строк с сервера, но одна из них — тот же домен в другом написании:
+    // сверка схлопывает его, и на экране остаётся четыре имени.
+    renderDetail(ALL_DOMAINS, { sites: [...SITES, { ...SITES[0], domain_name: "MATCHED.com." }] });
+    await compare();
+
+    const head = screen.getByText(/Сверка с сервером/).textContent ?? "";
+    expect(head).toContain("на сервере 4");
+    expect(head).not.toContain("на сервере 5");
   });
 });

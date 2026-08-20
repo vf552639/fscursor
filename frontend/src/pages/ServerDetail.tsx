@@ -1,7 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, STALE_TEXT } from "../components/ui/Primitives";
-import { STALE_SUFFIX, formatAgoStale, formatUptime, mbToGb } from "../lib/format";
+import { STALE_SUFFIX, domainWord, formatAgoStale, formatUptime, mbToGb } from "../lib/format";
 import { useServer, useServers, useDeleteServer, useTestSsh, useInstallFastPanel, installFastPanelKey, useUpdateServer, useRefreshMetrics, useServerListSites, ServerSite } from "../api/servers";
 import { compareServerSites } from "../lib/serverSites";
 import { providerError, providerOptions, providerPayload } from "../lib/providerInput";
@@ -10,7 +10,6 @@ import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
 import { useDomains, useDeleteDomain, useUpdateDomain, useBulkAssignServer, useBulkCreateStructuredDomains, Domain } from "../api/domains";
-import { domainWord } from "../lib/fullSetupPlan";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -88,11 +87,20 @@ const COMPARE_ALERT: React.CSSProperties = {marginTop:12, padding:"8px 12px", bo
  * привязанные к этому серверу: иначе «SDMP о домене не знает» неотличимо от
  * «домен стоит на другой машине», а лечатся они по-разному.
  *
+ * Мутации и список непрошедших имён баннеру ПЕРЕДАЮТСЯ, а не заводятся внутри,
+ * и живут на странице. Причин две. Кнопка «Сверить домены» стоит выше баннера и
+ * обязана гаснуть, пока идёт привязка, — а про мутации внутри баннера она знать
+ * не может. И баннер нельзя размонтировать на новой сверке (раньше это делал
+ * `key`): размонтирование посреди секундного POST уносило с собой и наблюдателя
+ * мутации, и `skipped`, так что имена, которые сервер отказался заводить, не
+ * показывались нигде — ровно тот провал, против которого `key` и вводился.
+ * Отчёты о прошлом прогоне гасит эффект на странице.
+ *
  * Своего гейта на десктоп у кнопок нет — и не надо: баннер показывается только
  * после удачной сверки, а сверка читает сайты по SSH и живёт только в десктопе.
  * Второй гейт поверх этого был бы мёртвой веткой, которую нечем проверить.
  */
-function SiteCompareBanner({ sites, domains, serverId, serverName, servers }: {
+function SiteCompareBanner({ sites, domains, serverId, serverName, servers, assignServer, createBound, skipped, onSkipped }: {
   sites: ServerSite[];
   /** ВСЕ домены пользователя (см. JSDoc выше), а не домены этого сервера. */
   domains: Domain[];
@@ -100,18 +108,19 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers }: {
   serverName: string;
   /** Чтобы назвать сервер, на котором домен стоит сейчас, именем, а не числом. */
   servers: { id: number; name: string }[];
+  assignServer: ReturnType<typeof useBulkAssignServer>;
+  createBound: ReturnType<typeof useBulkCreateStructuredDomains>;
+  /**
+   * Имена, которые сервер отказался заводить: такой домен уже есть либо имя не
+   * прошло проверку (`bulk_create_structured` кладёт в `skipped` оба случая, не
+   * различая их, и чей это домен — не говорит). Это НЕ успех: привязку
+   * пропущенным никто не поставил, а колонки после инвалидации выглядят как
+   * «всё сделано». Молчать об этом нельзя (принцип №6) — потому поимённо.
+   */
+  skipped: string[];
+  onSkipped: (names: string[]) => void;
 }) {
   const cmp = compareServerSites(sites, domains, serverId);
-  const assignServer = useBulkAssignServer();
-  const createBound = useBulkCreateStructuredDomains();
-  /**
-   * Имена, которые сервер отказался заводить: такой домен у пользователя уже
-   * есть либо имя не прошло проверку (`bulk_create_structured` кладёт в
-   * `skipped` оба случая, не различая их). Это НЕ успех: привязку пропущенным
-   * никто не поставил, а колонки после инвалидации выглядят как «всё сделано».
-   * Молчать об этом нельзя (принцип №6), поэтому пропущенные названы поимённо.
-   */
-  const [skipped, setSkipped] = useState<string[]>([]);
 
   const serverNames = new Map(servers.map((x)=>[x.id, x.name]));
   const noteFor = (d: Domain) =>
@@ -132,7 +141,11 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers }: {
       ? ` У ${moving.length} из них сейчас стоит другой сервер: привязка переедет, а прочитанные с прежней машины факты (FTP-доступ, пути, PHP) будут сброшены.`
       : "";
     if (!(await confirmAction(`Привязать ${ids.length} ${domainWord(ids.length)} к ${serverName}?${move}`))) return;
-    setSkipped([]);
+    // Гасится отчёт и СОСЕДНЕЙ кнопки: свой статус react-query сбросит сам на
+    // старте мутации, а чужая красная плашка иначе переживёт этот прогон и
+    // повиснет над колонками, перерисованными по свежим данным.
+    onSkipped([]);
+    createBound.reset();
     assignServer.mutate({ domain_ids: ids, server_id: serverId });
   };
 
@@ -140,19 +153,26 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers }: {
     const names = cmp.onlyOnServer.map((s)=>s.domain_name);
     if (names.length === 0) return;
     if (!(await confirmAction(`Завести в SDMP ${names.length} ${domainWord(names.length)} и привязать к ${serverName}?`))) return;
-    setSkipped([]);
+    // См. `bindExisting`: гасим и соседнюю ошибку тоже.
+    onSkipped([]);
+    assignServer.reset();
     createBound.mutate(
       { items: names.map((domain_name)=>({ domain_name, server_id: serverId })) },
-      { onSuccess: (r)=>setSkipped(r.skipped) },
+      { onSuccess: (r)=>onSkipped(r.skipped) },
     );
   };
 
   return (
     <div style={{marginBottom:20, padding:"14px 18px", borderRadius:10, background:"#f9fafb", border:"1px solid #e5e7eb"}}>
       <div style={{fontSize:13,fontWeight:600,color:"#111",marginBottom:12}}>
-        {/* «Привязано сюда», а не «в SDMP»: на вход идут все домены пользователя,
-            и их общее число про этот сервер ничего не говорит. */}
-        Сверка с сервером: на сервере {sites.length}, привязано к {serverName} {cmp.matched.length + cmp.onlyInSdmp.length}
+        {/* Оба числа считаются ПО СВЕРКЕ, а не по длине входных списков: сырой
+            счёт сайтов над колонками, где дубли схлопнуты, а мусорные имена
+            выброшены, давал бы «на сервере 4» рядом с тремя строками — и куда
+            делась четвёртая, экран не сказал бы нигде.
+
+            «Привязано сюда», а не «в SDMP»: на вход идут все домены
+            пользователя, и их общее число про этот сервер ничего не говорит. */}
+        Сверка с сервером: на сервере {cmp.matched.length + cmp.notBoundHere.length + cmp.onlyOnServer.length}, привязано к {serverName} {cmp.matched.length + cmp.onlyInSdmp.length}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
         <CompareColumn title="Только на сервере" items={cmp.onlyOnServer.map((s)=>({name:s.domain_name}))} tone="#b45309">
@@ -275,8 +295,14 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // запроса, а не один с фильтром на клиенте: серверный фильтр — это то, что
   // таблица показывает, и повторять его вручную значит завести второе правило
   // «чьи домены считать серверными».
-  const { data: allDomainsData } = useDomains();
-  const allDomains: Domain[] = allDomainsData ?? [];
+  //
+  // Держим ЗАПРОС, а не `data ?? []`: прочерк на месте непрочитанного списка
+  // сверка читает как знание. При отказе `GET /domains` баннер уверенно писал
+  // «привязано к prod-01 0», складывал ВСЕ сайты сервера в «только на сервере»
+  // и предлагал завести заново домены, которые уже привязаны сюда, — от порчи
+  // данных спасал только UNIQUE на бэкенде, а человек получал красную плашку
+  // про домены, с которыми всё в порядке.
+  const allDomainsQ = useDomains();
   
   // FastPanel setup
   const isFPInstalled = s?.fastpanel_status === "installed";
@@ -334,6 +360,28 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   // zero-knowledge — был гарантированный 404). Читает по SSH и показывает
   // расхождение; ничего на сервере не меняет.
   const listSites = useServerListSites(server?.id || 0);
+  // Лекарства сверки живут здесь, а не в баннере: кнопка сверки обязана гаснуть,
+  // пока они идут, а баннер не должен размонтироваться посреди их POST (см.
+  // JSDoc `SiteCompareBanner`).
+  const assignServer = useBulkAssignServer();
+  const createBound = useBulkCreateStructuredDomains();
+  const [compareSkipped, setCompareSkipped] = useState<string[]>([]);
+  // Новая сверка — новые данные, значит прошлые отчёты о лечении к ним не
+  // относятся. Раньше это делал `key` на баннере, но размонтирование уносило и
+  // ещё не приехавший ответ.
+  //
+  // Зависимость ровно одна — время последнего запуска сверки. `reset` у мутации
+  // стабилен (`MutationObserver` привязывает его в конструкторе), но окажись он
+  // новым на каждом рендере — эффект гасил бы ошибку сразу после её появления,
+  // и плашку никто бы не увидел. Такую цену за формальную полноту списка
+  // зависимостей платить нечем.
+  const compareRunAt = listSites.submittedAt;
+  useEffect(() => {
+    setCompareSkipped([]);
+    assignServer.reset();
+    createBound.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareRunAt]);
   const updateServer = useUpdateServer(server?.id || 0);
   const deleteDomain = useDeleteDomain();
   const updateDomain = useUpdateDomain(editingDomain?.id || 0);
@@ -768,7 +816,11 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               size="sm"
               variant="secondary"
               onClick={() => listSites.mutate()}
-              disabled={listSites.isPending}
+              // Гаснет и на время лечения: кнопка стоит прямо над баннером, а
+              // перезапуск сверки посреди секундного POST снёс бы колонки из-под
+              // ещё не приехавшего ответа — и имена, которые сервер отказался
+              // заводить, не показались бы нигде.
+              disabled={listSites.isPending || assignServer.isPending || createBound.isPending}
             >
               {listSites.isPending ? "Сверяю…" : "Сверить домены"}
             </Btn>
@@ -841,11 +893,31 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         Не удалось прочитать сайты с сервера: {(listSites.error as any)?.message || "request error"}
       </div>
     ) : listSites.data ? (
-      /* `key` по времени сверки: новая сверка — новый баннер. Отчёты о
-         привязке (ошибка мутации, список непрошедших имён) живут в состоянии
-         баннера и пережили бы повторное чтение сайтов — то есть висели бы над
-         колонками, которые описывают уже другой прогон. */
-      <SiteCompareBanner key={listSites.submittedAt} sites={listSites.data} domains={allDomains} serverId={s.id} serverName={s.name} servers={serversList?.items || []} />
+      /* Сверять есть с чем только при ПРОЧИТАННОМ списке доменов. Пустой список
+         вместо непрочитанного — это диагноз «SDMP не знает ни одного домена
+         этого сервера», выставленный по отсутствию данных, и лечение под ним
+         предлагается такое же уверенное (принцип №6). */
+      allDomainsQ.isError ? (
+        <div role="alert" style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
+          Сайты с сервера прочитаны, но список доменов SDMP не загрузился — сверять не с чем: {(allDomainsQ.error as any)?.message || "request error"}
+        </div>
+      ) : allDomainsQ.isSuccess ? (
+        <SiteCompareBanner
+          sites={listSites.data}
+          domains={allDomainsQ.data}
+          serverId={s.id}
+          serverName={s.name}
+          servers={serversList?.items || []}
+          assignServer={assignServer}
+          createBound={createBound}
+          skipped={compareSkipped}
+          onSkipped={setCompareSkipped}
+        />
+      ) : (
+        <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb", color: "#6b7280", fontSize: 13}}>
+          Сайты с сервера прочитаны; ждём список доменов SDMP, чтобы было с чем сверять.
+        </div>
+      )
     ) : null}
     {s.last_check_ok === false && s.last_check_error && (
       <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
