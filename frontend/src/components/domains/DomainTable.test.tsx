@@ -4,6 +4,7 @@ import { render, screen, cleanup, within, fireEvent } from "@testing-library/rea
 
 import { RegistrarAccount } from "../../api/registrars";
 import { Server } from "../../api/servers";
+import { setTauri } from "../../test/secretBlobKit";
 import DomainTable from "./DomainTable";
 import { DomainUI } from "./types";
 
@@ -199,5 +200,46 @@ describe("DomainRow — цена клика", () => {
     fireEvent.click(within(rowOf("bravo.com")).getByRole("button", { name: "Open domain settings" }));
     expect(spies.onOpenDetail.mock.calls).toEqual([[2]]);
     expect(spies.onDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe("DomainRow — состав колонки действий", () => {
+  /**
+   * Главное утверждение фазы 4: вход в provision ОДИН, и он на карточке домена.
+   *
+   * Проверяется составом, а не отсутствием одной кнопки, и проверяется именно
+   * под флагом десктопа — потому что ревью сломало это мутацией и не поймало
+   * никто: иконка ⚙ provision, возвращённая в строку под `isTauri()`, оставила
+   * зелёными все четыреста тридцать три теста страниц. Исчезновение второго
+   * входа охранял ровно один тест, и тот — в веб-ветке
+   * (`Domains.provision.test.tsx`), то есть ровно в той, где кнопки не было бы
+   * и у мутанта.
+   *
+   * `toEqual` на массиве, а не пара `queryByRole(...).toBeNull()`: список имён
+   * запирает и набор, и порядок, и любое ТРЕТЬЕ действие — как бы оно ни
+   * называлось. Отрицание же охраняет только то имя, которое в него вписали, а
+   * следующая кнопка приедет с другим.
+   */
+  // Флаг десктопа живёт на общем `window` и переживает файл: не сняв его, мы
+  // покрасили бы чужой тест, который сам десктоп не включал.
+  afterEach(() => setTauri(false));
+
+  /** Доступные имена кнопок ячейки действий — она последняя в строке. */
+  const actionNames = (domainName: string) => {
+    const cells = within(rowOf(domainName)).getAllByRole("cell");
+    return within(cells[cells.length - 1])
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label"));
+  };
+
+  it("в ДЕСКТОПЕ действий ровно два — открыть карточку и удалить", () => {
+    setTauri(true);
+    renderTable();
+    expect(actionNames("alpha.com")).toEqual(["Open domain settings", "Delete domain"]);
+  });
+
+  it("в вебе набор тот же — разницы между ветками у строки нет вовсе", () => {
+    renderTable();
+    expect(actionNames("alpha.com")).toEqual(["Open domain settings", "Delete domain"]);
   });
 });

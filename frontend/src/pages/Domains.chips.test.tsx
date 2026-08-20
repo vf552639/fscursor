@@ -5,7 +5,9 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import Domains from "./Domains";
 import { queryClient } from "../api/queryClient";
+import { tokens } from "../lib/designTokens";
 import { useAuthStore } from "../store/auth";
+import { hexToRgb } from "../test/colors";
 
 /**
  * Чипы-фильтры вкладки Domains: по какому списку они считают.
@@ -86,9 +88,9 @@ const DOMAINS = [
   domainRow(7, "midway.com", "ns_ok", { ns_status: "pending" }),
 ];
 
-function renderPage() {
+function renderPage(rows: ReturnType<typeof domainRow>[] = DOMAINS) {
   mocks.apiGet.mockImplementation(async (url: string) => {
-    if (url === "/domains") return DOMAINS;
+    if (url === "/domains") return rows;
     if (url === "/servers") return { items: [], total: 0 };
     if (url === "/registrars/accounts") return [];
     if (url === "/cloudflare/accounts") return [];
@@ -103,12 +105,22 @@ function renderPage() {
 
 /** Чип — кнопка, подписанная словом и счётчиком: «Failed 1». */
 const chip = (label: string) => screen.getByRole("button", { name: new RegExp(`^${label}`) });
-const countOn = (label: string) => within(chip(label)).getAllByText(/^\d+$/)[0].textContent;
+/** Сам счётчик — узлом, а не текстом: у него спрашивают ещё и цвет. */
+const countEl = (label: string) => within(chip(label)).getAllByText(/^\d+$/)[0];
+const countOn = (label: string) => countEl(label).textContent;
 const rowNames = () =>
   within(screen.getByRole("table"))
     .getAllByRole("row")
     .slice(1)
     .map((r) => r.querySelector("td")?.parentElement?.textContent ?? "");
+
+/** Перерисовать страницу другим списком доменов — иначе «провалов ноль» не показать. */
+async function rerenderWith(rows: ReturnType<typeof domainRow>[]) {
+  cleanup();
+  queryClient.clear();
+  renderPage(rows);
+  await screen.findByRole("table");
+}
 
 beforeEach(async () => {
   vi.resetAllMocks();
@@ -181,5 +193,96 @@ describe("Domains — чипы считают по полному списку",
     expect(rowNames().length).toBe(7);
     expect(chip("Active").getAttribute("aria-pressed")).toBe("false");
     expect(chip("All").getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+describe("Domains — чипы фильтруют список", () => {
+  it("«Failed» оставляет ровно провалившийся домен", () => {
+    fireEvent.click(chip("Failed"));
+    // Именно ИМЯ, а не число строк: срез из одной строки совпал бы по длине с
+    // десятком других однострочных срезов, и тест не отличил бы «отфильтровал
+    // по failed» от «отфильтровал хоть как-нибудь».
+    expect(rowNames().length).toBe(1);
+    expect(rowNames()[0]).toContain("broken.com");
+    expect(chip("Failed").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("«All» возвращает весь список, а не только соседний срез", () => {
+    fireEvent.click(chip("Failed"));
+    expect(rowNames().length).toBe(1);
+
+    // Сброс через «All», а не повторным кликом по нажатому чипу (это соседний
+    // тест): дорога другая — здесь нажимают ДРУГУЮ кнопку, и она обязана снять
+    // чужой срез, а не добавить свой.
+    fireEvent.click(chip("All"));
+    expect(rowNames().length).toBe(7);
+    expect(chip("All").getAttribute("aria-pressed")).toBe("true");
+    expect(chip("Failed").getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("Domains — красный счётчик достаётся только настоящим провалам", () => {
+  /**
+   * Цвет здесь утверждение, а не украшение: красное число на чипе — это «иди
+   * посмотри», и оно обязано загораться ровно тогда, когда смотреть есть на
+   * что.
+   *
+   * Сверяется с токенами (`semantic.danger`), а не с хексом в тесте: палитра
+   * живёт в одном месте по построению, и вписанный сюда хекс был бы её второй
+   * копией — той самой, что разъезжается. Утверждение при этом не пустое: тест
+   * говорит, каким ИМЕННО токеном покрашено число, а «красный» и
+   * «приглушённый» — разные роли, и перепутать их модуль токенов не поможет.
+   */
+  const isAlarming = (label: string) => {
+    const el = countEl(label);
+    return {
+      color: el.style.color === hexToRgb(tokens.semantic.danger.text),
+      bg: el.style.background === hexToRgb(tokens.semantic.danger.bg),
+    };
+  };
+
+  it("провалы есть — число красное на красном", () => {
+    expect(isAlarming("Failed")).toEqual({ color: true, bg: true });
+  });
+
+  it("у соседних чипов число обычное, сколько бы их ни было", () => {
+    // «Active 3» — тоже не ноль, и если бы красным красили просто ненулевой
+    // счётчик, тревогой светился бы весь ряд на совершенно здоровом списке.
+    expect(isAlarming("Active")).toEqual({ color: false, bg: false });
+    expect(countEl("Active").style.color).toBe(hexToRgb(tokens.text.secondary));
+  });
+
+  it("провалов ноль — «Failed» гаснет вместе с ними", async () => {
+    await rerenderWith(DOMAINS.filter((d) => d.status !== "failed"));
+    expect(countOn("Failed")).toBe("0");
+    // Красный ноль кричал бы о том, чего не случилось.
+    expect(isAlarming("Failed")).toEqual({ color: false, bg: false });
+  });
+});
+
+describe("Domains — строка NS-деталей разворачивается и сворачивается", () => {
+  /** Кнопка называет СЛЕДУЮЩЕЕ действие, поэтому ищется по обоим именам сразу. */
+  const toggle = () => screen.getByRole("button", { name: /^(NS details|Hide NS details)$/ });
+
+  it("свёрнута изначально, и её содержимого на экране нет", () => {
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText(/^NS OK: /)).toBeNull();
+  });
+
+  it("клик разворачивает, повторный — сворачивает обратно", () => {
+    fireEvent.click(toggle());
+    expect(toggle().getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("NS OK: 5")).toBeTruthy();
+    // Подпись сменилась на следующее действие: кнопка, оставшаяся «NS details»
+    // при развёрнутой строке, обещает открыть уже открытое.
+    expect(toggle().textContent).toBe("Hide NS details");
+
+    fireEvent.click(toggle());
+    // Пропала именно СТРОКА, а не только её первый пункт: свёрнутая строка,
+    // оставившая на экране хвост из «In progress», — это половина сворачивания.
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText(/^NS OK: /)).toBeNull();
+    expect(screen.queryByText(/^In progress: /)).toBeNull();
+    expect(toggle().textContent).toBe("NS details");
   });
 });

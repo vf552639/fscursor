@@ -219,8 +219,7 @@ describe("кнопка Provision — только десктоп и только
 
     fireEvent.click(provision);
     // Вкладка только ЗОВЁТ страницу: диалог с галочкой «создать БД» и сам
-    // прогон живут там, потому что в ответе прогона лежат пароли БД и FTP,
-    // существующие ровно один раз, а карточка закрывается кликом по подложке.
+    // прогон живут там — почему, разобрано у пропа `onProvision`.
     expect(onProvision).toHaveBeenCalledTimes(1);
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
   });

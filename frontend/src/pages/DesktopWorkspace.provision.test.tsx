@@ -11,6 +11,13 @@ import DesktopWorkspace, {
 } from "./DesktopWorkspace";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
+import {
+  closeDomainCard,
+  confirmProvision,
+  openProvisionDialog,
+  openServerTab,
+  serverTabProvisionButton,
+} from "../test/domainCard";
 
 /**
  * Владелец результатов provision — `DesktopWorkspace`, и проверяется он здесь
@@ -153,42 +160,12 @@ function renderWorkspace(rows: Array<{ id: number; name: string }>) {
   );
 }
 
-/**
- * Открыть карточку домена на вкладке Server — единственный вход в одиночный
- * provision с фазы 4 редизайна вкладки Domains.
- */
-async function openServerTab(domain: string) {
-  fireEvent.click(await screen.findByRole("button", { name: domain }));
-  fireEvent.click(await screen.findByRole("tab", { name: "Server" }));
-}
-
-/** Кнопка Provision в шапке снимка на открытой вкладке Server. */
-function tabProvisionButton() {
-  const line = screen.getByRole("button", { name: "Проверить на сервере" })
-    .parentElement as HTMLElement;
-  return within(line).getByRole("button", { name: /^Provision(ing…)?$/ }) as HTMLButtonElement;
-}
-
-/** Закрыть карточку домена — иначе до строки соседнего не добраться. */
-function closeCard() {
-  const card = screen
-    .getByRole("tablist", { name: "Domain card sections" })
-    .closest('[style*="z-index"]') as HTMLElement;
-  fireEvent.click(within(card).getByRole("button", { name: "Close" }));
-}
-
 /** Запустить provision конкретного домена: карточка → Server → диалог с БД. */
 async function provisionRow(domain: string) {
-  await openServerTab(domain);
-  fireEvent.click(tabProvisionButton());
-  // Панель диалога — от чекбокса «создать БД»: он живёт только в диалоге, а
-  // `Modal` кладёт детей прямо в панель. Без скоупа кнопка диалога неотличима
-  // от кнопки вкладки, оставшейся под ним.
-  const cb = await screen.findByLabelText(/Also create a database/i);
+  const cb = await openProvisionDialog(domain);
   fireEvent.click(cb);
-  const dialog = cb.closest("label")!.parentElement as HTMLElement;
-  fireEvent.click(within(dialog).getByRole("button", { name: "Provision" }));
-  closeCard();
+  confirmProvision(cb);
+  closeDomainCard();
 }
 
 beforeEach(() => {
@@ -476,7 +453,7 @@ describe("DesktopWorkspace — владелец результатов provision
     const handler = mocks.onOpenUrl.mock.calls[0][0] as (urls: string[]) => void;
 
     /**
-     * Подпись кнопки provision на карточке домена.
+     * Подпись кнопки provision на карточке домена — прочитанная один раз.
      *
      * Домены проверяются ПО ОЧЕРЕДИ, а не все сразу, и это прямая цена переезда
      * кнопки в карточку (фаза 4): раньше три состояния читались с трёх строк
@@ -485,16 +462,37 @@ describe("DesktopWorkspace — владелец результатов provision
      */
     const provisionLabelOf = async (name: string) => {
       await openServerTab(name);
-      const label = tabProvisionButton().textContent;
-      closeCard();
-      return label;
+      try {
+        return serverTabProvisionButton().textContent;
+      } finally {
+        closeDomainCard();
+      }
+    };
+
+    /**
+     * То же ожидание, но с повтором — и повторяется в нём ТОЛЬКО чтение.
+     *
+     * Карточка открывается до `waitFor` и закрывается после, потому что колбэк
+     * RTL выполняется многократно: открыть → прочитать → закрыть внутри него
+     * значит открывать и закрывать карточку на каждой попытке. Пока попытки
+     * успешны, это незаметно; но стоит одной упасть между открытием и
+     * закрытием — и следующая начнётся с уже открытой карточки, а тест сообщит
+     * про две кнопки «Provision» на экране вместо «подпись не та».
+     */
+    const waitProvisionLabel = async (name: string, expected: string) => {
+      await openServerTab(name);
+      try {
+        await waitFor(() => expect(serverTabProvisionButton().textContent).toBe(expected));
+      } finally {
+        closeDomainCard();
+      }
     };
 
     handler(["sdmp://bulk-provision?ids=1,2"]);
 
     // Клик по кнопке домена, который сейчас идёт в bulk, открыл бы вторую
     // SSH-сессию с create_site/create_ftp_account/certbot по тому же домену.
-    await waitFor(async () => expect(await provisionLabelOf("a.com")).toBe("Provisioning…"));
+    await waitProvisionLabel("a.com", "Provisioning…");
     expect(await provisionLabelOf("b.com")).toBe("Provisioning…");
     // Домен вне набора не тронут — гейт подоменный, а не глобальный.
     expect(await provisionLabelOf("z.com")).toBe("Provision");
@@ -502,6 +500,6 @@ describe("DesktopWorkspace — владелец результатов provision
     finish({ idempotency_key: "k", status: "ok", items: [] });
 
     // И отпущен после прогона — иначе кнопка не включится уже никогда.
-    await waitFor(async () => expect(await provisionLabelOf("a.com")).toBe("Provision"));
+    await waitProvisionLabel("a.com", "Provision");
   });
 });

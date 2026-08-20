@@ -7,6 +7,7 @@ import Domains from "./Domains";
 import { describeBulkProvision } from "../components/domains/describeBulkProvision";
 import { queryClient } from "../api/queryClient";
 import { useAuthStore } from "../store/auth";
+import { closeDomainCard, confirmProvision, openProvisionDialog } from "../test/domainCard";
 
 /**
  * Кнопка «Provision» панели массовых действий.
@@ -137,27 +138,18 @@ function renderPage(
  * → диалог → «Provision».
  *
  * Дорога длинная, потому что вход в одиночный прогон ровно один и он там
- * (фаза 4). Карточка в конце ЗАКРЫВАЕТСЯ, и это не уборка: пока она открыта, на
- * экране две кнопки с именем «Provision» — её и тулбара, — и `getByRole` в
+ * (фаза 4). Сами шаги — из общего `test/domainCard`, а не своей копией: их
+ * хрупкая часть (скоуп по вёрстке) обязана быть одна на все три файла, которые
+ * этой дорогой ходят.
+ *
+ * Карточка в конце ЗАКРЫВАЕТСЯ, и это не уборка: пока она открыта, на экране
+ * две кнопки с именем «Provision» — её и тулбара, — и `getByRole` в
  * `selectAllAndFindProvision` нашёл бы обе.
  */
 async function startSingleProvision(domain: string) {
-  fireEvent.click(await screen.findByRole("button", { name: domain }));
-  fireEvent.click(await screen.findByRole("tab", { name: "Server" }));
-  const snapshotLine = screen.getByRole("button", { name: "Проверить на сервере" })
-    .parentElement as HTMLElement;
-  fireEvent.click(within(snapshotLine).getByRole("button", { name: "Provision" }));
-  // Панель диалога — от чекбокса «создать БД»: он живёт только в диалоге, а
-  // `Modal` кладёт детей прямо в панель. Без скоупа кнопка «Provision» диалога
-  // неотличима от кнопки вкладки, оставшейся под ним.
-  const cb = await screen.findByLabelText(/Also create a database/i);
-  const dialog = cb.closest("label")!.parentElement as HTMLElement;
-  fireEvent.click(within(dialog).getByRole("button", { name: "Provision" }));
-
-  const card = screen
-    .getByRole("tablist", { name: "Domain card sections" })
-    .closest('[style*="z-index"]') as HTMLElement;
-  fireEvent.click(within(card).getByRole("button", { name: "Close" }));
+  const cb = await openProvisionDialog(domain);
+  confirmProvision(cb);
+  closeDomainCard();
 }
 
 /** Выделить оба домена шапочным чекбоксом и вернуть кнопку «Provision» тулбара. */
