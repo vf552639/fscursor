@@ -207,7 +207,7 @@ describe("Domains — автопривязка при создании", () => {
 
     renderPage();
     await screen.findByText("a.com");
-    fireEvent.click(screen.getByText("⊕ Bulk Add"));
+    fireEvent.click(screen.getByRole("button", { name: "Bulk Add" }));
     fireEvent.change(await screen.findByPlaceholderText(/example.com/), {
       target: { value: "x.com\ny.com\nz.com" },
     });
@@ -462,7 +462,7 @@ describe("Domains — кнопка «Синхронизировать выдел
 
     renderPage([domainRow(1, "a.com")]);
     await screen.findByText("a.com");
-    fireEvent.click(screen.getByText("⊕ Bulk Add"));
+    fireEvent.click(screen.getByRole("button", { name: "Bulk Add" }));
     fireEvent.change(await screen.findByPlaceholderText(/example.com/), {
       target: { value: "x.com" },
     });
@@ -517,7 +517,7 @@ describe("Domains — кнопка «Синхронизировать выдел
     // от отчёта фонового прогона, иначе тест не увидел бы подмены.
     const { container } = renderPage([domainRow(1, "a.com"), domainRow(2, "b.com", 42)]);
     await screen.findByText("a.com");
-    fireEvent.click(screen.getByText("⊕ Bulk Add"));
+    fireEvent.click(screen.getByRole("button", { name: "Bulk Add" }));
     fireEvent.change(await screen.findByPlaceholderText(/example.com/), {
       target: { value: "x.com" },
     });

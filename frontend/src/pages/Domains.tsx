@@ -9,7 +9,7 @@ import { CfBindNotice } from "../api/cfAutoBind";
 import { FullSetupNotice } from "../api/fullSetup";
 import { AddDomainModal } from "../components/domains/AddDomainModal";
 import DomainFilters from "../components/domains/DomainFilters";
-import DomainStats from "../components/domains/DomainStats";
+import DomainStatChips from "../components/domains/DomainStatChips";
 import DomainTable from "../components/domains/DomainTable";
 import BulkProvisionErrorBanner from "../components/domains/BulkProvisionErrorBanner";
 import RunNoticeBanner from "../components/domains/RunNoticeBanner";
@@ -359,7 +359,14 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       onBulkAdd={()=>setSB(true)}
       onAddDomain={()=>setSA(true)}
     />
-    <DomainStats domains={domains} />
+    {/* Счётчики — по ПОЛНОМУ списку (`domains`), а не по `filters.filtered`:
+        чип и показывает число, и фильтрует по нему, и посчитанный по срезу он
+        обнулял бы соседей ровно в тот момент, когда по ним и надо вернуться. */}
+    <DomainStatChips
+      domains={domains}
+      status={filters.controls.status}
+      onStatusChange={filters.controls.onStatusChange}
+    />
     <DomainFilters {...filters.controls} servers={servers} registrars={registrars} cfAccounts={cfAccounts} />
     {bulkProvision.error ? <BulkProvisionErrorBanner message={bulkProvision.error} /> : null}
     {cfBind.notice ? (

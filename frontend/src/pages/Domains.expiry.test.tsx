@@ -376,7 +376,10 @@ describe("Domains — сортировка по клику на заголово
 
   it("сортировка идёт ПОСЛЕ фильтра, а не вместо него", () => {
     fireEvent.click(sortBtn("Expires"));
-    fireEvent.change(screen.getByDisplayValue("All Statuses"), { target: { value: "failed" } });
+    // Срез по статусу задаётся чипом: селекта «All Statuses» больше нет, и это
+    // не смена способа нажать, а смена поверхности — фильтр теперь виден на
+    // экране числом, а не спрятан в списке.
+    fireEvent.click(screen.getByRole("button", { name: /^Failed/ }));
     expect(rowNames()).toEqual(["charlie.com"]);
   });
 
@@ -404,24 +407,38 @@ describe("Domains — сортировка по клику на заголово
 });
 
 describe("Domains — срез по статусам и рассинхрон ns_ok", () => {
-  it("второй ряд карточек показывает жизненный цикл и сходится с Total", () => {
-    const card = (label: string) => screen.getByText(label).closest("div")?.parentElement as HTMLElement;
-    expect(within(card("New")).getByText("2")).toBeTruthy();
-    // ns_ok, site_created и незнакомый статус — все «в работе»: перечислением
-    // статусов их легко потерять, поэтому счётчик считается остатком и всегда
-    // сходится с Total.
-    expect(within(card("In progress")).getByText("3")).toBeTruthy();
-    expect(within(card("Active")).getByText("1")).toBeTruthy();
-    expect(within(card("Failed")).getByText("1")).toBeTruthy();
-    expect(within(card("Total")).getByText("7")).toBeTruthy();
+  /**
+   * Чип — кнопка, подписанная словом и счётчиком («Failed 1»). Ищется по началу
+   * подписи, а не по ней целиком: разделитель между словом и числом — деталь
+   * вёрстки, и тест, прибитый к нему, краснел бы от смены отступа.
+   */
+  const chip = (label: string) => screen.getByRole("button", { name: new RegExp(`^${label}`) });
+
+  it("чипы показывают жизненный цикл и сходятся с общим числом", () => {
+    expect(within(chip("New")).getByText("2")).toBeTruthy();
+    expect(within(chip("Active")).getByText("1")).toBeTruthy();
+    expect(within(chip("Failed")).getByText("1")).toBeTruthy();
+    // «All» — то самое Total, на котором и проверяется сходимость: 2 + 1 + 1
+    // плюс трое «в работе», которым своего чипа не досталось.
+    expect(within(chip("All")).getByText("7")).toBeTruthy();
   });
 
-  it("ns_ok есть и в фильтре, и в бейдже — и бейдж не серый фолбэк", () => {
-    // Ровно этот рассинхрон и держался: статус существует на бэкенде, а на
-    // фронте его не было ни в списке фильтра, ни в карте бейджа.
-    const filter = screen.getByDisplayValue("All Statuses");
-    expect(within(filter).getByRole("option", { name: "NS_OK" })).toBeTruthy();
+  it("«In progress» считается остатком и не теряет статусы, которых нет в чипах", () => {
+    // ns_ok, site_created и незнакомый статус — все «в работе»: перечислением
+    // статусов их легко потерять, поэтому счётчик считается остатком и всегда
+    // сходится с общим числом. Живёт он теперь за кнопкой NS-деталей — чипов
+    // ровно четыре, и промежуточным статусам среди них места нет.
+    fireEvent.click(screen.getByRole("button", { name: "NS details" }));
+    expect(screen.getByText("In progress: 3")).toBeTruthy();
+  });
 
+  it("ns_ok рисуется своим бейджем, а не серым фолбэком", () => {
+    // Ровно этот рассинхрон и держался: статус существует на бэкенде, а на
+    // фронте его не было ни в списке фильтра, ни в карте бейджа. Половина про
+    // список фильтра снята вместе с самим селектом «All Statuses»: срез по
+    // статусу задают четыре чипа, промежуточных статусов среди них нет по
+    // решению, и проверять в них пункт `NS_OK` больше нечего. Половина про
+    // бейдж — та, что и ловила фолбэк, — остаётся.
     const badge = within(rowOf("delta.com")).getByText("NS_OK");
     // Синий, а не серый (`#9ca3af` фолбэка) и не зелёный: NS проставлены — это
     // пройденная ступень, а не готовый домен.

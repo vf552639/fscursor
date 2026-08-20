@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, within } from "@testing-library/react";
+import { render, screen, cleanup, within, fireEvent } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import Domains from "./Domains";
@@ -129,7 +129,11 @@ describe("упавший provision виден в списке доменов", (
       domainRow({ id: 4, domain_name: "quiet.com", status: "active", ssl_status: "active" }),
     ]);
 
-    expect(await screen.findByText("Failed at SSL: 2")).toBeTruthy();
+    // Счётчик переехал из отдельного красного бейджа в строку NS-деталей: в
+    // макете вкладки поверхности под него нет, а сигнал терять нельзя — провал
+    // SSL больше нигде на этом экране не суммируется. Поэтому сначала разворот.
+    fireEvent.click(await screen.findByRole("button", { name: "NS details" }));
+    expect(screen.getByText("Failed at SSL: 2")).toBeTruthy();
   });
 
   it("не показывает «Failed at SSL», когда SSL везде на месте", async () => {
@@ -143,8 +147,11 @@ describe("упавший provision виден в списке доменов", (
       }),
     ]);
 
-    // Дождаться отрисовки таблицы, иначе «нет бейджа» верно и до загрузки.
+    // Дождаться отрисовки таблицы, иначе «нет пункта» верно и до загрузки.
     await screen.findByText("b.com");
+    // Детали РАЗВЁРНУТЫ: свёрнутая строка не показывает и настоящий счётчик,
+    // так что проверка «пункта нет» осталась бы зелёной у любой реализации.
+    fireEvent.click(screen.getByRole("button", { name: "NS details" }));
     expect(screen.queryByText(/Failed at SSL/)).toBeNull();
   });
 });

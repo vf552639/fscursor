@@ -131,6 +131,15 @@ const semantic = {
   /** «Ждём чужого действия»: делегирование NS, выпуск сертификата, срок истекает. */
   warningText: "#b45309",
   /**
+   * «Идёт работа»: домен между `new` и `active`, прогон в процессе.
+   *
+   * Отдельный от `warningText` намеренно, хотя оба означают «ещё не готово»:
+   * янтарный — это ожидание ЧУЖОГО действия (регистратор проставит NS, ACME
+   * выдаст сертификат), синий — наше собственное, идущее прямо сейчас. Разница
+   * в том, кому идти что-то делать, и цветом её различают быстрее, чем текстом.
+   */
+  infoText: "#1d4ed8",
+  /**
    * Бейдж регистратора — единственное тёплое пятно на всей странице.
    *
    * Текст на нём НЕ оранжевый (`text.body`), и это не недосмотр: регистратор —
@@ -222,7 +231,7 @@ export const STATUS_PILL: Record<StatusPillVariant, StatusPillColors> = {
    * не различает глаз, зато синяя пилюля на подсвеченной строке пропадала бы в
    * фоне вовсе. Один синий на оба случая — и он утверждён макетом.
    */
-  blue: { color: "#1d4ed8", bg: surface.rowFocus, border: "#bfdbfe" },
+  blue: { color: semantic.infoText, bg: surface.rowFocus, border: "#bfdbfe" },
   green: { color: semantic.successText, bg: semantic.successBg, border: "#a7f3d0" },
   yellow: { color: semantic.warningText, bg: "#fffbeb", border: "#fde68a" },
   red: { color: semantic.dangerText, bg: semantic.dangerBg, border: semantic.dangerBorder },
