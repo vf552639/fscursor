@@ -84,14 +84,18 @@ export default function DomainDetailModal({
 }: {
   domain: Domain;
   /**
-   * Список серверов — чтобы назвать сервер домена ИМЕНЕМ, а не сырым id, и
-   * отдать его IP карточке FTP на вкладке Server (адрес хоста). На странице `Domains` он уже
-   * загружен и раздаётся другим детям — до модалки просто не доезжал.
+   * Список серверов — чтобы отдать IP сервера домена карточке FTP на вкладке
+   * Server (адрес хоста). На странице `Domains` он уже загружен и раздаётся
+   * другим детям — до модалки просто не доезжал.
+   *
+   * Ряду связей на Overview он больше не нужен: поле сервера стало селектом и
+   * читает список само (`useServers`, та же запись кэша), заодно получив три
+   * состояния списка вместо «нашли/не нашли» — см. `DomainServerField`.
    */
   servers: Server[];
   onClose: () => void;
 }) {
-  // Сервер домена: имя вместо id в шапке и адрес для карточки FTP.
+  // Сервер домена: адрес для карточки FTP на вкладке Server.
   const server = servers.find((s) => s.id === domain.server_id);
   // Одно чтение часов на рендер карточки: два срока на одном экране обязаны
   // отвечать на «сейчас» одинаково.
@@ -286,7 +290,6 @@ export default function DomainDetailModal({
         {tab === "overview" ? (
           <DomainOverviewTab
             domain={domain}
-            server={server}
             zone={zone}
             zones={zones}
             zonesError={zonesQ.error}

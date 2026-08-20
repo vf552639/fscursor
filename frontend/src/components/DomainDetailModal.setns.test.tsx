@@ -113,6 +113,11 @@ function mockInvoke(reads: { zones?: any[]; zonesError?: Error } = {}) {
       if (reads.zonesError) throw reads.zonesError;
       return reads.zones ?? [ZONE];
     }
+    // Записи зоны читает поле сервера в ряду связей — сверить A-запись apex с
+    // адресом выбранного сервера. Это ЧТЕНИЕ, и разводить его надо здесь: упав
+    // в общую ветку, оно съедало бы `mockResolvedValueOnce`, поставленный под
+    // пуш NS, и сюжет теста разъезжался бы на ровном месте.
+    if (cmd === "cf_list_dns_records") return [];
     return mocks.mutate(cmd, args);
   });
   // Карточка сверяет NS зоны с делегированием ИЗ РЕЕСТРА. Этот сценарий про
@@ -623,6 +628,10 @@ describe("вкладки не разводят Cloudflare и nameservers", () =>
     expect(mocks.apiGet.mock.calls.map((c: any[]) => String(c[0])).sort()).toEqual([
       "/cloudflare/accounts",
       "/registrars/accounts",
+      // Список серверов — тоже не про домен: по нему селект сервера в ряду
+      // связей называет машину именем и отличает «не назначен» от «id есть, а
+      // сервера в списке нет».
+      "/servers",
     ]);
     expect(mocks.apiPost.mock.calls.map((c: any[]) => String(c[0]))).toEqual([]);
   });

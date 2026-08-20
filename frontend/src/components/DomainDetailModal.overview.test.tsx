@@ -64,15 +64,21 @@ const ddMmYyyy = (iso: string) => {
   return `${d}.${m}.${y}`;
 };
 
-/** Списки учёток: по ним ряд связей называет аккаунты именами, а не числами. */
-function mockAccounts() {
+/** Списки связей: по ним ряд карточек называет их именами, а не числами. */
+function mockApi(servers: any[] = SERVERS) {
   mocks.apiGet.mockImplementation(async (path: string) => {
-    if (String(path).includes("/registrars/accounts")) {
+    const p = String(path);
+    if (p.includes("/registrars/accounts")) {
       return [{ id: REGISTRAR, provider: "namecheap", name: "Reg main", is_active: true }];
     }
-    if (String(path).includes("/cloudflare/accounts")) {
+    if (p.includes("/cloudflare/accounts")) {
       return [{ id: 7, name: "Main CF", is_active: true }];
     }
+    // Список серверов поле сервера читает САМО (`useServers` → `{items,total}`),
+    // пропом он до ряда связей больше не доезжает. Прежний `[]` на этом пути
+    // означал бы для селекта «список не прочитан» — то есть вечную загрузку
+    // вместо любого из проверяемых здесь состояний.
+    if (p === "/servers") return { items: servers, total: servers.length };
     return [];
   });
 }
@@ -114,7 +120,13 @@ function facts(over: Record<string, unknown> = {}) {
 /** Сервер домена (id 3) — чтобы карточка назвала его именем, а не сырым id. */
 const SERVERS = [{ id: 3, name: "web-01", ip_address: "10.0.0.3" }] as any[];
 
+/**
+ * Список серверов уходит В ДВА места, и оба нужны: пропом — карточке FTP на
+ * вкладке Server (адрес хоста), ответом API — селекту сервера в ряду связей.
+ * Разъехавшись, они дали бы «сервера нет в списке» рядом с его же IP.
+ */
 function show(over: Record<string, unknown> = {}, servers: any[] = SERVERS) {
+  mockApi(servers);
   render(
     <QueryClientProvider client={queryClient}>
       <DomainDetailModal domain={domain(over)} servers={servers} onClose={() => {}} />
@@ -151,10 +163,19 @@ function registrarSelect() {
   return screen.getByLabelText("Registrar account") as HTMLSelectElement;
 }
 
+/**
+ * Селект сервера — через карточку, а не через `getByLabelText("Server")`: то же
+ * имя носит и сама карточка (`role="group"` с заголовком `SERVER`), и запрос по
+ * имени находит их обоих.
+ */
+function serverSelect() {
+  return within(plate("Server")).getByRole("combobox") as HTMLSelectElement;
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   queryClient.clear();
-  mockAccounts();
+  mockApi();
 });
 
 afterEach(() => {
@@ -269,9 +290,15 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
     expect(screen.queryByText("9")).toBeNull();
   });
 
-  it("сервер назван именем и адресом", () => {
+  it("сервер выбирается селектом, а не только читается", async () => {
+    // Поле было read-only по решению плана 2026-08-17 («сервер домену назначает
+    // развёртывание»). Решение отменено: provision `server_id` не ставит, а
+    // читает и без него падает — связка обязана существовать ДО развёртывания.
+    // Правила самого поля проверены у него (`DomainServerField.test.tsx`); здесь
+    // — что в ряду связей стоит именно оно и что имя приезжает списком.
     show();
-    expect(within(plate("Server")).getByText("web-01")).toBeTruthy();
+    expect(await within(plate("Server")).findByText("web-01")).toBeTruthy();
+    expect(serverSelect().value).toBe("3");
     expect(within(plate("Server")).getByText("10.0.0.3")).toBeTruthy();
     // Тот же адрес карточка FTP показывает как Host — и берётся он из того
     // же объекта, а не из второго чтения (карточка живёт на вкладке Server,
@@ -280,22 +307,25 @@ describe("ряд связей — Registrar → Cloudflare → Server", () => {
     expect(screen.getByText("Host").parentElement?.textContent).toContain("10.0.0.3");
   });
 
-  it("домен без сервера говорит «не назначен», а не молчит прочерком", () => {
+  it("домен без сервера говорит, чем это грозит, а не молчит прочерком", async () => {
     show({ server_id: null }, []);
-    expect(screen.getByText(/Not assigned/)).toBeTruthy();
-    expect(screen.getByText(/gets its server when it is deployed/)).toBeTruthy();
+    // Прежняя подпись «A domain gets its server when it is deployed» удалена
+    // как НЕВЕРНАЯ: развёртывание сервер не назначает, а требует.
+    expect(screen.queryByText(/gets its server when it is deployed/)).toBeNull();
+    expect(await screen.findByText(/deployment has nowhere to go/i)).toBeTruthy();
   });
 
-  it("сервер, которого нет в списке, — сырой id и слово об этом", () => {
-    // Домен на сервере, которого в списке нет (исчез, под фильтром). Прочерк
-    // тут выдавал бы существующую связь за её отсутствие.
+  it("сервер, которого нет в списке, — сырой id и слово об этом", async () => {
+    // Домен на сервере, которого в списке нет (исчез, под фильтром). Пустой
+    // селект тут выдавал бы существующую связь за её отсутствие.
     show({}, []);
-    // Спрашиваем ЗНАЧЕНИЕ, а не текст всей карточки: id назван и в ноте строкой
-    // ниже, так что проверка по `textContent` карточки прошла бы и на значении,
-    // подменённом прочерком, — то есть не запирала бы ровно то поведение,
+    expect(await within(plate("Server")).findByText(/#3 · server not found/)).toBeTruthy();
+    // Спрашиваем ЗНАЧЕНИЕ селекта, а не текст карточки: id назван и в ноте
+    // строкой ниже, так что проверка по `textContent` прошла бы и на селекте,
+    // упавшем в «— No server —», — то есть не запирала бы ровно то поведение,
     // ради которого этот тест и написан.
-    expect(within(plate("Server")).getByText("3")).toBeTruthy();
-    expect(screen.getByText(/Server #3 is not in the loaded list/)).toBeTruthy();
+    expect(serverSelect().value).toBe("3");
+    expect(screen.getByText(/Server #3 is not in the list/)).toBeTruthy();
   });
 
   it("селект Cloudflare стоит в ряду связей и работает как прежде", async () => {
