@@ -333,16 +333,25 @@ async def bulk_create_structured(
     `registrar_name` проверять нечего и не в чем: он резолвится (`find_reg_id`)
     только по аккаунтам этого пользователя, то есть чужого попросту не найдёт.
 
+    Какой именно из чужих id вызвал отказ, ответ НЕ говорит: `_ensure_links_owned`
+    поднимает фиксированное «Server not found» без id, одинаковое на любой чужой
+    сервер. Поэтому и порядок обхода множества здесь ничего не решает. Указать
+    виновную строку CSV этот отказ не поможет — форма отказа общая на все
+    маршруты записи связок, и менять её надо там, а не тут.
+
+    В аудит связки этого маршрута не идут — в отличие от `/bulk`, где они одни
+    на всю пачку. Здесь они построчные: двести строк могут нести двести разных
+    серверов, одно поле `server_id` в metadata было бы про них неправдой, а их
+    перечень — тем самым списком сущностей, которого дисциплина аудита в этом
+    файле не допускает. По той же причине там нет и регистратора — так было с
+    самого начала.
+
     Почему гарда здесь раньше не было и что через это проходило — в docstring
     `bulk_create` выше.
     """
-    # `sorted` — ради определённости: какая из чужих связок назовётся в 404,
-    # не должно зависеть от порядка обхода множества.
-    for server_id in sorted({i.server_id for i in data.items if i.server_id is not None}):
+    for server_id in {i.server_id for i in data.items if i.server_id is not None}:
         await _ensure_links_owned(db, user, server_id=server_id)
-    for registrar_id in sorted(
-        {i.registrar_id for i in data.items if i.registrar_id is not None}
-    ):
+    for registrar_id in {i.registrar_id for i in data.items if i.registrar_id is not None}:
         await _ensure_links_owned(db, user, registrar_id=registrar_id)
     created, skipped = await domain_service.bulk_create_structured(db, user.id, data.items)
     await audit_service.log(

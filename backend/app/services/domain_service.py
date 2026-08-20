@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Final, Optional
 from uuid import UUID
 
 from sqlalchemy import select, update as sa_update
@@ -28,7 +28,7 @@ def _normalize(name: str) -> str:
 # переезд обесценивает всю четвёрку разом — оставить хоть одно поле значило бы
 # датировать пустой снимок или показывать ошибку чтения с сервера, к которому
 # домен больше не привязан.
-_FORGOTTEN_FACTS: dict[str, None] = {
+_FORGOTTEN_FACTS: Final[dict[str, None]] = {
     "fp_facts": None,
     "fp_facts_at": None,
     "fp_check_error": None,
@@ -360,6 +360,13 @@ async def _set_links(
     его в одной транзакции, и промежуточный коммит разорвал бы её пополам.
     Сужение по `user_id` — часть запроса, а не проверка снаружи: без него
     массовый UPDATE менял бы чужие строки по угаданному id.
+
+    ОСТОРОЖНО: одна колонка тут с побочным обязательством. `server_id` в
+    `values` — сначала `_forget_facts_of_previous_server` по тем же id: снимок
+    `fp_facts` снят со СТАРОЙ машины и переезд переживёт, оставив на вкладке
+    Server FTP-логин прежнего сервера рядом с IP нового. Сеттер универсальный и
+    сам за этим не следит, поэтому следующий писатель `server_id` прочитает про
+    правило здесь — или не прочитает нигде.
     """
     ver = await bump_version(db, user_id)
     result = await db.execute(
@@ -406,9 +413,9 @@ async def _forget_facts_of_previous_server(
     UPDATE тянулся бы к чужим строкам по угаданному id.
 
     Своего `bump_version` здесь нет намеренно. Оба вызывающих ставят её перед
-    `_set_links`, который идёт по тем же (или более широким) строкам в той же
-    транзакции — обнулённая строка по определению не в целевом состоянии,
-    значит она и в его наборе, — и версию синхронизации ей проставляет он.
+    `_set_links` в той же транзакции, и каждая ОБНУЛЁННАЯ строка попадает и в
+    его набор: раз `server_id` у неё отличается, она не в целевом состоянии.
+    Версию синхронизации ей проставляет он.
     Второй бамп сжёг бы номер и не добавил бы ничего. Правило запёрто тестом:
     `sync_version` переехавшего домена обязан вырасти.
     """
@@ -520,12 +527,13 @@ async def bulk_full_setup(
     outdated = [
         row.id for row in rows if any(getattr(row, k) != v for k, v in values.items())
     ]
-    # Переезжающие — до `_set_links`, пока в строках ещё старый сервер
-    # (`_forget_facts_of_previous_server`, там же и причина). У неразвёрнутого
-    # домена снимка нет вовсе, и сброс на нём — no-op; у повторного прогона
-    # список пуст, поэтому идемпотентность full-setup сброс не разрушает.
-    moving = [row.id for row in rows if row.server_id != server_id]
-    await _forget_facts_of_previous_server(db, user_id, moving, server_id)
+    # ДО `_set_links` — пока в строках ещё старый сервер. Кто из них едет, а
+    # кто уже стоит на целевом, решает сама функция, и решает в SQL: вывести
+    # тот же предикат здесь заново значило бы завести ему вторую редакцию —
+    # ровно то, ради чего правило и вынесено в одну функцию.
+    await _forget_facts_of_previous_server(
+        db, user_id, [row.id for row in rows], server_id
+    )
     if outdated:
         await _set_links(db, user_id, outdated, values)
 

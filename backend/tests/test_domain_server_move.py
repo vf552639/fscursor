@@ -22,6 +22,8 @@
 Заготовка (регистрация, уборка, заведение сервера) — общая, в `conftest.py`.
 """
 
+from typing import Optional
+
 import pytest
 from conftest import (
     create_cf_account,
@@ -68,12 +70,17 @@ async def _sync_version(domain_id: int) -> int:
         ).scalar_one()
 
 
-async def _domain_with_snapshot(c: AsyncClient, server_id: int) -> int:
+async def _domain_with_snapshot(c: AsyncClient, server_id: Optional[int]) -> int:
     """Домен на сервере `server_id`, у которого уже есть снимок.
 
     Снимок ставится тем же путём, что и в жизни, — `POST /domains/{id}/facts`:
     писать колонки в обход роута значило бы проверять правило на состоянии,
     которого продукт не производит.
+
+    `server_id=None` — тоже законное состояние, а не выдумка теста: приёмник
+    фактов привязки не требует и не проверяет (снимок читает десктоп по SSH и
+    шлёт сюда), так что снимок при пустом `server_id` продукт производит сам —
+    например, когда домен отвязали в другой вкладке между чтением и отправкой.
     """
     r = await c.post(
         "/api/domains", json={"domain_name": domain_name(), "server_id": server_id}
@@ -180,6 +187,64 @@ async def test_bulk_assign_server_forgets_only_of_those_who_moved():
         # идущий следом `_set_links`. Если это когда-нибудь разъедется, десктоп
         # и read-only веб останутся со снимком, которого в БД уже нет.
         assert await _sync_version(moving) > moving_version
+
+
+@pytest.mark.asyncio
+async def test_bulk_assign_server_to_null_forgets_the_snapshot_too():
+    """Массовая ОТВЯЗКА (`server_id: null`) тоже забывает снимок.
+
+    Путь живой и своей ветки заслуживает: `server_id` в
+    `DomainBulkAssignServer` объявлен `Optional`, маршрут отдельно разбирает
+    `None` в аудите, а оставшийся после отвязки снимок — это FTP-логин машины,
+    к которой домен больше не привязан.
+
+    Отдельным тестом, а не хвостом `..._only_of_those_who_moved`: там к моменту
+    отвязки снимок уже пуст, и проверка выродилась бы в тавтологию.
+
+    Что этот тест НЕ доказывает — выбор `IS DISTINCT FROM`: SQLAlchemy
+    переписывает `!= None` в `IS NOT NULL`, поэтому наивный `!=` его прошёл бы.
+    Оператор запирает следующий тест.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "move-bulk-null")
+        server_id = await create_server(c)
+        domain_id = await _domain_with_snapshot(c, server_id)
+
+        r = await c.post(
+            "/api/domains/bulk-assign-server",
+            json={"domain_ids": [domain_id], "server_id": None},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["updated"] == 1
+        assert await _facts(domain_id) == EMPTY_SNAPSHOT
+
+
+@pytest.mark.asyncio
+async def test_binding_an_unbound_domain_forgets_its_stale_snapshot():
+    """Привязка домена БЕЗ сервера тоже забывает снимок — и это про оператор.
+
+    Здесь и только здесь наблюдаема разница `IS DISTINCT FROM` против `!=`.
+    У непривязанного домена `server_id` — NULL, и в SQL `NULL != 5` даёт NULL,
+    то есть строка тихо выпадает из UPDATE и увозит снимок с собой: карточка
+    показала бы реквизиты, снятые до привязки, как состояние новой машины.
+    `IS DISTINCT FROM` трактует NULL как значение и строку берёт.
+
+    Зеркальный случай (`5 != NULL`, отвязка) этого не ловит: SQLAlchemy
+    переписывает `!= None` в `IS NOT NULL`, и наивная реализация там ведёт себя
+    правильно по случайности. Проверено подменой оператора: под `!=` красный
+    ровно этот тест.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await register_and_login(c, "move-bind")
+        target = await create_server(c)
+        domain_id = await _domain_with_snapshot(c, None)
+
+        r = await c.post(
+            "/api/domains/bulk-assign-server",
+            json={"domain_ids": [domain_id], "server_id": target},
+        )
+        assert r.status_code == 200, r.text
+        assert await _facts(domain_id) == EMPTY_SNAPSHOT
 
 
 @pytest.mark.asyncio
