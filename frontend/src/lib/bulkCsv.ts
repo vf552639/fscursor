@@ -51,27 +51,8 @@ export interface BulkCsvOptions {
  */
 export type BulkCsvErrorReason = "not-found" | "ambiguous" | "duplicate";
 
-/**
- * Формулировка живёт рядом с причиной, которую объясняет, а не тернарником в
- * разметке: `Record` по закрытому union компилятор обязан покрыть целиком, и
- * четвёртая причина не сможет молча напечататься уверенным «не найден».
- *
- * Функции, а не строки, потому что подлежащее у причин РАЗНОЕ: у двух первых в
- * `value` лежит сервер, у дубля — домен, и общий шаблон «сервер «...»» назвал бы
- * домен сервером.
- */
-const REASON_TEXT: Record<BulkCsvErrorReason, (value: string) => string> = {
-  "not-found": (v) => `сервер «${v}» не найден`,
-  ambiguous: (v) => `сервер «${v}» подходит нескольким — уточните имя или IP`,
-  duplicate: (v) => `домен «${v}» уже есть выше в этой же вставке`,
-};
-
-/** Одна строка отчёта — без номера строки: его подставляет тот, кто рисует. */
-export function bulkCsvErrorText(error: BulkCsvError): string {
-  return REASON_TEXT[error.reason](error.value);
-}
-
-export interface BulkCsvError {
+/** Общее у всех непринятых строк: где она и что в ней написано. */
+interface BulkCsvErrorBase {
   /**
    * Номер строки в textarea, считая с единицы и ВКЛЮЧАЯ пустые.
    *
@@ -86,7 +67,52 @@ export interface BulkCsvError {
    * колонка, у дубля — имя домена (см. `REASON_TEXT`).
    */
   value: string;
-  reason: BulkCsvErrorReason;
+}
+
+/**
+ * Непринятая строка. Union, а не одна структура с необязательными полями (тот же
+ * приём, что у `ZoneMatch` в `lib/cfZoneMatch`): `firstLine` есть ТОЛЬКО у
+ * дубля, и напечатать в сообщении `undefined` поэтому нечем.
+ */
+export type BulkCsvError =
+  | (BulkCsvErrorBase & { reason: "not-found" })
+  | (BulkCsvErrorBase & { reason: "ambiguous" })
+  | (BulkCsvErrorBase & {
+      reason: "duplicate";
+      /**
+       * Номер строки, где этот домен встретился ВПЕРВЫЕ.
+       *
+       * Не украшение и не «уже есть выше»: ключ сравнения нормализован, поэтому
+       * первая строка может выглядеть иначе, чем вторая (`Example.COM.` против
+       * `example.com`), и человек не узнал бы в чужом написании собственную
+       * строку. Довод тот же, что и у `line`: в сотне строк ищут по номеру.
+       */
+      firstLine: number;
+    });
+
+/**
+ * Формулировка живёт рядом с причиной, которую объясняет, а не тернарником в
+ * разметке: карта по закрытому union компилятор обязан покрыть целиком, и
+ * четвёртая причина не сможет молча напечататься уверенным «не найден».
+ *
+ * Функции, а не строки, потому что у причин разное и подлежащее, и данные: у
+ * двух первых в `value` лежит сервер, у дубля — домен плюс номер первой строки.
+ */
+const REASON_TEXT: {
+  [R in BulkCsvErrorReason]: (error: Extract<BulkCsvError, { reason: R }>) => string;
+} = {
+  "not-found": (e) => `сервер «${e.value}» не найден`,
+  ambiguous: (e) => `сервер «${e.value}» подходит нескольким — уточните имя или IP`,
+  duplicate: (e) => `домен «${e.value}» — дубль строки ${e.firstLine}`,
+};
+
+/** Одна строка отчёта — без номера строки: его подставляет тот, кто рисует. */
+export function bulkCsvErrorText(error: BulkCsvError): string {
+  // Единственное место, где связь «причина → её данные» держится не типом:
+  // индексация union'ом сужение теряет, а разбирать его вторым switch значило бы
+  // завести ту же таблицу дважды.
+  const render = REASON_TEXT[error.reason] as (e: BulkCsvError) => string;
+  return render(error);
 }
 
 export interface BulkCsvParse {
@@ -135,7 +161,7 @@ export interface BulkCsvParse {
 function resolveServer(
   raw: string,
   servers: ReadonlyArray<ResolvableServer>,
-): { outcome: "matched"; id: number } | { outcome: BulkCsvErrorReason } {
+): { outcome: "matched"; id: number } | { outcome: "not-found" | "ambiguous" } {
   const key = raw.toLowerCase();
   const hits = servers.filter(
     (s) => s.ip_address.trim() === raw || s.name.trim().toLowerCase() === key,
@@ -188,22 +214,29 @@ export function parseBulkCsv(text: string, options: BulkCsvOptions): BulkCsvPars
 
   const items: DomainBulkCreateItem[] = [];
   const errors: BulkCsvError[] = [];
-  const seen = new Set<string>();
+  // Значение — номер ПЕРВОЙ строки с этим именем: он уезжает в сообщение про
+  // дубль (см. `firstLine`).
+  const seen = new Map<string, number>();
 
   for (const line of filled) {
     const parts = line.text.split(";");
     const domainName = parts[0].trim();
+    // Гард пустого домена стоит ДО проверки дубля намеренно, и переставить их
+    // местами нельзя: пустые имена нормализуются в один и тот же ключ, и вторая
+    // строка вида `;Reg;web-01` стала бы «дублём» первой — вставка блокировалась
+    // бы жалобой на домен, которого в ней нет.
     if (!domainName) continue;
 
     const key = normalizeZoneName(domainName);
-    if (seen.has(key)) {
+    const firstLine = seen.get(key);
+    if (firstLine !== undefined) {
       // Второе вхождение не попадает в `items` вовсе: отправку держат `errors`,
       // но нести в payload строку, о которой уже известно, что она уронит
       // вставку в 500, нельзя ни при каком повороте событий.
-      errors.push({ line: line.n, value: domainName, reason: "duplicate" });
+      errors.push({ line: line.n, value: domainName, reason: "duplicate", firstLine });
       continue;
     }
-    seen.add(key);
+    seen.set(key, line.n);
 
     const registrarName = (parts[1] ?? "").trim();
     const serverRaw = (parts[2] ?? "").trim();

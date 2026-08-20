@@ -188,7 +188,9 @@ export default function BulkAddDialog({
           вердикт про разделитель — приговоры ПРОШЛОМУ тексту. Строка №4,
           оставшаяся после того, как её исправили, показывает на чужую строку, а
           «вы используете запятые», переживший замену запятых, — просто неправда.
-          Правила у двух одинаковых коробок на одной вкладке обязаны совпадать. */}
+          Правила у двух одинаковых коробок на одной вкладке обязаны совпадать.
+          На Plain Text того же нет намеренно: коробка там одна, противоречить
+          нечему, и её сроки жизни — прежние, не тронутые этой правкой. */}
       <textarea value={csvText} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>)=>{setCsvText(e.target.value); if (csvErrors.length) setCsvErrors([]); if (bulkError) setBulkError("");}} placeholder={"example.com;Namecheap;45.83.194.107\nshop.com;Hostiq;web-01"} style={{width:"100%",height:160,padding:"10px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
     </>}
 

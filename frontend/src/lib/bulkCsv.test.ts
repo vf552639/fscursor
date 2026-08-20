@@ -103,8 +103,11 @@ describe("parseBulkCsv", () => {
     expect(r.items[0].registrar_name).toBe("Reg, Inc.");
   });
 
-  it("строка без домена выпадает молча — привязывать сервер не к чему", () => {
-    const r = parseBulkCsv("  ;Namecheap;1.2.3.4\nexample.com;Namecheap;web-01", {
+  it("строки без домена выпадают молча — и вторая не становится дублём первой", () => {
+    // Две пустые первые колонки дают ОДИН нормализованный ключ, поэтому гард
+    // пустого домена обязан стоять раньше проверки дубля: иначе вставка
+    // блокируется жалобой на домен, которого в ней нет.
+    const r = parseBulkCsv("  ;Namecheap;1.2.3.4\n;Hostiq;web-01\nexample.com;Namecheap;web-01", {
       servers: SERVERS,
     });
     expect(r.items).toHaveLength(1);
@@ -127,7 +130,7 @@ describe("parseBulkCsv", () => {
     const r = parseBulkCsv("a.com;Reg;web-01\nb.com;Reg;web-01\na.com;Reg;web-02", {
       servers: SERVERS,
     });
-    expect(r.errors).toEqual([{ line: 3, value: "a.com", reason: "duplicate" }]);
+    expect(r.errors).toEqual([{ line: 3, value: "a.com", reason: "duplicate", firstLine: 1 }]);
     expect(r.items.map((i) => i.domain_name)).toEqual(["a.com", "b.com"]);
   });
 
@@ -143,15 +146,27 @@ describe("parseBulkCsv", () => {
 
   it("у дубля свой сервер уже не спрашивают — одна строка, одна причина", () => {
     const r = parseBulkCsv("a.com;Reg;web-01\na.com;Reg;1.2.3.4", { servers: SERVERS });
-    expect(r.errors).toEqual([{ line: 2, value: "a.com", reason: "duplicate" }]);
+    expect(r.errors).toEqual([{ line: 2, value: "a.com", reason: "duplicate", firstLine: 1 }]);
   });
 
   it("у каждой причины своя формулировка, и подлежащее в ней верное", () => {
-    const text = (reason: any, value: string) => bulkCsvErrorText({ line: 1, value, reason });
-    expect(text("not-found", "1.2.3.4")).toContain("сервер");
-    expect(text("ambiguous", "1.2.3.4")).toContain("подходит нескольким");
+    expect(bulkCsvErrorText({ line: 2, value: "1.2.3.4", reason: "not-found" })).toContain("сервер");
+    expect(bulkCsvErrorText({ line: 2, value: "1.2.3.4", reason: "ambiguous" })).toContain(
+      "подходит нескольким",
+    );
     // Дубль — про домен: общий шаблон «сервер «...»» назвал бы домен сервером.
-    expect(text("duplicate", "a.com")).toContain("домен");
+    const dup = bulkCsvErrorText({ line: 5, value: "a.com", reason: "duplicate", firstLine: 2 });
+    expect(dup).toContain("домен");
+    // И называет НОМЕР первой строки: ключ нормализован, поэтому та строка
+    // может быть написана иначе, и «уже есть выше» человек бы не опознал.
+    expect(dup).toContain("2");
+  });
+
+  it("сообщение про дубль называет строку первого вхождения, а не его написание", () => {
+    const r = parseBulkCsv("Example.COM.;Reg;web-01\nb.com;Reg;web-01\nexample.com;Reg;web-01", {
+      servers: SERVERS,
+    });
+    expect(bulkCsvErrorText(r.errors[0])).toBe("домен «example.com» — дубль строки 1");
   });
 
   it("пустая вторая колонка берёт регистратора из селекта, непустая — побеждает его", () => {
