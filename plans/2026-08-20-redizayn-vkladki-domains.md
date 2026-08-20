@@ -1,0 +1,196 @@
+# План: Редизайн вкладки Domains по макету design_handoff_domains_page
+
+**Дата:** 2026-08-20
+**Связь с бизнесом:** принцип №2 CLAUDE.md — «плотность без тесноты», пульт управления
+для power-user'а. Карточка домена уже переехала на новый визуальный язык
+(`2026-08-17-kartochka-domena-svyazi-i-registrar.md`, `2026-08-18-kartochka-domena-vkladki.md`);
+вкладка Domains, из которой карточка открывается, осталась в старой палитре — клик по
+строке сегодня переносит человека в другой продукт. План закрывает этот разрыв и заодно
+чинит плотность: восемь stat-карточек в два ряда заменяются рядом чипов, NS-статистика
+демотируется в скрытую по умолчанию строку, Server/Registrar сворачиваются в бейджи под
+именем домена. Источник — `task19.md` (корень репозитория, ТЗ по макету из
+design-проекта claude.ai `3701fcbd-4907-480b-adef-e7078253cd70`, локальной копии нет).
+Работа только фронтенд, только показ: ни один запрос к API, Tauri-команда или правило
+подсчёта не меняются.
+
+### Решения, принятые с пользователем
+
+| Вопрос                                                                                       | Решение                                                                                      |
+| --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Объём                                                                                        | Вкладка Domains + шрифт IBM Plex глобально. Геометрия сайдбара/топбара не трогается.         |
+| Сортировка                                                                                   | Сохранить. Заголовки перекрашиваются в стиль макета, но остаются кнопками с `aria-sort`.     |
+| Точка состояния сервера и «checked 4h ago» в строке                                          | Убрать (бейдж макета — только имя сервера).                                                  |
+| Полные состояния SSL + срок сертификата в строке                                             | Убрать (`Valid` / `No SSL`).                                                                 |
+| Текст ошибки провижининга под статусом                                                       | **Сохранить.**                                                                               |
+| Колонка Added                                                                                | **Сохранить**, вместе с сортировкой по ней.                                                  |
+| Иконки строки                                                                                | Две: ⚙ открыть карточку, ✕ удалить. `↗ Open site` из макета не делаем.                       |
+| Provision одного домена                                                                      | Переезжает на карточку домена, вкладка **Server**, рядом с SITE и информацией о БД.          |
+| Промежуточные статусы (`ns_pending`, `ns_ok`, `provisioning`, `site_created`, `ssl_pending`) | Строго 4 чипа по макету; селект «All Statuses» удаляется. Эти домены видны только под `All`. |
+
+## Acceptance criteria (что значит «готово»)
+
+- [ ] Вкладка Domains визуально на палитре `SectionCard` (рамка `#dbe3ee`, шапка `#eef2f7`),
+      шрифт IBM Plex Sans/Mono подключён self-host и работает офлайн в десктопе.
+- [ ] Ряд чипов `All/Active/New/Failed` со счётчиками заменяет восемь stat-карточек;
+      `NS details` разворачивает приглушённую строку с NS/SSL-остатками.
+- [ ] Таблица — по-прежнему `<table>` с `aria-sort`, без колонок Server/Registrar в шапке
+      (переехали бейджами под имя домена); вся строка кликабельна, кроме чекбокса и ✕.
+- [ ] Provision одного домена доступен только с карточки (вкладка Server), с сохранением
+      галочки «создать БД» и возврата паролей в очередь показов.
+- [ ] Вся фронт-сюита и `tsc --noEmit` зелёные с `--testTimeout=30000`.
+
+## Edge cases (продумать заранее)
+
+- Домен без сервера/регистратора — бейджи под именем не рисуются вовсе, а не пустышкой.
+- `last_provision_error` длинный — усечённая строка + полный текст в `title`.
+- Домен без срока действия (`unknown`) — `-` в `#cbd5e1`, не путается с `expired`.
+- Промежуточные статусы не теряются молча: `In progress` — остаток `total - new - active - failed`,
+  а не перечисление (сегодняшний баг с потерей `ns_ok` — тот же класс ошибки).
+- Ноль доменов после фильтра — сообщение внутри таблицы, не путается с пустым списком вообще
+  (`DomainsEmptyState` остаётся отдельным путём).
+- Клик по строке не должен красть выделение чекбокса и удаление по ✕ — оба требуют
+  `stopPropagation`.
+- Массовый провижининг (`ProvisionDialog` для одиночного домена) должен по-прежнему открываться
+  поверх карточки без конфликта z-index с `DomainDetailModal`.
+
+## Фазы
+
+### Фаза 1 — Токены и шрифт (глобально)  `[ ]`
+- IBM Plex Sans/Mono self-host (`@fontsource/ibm-plex-sans`, `@fontsource/ibm-plex-mono`) —
+  Google Fonts CDN недоступен: CSP десктопа (`desktop/src-tauri/tauri.conf.json:24`) не
+  даёт `font-src`/домен googleapis. Импорты весов 400/500/600/700 Sans, 400/500 Mono в
+  `main.tsx`; `index.css` (body, инпуты, фон страницы `#f1f5f9`); `Btn` в
+  `Primitives.tsx:259` убирает хардкод `'Inter'`.
+- Новый `lib/designTokens.ts` — палитра макета одним модулем (ink/heading/body/muted/faint/
+  disabled, рамки, поверхности, семантические цвета, радиусы, карта статусов
+  `lib/domainStatus` → `{color,bg,border}`). Причина — та же, что у `lib/serverStatus.ts` и
+  `lib/domainStatus.ts`: три места уже держат свои копии хексов, будет ещё шесть.
+- `SectionCard` переводится на модуль (правка механическая, вид не меняется) — сразу два
+  потребителя палитры вместо одного.
+- Файлы: `lib/designTokens.ts` (новый), `index.css`, `main.tsx`, `package.json`,
+  `components/ui/Primitives.tsx`.
+
+### Фаза 2 — Шапка вкладки и чипы  `[ ]`
+- `DomainsHeader.tsx` — перекраска по палитре макета, глифы-префиксы кнопок (`⇪`, `⊕`, `⟳`)
+  убираются. Подпись кнопки синхрона остаётся собранной из `CF_SYNC_VERB`
+  (`lib/cfZoneMatch`) — общий источник со строкой и тулбаром, разъезжаться нельзя.
+- Новый `DomainStatChips.tsx` заменяет `DomainStats.tsx` (старый файл удаляется): пилюли
+  `All/Active/New/Failed` пишут в существующий фильтр `status`
+  (`hooks/useDomainFilters.ts`), синхронизация с `?status=` не меняется. После чипов —
+  кнопка `NS details`/`Hide NS details`, разворачивающая строку
+  `NS OK / NS Pending / NS Errors / In progress` (+ `Failed at SSL` при N>0, сегодняшний
+  отдельный красный бейдж под карточками переезжает туда же). `In progress` — остаток, не
+  перечисление (см. edge cases).
+- `DomainFilters.tsx` — обёртка `<Card>` снимается, селект «All Statuses» удаляется
+  (`DomainFilterControls` сохраняет пропсы `status`/`onStatusChange`, их теперь потребляют
+  чипы).
+- Файлы: `components/domains/DomainsHeader.tsx`, `DomainStatChips.tsx` (новый),
+  `DomainStats.tsx` (удаляется), `DomainFilters.tsx`.
+
+### Фаза 3 — Таблица  `[ ]`
+- Раскладка остаётся `<table>` (не грид из `div`) — `columnheader`/`aria-sort`/навигация
+  скринридера уже сделаны в `DomainTable.tsx`, грид их обнулил бы; геометрия макета —
+  `table-layout: fixed` + `<colgroup>` (Domain 34%, Cloudflare 22%, Status/SSL/Expires/Added
+  фиксированной ширины). Колонки Server/Registrar уходят из шапки.
+- Шапка и строка — перекраска по палитре, `SortableTh`/`PlainTh` сохраняются целиком.
+- Строка: вся кликабельна → открывает карточку, но имя домена остаётся `<button>` —
+  `<tr onClick>` недостижим с клавиатуры, кнопка внутри решает обе задачи и сохраняет
+  тесты; чекбокс и действия — `stopPropagation`.
+  - Domain: бейджи сервера/регистратора под именем (только значение, `cursor:help` +
+    `title`), точка состояния сервера и `checked … ago` уходят — не противоречит принципу
+    №6 CLAUDE.md: бейдж не утверждает здоровья, он называет машину.
+  - Status: пилюля рисует все восемь статусов из карты фазы 1 (`lib/domainStatus` не
+    трогается), под ней — усечённый `last_provision_error` с `title`.
+  - SSL: `active` → `Valid`, всё остальное → `No SSL`; точный `ssl_status` уходит в `title`
+    — молча терять разницу «не выпустился» vs «не заказывали» нельзя, место для неё есть
+    на карточке (`DomainSslCard`).
+  - Expires: цвета из `lib/domainExpiry.expiryTextColor` переезжают на палитру макета.
+    **Осознанное отступление от макета:** макет красит красным всё < 30 дней, сливая
+    «истёк» и «скоро истечёт»; модуль их различает по построению — `soon` остаётся
+    янтарным, а не красным.
+  - Actions: ⚙/✕ через существующий `RowActions` (`Primitives.tsx:401`) с новым
+    необязательным пропом `tone?: "blue"|"slate"`. Ветка `OpenInDesktop`
+    (`sdmp://provision`) из строки уходит вместе с провижинингом (см. фазу 4).
+- Подвал таблицы (`Showing X of Y domains`) и пустой результат фильтра — внутри
+  `DomainTable`/контейнера, `DomainsEmptyState` не трогается.
+- `BulkActionToolbar.tsx` — только перекраска (`#eff4ff/#bfdbfe` → `#eef2f7/#dbe3ee`),
+  поведение то же.
+- `pages/Domains.tsx` — общий контейнер `maxWidth:1240` с вертикальным ритмом,
+  `marginBottom` с отдельных блоков снимается.
+- Файлы: `DomainTable.tsx`, `DomainRow.tsx`, `DomainStatusBadge.tsx`,
+  `components/ui/Primitives.tsx` (`RowActions`), `BulkActionToolbar.tsx`,
+  `lib/domainExpiry.ts`, `pages/Domains.tsx`.
+
+### Фаза 4 — Provision переезжает на карточку  `[ ]`
+- Иконка ⚙ в строке была единственным входом в диалог с галочкой «создать БД»:
+  `sdmp://provision` идёт с `withDb:false` (`lib/deepLink.ts:174`), массовый прогон
+  `with_db` не принимает вовсе. Удалить её без переноса значило бы убрать создание БД из
+  продукта — поэтому логика остаётся, переезжает точка входа.
+- `pages/Domains.tsx` сохраняет как есть `singleProvision`/`provisionTarget`/
+  `handleProvision`/`isProvisioning`/`<ProvisionDialog>` (ответ несёт пароли FTP и БД,
+  которых больше нигде нет).
+- `DomainRow`/`DomainTable` теряют пропсы `onProvision`/`isProvisioning`.
+- `DomainDetailModal.tsx` получает `onProvision`/`isProvisioning`, передаёт в
+  `DomainServerTab` — кнопка `Provision`/`Provisioning…` встаёт в правый слот
+  `SnapshotLine` рядом с «Проверить на сервере» (оба десктоп-онли, оба по SSH, оба про то,
+  что развёрнуто на сервере). `ProvisionDialog` рендерится в `Domains.tsx` ниже
+  `DomainDetailModal` (оба `z-index:100`, порядок в DOM решает); `DomainUI` для диалога
+  берётся через существующий `toDomainUI`.
+- Файлы: `pages/Domains.tsx`, `DomainRow.tsx`, `DomainTable.tsx`,
+  `components/DomainDetailModal.tsx`, `components/domains/tabs/DomainServerTab.tsx`.
+
+### Фаза 5 — Тесты  `[ ]`
+- Обновить: `Domains.render.test.tsx` (чипы вместо stat-карточек, «⊕ Bulk Add» → «Bulk
+  Add», исчезнувшие колонки), `Domains.expiry.test.tsx` (`Valid`/`No SSL`, срок
+  сертификата в строке снят), `Domains.sort.test.tsx` (новые заголовки),
+  `Domains.provision.test.tsx`/`Domains.provisionerror.test.tsx` (путь через карточку →
+  вкладка Server → Provision), `DomainRow.cfhint.test.tsx`, `lib/domainExpiry.test.ts`/
+  `DomainExpiryField.test.tsx` (если ассертят хексы).
+- Удалить: `Domains.serverstatus.test.tsx` — точки состояния и свежести в строке больше
+  нет; та же лестница проверяется на `Servers.freshness`/`ServerDetail.*`/
+  `Dashboard.freshness`.
+- Добавить: фильтрация чипами (включая `Failed` с красным счётчиком и сброс на `All`);
+  разворачивание NS-строки; подвал `Showing X of Y`; клик по строке открывает карточку, а
+  чекбокс/✕ — нет; `Provision` на вкладке Server открывает диалог с `withDb`.
+- Файлы: `pages/Domains.*.test.tsx`, `components/domains/DomainRow.cfhint.test.tsx`,
+  `lib/domainExpiry.test.ts`, `components/domains/DomainExpiryField.test.tsx`,
+  `pages/Domains.serverstatus.test.tsx` (удаляется).
+
+### Фаза 6 — План проекта  `[ ]`
+- По правилу CLAUDE.md завести этот план (`plans/2026-08-20-redizayn-vkladki-domains.md`)
+  и добавить строку в `plans/README.md`.
+- Файлы: `plans/2026-08-20-redizayn-vkladki-domains.md`, `plans/README.md`.
+
+## Проверка
+
+1. `cd frontend && npx tsc --noEmit` — типы.
+2. `cd frontend && npx vitest run src/pages/Domains src/components/domains src/lib/domainExpiry --testTimeout=30000`
+   — таймаут обязателен: сюита краснеет по `Test timed out in 5000ms` от нагрузки, а не по
+   существу.
+3. `cd frontend && npx vitest run --testTimeout=30000` — вся сюита, чтобы поймать
+   потребителей `RowActions`/`Btn`/`SectionCard` на других экранах.
+4. Глазами, `npm run dev` + браузер на 1280×820 (размер превью макета): чипы фильтруют и
+   складываются с поиском по И; `NS details` разворачивает/прячет строку; клик по строке
+   открывает карточку, чекбокс/✕ — нет; сортировка по Domain/Status/Expires/SSL/Added
+   работает и переворачивается вторым кликом; `last_provision_error` красной строкой под
+   пилюлей; домен без срока — `-` в `#cbd5e1`, < 30 дней — янтарный, просроченный —
+   красный; подвал считает `Showing X of Y`.
+5. Десктоп (`npm run tauri dev` в `desktop/`): шрифт IBM Plex подхватился офлайн (CSP не
+   тронут); карточка домена → вкладка Server → `Provision` открывает диалог с галочкой
+   «создать БД», прогон возвращает пароли в очередь показов воркспейса.
+
+## Что осознанно НЕ делаем
+
+- Геометрию сайдбара и топбара (216px, тёмный логотип, чип аккаунта, версия внизу) — они
+  общие для всех экранов, перекрасить их значило бы оставить Servers/Cloudflare/Settings
+  с новой оболочкой и старым содержимым.
+- `↗ Open site` — по решению пользователя в строке остаются две иконки.
+- Отдельный фильтр по промежуточным статусам — их пять, они видны под `All`, их число
+  печатает строка NS-деталей.
+- Массовые действия по макету — хендофф прямо говорит, что они не спроектированы;
+  сегодняшний `BulkActionToolbar` остаётся по функции, меняется только цвет.
+
+## Итог
+
+- Реализован целиком: нет — работа начата.
+- Что осталось: фазы 1–6.
