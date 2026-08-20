@@ -81,7 +81,12 @@ const NS_DRAFT: NsDraft = {
 beforeEach(() => {
   vi.resetAllMocks();
   queryClient.clear();
-  mocks.apiGet.mockResolvedValue([]);
+  // Списки учёток и серверов ряд связей читает сам (`server` пропом больше не
+  // едет — поле сервера стало селектом со своим `useServers`). Здесь они пусты:
+  // предмет набора — провод состояния сертификата, а не ряд связей.
+  mocks.apiGet.mockImplementation(async (path: string) =>
+    String(path) === "/servers" ? { items: [], total: 0 } : [],
+  );
 });
 
 afterEach(() => {
@@ -108,7 +113,6 @@ describe("вкладка Overview доносит состояние сертиф
               ...SNAPSHOT,
             } as any
           }
-          server={undefined}
           zone={null}
           zones={undefined}
           zonesError={null}

@@ -3,7 +3,6 @@ import React from "react";
 import { clip } from "../../../api/cfAutoBind";
 import { Domain } from "../../../api/domains";
 import { Zone } from "../../../api/cloudflare";
-import { Server } from "../../../api/servers";
 import { SslState } from "../../../lib/domainFacts";
 import { NsDelegation } from "../../../lib/nsDelegation";
 import { Badge, SectionCard } from "../../ui/Primitives";
@@ -57,8 +56,6 @@ const SSL_PROVISION_ALARM: Record<string, string> = {
 
 export interface DomainOverviewTabProps {
   domain: Domain;
-  /** Сервер домена, найденный в списке страницы; `undefined` — не найден. */
-  server: Server | undefined;
   /** Зона домена: `undefined` — зоны ещё не прочитаны, `null` — её нет. */
   zone: Zone | null | undefined;
   zones: Zone[] | undefined;
@@ -99,7 +96,6 @@ export interface DomainOverviewTabProps {
  */
 export default function DomainOverviewTab({
   domain,
-  server,
   zone,
   zones,
   zonesError,
@@ -111,13 +107,7 @@ export default function DomainOverviewTab({
 }: DomainOverviewTabProps) {
   return (
     <TabBody>
-      <DomainLinks
-        domain={domain}
-        server={server}
-        zone={zone}
-        zones={zones}
-        zonesError={zonesError}
-      />
+      <DomainLinks domain={domain} zone={zone} zones={zones} zonesError={zonesError} />
 
       <div style={{ fontSize: 13, color: "#374151", display: "grid", gap: 6 }}>
         {/* Наша запись о последней попытке смены NS — не то же самое, что

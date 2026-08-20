@@ -7,6 +7,7 @@
  * же приём, что у `lib/cfZoneMatch.ts` и `lib/domainStatus.ts`.
  */
 
+import { domainWord } from "./format";
 import { registrarSupportsNsApi } from "./registrarCaps";
 
 /** Значения формы — строками, как их отдаёт `<select>`. Пусто = «не выбрано». */
@@ -171,19 +172,6 @@ export interface LoadedOption {
   count: number;
   /** Готовая подпись пункта: имя плюс нагрузка. */
   label: string;
-}
-
-/**
- * Русское склонение для счётчика. «1 доменов» в подписи, которую человек читает
- * каждый раз, выбирая сервер, — это опечатка, живущая вечно.
- */
-function domainWord(n: number): string {
-  const tens = n % 100;
-  if (tens >= 11 && tens <= 14) return "доменов";
-  const ones = n % 10;
-  if (ones === 1) return "домен";
-  if (ones >= 2 && ones <= 4) return "домена";
-  return "доменов";
 }
 
 /**

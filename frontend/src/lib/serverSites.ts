@@ -18,28 +18,74 @@ export interface ComparableSite {
   domain_name: string;
 }
 
-/** Минимум, что нужно от домена SDMP для сверки: имя домена. */
+/**
+ * Минимум, что нужно от домена SDMP для сверки: имя и текущая привязка.
+ *
+ * `server_id` здесь не украшение: без него «домен есть в SDMP» и «домен стоит
+ * на ЭТОМ сервере» — одно и то же утверждение, а это два разных знания (см.
+ * `SiteComparison`).
+ */
 export interface ComparableDomain {
   domain_name: string;
+  server_id: number | null;
 }
 
 /**
- * Три группы сверки. Имена намеренно говорят о ЗНАНИИ, а не о действии:
- * `onlyOnServer` — «есть на сервере, SDMP о нём не знает»; `onlyInSdmp` — «есть
- * в SDMP, на сервере не нашли». Никакого ресинка эта сверка не делает — только
- * читает и показывает расхождение (принцип №3: веб/сверка не мутируют).
+ * Четыре группы сверки. Имена намеренно говорят о ЗНАНИИ, а не о действии:
+ * лекарство у групп разное и оно меняется, а знание — нет.
+ *
+ * Раньше групп было три, и `onlyOnServer` смешивал два разных незнания: на вход
+ * шли только домены, УЖЕ привязанные к этому серверу, поэтому туда одинаково
+ * попадал и домен, которого в SDMP нет вовсе, и домен, который в SDMP есть, но
+ * стоит на другом сервере. Лечатся они противоположно — первый надо завести,
+ * второму хватит перепривязки, — и «завести» второго означало бы дубль имени.
+ * Поэтому функция теперь принимает ВСЕ домены пользователя и id сервера, чей
+ * это экран, и разводит эти две строки по разным колонкам.
+ *
+ * Сама сверка по-прежнему ничего не мутирует — она чистая; кнопки лечения живут
+ * в карточке сервера и только в десктопе (принцип №3).
  */
 export interface SiteComparison<S extends ComparableSite, D extends ComparableDomain> {
-  /** Домен есть и на сервере, и в SDMP (совпал по нормализованному имени). */
+  /** Сайт есть, домен в SDMP есть и привязан ИМЕННО к этому серверу. */
   matched: { site: S; domain: D }[];
-  /** Сайт есть на сервере, но такого домена в SDMP нет. */
+  /**
+   * Сайт есть, домен в SDMP есть, но стоит на другом сервере или ни на каком.
+   *
+   * Имя `notBoundHere`, а не `unbound`: половина группы привязана — просто не
+   * сюда, — и слово «unbound» про такую строку было бы прямой неправдой ровно
+   * там, где цена ошибки выше. Перепривязка такого домена ПЕРЕВОЗИТ его учётную
+   * запись, а бэкенд при смене `server_id` сбрасывает снимок `fp_facts` (сайт
+   * не переезжает вслед за записью, и FTP-доступ с прежней машины хранить
+   * нельзя). Тот, кто читает имя группы, должен видеть эту разницу, а не узнать
+   * о ней постфактум.
+   */
+  notBoundHere: D[];
+  /**
+   * Сайт есть на сервере, а домена в SDMP нет вовсе.
+   *
+   * Имя оставлено прежним, хотя спека звала группу `unknown`: «only on server» —
+   * ровно это знание и есть, и только теперь оно стало правдой (до разделения
+   * сюда падали и известные SDMP домены). `unknown` же не говорит, чьё это
+   * незнание, и рядом с `onlyInSdmp` читался бы как третий словарь.
+   */
   onlyOnServer: S[];
-  /** Домен есть в SDMP, но сайта с таким именем на сервере не нашли. */
+  /**
+   * Домен привязан к ЭТОМУ серверу, а сайта с таким именем на нём не нашли.
+   *
+   * Именно «к этому», а не «есть в SDMP»: на вход идут все домены пользователя,
+   * и без фильтра по привязке карточка каждого сервера рапортовала бы о сотнях
+   * чужих доменов как о пропавших сайтах. Лекарства у группы нет — это диагноз
+   * (сайт снесли руками, домен завели впрок, привязали не туда).
+   */
   onlyInSdmp: D[];
 }
 
 /**
  * Сверить список сайтов с сервера со списком доменов SDMP.
+ *
+ * `domains` — ВСЕ домены пользователя, `serverId` — сервер, чью карточку
+ * открыли. Отфильтрованный по серверу список сюда передавать нельзя: именно он
+ * и склеивал «SDMP о домене не знает» с «домен стоит на другой машине».
  *
  * Матч — по `normalizeZoneName` (trim + срез завершающей точки + нижний
  * регистр): та же нормализация, что у зон Cloudflare. Пустое имя после
@@ -52,6 +98,7 @@ export interface SiteComparison<S extends ComparableSite, D extends ComparableDo
 export function compareServerSites<S extends ComparableSite, D extends ComparableDomain>(
   sites: readonly S[],
   domains: readonly D[],
+  serverId: number,
 ): SiteComparison<S, D> {
   const domainByName = new Map<string, D>();
   for (const d of domains) {
@@ -65,17 +112,19 @@ export function compareServerSites<S extends ComparableSite, D extends Comparabl
   }
 
   const matched: { site: S; domain: D }[] = [];
+  const notBoundHere: D[] = [];
   const onlyOnServer: S[] = [];
   for (const [key, site] of siteByName) {
     const domain = domainByName.get(key);
-    if (domain) matched.push({ site, domain });
-    else onlyOnServer.push(site);
+    if (!domain) onlyOnServer.push(site);
+    else if (domain.server_id === serverId) matched.push({ site, domain });
+    else notBoundHere.push(domain);
   }
 
   const onlyInSdmp: D[] = [];
   for (const [key, domain] of domainByName) {
-    if (!siteByName.has(key)) onlyInSdmp.push(domain);
+    if (domain.server_id === serverId && !siteByName.has(key)) onlyInSdmp.push(domain);
   }
 
-  return { matched, onlyOnServer, onlyInSdmp };
+  return { matched, notBoundHere, onlyOnServer, onlyInSdmp };
 }

@@ -274,8 +274,19 @@ async def bulk_create(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkCreateResponse:
+    """Массовая заливка списком имён. Связки — одни на всю пачку.
+
+    Гарда владения у этого маршрута (и у `/bulk-structured` ниже) не было
+    ВОВСЕ, хотя он стоял на всех остальных путях записи связок: чужой
+    `registrar_id` в теле проходил молча, и сотня доменов заводилась со ссылкой
+    на чужой аккаунт. `server_id` в теле появился той же правкой, что закрыла
+    дыру, поэтому проверяются оба.
+    """
+    await _ensure_links_owned(
+        db, user, server_id=data.server_id, registrar_id=data.registrar_id
+    )
     created, skipped = await domain_service.bulk_create(
-        db, user.id, data.domains_text, data.registrar_id
+        db, user.id, data.domains_text, data.registrar_id, server_id=data.server_id
     )
     # Пишем счётчики, а не список имён: массовая заливка — это сотни доменов,
     # им не место в JSONB-поле аудита. `mode` отличает этот маршрут от
@@ -290,6 +301,9 @@ async def bulk_create(
             "created": len(created),
             "skipped": len(skipped),
             "registrar_id": data.registrar_id,
+            # Связка, с которой домены заведены, — рядом с регистратором: без
+            # неё по журналу не понять, откуда у пачки взялся сервер.
+            "server_id": data.server_id,
         },
     )
     await db.commit()
@@ -309,6 +323,36 @@ async def bulk_create_structured(
     user: User = Depends(get_current_user_or_401),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkCreateResponse:
+    """Массовая заливка построчно: у каждого домена своя пара связок.
+
+    Владение проверяется по МНОЖЕСТВУ уникальных id, а не по элементу: пачка
+    бывает на сотни строк с одним и тем же сервером, и проверка на элемент
+    означала бы сотни одинаковых SELECT-ов. Проверяются все уникальные, а не
+    первый попавшийся: чужой id в сто первой строке — тот же чужой id.
+
+    `registrar_name` проверять нечего и не в чем: он резолвится (`find_reg_id`)
+    только по аккаунтам этого пользователя, то есть чужого попросту не найдёт.
+
+    Какой именно из чужих id вызвал отказ, ответ НЕ говорит: `_ensure_links_owned`
+    поднимает фиксированное «Server not found» без id, одинаковое на любой чужой
+    сервер. Поэтому и порядок обхода множества здесь ничего не решает. Указать
+    виновную строку CSV этот отказ не поможет — форма отказа общая на все
+    маршруты записи связок, и менять её надо там, а не тут.
+
+    В аудит связки этого маршрута не идут — в отличие от `/bulk`, где они одни
+    на всю пачку. Здесь они построчные: двести строк могут нести двести разных
+    серверов, одно поле `server_id` в metadata было бы про них неправдой, а их
+    перечень — тем самым списком сущностей, которого дисциплина аудита в этом
+    файле не допускает. По той же причине там нет и регистратора — так было с
+    самого начала.
+
+    Почему гарда здесь раньше не было и что через это проходило — в docstring
+    `bulk_create` выше.
+    """
+    for server_id in {i.server_id for i in data.items if i.server_id is not None}:
+        await _ensure_links_owned(db, user, server_id=server_id)
+    for registrar_id in {i.registrar_id for i in data.items if i.registrar_id is not None}:
+        await _ensure_links_owned(db, user, registrar_id=registrar_id)
     created, skipped = await domain_service.bulk_create_structured(db, user.id, data.items)
     await audit_service.log(
         db,
@@ -503,6 +547,21 @@ async def bulk_import_domains(
     default_registrar_id: Optional[int] = Form(None),
     db: AsyncSession = Depends(get_db),
 ) -> DomainBulkImportResponse:
+    """Заливка доменов файлом (CSV): `domain, registrar_name`.
+
+    **Гарды владения здесь НЕТ, и это известная дыра, а не недосмотр.**
+    `default_registrar_id` приходит формой и доезжает до
+    `bulk_create_structured` мимо `_ensure_links_owned` — чужой id проходит
+    молча, и пачка заводится со ссылкой на чужой аккаунт. Ровно та же дыра
+    закрыта у соседей `/bulk` и `/bulk-structured`; здесь она осталась потому,
+    что у маршрута своё тело (`multipart`), свой парсер и своя форма отчёта об
+    ошибках, — в объём той работы это не бралось.
+
+    Записано долгом в `plans/2026-08-20-privyazka-domena-k-serveru.md`, раздел
+    «Долг». Указатель стоит здесь, а не только в плане: план читает тот, кто
+    открыл план, а гарду ищет тот, кто открыл этот файл, — и, не найдя её у
+    третьего из трёх соседей, решит, что здесь она не нужна.
+    """
     raw = await file.read()
     created, skipped, errors, csv_url = await process_bulk_import(
         db,

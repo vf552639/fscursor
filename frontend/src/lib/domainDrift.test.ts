@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  anyRecordedOnly,
   dbNameSource,
   dbUserSource,
   ftpLoginSource,
@@ -309,5 +310,60 @@ describe("dbUserSource — сверять не с чем", () => {
 
   it("пусто — по-прежнему нечего дорисовывать", () => {
     expect(dbUserSource(null)).toEqual({ kind: "agree" });
+  });
+});
+
+/**
+ * Вопрос вкладки Server, а не поля: «есть ли на экране хоть одно приглушённое
+ * значение». По нему печатается фраза легенды, которая эти значения объясняет,
+ * — а объяснять нечего у домена, только что переехавшего на другой сервер:
+ * бэкенд гасит при переезде и снимок, и все колонки provision разом.
+ */
+describe("anyRecordedOnly — печатать ли фразу про приглушённые значения", () => {
+  const empty = {};
+
+  it("ни снимка, ни записей — приглушать нечего", () => {
+    expect(anyRecordedOnly(empty, null)).toBe(false);
+    expect(anyRecordedOnly({ ftp_user: "", site_path: "   " }, null)).toBe(false);
+  });
+
+  it("любая одна колонка provision без снимка — уже есть что объяснять", () => {
+    expect(anyRecordedOnly({ ftp_user: "example_ftp" }, null)).toBe(true);
+    expect(anyRecordedOnly({ site_path: "/var/www/example.com" }, null)).toBe(true);
+    expect(anyRecordedOnly({ site_user: "example_usr" }, null)).toBe(true);
+    expect(anyRecordedOnly({ php_version: "8.1" }, null)).toBe(true);
+    expect(anyRecordedOnly({ db_name: "example_db" }, null)).toBe(true);
+    // Пользователь базы — `recorded-only` всегда: сверять его не с чем.
+    expect(anyRecordedOnly({ db_user: "example_dbu" }, null)).toBe(true);
+  });
+
+  /**
+   * Под снимком совпавшее значение рисуется как ФАКТ, а не как наша запись, —
+   * приглушённого на экране нет, и фраза не нужна. Проверяется тем же снимком,
+   * которым живёт остальной файл.
+   */
+  it("под снимком совпавшая запись приглушённой не считается", () => {
+    const f = facts();
+    expect(
+      anyRecordedOnly(
+        {
+          ftp_user: "example_ftp",
+          site_path: "/var/www/example_usr/data/www/example.com",
+          site_user: "example_usr",
+          php_version: "8.1",
+          db_name: "example_db",
+        },
+        f,
+      ),
+    ).toBe(false);
+  });
+
+  it("под снимком расхождение — тоже не приглушённое: значением остаётся факт", () => {
+    expect(anyRecordedOnly({ site_user: "other_usr" }, facts())).toBe(false);
+  });
+
+  /** Запись есть, а факта по ней снимок не принёс — вот это и есть приглушённое. */
+  it("под снимком без этого поля запись остаётся приглушённой", () => {
+    expect(anyRecordedOnly({ db_name: "example_db" }, facts({ databases: [] }))).toBe(true);
   });
 });

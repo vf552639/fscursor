@@ -481,6 +481,19 @@ describe("снимка не было ни разу", () => {
     expect(screen.queryAllByText("not read")).toEqual([]);
   });
 
+  /**
+   * Состояние, ставшее обычным после того, как переезд домена на другой сервер
+   * начал гасить не только снимок, но и ВСЕ колонки provision: приглушённому
+   * значению на экране взяться неоткуда, и вторая фраза легенды объясняла бы
+   * то, чего не показано. Первая при этом обязана остаться — она объясняет
+   * пустые карточки.
+   */
+  it("нечего приглушать — легенда не обещает приглушённых значений", () => {
+    show({ ftp_user: null });
+    expect(screen.getByText(/Сервер ещё не читали/).textContent).toBe("Сервер ещё не читали.");
+    expect(screen.queryByText(/из provision, на сервере не проверено/)).toBeNull();
+  });
+
   it("известное из provision показано как наша запись, а подпись дана легендой один раз", () => {
     show({ ftp_user: "example_ftp", site_path: "/var/www/example.com", db_user: "example_dbu" });
     expect(sourceOf("Login")).toBe("recorded-only");

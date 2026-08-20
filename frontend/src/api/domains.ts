@@ -93,6 +93,12 @@ export interface DomainUpdate {
 export interface DomainBulkCreate {
   domains_text: string;
   registrar_id?: number | null;
+  /**
+   * Сервер на всю пачку — рядом с регистратором и по той же причине: provision
+   * `server_id` не ставит, а ЧИТАЕТ, и без связки падает. Заливка сотни доменов
+   * без него означала бы сотню правок поштучно на соседнем экране.
+   */
+  server_id?: number | null;
 }
 
 export interface DomainBulkCreateResponse {
@@ -104,6 +110,14 @@ export interface DomainBulkCreateItem {
   domain_name: string;
   registrar_id?: number | null;
   registrar_name?: string | null;
+  /**
+   * Сервер построчно — третья колонка CSV, УЖЕ разрешённая в id.
+   *
+   * Пары `server_name` рядом нет намеренно, хотя регистратор резолвится по
+   * имени: строку в сервер превращает фронт (`lib/bulkCsv`), потому что только
+   * он может назвать номер строки с опечаткой и не дать отправить пачку.
+   */
+  server_id?: number | null;
 }
 
 export interface DomainBulkStructuredCreate {
