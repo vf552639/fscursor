@@ -117,15 +117,15 @@ export default function DomainStatChips({
   ];
 
   const details: Detail[] = [
-    { label: "NS OK", value: ns.ok, color: tokens.semantic.successText },
-    { label: "NS Pending", value: ns.pending, color: tokens.semantic.warningText },
-    { label: "NS Errors", value: ns.error, color: tokens.semantic.dangerText },
-    { label: "In progress", value: lifecycle.inProgress, color: tokens.semantic.infoText },
+    { label: "NS OK", value: ns.ok, color: tokens.semantic.success.text },
+    { label: "NS Pending", value: ns.pending, color: tokens.semantic.warning.text },
+    { label: "NS Errors", value: ns.error, color: tokens.semantic.danger.text },
+    { label: "In progress", value: lifecycle.inProgress, color: tokens.semantic.info.text },
   ];
   // Пятый пункт — только когда есть о чём говорить: «Failed at SSL: 0» это не
   // сигнал, а шум, и красный цвет он тратит впустую.
   if (failedAtSslCount > 0) {
-    details.push({ label: "Failed at SSL", value: failedAtSslCount, color: tokens.semantic.dangerText });
+    details.push({ label: "Failed at SSL", value: failedAtSslCount, color: tokens.semantic.danger.text });
   }
 
   return (
@@ -187,8 +187,8 @@ export default function DomainStatChips({
                     fontWeight: 700,
                     padding: "1px 7px",
                     borderRadius: tokens.radius.pill,
-                    background: alarming ? tokens.semantic.dangerBg : tokens.surface.page,
-                    color: alarming ? tokens.semantic.dangerText : tokens.text.secondary,
+                    background: alarming ? tokens.semantic.danger.bg : tokens.surface.page,
+                    color: alarming ? tokens.semantic.danger.text : tokens.text.secondary,
                   }}
                 >
                   {chip.count}

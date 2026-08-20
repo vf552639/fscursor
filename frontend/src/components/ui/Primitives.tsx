@@ -257,12 +257,8 @@ export function Btn({children, variant="secondary", size="md", onClick, style, d
     ghost:{background:"transparent",color:"#6b7280",border:"none"}
   };
   return <button onClick={onClick} disabled={disabled} title={title}
-    // Семейство шрифта здесь не назначается намеренно: кнопка наследует его от
-    // `index.css` (`input,select,textarea,button`), где шрифт назван ровно один
-    // раз. Раньше тут стоял хардкод `'Inter'` — шрифта, который в приложение
-    // никогда не подключали, так что кнопки и так рисовались системным; вторая
-    // копия имени семейства просто ждала момента разойтись с первой.
-    style={{display:"inline-flex",alignItems:"center",gap:6,borderRadius:8,fontWeight:500,cursor:disabled?"not-allowed":"pointer",transition:"all 0.15s",opacity:disabled?0.5:1,...sz[size],...va[variant],...style}}
+    // Семейство шрифта не назначается — его даёт `index.css`, см. канон там.
+    style={{display:"inline-flex",alignItems:"center",gap:6,borderRadius:tokens.radius.sm,fontWeight:500,cursor:disabled?"not-allowed":"pointer",transition:"all 0.15s",opacity:disabled?0.5:1,...sz[size],...va[variant],...style}}
     onMouseEnter={e=>{if(!disabled)e.currentTarget.style.filter="brightness(0.93)";}}
     onMouseLeave={e=>{e.currentTarget.style.filter="none";}}
   >{children}</button>;
