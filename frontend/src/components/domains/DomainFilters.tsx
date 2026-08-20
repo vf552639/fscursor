@@ -76,7 +76,7 @@ export default function DomainFilters({
   registrars: RegistrarAccount[];
   cfAccounts: CloudflareAccount[];
 }) {
-  return <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginBottom:16}}>
+  return <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
     {/* Поле тянется, селекты — нет: длина имени домена непредсказуема, а
         подписи «All Servers» фиксированы. Глиф `⌕` внутри поля убран по
         макету — плейсхолдер и так говорит, что это поиск, а иконка съедала

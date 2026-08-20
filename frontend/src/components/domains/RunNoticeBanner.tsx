@@ -43,7 +43,7 @@ export default function RunNoticeBanner({
   return (
     <div
       role={notice.kind === "warn" ? "alert" : "status"}
-      style={{marginBottom:12,padding:"10px 12px",borderRadius:8,fontSize:13,display:"flex",alignItems:"flex-start",gap:10,background:notice.kind === "warn" ? "#fffbeb" : "#eff4ff",color:notice.kind === "warn" ? "#92400e" : "#1e40af"}}
+      style={{padding:"10px 12px",borderRadius:8,fontSize:13,display:"flex",alignItems:"flex-start",gap:10,background:notice.kind === "warn" ? "#fffbeb" : "#eff4ff",color:notice.kind === "warn" ? "#92400e" : "#1e40af"}}
     >
       <span style={{flex:1}}>{notice.kind === "warn" ? "⚠" : "✓"} {notice.text}</span>
       <button

@@ -214,9 +214,12 @@ const cell = (name: string, testId: string) => within(rowOf(name)).getByTestId(t
 const sortBtn = (column: string) => screen.getByRole("button", { name: `Sort by ${column}` });
 const header = (column: string) => sortBtn(column).closest("th") as HTMLElement;
 
-const RED = "rgb(220, 38, 38)";
-const AMBER = "rgb(217, 119, 6)";
-const DIM = "rgb(156, 163, 175)";
+// Палитра макета: `expiryTextColor` переехал на неё вместе с редизайном
+// вкладки. Янтарный отдельно от красного — намеренное отступление от макета
+// (он сливает «истёк» и «скоро истечёт»), см. `lib/domainExpiry`.
+const RED = "rgb(185, 28, 28)";
+const AMBER = "rgb(180, 83, 9)";
+const DIM = "rgb(203, 213, 225)";
 
 describe("Domains — колонка Expires", () => {
   it("близкий срок называет и красит, просроченный — тоже", () => {
@@ -253,15 +256,29 @@ describe("Domains — колонка Expires", () => {
     expect(cell("delta.com", "expiry-cell").textContent?.trim()).toBe("—");
   });
 
-  it("срок сертификата стоит в колонке SSL — второй колонки под него нет", () => {
+  it("колонка SSL отвечает про сертификат «есть или нет», а разницу не теряет", () => {
+    // Срока сертификата в строке больше НЕТ: сроков было два, домена и
+    // сертификата, и рядом они читались как один. Разбор уехал на карточку
+    // (`DomainSslCard`, вкладка Overview) — вместе с точным `ssl_status`.
     const ssl = cell("alpha.com", "ssl-cell");
-    expect(within(ssl).getByText("SSL active")).toBeTruthy();
-    expect(within(ssl).getByText("in 40 days")).toBeTruthy();
-    // «Сертификата нет» и «срок сертификата неизвестен» — разные вещи, но обе
-    // означают, что даты перевыпуска у нас нет, и молчать об этом нельзя.
+    expect(within(ssl).getByText("Valid")).toBeTruthy();
+    expect(ssl.textContent).not.toMatch(/day/);
+
+    // «Сертификат не выпустился» и «его не заказывали» — разные вещи, и колонка
+    // сливает их в один тег намеренно (она отвечает на вопрос ко всему списку —
+    // «где сайт открывается по https»). Молча терять разницу нельзя, поэтому
+    // точный статус обязан остаться в подсказке.
     const none = cell("bravo.com", "ssl-cell");
-    expect(within(none).getByText("— No SSL")).toBeTruthy();
-    expect(within(none).getByText("—")).toBeTruthy();
+    expect(within(none).getByText("No SSL")).toBeTruthy();
+    expect(within(none).getByTitle("SSL status: none")).toBeTruthy();
+
+    const pending = cell("delta.com", "ssl-cell");
+    expect(within(pending).getByText("No SSL")).toBeTruthy();
+    expect(within(pending).getByTitle("SSL status: pending")).toBeTruthy();
+
+    const failed = cell("charlie.com", "ssl-cell");
+    expect(within(failed).getByText("No SSL")).toBeTruthy();
+    expect(within(failed).getByTitle("SSL status: error")).toBeTruthy();
   });
 });
 
@@ -440,8 +457,9 @@ describe("Domains — срез по статусам и рассинхрон ns_
     // решению, и проверять в них пункт `NS_OK` больше нечего. Половина про
     // бейдж — та, что и ловила фолбэк, — остаётся.
     const badge = within(rowOf("delta.com")).getByText("NS_OK");
-    // Синий, а не серый (`#9ca3af` фолбэка) и не зелёный: NS проставлены — это
-    // пройденная ступень, а не готовый домен.
-    expect(badge.style.color).toBe("rgb(37, 99, 235)");
+    // Синий, а не серый фолбэк и не зелёный: NS проставлены — это пройденная
+    // ступень, а не готовый домен. Хекс поехал вместе с переездом бейджа на
+    // пилюлю макета (`STATUS_PILL` → `semantic.info`), утверждение то же.
+    expect(badge.style.color).toBe("rgb(29, 78, 216)");
   });
 });

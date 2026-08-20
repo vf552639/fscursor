@@ -73,7 +73,7 @@ export default function DomainsHeader({
   onBulkAdd: () => void;
   onAddDomain: () => void;
 }) {
-  return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+  return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
     <div>
       <h1 style={{fontSize:22,fontWeight:700,color:tokens.text.ink,marginBottom:2}}>Domains</h1>
       <div style={{fontSize:13,color:tokens.text.muted}}>{total} domains total</div>

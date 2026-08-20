@@ -27,7 +27,7 @@ export default function CloudflareUnreadBanner({ accounts }: { accounts: UnreadC
   return (
     <div
       role="status"
-      style={{marginBottom:12,padding:"8px 12px",borderRadius:8,fontSize:12.5,background:"#f9fafb",color:"#6b7280",border:"1px solid #e5e7eb"}}
+      style={{padding:"8px 12px",borderRadius:8,fontSize:12.5,background:"#f9fafb",color:"#6b7280",border:"1px solid #e5e7eb"}}
     >
       Cloudflare: {accounts.length} account(s) could not be read (
       {accounts.map((a, i) => (

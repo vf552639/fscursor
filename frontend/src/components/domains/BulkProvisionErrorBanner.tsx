@@ -13,7 +13,7 @@ import React from "react";
  */
 export default function BulkProvisionErrorBanner({ message }: { message: string }) {
   return (
-    <div role="alert" style={{marginBottom:12,padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
+    <div role="alert" style={{padding:"10px 12px",background:"#fee2e2",borderRadius:8,color:"#991b1b",fontSize:13}}>
       {message}
     </div>
   );

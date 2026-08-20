@@ -101,7 +101,7 @@ export default function DomainStatChips({
   }
 
   return (
-    <div style={{ marginBottom: 16 }}>
+    <div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {/*
          * `role="group"` + `aria-pressed`, а НЕ `role="radiogroup"`/`aria-checked`.

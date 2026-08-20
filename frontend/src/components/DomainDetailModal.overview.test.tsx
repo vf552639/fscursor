@@ -225,12 +225,16 @@ describe("шапка карточки", () => {
   it("близкий срок красит, дальний — нет", () => {
     // Значение переехало в кнопку инлайн-правки, поэтому цвет спрашиваем у неё
     // — утверждение прежнее: близкий срок янтарный, дальний обычный тёмный.
+    // Хексы поехали вместе с переездом `expiryTextColor` на палитру макета — и
+    // поехали ОДНОВРЕМЕННО здесь и в строке списка, потому что источник у
+    // обоих один. Это и есть смысл модуля: срок домена в карточке и он же в
+    // списке обязаны выглядеть одинаково.
     show({ expiry_date: dateOnly(10 * DAY) });
-    expect((screen.getByText(/in 10 days/) as HTMLElement).style.color).toBe("rgb(217, 119, 6)");
+    expect((screen.getByText(/in 10 days/) as HTMLElement).style.color).toBe("rgb(180, 83, 9)");
     cleanup();
 
     show({ expiry_date: dateOnly(60 * DAY) });
-    expect((screen.getByText(/in 60 days/) as HTMLElement).style.color).toBe("rgb(55, 65, 81)");
+    expect((screen.getByText(/in 60 days/) as HTMLElement).style.color).toBe("rgb(15, 23, 42)");
   });
 
   it("непроверенный домен получает серое «Not checked», а не зелёное", () => {

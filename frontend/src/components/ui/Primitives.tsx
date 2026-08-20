@@ -400,12 +400,42 @@ type RowAction = {
   disabled?: boolean;
 };
 
-export function RowActions({ actions = [] }: { actions: RowAction[] }) {
+/**
+ * Тон ховера иконочных кнопок строки.
+ *
+ * Заведён редизайном вкладки Domains и НЕ обязателен намеренно: `RowActions`
+ * рисуют Servers, ServerDetail, Cloudflare и шапки полудюжины карточек, и
+ * перекрасить его всем сразу значило бы протащить редизайн одной вкладки на
+ * всё приложение — правку вида в местах, которых никто не смотрел. Умолчание
+ * `"blue"` — ровно сегодняшний вид, до последнего хекса.
+ *
+ * Различаются только цвета ХОВЕРА. Геометрия (28×28, радиус 6, рамка, шрифт) и
+ * покой у обоих тонов общие: кнопка обязана оставаться той же кнопкой, иначе
+ * два экрана рядом читаются как два разных продукта — а это ровно та беда, из-за
+ * которой редизайн и затевался.
+ */
+export type RowActionsTone = "blue" | "slate";
+
+/** Цвета ховера по тону: заливка, глиф и рамка — отдельно для обычного и опасного. */
+const ROW_ACTION_HOVER: Record<RowActionsTone, { normal: {bg: string; color: string; border: string}; danger: {bg: string; color: string; border: string} }> = {
+  // Как было и как останется на всех экранах, кроме списка доменов.
+  blue:  { normal: {bg:"#eff4ff",color:"#2563eb",border:"#e5e7eb"}, danger: {bg:"#fef2f2",color:"#dc2626",border:"#e5e7eb"} },
+  // Макет вкладки Domains: обычное действие ИНВЕРТИРУЕТСЯ (тёмная плашка,
+  // белый глиф), опасное краснеет целиком — включая рамку, которой синему тону
+  // трогать нечем.
+  slate: { normal: {bg:"#0f172a",color:"#fff",border:"#0f172a"},   danger: {bg:"#fee2e2",color:"#b91c1c",border:"#fecaca"} },
+};
+
+const ROW_ACTION_BORDER = "#e5e7eb";
+
+export function RowActions({ actions = [], tone = "blue" }: { actions: RowAction[]; tone?: RowActionsTone }) {
+  const hover = ROW_ACTION_HOVER[tone];
   return <div style={{display:"flex",gap:5}}>
     {actions.map((a, i) => {
       const isDanger = a.variant === "danger";
       // Как в Btn: заблокированное действие не просто инертно, оно и выглядит так.
       const isDisabled = Boolean(a.disabled);
+      const hov = isDanger ? hover.danger : hover.normal;
       return (
         <button
           key={`${a.title}-${i}`}
@@ -414,9 +444,13 @@ export function RowActions({ actions = [] }: { actions: RowAction[] }) {
           aria-label={a.title}
           onClick={a.onClick}
           disabled={isDisabled}
-          style={{width:28,height:28,border:"1px solid #e5e7eb",borderRadius:6,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:isDisabled?"not-allowed":a.onClick?"pointer":"default",opacity:isDisabled?0.5:1,fontSize:12,color:isDanger?"#dc2626":"#6b7280",transition:"all 0.15s"}}
-          onMouseEnter={e=>{if(a.onClick&&!isDisabled){e.currentTarget.style.background=isDanger?"#fef2f2":"#eff4ff";e.currentTarget.style.color=isDanger?"#dc2626":"#2563eb";}}}
-          onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color=isDanger?"#dc2626":"#6b7280";}}
+          style={{width:28,height:28,border:`1px solid ${ROW_ACTION_BORDER}`,borderRadius:6,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:isDisabled?"not-allowed":a.onClick?"pointer":"default",opacity:isDisabled?0.5:1,fontSize:12,color:isDanger?"#dc2626":"#6b7280",transition:"all 0.15s"}}
+          // Рамку возвращаем ВСЕГДА, а не только под тем тоном, который её
+          // трогает: инлайн-стиль, поставленный на `mouseenter`, живёт на узле
+          // до тех пор, пока его не снимут, и «слейтовый» тон оставил бы за
+          // собой красную рамку на кнопке, с которой курсор уже ушёл.
+          onMouseEnter={e=>{if(a.onClick&&!isDisabled){e.currentTarget.style.background=hov.bg;e.currentTarget.style.color=hov.color;e.currentTarget.style.borderColor=hov.border;}}}
+          onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.color=isDanger?"#dc2626":"#6b7280";e.currentTarget.style.borderColor=ROW_ACTION_BORDER;}}
         >
           {a.icon}
         </button>

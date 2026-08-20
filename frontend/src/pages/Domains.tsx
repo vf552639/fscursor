@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback } from "react";
 import { useMutationState } from "@tanstack/react-query";
-import { Card } from "../components/ui/Primitives";
+import { tokens } from "../lib/designTokens";
 import { useDomains, useBulkAssignServer, useBulkAssignCloudflare, useDeleteDomain, useProvisionDomain, isBulkGateClaim, PROVISION_DOMAIN_KEY, Domain, ProvisionDomainVars, ProvisionOutcome, BulkProvisionOutcome } from "../api/domains";
 import { useServers } from "../api/servers";
 import { useRegistrarAccounts } from "../api/registrars";
@@ -355,6 +355,20 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   }
 
   return <>
+    {/* Один контейнер на всё содержимое вкладки — и он же единственный
+        источник вертикального ритма.
+        `maxWidth` — потому что таблица на широком мониторе растягивается до
+        полутора тысяч пикселей, и глаз, ведомый от имени домена к его статусу,
+        теряет строку по дороге. `gap` вместо `marginBottom` у каждого блока —
+        потому что отступ, принадлежащий блоку, живёт по своим правилам в
+        каждом файле (было 20 у шапки, 16 у чипов и фильтров, 12 у баннеров), и
+        ритм складывался из того, кто в этот раз отрисовался. Отступ между
+        соседями принадлежит их родителю, а не им.
+        Горизонтальные поля даёт `<main>` в `DesktopWorkspace` (`padding: 28`) —
+        здесь их нет намеренно, чтобы не сложились дважды.
+        Модалки стоят СНАРУЖИ: они рисуются `position: fixed` поверх экрана, и
+        ни ритм, ни ширина колонки к ним отношения не имеют. */}
+    <div style={{maxWidth:1240,display:"flex",flexDirection:"column",gap:16}}>
     <DomainsHeader
       total={domains.length}
       // Весь список — включая строки, спрятанные фильтром, и это выбор.
@@ -431,7 +445,14 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       onDelete={handleBulkDelete}
       provisionPending={bulkProvisionRunning}
     />
-    <Card>
+    {/* Контейнер таблицы — местный, а не общий `Card`.
+        `Card` держит старую палитру приложения (`#e5e7eb`) и остаётся на ней
+        намеренно: его рисуют Servers, Cloudflare, Settings и полдесятка
+        карточек, и перекрасить его значило бы протащить редизайн одной вкладки
+        на всё приложение. `overflow: hidden` тут несущий, а не косметический:
+        шапка таблицы и полоса подвала залиты фоном до самого края, и без
+        обрезки они легли бы поверх скруглений углов. */}
+    <div style={{background:tokens.surface.base,border:`1px solid ${tokens.border.card}`,borderRadius:tokens.radius.lg,overflow:"hidden"}}>
       <div style={{overflowX:"auto"}}>
         {domainsData.length === 0 ? (
           <DomainsEmptyState
@@ -442,6 +463,10 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
         ) : (
         <DomainTable
           rows={order.sorted}
+          /* Всё, что есть в базе, — а не длина отфильтрованного среза: подвал
+             говорит «показано X из Y», и Y обязан быть тем числом, к которому
+             человек вернётся, сбросив фильтр. */
+          total={domains.length}
           servers={servers}
           registrars={registrars}
           cfAccounts={cfAccounts}
@@ -458,7 +483,8 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
         />
         )}
       </div>
-    </Card>
+    </div>
+    </div>
 
     {/* Зону просили — идёт полная настройка; не просили — прежняя автопривязка
         по имени. Одно вместо другого, а не одно за другим: домен с уже
