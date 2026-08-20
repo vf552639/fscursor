@@ -546,3 +546,27 @@ async def test_a_move_in_the_same_put_beats_the_values_sent_with_it():
         assert body["server_id"] == target
         # Не про машину — записалось, как и всякий обычный патч.
         assert body["nginx_override"] == "# edited in the same request"
+
+
+def test_the_rule_covers_exactly_the_columns_this_file_lists():
+    """Правило и дословный `MACHINE_COLUMNS` — одно и то же множество.
+
+    Дословный список защищает от СЖАТИЯ правила: выкинули колонку из
+    `_FORGOTTEN_ON_MOVE` — тесты выше краснеют, потому что ожидание в них не
+    ужалось следом. От РОСТА он не защищает ничем: добавят колонку в правило и
+    не добавят сюда — она начнёт гаснуть молча, и ни один тест этого не увидит.
+    Приём односторонний, и вторую сторону закрывает этот тест.
+
+    Поэтому здесь — и только здесь — константа импортируется: сравнение
+    литерального кортежа с настоящим правилом краснеет в ОБЕ стороны, а тесты
+    выше константу по-прежнему не видят.
+
+    Заодно проверяется, что правило гасит колонки именно в NULL: значение,
+    отличное от `None`, означало бы, что кто-то приписал переезду запись
+    состояния, а не забывание.
+    """
+    from app.services.domain_service import _FORGOTTEN_ON_MOVE
+
+    assert len(MACHINE_COLUMNS) == len(set(MACHINE_COLUMNS)), "дубль в списке теста"
+    assert set(_FORGOTTEN_ON_MOVE) == set(MACHINE_COLUMNS)
+    assert all(v is None for v in _FORGOTTEN_ON_MOVE.values())
