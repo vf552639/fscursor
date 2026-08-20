@@ -30,7 +30,7 @@ const SECONDARY_BTN: React.CSSProperties = {
 
 const PRIMARY_BTN: React.CSSProperties = {
   background: tokens.text.ink,
-  color: "#fff",
+  color: tokens.surface.base,
   border: "1px solid transparent",
   borderRadius: tokens.radius.md,
   fontSize: 13,

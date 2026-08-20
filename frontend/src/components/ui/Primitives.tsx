@@ -463,7 +463,7 @@ export function RowActions({ actions = [], tone = "default" }: { actions: RowAct
           aria-label={a.title}
           onClick={a.onClick}
           disabled={isDisabled}
-          style={{width:28,height:28,border:`1px solid ${ROW_ACTION_BORDER}`,borderRadius:6,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:isDisabled?"not-allowed":a.onClick?"pointer":"default",opacity:isDisabled?0.5:1,fontSize:12,color:isDanger?"#dc2626":"#6b7280",transition:"all 0.15s"}}
+          style={{width:28,height:28,border:`1px solid ${ROW_ACTION_BORDER}`,borderRadius:tokens.radius.xs,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:isDisabled?"not-allowed":a.onClick?"pointer":"default",opacity:isDisabled?0.5:1,fontSize:12,color:isDanger?"#dc2626":"#6b7280",transition:"all 0.15s"}}
           // Рамку возвращаем ВСЕГДА, а не только под тем тоном, который её
           // трогает: инлайн-стиль, поставленный на `mouseenter`, живёт на узле
           // до тех пор, пока его не снимут, и «слейтовый» тон оставил бы за

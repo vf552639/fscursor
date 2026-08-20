@@ -5,6 +5,8 @@ import { render, screen, cleanup, within, fireEvent } from "@testing-library/rea
 import { RegistrarAccount } from "../../api/registrars";
 import { Server } from "../../api/servers";
 import { setTauri } from "../../test/secretBlobKit";
+import { tokens } from "../../lib/designTokens";
+import { hexToRgb } from "../../test/colors";
 import DomainTable from "./DomainTable";
 import { DomainUI } from "./types";
 
@@ -241,5 +243,87 @@ describe("DomainRow — состав колонки действий", () => {
   it("в вебе набор тот же — разницы между ветками у строки нет вовсе", () => {
     renderTable();
     expect(actionNames("alpha.com")).toEqual(["Open domain settings", "Delete domain"]);
+  });
+});
+
+describe("DomainRow — тег сертификата не теряет краёв", () => {
+  /**
+   * Про что тест на самом деле: находка прошлого ревью, у которой не было ни
+   * одного ассерта, — рамка пилюли «No SSL».
+   *
+   * Дефект не в цвете, а в СОВПАДЕНИИ двух цветов: заливка нейтральной пилюли
+   * (`surface.page`) равна разлиновке строк (`border.hairline` объявлен ей
+   * равным намеренно), поэтому без рамки у пилюли не было краёв ПО
+   * ПОСТРОЕНИЮ — она читалась пятном на строке, а не тегом. Заметить это можно
+   * только глазами и только на настоящем списке; в diff'е снятая рамка
+   * выглядит уборкой лишнего.
+   *
+   * Поэтому утверждение двойное: рамка есть И она отличается от заливки. Одной
+   * первой половины мало — `border: 1px solid <цвет заливки>` формально рамка,
+   * а на экране её нет.
+   */
+  const sslPill = (name: string) =>
+    within(rowOf(name)).getByTitle(/^SSL status: /) as HTMLElement;
+
+  it("«No SSL» очерчен, и рамка не сливается с собственной заливкой", () => {
+    renderTable();
+    const pill = sslPill("bravo.com");
+    expect(pill.textContent).toBe("No SSL");
+    expect(pill.style.background).toBe(hexToRgb(tokens.surface.page));
+    expect(pill.style.borderStyle).toBe("solid");
+    expect(pill.style.borderColor).toBe(hexToRgb(tokens.border.light));
+    expect(pill.style.borderColor).not.toBe(pill.style.background);
+  });
+
+  it("и та же заливка правда равна разлиновке строк — ради чего рамка и нужна", () => {
+    // Опорная точка находки, а не украшение: сойдись эти два токена в разные
+    // значения, тест выше охранял бы уже не ту причину, о которой написан.
+    expect(tokens.surface.page).toBe(tokens.border.hairline);
+  });
+});
+
+describe("RowActions — ховер не оставляет за собой рамки", () => {
+  /**
+   * Про что тест на самом деле: вторая находка прошлого ревью без ассертов.
+   *
+   * Инлайн-стиль, поставленный на `mouseenter`, живёт на узле до тех пор, пока
+   * его не снимут явно. Тон `inverted` красит на ховере ещё и рамку (опасное
+   * действие краснеет целиком), а `mouseleave`, возвращавший только фон и цвет
+   * глифа, оставлял красную рамку на кнопке, с которой курсор давно ушёл, — то
+   * есть строка помнила бы, над каким «✕» посетитель однажды пронёс мышь.
+   *
+   * Проверяется ЦИКЛ, а не конечное состояние: рамка, никогда не менявшаяся,
+   * прошла бы проверку «после ухода она обычная» с тем же успехом.
+   */
+  const deleteBtn = (name: string) =>
+    within(rowOf(name)).getByRole("button", { name: "Delete domain" });
+
+  it("рамка краснеет под курсором и возвращается, когда он ушёл", () => {
+    renderTable();
+    const btn = deleteBtn("alpha.com");
+    const resting = btn.style.borderColor;
+    expect(resting).toBeTruthy();
+
+    fireEvent.mouseEnter(btn);
+    expect(btn.style.borderColor).toBe(hexToRgb(tokens.semantic.danger.border));
+    expect(btn.style.borderColor).not.toBe(resting);
+
+    fireEvent.mouseLeave(btn);
+    expect(btn.style.borderColor).toBe(resting);
+  });
+
+  it("обычное действие уходит с ховера тем же путём", () => {
+    // Второй тон той же карты: `inverted` красит рамку и у обычной кнопки
+    // (тёмная плашка — тёмная рамка), так что забыть её вернуть можно ровно
+    // так же.
+    renderTable();
+    const btn = within(rowOf("alpha.com")).getByRole("button", { name: "Open domain settings" });
+    const resting = btn.style.borderColor;
+
+    fireEvent.mouseEnter(btn);
+    expect(btn.style.borderColor).not.toBe(resting);
+
+    fireEvent.mouseLeave(btn);
+    expect(btn.style.borderColor).toBe(resting);
   });
 });

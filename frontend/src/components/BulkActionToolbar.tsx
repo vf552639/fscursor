@@ -10,6 +10,19 @@ function idsQuery(ids: number[]): string {
   return ids.length ? `?ids=${ids.map((n) => String(n)).join(",")}` : "";
 }
 
+/**
+ * Полоса действий над выделенными строками: появляется вместе с выделением и
+ * исчезает вместе с ним.
+ *
+ * Своего нижнего отступа компонент НЕ несёт, и это контракт, а не упущение:
+ * расстояние до соседа держит колонка страницы (`gap` у контейнера в
+ * `pages/Domains`). Здесь `marginBottom: 12` пережил переход на `gap` и давал
+ * под выделением 28px там, где у шапки, чипов, фильтров и трёх баннеров ровно
+ * 16 — то есть ритм страницы менялся от того, выделена строка или нет. Вернуть
+ * отступ сюда — значит отдать блоку расстояние, которое принадлежит промежутку:
+ * оно останется висеть, когда блок окажется последним или единственным на
+ * экране.
+ */
 export default function BulkActionToolbar({
   selectedCount,
   selectedDomainIds = [],
@@ -85,7 +98,6 @@ export default function BulkActionToolbar({
         border: `1px solid ${tokens.border.card}`,
         borderRadius: 10,
         padding: "10px 16px",
-        marginBottom: 12,
         display: "flex",
         alignItems: "center",
         gap: 10,

@@ -158,7 +158,7 @@ export default function DomainStatChips({
                   cursor: "pointer",
                   fontFamily: "inherit",
                   background: isActive ? tokens.text.ink : tokens.surface.base,
-                  color: isActive ? "#fff" : tokens.text.secondary,
+                  color: isActive ? tokens.surface.base : tokens.text.secondary,
                   // Рамка есть и у активного — прозрачная: без неё чип при
                   // выборе терял бы два пикселя ширины и ряд сдвигался бы.
                   border: `1px solid ${isActive ? "transparent" : tokens.border.light}`,
