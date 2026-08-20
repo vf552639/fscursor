@@ -452,6 +452,10 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
       open={showBulk}
       onClose={()=>setSB(false)}
       registrars={registrars}
+      servers={servers}
+      /* Строки API, а не `domains`: нагрузку серверов считает `optionsByLoad`, и
+         тот же список тем же счётом уходит в мастер полной настройки ниже. */
+      domains={domainsData}
       onCreated={(created: Domain[])=>{ void cfBind.run(created, "auto"); }}
     />
 
