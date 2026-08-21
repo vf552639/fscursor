@@ -98,6 +98,16 @@ const rowOf = (name: string) => {
   return row;
 };
 
+/**
+ * Ячейка имени домена — вторая в строке (нулевая — чекбокс).
+ *
+ * Под именем в ней же стоят метки (ступень настройки, сервер, регистратор) и
+ * текст провалившегося прогона, так что «в этой ячейке» — не придирка к
+ * вёрстке, а само утверждение: сигнал переехал в колонку имени, а не остался в
+ * строке вообще.
+ */
+const nameCell = (name: string) => within(rowOf(name)).getAllByRole("cell")[1];
+
 afterEach(cleanup);
 
 describe("DomainTable — набор колонок", () => {
@@ -155,9 +165,6 @@ describe("DomainRow — ступень настройки называется �
    * другой. Без второй («у исключения бейдж есть») уборка унесла бы с собой
    * единственное место в списке, где видно, что домен не доехал.
    */
-  /** Ячейка имени домена — вторая в строке (нулевая — чекбокс). */
-  const nameCell = (name: string) => within(rowOf(name)).getAllByRole("cell")[1];
-
   it("у `new` и `active` ступени в строке нет вовсе", () => {
     renderTable({ rows: [domain(1, "fresh.com", { status: "new" }), domain(2, "live.com", { status: "active" })] });
     // Не «нет в ячейке имени», а нет НИГДЕ в строке: колонки со ступенью в
@@ -208,14 +215,22 @@ describe("DomainRow — текст провалившегося прогона",
 
   it("стоит текстом под именем домена, а полный — ещё и в подсказке", () => {
     renderTable({ rows: [domain(1, "broken.com", { status: "failed", last_provision_error: ERR })] });
-    const cell = within(rowOf("broken.com")).getAllByRole("cell")[1];
-    const err = within(cell).getByTestId("provision-error");
+    const err = within(nameCell("broken.com")).getByTestId("provision-error");
     expect(err.textContent).toBe(ERR);
     expect(err.getAttribute("title")).toBe(ERR);
     // Видимая часть — ДВЕ строки, а не одна обрезанная по первому слову:
     // в узкой колонке статуса от такой строки оставалось «provision failed…»,
     // то есть всё объяснение уезжало в подсказку. `nowrap` — ровно тот дефект,
     // и вернуть его молча нельзя.
+    //
+    // Проверяются ВСЕ ТРИ свойства связки, а не одно: обрезка на две строки
+    // работает только вместе (`-webkit-box` + `box-orient: vertical` +
+    // `line-clamp`), и, сторожа один `line-clamp`, тест зеленел бы у
+    // реализации, где текст не обрезается вовсе — а многословный ответ сервера
+    // растягивал бы строку списка на пол-экрана. Молчаливая поломка ровно того
+    // класса, ради которого написана преамбула этого файла.
+    expect(err.style.display).toBe("-webkit-box");
+    expect(err.style.getPropertyValue("-webkit-box-orient")).toBe("vertical");
     expect(err.style.getPropertyValue("-webkit-line-clamp")).toBe("2");
     expect(err.style.whiteSpace).not.toBe("nowrap");
   });
@@ -232,6 +247,11 @@ describe("DomainRow — текст провалившегося прогона",
     const pill = within(rowOf("broken.com")).getByText(domainStatusLabel("failed"));
     expect(pill.getAttribute("title")).toBe(domainStatusHint("failed"));
     expect(pill.getAttribute("title")).not.toBe(ERR);
+    // И о том, что подсказка есть, курсор заявляет — как у соседних меток
+    // (`RowBadge`): пилюля показывает одно слово из чужого словаря, и догадаться
+    // иначе не о чем. Без этого о наличии объяснения сообщали бы как раз те две
+    // метки, чьи объяснения менее ценны.
+    expect(pill.style.cursor).toBe("help");
   });
 
   it("чистому домену блока не достаётся вовсе", () => {
@@ -255,7 +275,7 @@ describe("DomainRow — текст провалившегося прогона",
     // прислал сервер. Разойдись мы с ним завтра — строка читалась бы как
     // поломка страницы, а не домена, и это нельзя оставлять на «не случится».
     renderTable({ rows: [domain(1, "stale.com", { status: "active", last_provision_error: ERR })] });
-    const cell = within(rowOf("stale.com")).getAllByRole("cell")[1];
+    const cell = nameCell("stale.com");
     expect(within(cell).getByText(domainStatusLabel("active"))).toBeTruthy();
     expect(within(cell).getByTestId("provision-error")).toBeTruthy();
   });

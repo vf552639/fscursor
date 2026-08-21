@@ -47,12 +47,15 @@ function PlainTh({children}: {children?: React.ReactNode}){
  * фолбэком на ключ, колонка, для которой его забыли, объявляла бы себя «Sort by
  * created».
  */
-function SortableTh({k, label, title, sort, onSort}: {k: SortKey, label: string, title?: string, sort: Sort, onSort: (k: SortKey) => void}){
+function SortableTh({k, label, sort, onSort}: {k: SortKey, label: string, sort: Sort, onSort: (k: SortKey) => void}){
   const active = sort.key === k;
-  // `title` — на ячейке, а не на кнопке: подсказка объясняет КОЛОНКУ, а не
-  // действие «отсортировать по ней», и, повешенная на кнопку, она перебивала бы
-  // собственное `aria-label` этой кнопки.
-  return <th style={TH_STYLE} title={title} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+  // Подсказки у заголовка больше нет: несла её одна колонка — ушедшая «Setup»,
+  // которой требовалось оговорить, что она про ступень настройки, а не про
+  // здоровье сайта. Понадобится снова — вешать её надо на ЯЧЕЙКУ, а не на
+  // кнопку внутри: подсказка объясняла бы колонку, а не действие
+  // «отсортировать по ней», и с кнопки перебивала бы собственное `aria-label`
+  // этой кнопки.
+  return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
     <button type="button" onClick={()=>onSort(k)} aria-label={`Sort by ${label}`} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?tokens.text.ink:"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
       {label}
       <span aria-hidden="true" style={{color:active?tokens.text.ink:tokens.text.disabled}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
@@ -61,13 +64,17 @@ function SortableTh({k, label, title, sort, onSort}: {k: SortKey, label: string,
 }
 
 /**
- * Колонка шапки: подпись, ключ сортировки (если по ней есть порядок) и
- * подсказка (если подпись сама себя не объясняет).
+ * Колонка шапки: подпись и ключ сортировки, если по ней есть порядок.
+ *
+ * Поля `title` тут больше нет: подсказку несла ровно одна колонка — «Setup», —
+ * и с её уходом опциональное поле осталось без единого потребителя. Пустой
+ * проп не инертен: он позволяет завести подсказку одной строкой, не прочитав
+ * довода о том, где ей место (см. `SortableTh`), — а `tsc` теперь про этот
+ * довод спросит.
  */
 interface Column {
   label: string;
   key?: SortKey;
-  title?: string;
 }
 
 /**
@@ -204,7 +211,7 @@ export default function DomainTable({
     <colgroup>{COL_WIDTHS.map((w,i)=><col key={i} style={{width:w}}/>)}</colgroup>
     <thead><tr><th style={TH_STYLE}><input type="checkbox" checked={selectedIds.size===rows.length&&rows.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
       {COLUMNS.map((c)=>c.key
-        ? <SortableTh key={c.label} k={c.key} label={c.label} title={c.title} sort={sort} onSort={onSort}/>
+        ? <SortableTh key={c.label} k={c.key} label={c.label} sort={sort} onSort={onSort}/>
         : <PlainTh key={c.label}>{c.label}</PlainTh>)}
     </tr></thead>
     <tbody>
