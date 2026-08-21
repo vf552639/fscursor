@@ -8,6 +8,7 @@ import { CF_HINT_TITLE } from "../../lib/cfZoneMatch";
 import { SemanticTone, STATUS_PILL, tokens } from "../../lib/designTokens";
 import { NO_VALUE, expiryState, expiryTextColor, expiryTextWeight, formatExpiry, formatExpiryDate } from "../../lib/domainExpiry";
 import { SSL_BADGE, factsFreshness, sslState } from "../../lib/domainFacts";
+import { domainStatusIsRoutine } from "../../lib/domainStatus";
 import DomainStatusBadge from "./DomainStatusBadge";
 import { DomainUI, RowCfHint } from "./types";
 
@@ -196,6 +197,13 @@ function DomainRow({
   const ssl = sslState(d.ssl, d.facts_at, now);
   const sslBadge = SSL_BADGE[ssl];
   const sslTone = STATUS_PILL[sslBadge.variant];
+  // Ступень настройки называется только тогда, когда она исключение: рутина
+  // (`new`, `active`) молчит, всё остальное — включая статус, которого фронт не
+  // знает, — получает бейдж. Непогашенный текст провалившегося прогона считается
+  // тем же исключением: гасит его отдельный запрос с десктопа, и если тот не
+  // дошёл, красная строка под именем осталась бы без единого слова о том, чем
+  // домен является.
+  const showStatus = !domainStatusIsRoutine(d.status) || !!d.last_provision_error;
   return <tr
     onClick={() => onOpenDetail(d.id)}
     style={{ cursor: "pointer", ...(focused ? { background: tokens.surface.rowFocus } : null) }}
@@ -223,13 +231,64 @@ function DomainRow({
           противоречит: метка не утверждает здоровья вовсе — она называет
           машину, на которой домен живёт. Лестница `lib/serverStatus`
           продолжает отвечать за здоровье там, где про него и спрашивают: на
-          Servers, ServerDetail и Dashboard. */}
-      {(srv || reg?.provider) ? (
+          Servers, ServerDetail и Dashboard.
+
+          Ступень настройки стоит ЗДЕСЬ ЖЕ и первой. Своей колонки у неё больше
+          нет: она называла ступень у каждого домена, а список из этого состоит
+          на девять десятых из «Not set up» и «Deployed» — того же, что чипы над
+          таблицей говорят одной строкой со счётчиками. Осталось редкое:
+          застрявший, упавший или незнакомый статус. Первой — потому что это
+          единственная метка ряда, требующая действия; сервер и регистратор
+          отвечают на вопрос «где домен живёт», а он спокойный.
+
+          Бейдж — `DomainStatusBadge`, а не `RowBadge` соседей, и форма у него
+          намеренно другая (полная капля против скруглённого прямоугольника, см.
+          комментарий у `ROW_PILL`). В ряду из трёх меток это работает на нас:
+          исключение отличается от справки не только цветом, который у
+          незнакомого статуса как раз серый. Свой `RowBadge` пришлось бы кормить
+          подписью, цветом и подсказкой из лестницы вручную — то есть завести
+          вторую точку показа статуса рядом с готовой. */}
+      {(showStatus || srv || reg?.provider) ? (
         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4,maxWidth:"100%"}}>
+          {showStatus ? <DomainStatusBadge status={d.status} title={d.last_provision_error || undefined} /> : null}
           {srv ? <RowBadge tone={tokens.semantic.server} title="Server this domain is hosted on">{srv.name}</RowBadge> : null}
           {reg?.provider ? (
             <RowBadge tone={tokens.semantic.registrar} title="Domain provider (registrar) this domain was purchased from">{reg.provider}</RowBadge>
           ) : null}
+        </div>
+      ) : null}
+      {/* Текст ошибки — строкой, а не только подсказкой бейджа: подсказка
+          невидима, пока в неё не попали мышью, а искать провалившийся домен
+          глазами по списку в двести строк надо без наведения. `title` здесь —
+          ВТОРОЙ канал, и первый не должен сводиться к одному обрезанному слову:
+          поэтому не `nowrap` с эллипсисом, как было в узкой колонке статуса, а
+          две строки под именем домена — в них помещается и шаг, на котором
+          прогон встал, и начало причины.
+
+          Две, а не сколько получится: строки списка равной высоты, и один
+          многословный ответ сервера иначе растянул бы свою на пол-экрана.
+          Полный текст остаётся в `title` и в карточке домена.
+
+          `overflowWrap: anywhere` — потому что в ошибках приезжают пути и
+          команды без пробелов: без него одно длинное слово вылезало бы за край
+          ячейки, а колонка фиксированной ширины его не подвинет. */}
+      {d.last_provision_error ? (
+        <div
+          data-testid="provision-error"
+          title={d.last_provision_error}
+          style={{
+            marginTop:4,
+            fontSize:11,
+            lineHeight:1.35,
+            color:tokens.semantic.danger.text,
+            display:"-webkit-box",
+            WebkitBoxOrient:"vertical",
+            WebkitLineClamp:2,
+            overflow:"hidden",
+            overflowWrap:"anywhere",
+          }}
+        >
+          {d.last_provision_error}
         </div>
       ) : null}
     </td>
@@ -248,24 +307,6 @@ function DomainRow({
       {cf ? cf.name : cfHintAccount
         ? <span title={CF_HINT_TITLE} style={{fontStyle:"italic"}}>{cfHintAccount.name}</span>
         : NO_VALUE}
-    </td>
-    <td style={CELL}>
-      <DomainStatusBadge status={d.status} title={d.last_provision_error || undefined} />
-      {/*
-        Текст ошибки — строкой, а не только тултипом пилюли: тултип
-        невидим, пока в него не попали мышью, а искать провалившийся
-        домен глазами по списку в двести строк надо без наведения.
-        Полный текст остаётся в `title` и в карточке домена.
-      */}
-      {d.last_provision_error ? (
-        <div
-          data-testid="provision-error"
-          title={d.last_provision_error}
-          style={{marginTop:4,fontSize:11,color:tokens.semantic.danger.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}
-        >
-          {d.last_provision_error}
-        </div>
-      ) : null}
     </td>
     {/* Тег сертификата — состояние с СЕРВЕРА, всеми шестью словами лестницы, а
         не «есть/нет». Двух состояний было мало не по бедности показа: под «No

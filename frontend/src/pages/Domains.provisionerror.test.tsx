@@ -99,6 +99,11 @@ describe("упавший provision виден в списке доменов", (
     // Текст, а не `title`: тултип невидим, пока в него не попали мышью.
     expect(within(failed).getByText(PROVISION_ERROR)).toBeTruthy();
     expect(within(failed).getByText("Failed")).toBeTruthy();
+    // И то, и другое — в ячейке ИМЕНИ домена: своей колонки у ступени настройки
+    // больше нет, а сигнал остался под именем, рядом с сервером и регистратором.
+    const nameCell = within(failed).getAllByRole("cell")[1];
+    expect(within(nameCell).getByText(PROVISION_ERROR)).toBeTruthy();
+    expect(within(nameCell).getByText("Failed")).toBeTruthy();
 
     // Вторая половина утверждения: у домена без ошибки блока нет вовсе.
     // Считается именно число блоков: проверка «нет текста в чистой строке»
@@ -107,6 +112,10 @@ describe("упавший provision виден в списке доменов", (
     const ok = (await screen.findByText("fine.com")).closest("tr") as HTMLElement;
     expect(within(ok).queryByTestId("provision-error")).toBeNull();
     expect(screen.getAllByTestId("provision-error")).toHaveLength(1);
+    // И ступень у доехавшего домена не называется вовсе: чипы над таблицей уже
+    // сказали, сколько таких, и повторять это в каждой строке значило бы
+    // вернуть колонку под другим именем.
+    expect(within(ok).queryByText("Deployed")).toBeNull();
   });
 
   // Набор подобран так, что старый и новый предикаты дают РАЗНЫЕ числа (2 и 1):

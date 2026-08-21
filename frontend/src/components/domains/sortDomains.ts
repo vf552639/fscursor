@@ -1,10 +1,17 @@
 import { expiryTs } from "../../lib/domainExpiry";
 import { sslState, sslStateRank } from "../../lib/domainFacts";
-import { domainStatusRank } from "../../lib/domainStatus";
 import { DomainUI } from "./types";
 
-/** По какой колонке сортируем. Только те, у чьих значений есть порядок. */
-export type SortKey = "domain" | "status" | "expiry_date" | "ssl" | "created";
+/**
+ * По какой колонке сортируем. Только те, у чьих значений есть порядок.
+ *
+ * Ключа `status` здесь больше нет: колонка со ступенью настройки ушла из
+ * таблицы, а ключ сортировки без заголовка нажать нечем. Порядок сортировки
+ * пользователь держит в памяти страницы (`useDomainSort`), в адрес он не
+ * пишется и нигде не сохраняется, так что ссылку или сохранённое состояние это
+ * не ломает.
+ */
+export type SortKey = "domain" | "expiry_date" | "ssl" | "created";
 
 export interface Sort {
   key: SortKey;
@@ -30,7 +37,7 @@ export const DEFAULT_SORT: Sort = { key: "domain", dir: "asc" };
  * всегда в конец, при ЛЮБОМ направлении.
  *
  * Ветки `null` стоят ДО умножения на направление — в этом всё правило и есть.
- * Одна функция на все ключи (даты, статус домена, статус сертификата) именно
+ * Одна функция на все ключи (обе даты и состояние сертификата) именно
  * потому, что незнание у них одно и то же: перевернув сортировку, пользователь
  * ищет либо самый горящий домен, либо самый дальний, и в обоих случаях список
  * начинался бы с тех, про кого ответа нет вовсе.
@@ -75,8 +82,8 @@ function dateOf(d: DomainUI, key: DateSortKey): string | null | undefined {
  * (`Domains.expiry.test.tsx`) — то есть тем самым порядком, который видит
  * пользователь, а не возвратом функции.
  *
- * Незнание (даты нет, статус незнакомый) уходит в конец при любом направлении —
- * см. `compareUnknownLast`.
+ * Незнание (даты нет, снимка сертификата нет) уходит в конец при любом
+ * направлении — см. `compareUnknownLast`.
  *
  * Колонка SSL сортируется ПО СОСТОЯНИЮ сертификата на сервере, а срок — лишь
  * второй ключ. Оба ключа читаются из СНИМКА (`ssl` + `facts_at`), тем же
@@ -100,8 +107,6 @@ export function sortDomains(rows: DomainUI[], sort: Sort, now: number = Date.now
     let primary: number;
     if (sort.key === "domain") {
       primary = a.domain.localeCompare(b.domain) * mul;
-    } else if (sort.key === "status") {
-      primary = compareUnknownLast(domainStatusRank(a.status), domainStatusRank(b.status), mul);
     } else if (sort.key === "ssl") {
       primary =
         compareUnknownLast(sslStateRank(sslState(a.ssl, a.facts_at, now)), sslStateRank(sslState(b.ssl, b.facts_at, now)), mul) ||
