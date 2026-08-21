@@ -99,7 +99,7 @@ export function AddDomainModal({onClose, servers, registrars, cfAccounts, domain
         чужих текстов на вкладке (`clip`). */}
     {create.isError ? (
       <div role="alert" style={{marginTop:14,padding:"8px 10px",borderRadius:8,fontSize:12.5,background:"#fee2e2",color:"#991b1b"}}>
-        Не удалось создать домен: {clip(errorText(create.error))}
+        Could not create the domain: {clip(errorText(create.error))}
       </div>
     ) : null}
     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
@@ -108,7 +108,7 @@ export function AddDomainModal({onClose, servers, registrars, cfAccounts, domain
           случае, даже когда шаги невозможны (нет NS-API у регистратора): домен и
           зона создаются, невозможный шаг просто пропускается и называется в
           отчёте. */}
-      <Btn variant="primary" onClick={handleAdd} disabled={create.isPending||!name} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{create.isPending ? "Adding..." : (plan?.createZone ? "Создать и настроить" : "Add Domain")}</Btn>
+      <Btn variant="primary" onClick={handleAdd} disabled={create.isPending||!name} style={{width:"100%",justifyContent:"center",padding:"11px 0"}}>{create.isPending ? "Adding..." : (plan?.createZone ? "Create and set up" : "Add Domain")}</Btn>
       <Btn variant="secondary" onClick={onClose} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
     </div>
   </Modal>;

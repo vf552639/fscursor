@@ -127,7 +127,7 @@ describe("свежесть снимка — в шапке карточки", () 
     // Два места, снимающих один и тот же снимок, — это два ответа на вопрос
     // «когда мы читали сервер» и гонка между ними.
     show(fresh);
-    expect(screen.queryByText("Проверить на сервере")).toBeNull();
+    expect(screen.queryByText("Check on server")).toBeNull();
   });
 });
 
@@ -179,13 +179,13 @@ describe("состояние сертификата названо словом"
 describe("расхождение нашей записи с фактом", () => {
   it("совпало — строки «при развёртывании» нет вовсе", () => {
     show({ ...fresh, ssl_issuer: "Let's Encrypt" });
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    expect(screen.queryByText(/at provision/)).toBeNull();
   });
 
   it("издатель разошёлся: значением остаётся факт, наша запись — серой строкой", () => {
     show({ ...fresh, ssl_issuer: "ZeroSSL" });
     expect(screen.getByText("Let's Encrypt")).toBeTruthy();
-    expect(screen.getByText("при развёртывании: ZeroSSL")).toBeTruthy();
+    expect(screen.getByText("at provision: ZeroSSL")).toBeTruthy();
   });
 
   it("срок сертификата сверяется по дате, а наша запись печатается по-человечески", () => {
@@ -206,14 +206,14 @@ describe("расхождение нашей записи с фактом", () =>
     // Тот же день, другое время — не расхождение (наша запись сделана в момент
     // выпуска, сервер отдаёт то, что написано в сертификате).
     show({ ...base, ssl_expires_at: at(60, 18).toISOString() });
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    expect(screen.queryByText(/at provision/)).toBeNull();
 
     cleanup();
     // Другой день — расхождение, и в строке стоит ДАТА, а не сырой ISO: иначе
     // она читалась бы расхождением с форматированным значением над ней.
     const other = at(62, 9);
     show({ ...base, ssl_expires_at: other.toISOString() });
-    const note = screen.getByText(/при развёртывании/).textContent ?? "";
+    const note = screen.getByText(/at provision/).textContent ?? "";
     expect(note).toContain(other.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }));
     expect(note).not.toContain("T");
   });

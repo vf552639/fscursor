@@ -36,10 +36,11 @@ export default function AssignServerDialog({
 }) {
   return (
     <Modal title="Assign Server" onClose={onClose} width={400}>
-      {/* Склонение — общим `domainWord`, а не «доменов» шаблоном: «для 1
-          доменов» здесь и стояло, пока функция лежала в трёх строках от этого
-          файла (`lib/format`), но никто её не позвал. */}
-      <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Назначить сервер для {selectedCount} {domainWord(selectedCount)}:</p>
+      {/* Число и слово — общим `domainWord`, а не шаблоном «domains»: «1
+          domains» — опечатка, живущая вечно. Русское склонение из функции ушло
+          вместе с переводом вкладки, но сама она осталась: единственное число
+          по-английски тоже отдельное слово, и мест, где его надо назвать, три. */}
+      <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Assign a server to {selectedCount} {domainWord(selectedCount)}:</p>
       <Sel value={serverId} onChange={(e: ChangeEvent<HTMLSelectElement>) => onServerChange(e.target.value)} style={{width:"100%"}}>
         <option value="">— Select Server —</option>
         {servers.map((s: Server) => <option key={s.id} value={s.id}>{s.name}</option>)}

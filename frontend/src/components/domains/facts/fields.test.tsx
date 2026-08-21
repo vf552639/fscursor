@@ -24,7 +24,7 @@ import { FactRow, HasSnapshot, RecordedNoteInLegend } from "./fields";
  */
 
 const RECORDED = { kind: "recorded-only", recorded: "8.2" } as const;
-const NOTE = "из provision, на сервере не проверено";
+const NOTE = "from provision, not verified on the server";
 
 function show(ui: React.ReactNode) {
   render(<>{ui}</>);

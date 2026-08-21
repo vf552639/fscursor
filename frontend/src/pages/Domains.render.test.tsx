@@ -157,7 +157,7 @@ describe("Domains — цена одного действия в рендерах
     await screen.findByRole("table");
     // Ждём именно подсказок: до прихода зон карта матчей пуста, и тест мерил бы
     // мемоизацию пропса, которого ещё нет.
-    expect((await screen.findAllByTitle(/в базе не сохранено/)).length).toBe(ROWS);
+    expect((await screen.findAllByTitle(/not saved in the database/)).length).toBe(ROWS);
 
     const before = rowRenders();
     fireEvent.change(searchBox(), { target: { value: "com" } });

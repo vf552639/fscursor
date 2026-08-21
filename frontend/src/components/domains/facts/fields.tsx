@@ -103,12 +103,12 @@ const DRAW: Record<FieldSource["kind"], (fact: React.ReactNode, recorded: React.
   agree: (fact) => ({ value: fact, note: null }),
   // Факт есть, наша запись другая — значением остаётся факт (он измерен), а
   // наша запись уходит вниз серой строкой.
-  drift: (fact, recorded) => ({ value: fact, note: <Note>при развёртывании: {recorded}</Note> }),
+  drift: (fact, recorded) => ({ value: fact, note: <Note>at provision: {recorded}</Note> }),
   // Факта нет — значением становится наша запись, но приглушённо и с подписью:
   // выдать её за прочитанное с сервера нельзя.
   "recorded-only": (_fact, recorded) => ({
     value: <span style={{ color: MUTED }}>{recorded}</span>,
-    note: <Note>из provision, на сервере не проверено</Note>,
+    note: <Note>from provision, not verified on the server</Note>,
   }),
 };
 

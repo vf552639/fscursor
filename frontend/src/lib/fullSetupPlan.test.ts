@@ -25,7 +25,7 @@ describe("zoneToggleRule", () => {
   it("в вебе мёртв: зону заводит команда десктопа", () => {
     const rule = zoneToggleRule(false, "7");
     expect(rule.enabled).toBe(false);
-    expect(rule.hint).toContain("десктоп");
+    expect(rule.hint).toContain("desktop app");
   });
 
   it("без аккаунта Cloudflare мёртв: зону негде заводить", () => {
@@ -35,7 +35,7 @@ describe("zoneToggleRule", () => {
   it("живой тумблер сразу отвечает на вопрос про дубль зоны", () => {
     const rule = zoneToggleRule(true, "7");
     expect(rule.enabled).toBe(true);
-    expect(rule.hint).toContain("вторая не создаётся");
+    expect(rule.hint).toContain("no second one is created");
   });
 });
 
@@ -49,7 +49,7 @@ describe("nsToggleRule", () => {
   it("провайдер без NS-API — мёртв, и сказано, что делать руками", () => {
     const rule = nsToggleRule({ ...base, registrarProvider: "godaddy" });
     expect(rule.enabled).toBe(false);
-    expect(rule.hint).toContain("вручную");
+    expect(rule.hint).toContain("manually");
   });
 
   it("регистратор не выбран — мёртв: команду отдавать некому", () => {
@@ -59,7 +59,7 @@ describe("nsToggleRule", () => {
   it("без шага зоны мёртв: NS берутся у неё, а не из воздуха", () => {
     const rule = nsToggleRule({ ...base, createZone: false });
     expect(rule.enabled).toBe(false);
-    expect(rule.hint).toContain("зоны Cloudflare");
+    expect(rule.hint).toContain("Cloudflare zone");
   });
 
   // Порядок причин повторяет `ns_plan` в десктопе: выключенный шаг зоны
@@ -67,7 +67,7 @@ describe("nsToggleRule", () => {
   // значило бы называть причиной то, что причиной не было.
   it("причина называется одна — первая по порядку", () => {
     expect(nsToggleRule({ desktop: true, createZone: false, registrarId: "", registrarProvider: null }).hint)
-      .toContain("зоны Cloudflare");
+      .toContain("Cloudflare zone");
   });
 });
 
@@ -159,12 +159,12 @@ describe("optionsByLoad", () => {
     expect(options.map((o) => o.count)).toEqual([0, 1, 2]);
   });
 
-  it("подпись называет нагрузку и склоняет счётчик", () => {
+  it("подпись называет нагрузку и различает единственное число", () => {
     const options = optionsByLoad(servers, domains, (d) => d.server_id);
     expect(options.map((o) => o.label)).toEqual([
-      "alpha — 0 доменов",
-      "gamma — 1 домен",
-      "beta — 2 домена",
+      "alpha — 0 domains",
+      "gamma — 1 domain",
+      "beta — 2 domains",
     ]);
   });
 

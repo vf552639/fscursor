@@ -258,7 +258,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     // ничего, домен уже на целевом не двигается вовсе — чем это важно, разобрано
     // у `describeServerBinding`.
     const moving = domainsData.filter((d) => sel.has(d.id) && d.server_id != null && d.server_id !== target);
-    const serverName = servers.find((s) => s.id === target)?.name ?? `сервер #${target}`;
+    const serverName = servers.find((s) => s.id === target)?.name ?? `server #${target}`;
     if (!(await confirmAction(describeServerBinding(sel.size, moving.length, serverName)))) return;
     bulkAssignServer.mutate(
       { domain_ids: Array.from(sel), server_id: target },
@@ -341,7 +341,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
     // Склонение общее с остальными счётчиками доменов (`lib/format`): «Удалить
     // 1 доменов?» — опечатка в вопросе, который человек читает перед необратимым
     // действием, и живёт она вечно, если её не запереть одной функцией.
-    if (!(await confirmAction(`Удалить ${sel.size} ${domainWord(sel.size)}?`))) return;
+    if (!(await confirmAction(`Delete ${sel.size} ${domainWord(sel.size)}?`))) return;
     Promise.all(Array.from(sel).map(id => deleteDomain.mutateAsync(id)))
       .then(() => setSel(new Set()));
   };

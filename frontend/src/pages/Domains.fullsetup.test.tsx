@@ -132,7 +132,7 @@ function renderPage(rows = [domainRow(1, "a.com", 5), domainRow(2, "b.com", 5)])
 async function openBulkDialog(container: HTMLElement) {
   fireEvent.click(container.querySelector('thead input[type="checkbox"]') as HTMLInputElement);
   fireEvent.click(screen.getByRole("button", { name: "Full setup" }));
-  await screen.findByLabelText("Cloudflare-аккаунт");
+  await screen.findByLabelText("Cloudflare account");
 }
 
 function selectValue(label: string, value: string) {
@@ -175,9 +175,9 @@ describe("Domains — массовая полная настройка", () => {
     const { container } = renderPage();
     await screen.findByText("a.com");
     await openBulkDialog(container);
-    selectValue("Хостинг (сервер)", "5");
-    selectValue("Cloudflare-аккаунт", "7");
-    fireEvent.click(screen.getByRole("button", { name: "Настроить" }));
+    selectValue("Hosting (server)", "5");
+    selectValue("Cloudflare account", "7");
+    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
 
     await waitFor(() =>
       expect(mocks.apiPost).toHaveBeenCalledWith("/domains/full-setup", {
@@ -193,7 +193,7 @@ describe("Domains — массовая полная настройка", () => {
       "2 of 2 linked, 2 zone(s) created",
     );
     // Диалог закрыт: прогон идёт минутами, а отчёт живёт баннером над таблицей.
-    expect(screen.queryByRole("button", { name: "Настроить" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
   });
 
   it("незаписанную зону поднимает в сводку, а не прячет в строку домена", async () => {
@@ -203,9 +203,9 @@ describe("Domains — массовая полная настройка", () => {
     const { container } = renderPage();
     await screen.findByText("a.com");
     await openBulkDialog(container);
-    selectValue("Хостинг (сервер)", "5");
-    selectValue("Cloudflare-аккаунт", "7");
-    fireEvent.click(screen.getByRole("button", { name: "Настроить" }));
+    selectValue("Hosting (server)", "5");
+    selectValue("Cloudflare account", "7");
+    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("1 not found");
@@ -219,9 +219,9 @@ describe("Domains — массовая полная настройка", () => {
     const { container } = renderPage([domainRow(1, "a.com", 5)]);
     await screen.findByText("a.com");
     await openBulkDialog(container);
-    selectValue("Хостинг (сервер)", "5");
-    selectValue("Cloudflare-аккаунт", "7");
-    fireEvent.click(screen.getByRole("button", { name: "Настроить" }));
+    selectValue("Hosting (server)", "5");
+    selectValue("Cloudflare account", "7");
+    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
 
     await waitFor(() => expect(mocks.invokeIfTauri).toHaveBeenCalled());
     expect(screen.getByText("1 selected")).toBeTruthy();
@@ -232,11 +232,11 @@ describe("Domains — массовая полная настройка", () => {
     await screen.findByText("a.com");
     await openBulkDialog(container);
 
-    const servers = screen.getByLabelText("Хостинг (сервер)") as HTMLSelectElement;
+    const servers = screen.getByLabelText("Hosting (server)") as HTMLSelectElement;
     expect(Array.from(servers.options).map((o) => o.textContent)).toEqual([
       "— None —",
-      "empty — 0 доменов",
-      "loaded — 2 домена",
+      "empty — 0 domains",
+      "loaded — 2 domains",
     ]);
   });
 
@@ -244,18 +244,18 @@ describe("Domains — массовая полная настройка", () => {
     const { container } = renderPage();
     await screen.findByText("a.com");
     await openBulkDialog(container);
-    selectValue("Хостинг (сервер)", "5");
-    selectValue("Cloudflare-аккаунт", "7");
+    selectValue("Hosting (server)", "5");
+    selectValue("Cloudflare account", "7");
 
-    selectValue("Регистратор", "3");
-    expect((screen.getByRole("checkbox", { name: /Прописать NS/ }) as HTMLInputElement).disabled).toBe(false);
+    selectValue("Registrar", "3");
+    expect((screen.getByRole("checkbox", { name: /Set NS/ }) as HTMLInputElement).disabled).toBe(false);
 
-    selectValue("Регистратор", "4");
-    const ns = screen.getByRole("checkbox", { name: /Прописать NS/ }) as HTMLInputElement;
+    selectValue("Registrar", "4");
+    const ns = screen.getByRole("checkbox", { name: /Set NS/ }) as HTMLInputElement;
     expect(ns.disabled).toBe(true);
     // Причина названа там же, где погас тумблер: домен и зона всё равно будут.
-    expect(screen.getByText(/нет API — пропишите NS вручную/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Настроить" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/has no API — set NS manually/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Set up" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("в вебе кнопки нет вовсе: зону и NS выполнять нечем", async () => {
@@ -289,13 +289,13 @@ describe("Domains — мастер «Add Domain»", () => {
     renderPage();
     await screen.findByText("a.com");
     await addDomain("new.com");
-    selectValue("Хостинг (сервер)", "6");
-    selectValue("Регистратор", "3");
-    selectValue("Cloudflare-аккаунт", "7");
-    fireEvent.click(screen.getByRole("checkbox", { name: /Создать зону/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /Прописать NS/ }));
+    selectValue("Hosting (server)", "6");
+    selectValue("Registrar", "3");
+    selectValue("Cloudflare account", "7");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Create the zone/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Set NS/ }));
     // Подпись кнопки следует за тумблерами: действие уже не «просто заведи».
-    fireEvent.click(screen.getByRole("button", { name: "Создать и настроить" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create and set up" }));
 
     await waitFor(() =>
       expect(mocks.apiPost).toHaveBeenCalledWith("/domains", {
@@ -369,9 +369,9 @@ describe("Domains — мастер «Add Domain»", () => {
     renderPage();
     await screen.findByText("a.com");
     await addDomain("new.com");
-    selectValue("Cloudflare-аккаунт", "7");
-    fireEvent.click(screen.getByRole("checkbox", { name: /Создать зону/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Создать и настроить" }));
+    selectValue("Cloudflare account", "7");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Create the zone/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create and set up" }));
 
     // Модалка закрыта, домен создан, а про несостоявшуюся зону сказано отдельно.
     await waitFor(() => expect(screen.queryByPlaceholderText("e.g., example.com")).toBeNull());

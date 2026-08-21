@@ -386,7 +386,7 @@ describe("Domains — provision: web", () => {
     // И на карточке кнопки нет: прогон идёт по SSH, а веб не выполняет ничего.
     await openServerTab(DOMAIN);
     expect(screen.queryByRole("button", { name: "Provision" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Проверить на сервере" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check on server" })).toBeNull();
 
     expect(mocks.invokeSynced).not.toHaveBeenCalled();
     expect(

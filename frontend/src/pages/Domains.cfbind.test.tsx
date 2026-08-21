@@ -126,12 +126,12 @@ async function addDomain(name: string) {
 async function selectAll(container: HTMLElement) {
   const all = container.querySelector('thead input[type="checkbox"]') as HTMLInputElement;
   fireEvent.click(all);
-  return screen.queryByRole("button", { name: /Синхронизировать выделенные/ }) as HTMLButtonElement | null;
+  return screen.queryByRole("button", { name: /Sync selected/ }) as HTMLButtonElement | null;
 }
 
 /** Кнопка синхрона по всему списку — та, что в шапке вкладки и видна всегда. */
 function syncAllBtn() {
-  return screen.queryByRole("button", { name: /Синхронизировать с Cloudflare/ }) as HTMLButtonElement | null;
+  return screen.queryByRole("button", { name: /Sync with Cloudflare/ }) as HTMLButtonElement | null;
 }
 
 beforeEach(() => {
@@ -272,7 +272,7 @@ describe("Domains — автопривязка в вебе", () => {
   });
 });
 
-describe("Domains — кнопка «Синхронизировать с Cloudflare» (весь список)", () => {
+describe("Domains — кнопка «Sync with Cloudflare» (весь список)", () => {
   it("привязывает весь список, ничего не выделяя", async () => {
     setTauri(true);
     zonesAre([
@@ -284,7 +284,7 @@ describe("Domains — кнопка «Синхронизировать с Cloudfl
     await screen.findByText("a.com");
     // Границы действия названы: глагол «синхронизировать» обещает больше, чем
     // делается, и единственное место, где обещание сужено, — этот `title`.
-    expect(syncAllBtn()!.title).toContain("уже привязанное не трогает");
+    expect(syncAllBtn()!.title).toContain("already bound domains are left alone");
     // Ни одной галочки не поставлено: подсказка живого матча стоит в строках
     // сама, и человеку, который её прочитал, выделять нечего.
     fireEvent.click(syncAllBtn()!);
@@ -328,14 +328,14 @@ describe("Domains — кнопка «Синхронизировать с Cloudfl
     // бы, что она делает что-то своё — а она пошла бы вторым проходом по тем же
     // зонам (гейт его остановит, но молча, см. `useCloudflareBind`).
     fireEvent.click(container.querySelector('thead input[type="checkbox"]') as HTMLInputElement);
-    const busy = screen.getAllByRole("button", { name: /Синхронизация…/ }) as HTMLButtonElement[];
+    const busy = screen.getAllByRole("button", { name: /Syncing…/ }) as HTMLButtonElement[];
     expect(busy.length).toBe(2);
     expect(busy.every((b) => b.disabled)).toBe(true);
     expect(btn.disabled).toBe(true);
   });
 });
 
-describe("Domains — кнопка «Синхронизировать выделенные»", () => {
+describe("Domains — кнопка «Sync selected»", () => {
   it("привязывает выделенные и отчитывается числами", async () => {
     setTauri(true);
     zonesAre([{ id: "zone-a", name: "a.com" }]);
@@ -413,7 +413,7 @@ describe("Domains — кнопка «Синхронизировать выдел
     // Границы действия обе кнопки объясняют одними и теми же словами: текст у
     // них общий (`CF_SYNC_TITLE`), и разъехаться копиям негде.
     expect(btn.title).toBe(headerBtn.title);
-    expect(btn.title).toContain("уже привязанное не трогает");
+    expect(btn.title).toContain("already bound domains are left alone");
     fireEvent.click(btn);
     await waitFor(() => expect(mocks.invokeSynced).toHaveBeenCalledTimes(1));
 
@@ -423,7 +423,7 @@ describe("Domains — кнопка «Синхронизировать выдел
     // вовсе, и тест был бы зелёным и без гейта.
     expect(btn.disabled).toBe(true);
     expect(headerBtn.disabled).toBe(true);
-    expect(headerBtn.textContent).toContain("Синхронизация…");
+    expect(headerBtn.textContent).toContain("Syncing…");
   });
 
   it("не проглатывает автопривязку домена, заведённого во время прогона", async () => {

@@ -58,9 +58,9 @@ export default function FullSetupFields({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <Field label="Хостинг (сервер)">
+      <Field label="Hosting (server)">
         <Sel
-          aria-label="Хостинг (сервер)"
+          aria-label="Hosting (server)"
           value={value.serverId}
           onChange={(e: ChangeEvent<HTMLSelectElement>) => set({ serverId: e.target.value })}
           style={{ width: "100%" }}
@@ -71,9 +71,9 @@ export default function FullSetupFields({
           ))}
         </Sel>
       </Field>
-      <Field label="Регистратор">
+      <Field label="Registrar">
         <Sel
-          aria-label="Регистратор"
+          aria-label="Registrar"
           value={value.registrarId}
           onChange={(e: ChangeEvent<HTMLSelectElement>) => set({ registrarId: e.target.value })}
           style={{ width: "100%" }}
@@ -84,9 +84,9 @@ export default function FullSetupFields({
           ))}
         </Sel>
       </Field>
-      <Field label="Cloudflare-аккаунт">
+      <Field label="Cloudflare account">
         <Sel
-          aria-label="Cloudflare-аккаунт"
+          aria-label="Cloudflare account"
           value={value.cloudflareAccountId}
           onChange={(e: ChangeEvent<HTMLSelectElement>) =>
             set({ cloudflareAccountId: e.target.value })
@@ -100,13 +100,13 @@ export default function FullSetupFields({
         </Sel>
       </Field>
       <Toggle
-        label="Создать зону в Cloudflare"
+        label="Create the zone in Cloudflare"
         rule={zone}
         checked={value.createZone && zone.enabled}
         onChange={(createZone) => set({ createZone })}
       />
       <Toggle
-        label="Прописать NS у регистратора"
+        label="Set NS at the registrar"
         rule={ns}
         checked={value.pushNs && ns.enabled}
         onChange={(pushNs) => set({ pushNs })}

@@ -125,7 +125,7 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers, assi
 
   const serverNames = new Map(servers.map((x)=>[x.id, x.name]));
   const noteFor = (d: Domain) =>
-    d.server_id == null ? "без сервера" : `сейчас ${serverNames.get(d.server_id) ?? `сервер #${d.server_id}`}`;
+    d.server_id == null ? "no server" : `now on ${serverNames.get(d.server_id) ?? `server #${d.server_id}`}`;
 
   // Те, кого привязка ПЕРЕВЕЗЁТ. Считаются отдельно от «ни на каком сервере»:
   // риск у них разный, и вопрос обязан это сказать (см. `bindExisting`).
@@ -151,7 +151,7 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers, assi
   const createAndBind = async () => {
     const names = cmp.onlyOnServer.map((s)=>s.domain_name);
     if (names.length === 0) return;
-    if (!(await confirmAction(`Завести в SDMP ${names.length} ${domainWord(names.length)} и привязать к ${serverName}?`))) return;
+    if (!(await confirmAction(`Add ${names.length} ${domainWord(names.length)} to SDMP and bind them to ${serverName}?`))) return;
     // См. `bindExisting`: гасим и соседнюю ошибку тоже.
     onSkipped([]);
     assignServer.reset();
@@ -171,32 +171,32 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers, assi
 
             «Привязано сюда», а не «в SDMP»: на вход идут все домены
             пользователя, и их общее число про этот сервер ничего не говорит. */}
-        Сверка с сервером: на сервере {cmp.matched.length + cmp.notBoundHere.length + cmp.onlyOnServer.length}, привязано к {serverName} {cmp.matched.length + cmp.onlyInSdmp.length}
+        Compared with the server: {cmp.matched.length + cmp.notBoundHere.length + cmp.onlyOnServer.length} on the server, {cmp.matched.length + cmp.onlyInSdmp.length} bound to {serverName}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
-        <CompareColumn title="Только на сервере" items={cmp.onlyOnServer.map((s)=>({name:s.domain_name}))} tone="#b45309">
+        <CompareColumn title="Only on the server" items={cmp.onlyOnServer.map((s)=>({name:s.domain_name}))} tone="#b45309">
           {cmp.onlyOnServer.length > 0 && (
             <Btn size="sm" variant="secondary" onClick={createAndBind} disabled={createBound.isPending}>
-              {createBound.isPending ? "Завожу…" : "Завести и привязать"}
+              {createBound.isPending ? "Adding…" : "Add and bind"}
             </Btn>
           )}
         </CompareColumn>
-        <CompareColumn title="Не привязано сюда" items={cmp.notBoundHere.map((d)=>({name:d.domain_name, note:noteFor(d)}))} tone="#c2410c">
+        <CompareColumn title="Not bound here" items={cmp.notBoundHere.map((d)=>({name:d.domain_name, note:noteFor(d)}))} tone="#c2410c">
           {cmp.notBoundHere.length > 0 && (
             <Btn size="sm" variant="secondary" onClick={bindExisting} disabled={assignServer.isPending}>
-              {assignServer.isPending ? "Привязываю…" : "Привязать к этому серверу"}
+              {assignServer.isPending ? "Binding…" : "Bind to this server"}
             </Btn>
           )}
         </CompareColumn>
-        <CompareColumn title="Совпало" items={cmp.matched.map((m)=>({name:m.domain.domain_name}))} tone="#166534" />
-        <CompareColumn title="Только в SDMP" items={cmp.onlyInSdmp.map((d)=>({name:d.domain_name}))} tone="#6b7280" />
+        <CompareColumn title="Matched" items={cmp.matched.map((m)=>({name:m.domain.domain_name}))} tone="#166534" />
+        <CompareColumn title="Only in SDMP" items={cmp.onlyInSdmp.map((d)=>({name:d.domain_name}))} tone="#6b7280" />
       </div>
       {/* Отказ мутации показывается здесь же, у кнопки, которая его вызвала: без
           этого неудачная привязка выглядела бы как удачная — колонки просто
           остались бы прежними, и человек нажал бы ещё раз. */}
       {assignServer.isError && (
         <div role="alert" style={COMPARE_ALERT}>
-          Не удалось привязать домены: {(assignServer.error as any)?.message || "request error"}
+          Could not bind the domains: {(assignServer.error as any)?.message || "request error"}
         </div>
       )}
       {createBound.isError && (
@@ -206,7 +206,7 @@ function SiteCompareBanner({ sites, domains, serverId, serverName, servers, assi
       )}
       {skipped.length > 0 && (
         <div role="alert" style={COMPARE_ALERT}>
-          Не заведены и не привязаны — такой домен уже есть в SDMP либо имя не прошло проверку: {skipped.join(", ")}
+          Not added and not bound — either the domain already exists in SDMP or the name failed validation: {skipped.join(", ")}
         </div>
       )}
     </div>
@@ -821,7 +821,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
               // заводить, не показались бы нигде.
               disabled={listSites.isPending || assignServer.isPending || createBound.isPending}
             >
-              {listSites.isPending ? "Сверяю…" : "Сверить домены"}
+              {listSites.isPending ? "Comparing…" : "Compare domains"}
             </Btn>
           ) : (
             // Русская заметка, а не `DesktopOnlyNote` (тот по шаблону
@@ -907,7 +907,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
          устареть, а не выбросить их. */
       allDomainsQ.isLoadingError ? (
         <div role="alert" style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 13}}>
-          Сайты с сервера прочитаны, но список доменов SDMP не загрузился — сверять не с чем: {(allDomainsQ.error as any)?.message || "request error"}
+          Sites were read from the server, but the SDMP domain list did not load — there is nothing to compare against: {(allDomainsQ.error as any)?.message || "request error"}
         </div>
       ) : allDomainsQ.data ? (
         <>
@@ -930,7 +930,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
         </>
       ) : (
         <div style={{marginBottom:20, padding: 12, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb", color: "#6b7280", fontSize: 13}}>
-          Сайты с сервера прочитаны; ждём список доменов SDMP, чтобы было с чем сверять.
+          Sites were read from the server; waiting for the SDMP domain list to compare against.
         </div>
       )
     ) : null}
@@ -1121,7 +1121,7 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
                   { icon: "✕", title: "Delete domain", variant: "danger", onClick: async () => { if (!(await confirmAction(`Delete ${d.domain_name}?`))) return; deleteDomain.mutate(d.id); } },
                 ]}/></td>
               </tr>)}
-              {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found{s.has_ssh && isFPInstalled ? '. Нажмите «Сверить домены», чтобы увидеть сайты на сервере.' : ""}</td></tr>}
+              {filtered.length===0&&<tr><td colSpan={6} style={{padding:"28px",textAlign:"center",color:"#9ca3af",fontSize:13}}>No domains found{s.has_ssh && isFPInstalled ? '. Press “Compare domains” to see the sites on the server.' : ""}</td></tr>}
             </tbody>
           </table>
         </div>

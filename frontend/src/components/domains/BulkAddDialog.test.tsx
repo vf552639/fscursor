@@ -122,7 +122,7 @@ describe("BulkAddDialog", () => {
     const options = Array.from(
       (screen.getByLabelText("Assign to Server") as HTMLSelectElement).options,
     ).map((o) => o.textContent);
-    expect(options).toContain("web-01 — 0 доменов");
+    expect(options).toContain("web-01 — 0 domains");
   });
 
   it("Plain Text отправляет выбранный сервер в payload", async () => {
@@ -165,8 +165,8 @@ describe("BulkAddDialog", () => {
     fireEvent.click(importBtn());
 
     // Номер — по тексту в textarea, вместе с пустой строкой посередине.
-    await waitFor(() => expect(screen.getByText(/Строка 3/)).toBeTruthy());
-    expect(screen.getByText(/Строка 3/).textContent).toContain("1.2.3.4");
+    await waitFor(() => expect(screen.getByText(/Line 3/)).toBeTruthy());
+    expect(screen.getByText(/Line 3/).textContent).toContain("1.2.3.4");
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
@@ -176,10 +176,10 @@ describe("BulkAddDialog", () => {
     const area = screen.getByPlaceholderText(/45\.83\.194\.107/);
     fireEvent.change(area, { target: { value: "shop.com;Hostiq;1.2.3.4" } });
     fireEvent.click(importBtn());
-    await waitFor(() => expect(screen.getByText(/Строка 1/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Line 1/)).toBeTruthy());
 
     fireEvent.change(area, { target: { value: "shop.com;Hostiq;web-01" } });
-    expect(screen.queryByText(/Строка 1/)).toBeNull();
+    expect(screen.queryByText(/Line 1/)).toBeNull();
   });
 
   it("ошибки CSV не держат Plain Text — третьей колонки там нет", async () => {
@@ -189,11 +189,11 @@ describe("BulkAddDialog", () => {
       target: { value: "shop.com;Hostiq;1.2.3.4" },
     });
     fireEvent.click(importBtn());
-    await waitFor(() => expect(screen.getByText(/Строка 1/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Line 1/)).toBeTruthy());
 
     fireEvent.click(tab("Plain Text"));
     // Коробка — новость про чужой ввод: на этой вкладке третьей колонки нет.
-    expect(screen.queryByText(/Строка 1/)).toBeNull();
+    expect(screen.queryByText(/Line 1/)).toBeNull();
     fireEvent.change(screen.getByPlaceholderText(/blog\.example\.com/), {
       target: { value: "example.com" },
     });
@@ -209,14 +209,14 @@ describe("BulkAddDialog", () => {
     fireEvent.change(area, { target: { value: "example.com,Namecheap,web-01" } });
     fireEvent.click(importBtn());
 
-    await waitFor(() => expect(screen.getByText(/запятые/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/commas/)).toBeTruthy());
     expect(mocks.apiPost).not.toHaveBeenCalled();
 
     // Вердикт про разделитель живёт ровно столько же, сколько список строк:
     // две одинаковые коробки на одной вкладке с разными правилами — это
     // «вы используете запятые» над текстом, в котором их больше нет.
     fireEvent.change(area, { target: { value: "example.com;Namecheap;web-01" } });
-    expect(screen.queryByText(/запятые/)).toBeNull();
+    expect(screen.queryByText(/commas/)).toBeNull();
   });
 
   it("дубль домена в одной вставке держит отправку и называет строку", async () => {
@@ -229,8 +229,8 @@ describe("BulkAddDialog", () => {
 
     // Дошло бы до бэкенда — был бы 500 на уникальном индексе, без номера
     // строки и без единого созданного домена.
-    await waitFor(() => expect(screen.getByText(/Строка 2/)).toBeTruthy());
-    expect(screen.getByText(/Строка 2/).textContent).toContain("a.com");
+    await waitFor(() => expect(screen.getByText(/Line 2/)).toBeTruthy());
+    expect(screen.getByText(/Line 2/).textContent).toContain("a.com");
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
@@ -241,7 +241,7 @@ describe("BulkAddDialog", () => {
       target: { value: "shop.com;Hostiq;1.2.3.4" },
     });
     fireEvent.click(importBtn());
-    await waitFor(() => expect(screen.getByText(/Строка 1/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Line 1/)).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByPlaceholderText(/45\.83\.194\.107/)).toBeNull();
@@ -249,7 +249,7 @@ describe("BulkAddDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Открыть снова" }));
     // Ошибка описывала отправку, которой больше нет, — показанная снова, она
     // рассказывала бы о несуществующем событии.
-    expect(screen.queryByText(/Строка 1/)).toBeNull();
+    expect(screen.queryByText(/Line 1/)).toBeNull();
     // А вставленный текст промах по Cancel пережить обязан: диалог прячется,
     // а не размонтируется.
     expect((screen.getByPlaceholderText(/45\.83\.194\.107/) as HTMLTextAreaElement).value).toBe(

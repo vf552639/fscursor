@@ -108,7 +108,7 @@ export default function DomainsHeader({
           title={CF_SYNC_TITLE}
           style={SECONDARY_BTN}
         >
-          {syncPending ? "Синхронизация…" : `${CF_SYNC_VERB} с Cloudflare`}
+          {syncPending ? "Syncing…" : `${CF_SYNC_VERB} with Cloudflare`}
         </Btn>
       ) : null}
       <Btn variant="secondary" onClick={onFileImport} style={SECONDARY_BTN}>File Import</Btn>

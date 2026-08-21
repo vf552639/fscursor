@@ -137,7 +137,7 @@ export default function BulkActionToolbar({
           disabled={syncPending}
           title={CF_SYNC_TITLE}
         >
-          {syncPending ? "Синхронизация…" : `${CF_SYNC_VERB} выделенные`}
+          {syncPending ? "Syncing…" : `${CF_SYNC_VERB} selected`}
         </Btn>
       ) : null}
       {/* Массового «Set NS» здесь намеренно нет: `POST /domains/bulk-set-ns` на
@@ -172,9 +172,9 @@ export default function BulkActionToolbar({
           size="sm"
           onClick={onFullSetup}
           disabled={fullSetupPending}
-          title="Связать выделенные домены с сервером и аккаунтом Cloudflare, завести зону и (по выбору) прописать NS"
+          title="Bind the selected domains to a server and a Cloudflare account, create the zone and (optionally) set NS"
         >
-          {fullSetupPending ? "Настройка…" : "Full setup"}
+          {fullSetupPending ? "Setting up…" : "Full setup"}
         </Btn>
       ) : null}
       <OpenInDesktop

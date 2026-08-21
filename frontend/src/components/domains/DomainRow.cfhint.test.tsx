@@ -69,14 +69,14 @@ describe("DomainRow — колонка Cloudflare", () => {
     const cell = renderRow({ domain: { ...DOMAIN, cf_id: 7 }, cfAccount: ACCOUNT });
 
     expect(cell.textContent).toBe("main");
-    expect(screen.queryByTitle(/в базе не сохранено/)).toBeNull();
+    expect(screen.queryByTitle(/not saved in the database/)).toBeNull();
   });
 
   it("живое совпадение показывает курсивом и с оговоркой, что это не факт", () => {
     const cell = renderRow({ cfHint: { outcome: "matched", account: ACCOUNT } });
 
     expect(cell.textContent).toBe("main");
-    const hint = screen.getByTitle(/в базе не сохранено/);
+    const hint = screen.getByTitle(/not saved in the database/);
     expect(hint.textContent).toBe("main");
     // Начертание — единственное, что отличает подсказку от факта: чипа рядом
     // нет по решению пользователя (лишний шум в списке на двести строк).
@@ -93,7 +93,7 @@ describe("DomainRow — колонка Cloudflare", () => {
     // Иначе в одной ячейке оказалось бы два источника правды, и живой список
     // зон перебивал бы выбор, сделанный руками.
     expect(cell.textContent).toBe("main");
-    expect(screen.queryByTitle(/в базе не сохранено/)).toBeNull();
+    expect(screen.queryByTitle(/not saved in the database/)).toBeNull();
   });
 
   it("неоднозначное совпадение остаётся прочерком без меток", () => {

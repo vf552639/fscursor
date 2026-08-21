@@ -155,8 +155,8 @@ function renderDetail(domains = ALL_DOMAINS, opts: { allDomainsFail?: boolean; s
 
 /** Прогнать сверку и дождаться баннера. */
 async function compare() {
-  fireEvent.click(await screen.findByText("Сверить домены"));
-  await screen.findByText(/Сверка с сервером/);
+  fireEvent.click(await screen.findByText("Compare domains"));
+  await screen.findByText(/Compared with the server/);
 }
 
 describe("ServerDetail — сверка сайтов и привязка по факту", () => {
@@ -168,17 +168,17 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     await compare();
 
     // Заголовки колонок несут счётчик — по нему и видно раскладку.
-    expect(screen.getByText("Только на сервере (1)")).toBeTruthy();
-    expect(screen.getByText("Не привязано сюда (2)")).toBeTruthy();
-    expect(screen.getByText("Совпало (1)")).toBeTruthy();
-    expect(screen.getByText("Только в SDMP (1)")).toBeTruthy();
+    expect(screen.getByText("Only on the server (1)")).toBeTruthy();
+    expect(screen.getByText("Not bound here (2)")).toBeTruthy();
+    expect(screen.getByText("Matched (1)")).toBeTruthy();
+    expect(screen.getByText("Only in SDMP (1)")).toBeTruthy();
 
     // Домен другого сервера без сайта здесь — не расхождение этой машины.
     expect(screen.queryByText(/other-orphan\.com/)).toBeNull();
     // А тот, что стоит на другой машине, назван вместе с ней: «привязать» его
     // означает переезд, и человек должен видеть, откуда.
-    expect(screen.getByText(/elsewhere\.com/).textContent).toContain("сейчас prod-02");
-    expect(screen.getByText(/free\.com/).textContent).toContain("без сервера");
+    expect(screen.getByText(/elsewhere\.com/).textContent).toContain("now on prod-02");
+    expect(screen.getByText(/free\.com/).textContent).toContain("no server");
   });
 
   it("«Привязать» шлёт ровно id непривязанных сюда — и ни одного лишнего", async () => {
@@ -188,7 +188,7 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+    fireEvent.click(screen.getByText("Bind to this server"));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
     expect(mocks.apiPost.mock.calls[0][0]).toBe("/domains/bulk-assign-server");
@@ -203,17 +203,17 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+    fireEvent.click(screen.getByText("Bind to this server"));
     await waitFor(() => expect(mocks.confirmAction).toHaveBeenCalled());
 
     const msg = mocks.confirmAction.mock.calls[0][0] as string;
-    expect(msg).toContain("2 домена");
+    expect(msg).toContain("2 domains");
     expect(msg).toContain("prod-01");
     // Переезжает один из двух — и вместе с ним сбрасываются факты с прежней
     // машины. Молчаливая перевозка чужого сайта — это то, что вопрос обязан
     // назвать вслух.
-    expect(msg).toContain("У 1 из них сейчас стоит другой сервер");
-    expect(msg).toMatch(/сброшен/);
+    expect(msg).toContain("1 of them currently sit on a different server");
+    expect(msg).toMatch(/is cleared/);
   });
 
   it("отказ в диалоге не отправляет ничего", async () => {
@@ -222,7 +222,7 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+    fireEvent.click(screen.getByText("Bind to this server"));
     await waitFor(() => expect(mocks.confirmAction).toHaveBeenCalled());
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
@@ -234,7 +234,7 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
     expect(mocks.apiPost.mock.calls[0][0]).toBe("/domains/bulk-structured");
@@ -252,10 +252,10 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+    fireEvent.click(screen.getByText("Bind to this server"));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Не удалось привязать домены");
+    expect(alert.textContent).toContain("Could not bind the domains");
     expect(alert.textContent).toContain("another user");
   });
 
@@ -272,10 +272,10 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Не заведены и не привязаны");
+    expect(alert.textContent).toContain("Not added and not bound");
     expect(alert.textContent).toContain("ghost.com");
   });
 
@@ -291,10 +291,10 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
     expect((await screen.findByRole("alert")).textContent).toContain("ghost.com");
 
-    fireEvent.click(screen.getByText("Сверить домены"));
+    fireEvent.click(screen.getByText("Compare domains"));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
@@ -304,9 +304,9 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail(SITES.map((s, i) => domain(100 + i, s.domain_name, SERVER_ID)));
     await compare();
 
-    expect(screen.getByText("Совпало (4)")).toBeTruthy();
-    expect(screen.queryByText("Привязать к этому серверу")).toBeNull();
-    expect(screen.queryByText("Завести и привязать")).toBeNull();
+    expect(screen.getByText("Matched (4)")).toBeTruthy();
+    expect(screen.queryByText("Bind to this server")).toBeNull();
+    expect(screen.queryByText("Add and bind")).toBeNull();
   });
 
   /**
@@ -319,16 +319,16 @@ describe("ServerDetail — сверка сайтов и привязка по ф
   it("отказ чтения доменов назван словом, а не нарисован нулями", async () => {
     setTauri(true);
     renderDetail(ALL_DOMAINS, { allDomainsFail: true });
-    fireEvent.click(await screen.findByText("Сверить домены"));
+    fireEvent.click(await screen.findByText("Compare domains"));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("список доменов SDMP не загрузился");
+    expect(alert.textContent).toContain("the SDMP domain list did not load");
     expect(alert.textContent).toContain("domains list failed");
 
     // Ни колонок с нулями, ни лечения по выдуманному диагнозу.
-    expect(screen.queryByText(/Сверка с сервером/)).toBeNull();
-    expect(screen.queryByText("Завести и привязать")).toBeNull();
-    expect(screen.queryByText("Привязать к этому серверу")).toBeNull();
+    expect(screen.queryByText(/Compared with the server/)).toBeNull();
+    expect(screen.queryByText("Add and bind")).toBeNull();
+    expect(screen.queryByText("Bind to this server")).toBeNull();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
@@ -345,12 +345,12 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
     // Кнопка сверки гаснет на время лечения — иначе клик по ней снёс бы колонки
     // из-под ещё не приехавшего ответа.
-    await waitFor(() => expect((screen.getByText("Сверить домены") as HTMLButtonElement).disabled).toBe(true));
+    await waitFor(() => expect((screen.getByText("Compare domains") as HTMLButtonElement).disabled).toBe(true));
 
-    fireEvent.click(screen.getByText("Сверить домены"));
+    fireEvent.click(screen.getByText("Compare domains"));
     release({ created: [], skipped: ["ghost.com"] });
 
     const alert = await screen.findByRole("alert");
@@ -369,11 +369,11 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Привязать к этому серверу"));
-    expect((await screen.findByRole("alert")).textContent).toContain("Не удалось привязать домены");
+    fireEvent.click(screen.getByText("Bind to this server"));
+    expect((await screen.findByRole("alert")).textContent).toContain("Could not bind the domains");
 
     mocks.apiPost.mockResolvedValue({ created: [], skipped: [] });
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
 
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
@@ -393,7 +393,7 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     const { client } = renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
     expect((await screen.findByRole("alert")).textContent).toContain("ghost.com");
 
     // Ровно то, что делает инвалидация после мутации, — только с отказом в ответ.
@@ -409,8 +409,8 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     // Сверка жива, лечение доступно, отчёт на месте — а про неудачу обновления
     // сказано отдельно, а не молчанием и не сносом экрана.
     expect(await screen.findByText(/мог устареть/)).toBeTruthy();
-    expect(screen.getByText(/Сверка с сервером/)).toBeTruthy();
-    expect(screen.getByText("Завести и привязать")).toBeTruthy();
+    expect(screen.getByText(/Compared with the server/)).toBeTruthy();
+    expect(screen.getByText("Add and bind")).toBeTruthy();
     expect(screen.queryByText(/не загрузился/)).toBeNull();
     expect(document.body.textContent ?? "").toContain("ghost.com");
   });
@@ -423,11 +423,11 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail();
     await compare();
 
-    fireEvent.click(screen.getByText("Завести и привязать"));
+    fireEvent.click(screen.getByText("Add and bind"));
     expect((await screen.findByRole("alert")).textContent).toContain("Не удалось завести домены");
 
     mocks.apiPost.mockResolvedValue({ updated: 2 });
-    fireEvent.click(screen.getByText("Привязать к этому серверу"));
+    fireEvent.click(screen.getByText("Bind to this server"));
 
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
@@ -443,8 +443,8 @@ describe("ServerDetail — сверка сайтов и привязка по ф
     renderDetail(ALL_DOMAINS, { sites: [...SITES, { ...SITES[0], domain_name: "MATCHED.com." }] });
     await compare();
 
-    const head = screen.getByText(/Сверка с сервером/).textContent ?? "";
-    expect(head).toContain("на сервере 4");
-    expect(head).not.toContain("на сервере 5");
+    const head = screen.getByText(/Compared with the server/).textContent ?? "";
+    expect(head).toContain("4 on the server");
+    expect(head).not.toContain("5 on the server");
   });
 });

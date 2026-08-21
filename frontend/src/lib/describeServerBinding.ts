@@ -24,7 +24,7 @@ import { domainWord } from "./format";
  */
 export function describeServerBinding(count: number, moving: number, serverName: string): string {
   const move = moving
-    ? ` У ${moving} из них сейчас стоит другой сервер: привязка переедет, а прочитанные с прежней машины факты (FTP-доступ, пути, PHP) будут сброшены.`
+    ? ` ${moving} of them currently sit on a different server: the binding moves, and everything read from the previous machine (FTP access, paths, PHP) is cleared.`
     : "";
-  return `Привязать ${count} ${domainWord(count)} к ${serverName}?${move}`;
+  return `Bind ${count} ${domainWord(count)} to ${serverName}?${move}`;
 }

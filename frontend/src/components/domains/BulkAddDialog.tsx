@@ -107,7 +107,7 @@ export default function BulkAddDialog({
         });
 
         if (result.created.length === 0 && result.skipped.length > 0) {
-          setBulkError(`❌ Все указанные домены были пропущены (неверный формат или уже существуют):\n ${result.skipped.join(", ")}`);
+          setBulkError(`❌ Every domain was skipped (invalid format or already exists):\n ${result.skipped.join(", ")}`);
           return;
         }
 
@@ -132,7 +132,7 @@ export default function BulkAddDialog({
         });
 
         if (parsed.commaSeparated) {
-          setBulkError("Похоже, вы используете запятые вместо точек с запятой. Пожалуйста, исправьте разделитель.");
+          setBulkError("Looks like you used commas instead of semicolons. Please fix the separator.");
           return;
         }
 
@@ -153,7 +153,7 @@ export default function BulkAddDialog({
         const result = await bulkStructured.mutateAsync({ items: parsed.items });
 
         if (result.created.length === 0 && result.skipped.length > 0) {
-          setBulkError(`❌ Все указанные домены были пропущены (неверный формат или уже существуют):\n ${result.skipped.join(", ")}`);
+          setBulkError(`❌ Every domain was skipped (invalid format or already exists):\n ${result.skipped.join(", ")}`);
           return;
         }
 
@@ -217,9 +217,9 @@ export default function BulkAddDialog({
         нет, и новость про её строки там была бы про чужой ввод. */}
     {bulkTab === "csv" && csvErrors.length > 0 && (
       <div style={{background:"#fef2f2",border:"1px solid #fee2e2",color:"#dc2626",padding:"10px 12px",borderRadius:8,fontSize:13,marginBottom:14}}>
-        <div style={{fontWeight:600,marginBottom:6}}>❌ Ничего не отправлено — эти строки не приняты:</div>
+        <div style={{fontWeight:600,marginBottom:6}}>❌ Nothing was sent — these lines were rejected:</div>
         {csvErrors.map((e) => (
-          <div key={e.line}>Строка {e.line}: {bulkCsvErrorText(e)}</div>
+          <div key={e.line}>Line {e.line}: {bulkCsvErrorText(e)}</div>
         ))}
       </div>
     )}

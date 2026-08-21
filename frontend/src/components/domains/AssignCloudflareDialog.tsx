@@ -2,6 +2,7 @@ import React, { ChangeEvent } from "react";
 
 import { Btn, Sel, Modal } from "../ui/Primitives";
 import { CloudflareAccount } from "../../api/cloudflare";
+import { domainWord } from "../../lib/format";
 
 /**
  * Назначить аккаунт Cloudflare выделенным доменам.
@@ -28,7 +29,7 @@ export default function AssignCloudflareDialog({
 }) {
   return (
     <Modal title="Assign Cloudflare" onClose={onClose} width={400}>
-      <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Назначить Cloudflare аккаунт для {selectedCount} доменов:</p>
+      <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Assign a Cloudflare account to {selectedCount} {domainWord(selectedCount)}:</p>
       <Sel value={cfId} onChange={(e: ChangeEvent<HTMLSelectElement>) => onCfChange(e.target.value)} style={{width:"100%"}}>
         <option value="">— Select CF Account —</option>
         {cfAccounts.map((c: CloudflareAccount) => <option key={c.id} value={c.id}>{c.name}</option>)}

@@ -357,7 +357,7 @@ export default function DomainLogsTab({ domain, now }: DomainLogsTabProps) {
               disabled={read.pending}
               title="Read the server snapshot over one SSH session — log file paths and sizes come with it"
             >
-              {read.pending ? "Checking…" : "Проверить на сервере"}
+              {read.pending ? "Checking…" : "Check on server"}
             </Btn>
           ) : null
         }

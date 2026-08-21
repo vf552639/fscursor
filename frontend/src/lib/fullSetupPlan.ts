@@ -67,16 +67,16 @@ export interface ToggleRule {
  */
 export function zoneToggleRule(desktop: boolean, cloudflareAccountId: string): ToggleRule {
   if (!desktop) {
-    return { enabled: false, hint: "Зону заводит десктоп — веб только показывает." };
+    return { enabled: false, hint: "Only the desktop app can create zones — the web view is read-only." };
   }
   if (!cloudflareAccountId) {
-    return { enabled: false, hint: "Выберите аккаунт Cloudflare — зону нужно где-то заводить." };
+    return { enabled: false, hint: "Pick a Cloudflare account — the zone has to be created somewhere." };
   }
   // Про «не продублируем» сказано прямо: это первый вопрос человека, у которого
   // часть доменов уже заведена в Cloudflare руками.
   return {
     enabled: true,
-    hint: "Домен заводится зоной в выбранном аккаунте. Если зона уже есть, вторая не создаётся.",
+    hint: "The domain gets a zone in the selected account. If the zone already exists, no second one is created.",
   };
 }
 
@@ -100,20 +100,20 @@ export function nsToggleRule(params: {
   registrarProvider: string | null;
 }): ToggleRule {
   if (!params.desktop) {
-    return { enabled: false, hint: "NS прописывает десктоп — веб только показывает." };
+    return { enabled: false, hint: "Only the desktop app can set NS — the web view is read-only." };
   }
   if (!params.createZone) {
     // NS берутся у зоны, а не из воздуха: без шага зоны прописывать нечего.
     // Ровно этим отвечает и десктоп — `zone_unavailable`.
-    return { enabled: false, hint: "NS берутся у зоны Cloudflare — включите её создание." };
+    return { enabled: false, hint: "NS come from the Cloudflare zone — turn zone creation on." };
   }
   if (!params.registrarId) {
-    return { enabled: false, hint: "Выберите регистратора — команду отдавать некому." };
+    return { enabled: false, hint: "Pick a registrar — there is no one to send the command to." };
   }
   if (!registrarSupportsNsApi(params.registrarProvider)) {
-    return { enabled: false, hint: "У регистратора нет API — пропишите NS вручную." };
+    return { enabled: false, hint: "This registrar has no API — set NS manually." };
   }
-  return { enabled: true, hint: "NS созданной зоны уедут регистратору: делегирование сменится сразу." };
+  return { enabled: true, hint: "The new zone's NS go to the registrar: delegation changes right away." };
 }
 
 /**

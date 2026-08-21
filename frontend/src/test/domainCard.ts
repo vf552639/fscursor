@@ -42,12 +42,12 @@ export async function openServerTab(domain: string) {
 /**
  * Кнопка «Provision» на открытой вкладке Server — в любом состоянии.
  *
- * Скоуп от «Проверить на сервере»: обе кнопки стоят в правом слоте одной
+ * Скоуп от «Check on server»: обе кнопки стоят в правом слоте одной
  * `SnapshotLine`, и это единственный способ отличить её от кнопки диалога,
  * который открывается ПОВЕРХ карточки и своей кнопки «Provision» не прячет.
  */
 export function serverTabProvisionButton(): HTMLButtonElement {
-  const line = screen.getByRole("button", { name: "Проверить на сервере" }).parentElement as HTMLElement;
+  const line = screen.getByRole("button", { name: "Check on server" }).parentElement as HTMLElement;
   return within(line).getByRole("button", { name: /^Provision(ing…)?$/ }) as HTMLButtonElement;
 }
 

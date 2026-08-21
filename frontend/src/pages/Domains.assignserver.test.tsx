@@ -181,12 +181,12 @@ describe("Domains — массовое назначение сервера", () 
     await waitFor(() => expect(mocks.confirmAction).toHaveBeenCalled());
     const text = askedText();
     // Привязка уедет по всем трём, и вопрос называет три.
-    expect(text).toContain("Привязать 3 домена к web-01?");
+    expect(text).toContain("Bind 3 domains to web-01?");
     // А переезжает один — тот, что стоит на web-02. Домен без сервера ничего не
     // теряет, домен уже на web-01 не двигается: посчитай их движением, и цена
     // операции в вопросе оказалась бы втрое больше настоящей.
-    expect(text).toContain("У 1 из них сейчас стоит другой сервер");
-    expect(text).toContain("FTP-доступ");
+    expect(text).toContain("1 of them currently sit on a different server");
+    expect(text).toContain("FTP access");
 
     await waitFor(() =>
       expect(mocks.apiPost).toHaveBeenCalledWith("/domains/bulk-assign-server", {
@@ -205,7 +205,7 @@ describe("Domains — массовое назначение сервера", () 
     // Подпись самого диалога склоняется тем же правилом: «для 1 доменов» тут и
     // стояло.
     await openAssignDialog();
-    expect(screen.getByText("Назначить сервер для 1 домен:")).toBeTruthy();
+    expect(screen.getByText("Assign a server to 1 domain:")).toBeTruthy();
 
     await assignTo(5);
 
@@ -213,6 +213,6 @@ describe("Domains — массовое назначение сервера", () 
     const text = askedText();
     // «1 доменов» — опечатка, живущая вечно; ради неё `domainWord` и вынесен
     // в `lib/format`.
-    expect(text).toBe("Привязать 1 домен к web-01?");
+    expect(text).toBe("Bind 1 domain to web-01?");
   });
 });

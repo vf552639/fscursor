@@ -172,7 +172,7 @@ export default function DomainFtpCard({
 }
 
 /**
- * Пароль FTP: показ через `RevealSecret` и ручной ввод «Задать пароль».
+ * Пароль FTP: показ через `RevealSecret` и ручной ввод «Set password».
  *
  * Плейнтекст живёт ТОЛЬКО внутри `useSecretSave` — не в нашем `useState` и не в
  * `variables` мутации (`PUT /domains/{id}` получает лишь id блоба). Ручной ввод
@@ -254,7 +254,7 @@ function FtpPassword({ domain, desktop }: { domain: Domain; desktop: boolean }) 
       {/* Ручной ввод — только десктоп: запись секрета в вебе невозможна. */}
       {desktop ? (
         <Btn size="sm" variant="secondary" onClick={() => setEditing(true)}>
-          Задать пароль
+          Set password
         </Btn>
       ) : null}
     </div>

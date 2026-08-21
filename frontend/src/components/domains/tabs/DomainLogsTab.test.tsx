@@ -346,7 +346,7 @@ describe("снимка не было ни разу", () => {
     setTauri(true);
     mocks.invokeSynced.mockResolvedValue(facts());
     show();
-    fireEvent.click(screen.getByText("Проверить на сервере"));
+    fireEvent.click(screen.getByText("Check on server"));
     await waitFor(() =>
       expect(mocks.invokeSynced).toHaveBeenCalledWith("domain_read_facts", {
         userId: "user-1",
@@ -358,13 +358,13 @@ describe("снимка не было ни разу", () => {
   it("в вебе кнопки нет: чтение идёт по SSH", () => {
     setTauri(false);
     show();
-    expect(screen.queryByText("Проверить на сервере")).toBeNull();
+    expect(screen.queryByText("Check on server")).toBeNull();
   });
 
   it("под снимком кнопки чтения нет: за перечитывание отвечает вкладка Server", async () => {
     setTauri(true);
     showWithSnapshot();
-    expect(screen.queryByText("Проверить на сервере")).toBeNull();
+    expect(screen.queryByText("Check on server")).toBeNull();
     // `mutate` зовёт `mutationFn` асинхронно, поэтому «ничего не запускалось»
     // проверяем ПОСЛЕ микрозадач: синхронная проверка была бы пустой.
     await act(async () => {

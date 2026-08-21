@@ -192,7 +192,7 @@ export default function DomainServerTab({ domain, server, now, onProvision, isPr
                   disabled={read.pending}
                   title="Read SSL, FTP, PHP, site and databases from the server over one SSH session"
                 >
-                  {read.pending ? "Checking…" : "Проверить на сервере"}
+                  {read.pending ? "Checking…" : "Check on server"}
                 </Btn>
                 {/* Второй клик стартовал бы вторую SSH-сессию с
                     create_site/create_ftp_account/certbot по тому же домену —
@@ -226,7 +226,7 @@ export default function DomainServerTab({ domain, server, now, onProvision, isPr
             чтения — в строке выше (и только в десктопе: SSH в вебе нет). */}
         {noSnapshot ? (
           <div style={{ fontSize: 12.5, color: "#6b7280" }}>
-            Сервер ещё не читали.{recordedShown ? " Приглушённые значения — из provision, на сервере не проверено." : ""}
+            This server has not been read yet.{recordedShown ? " Dimmed values come from provision and were not verified on the server." : ""}
           </div>
         ) : null}
 

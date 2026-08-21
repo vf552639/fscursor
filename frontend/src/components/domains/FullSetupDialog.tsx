@@ -6,6 +6,7 @@ import { CloudflareAccount } from "../../api/cloudflare";
 import { Domain } from "../../api/domains";
 import { RegistrarAccount } from "../../api/registrars";
 import { Server } from "../../api/servers";
+import { domainWord } from "../../lib/format";
 import { FullSetupForm } from "../../lib/fullSetupPlan";
 import { isTauri } from "../../lib/runtime";
 
@@ -52,7 +53,7 @@ export default function FullSetupDialog({
   return (
     <Modal title="Full setup" onClose={onClose} width={460}>
       <p style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>
-        Настроить {selectedCount} доменов: связки в SDMP, затем — что отмечено ниже.
+        Set up {selectedCount} {domainWord(selectedCount)}: bindings in SDMP, then whatever is checked below.
       </p>
       <FullSetupFields
         servers={servers}
@@ -68,7 +69,7 @@ export default function FullSetupDialog({
       />
       <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
         <Btn variant="primary" onClick={onRun} disabled={!ready || pending}>
-          {pending ? "Настройка…" : "Настроить"}
+          {pending ? "Setting up…" : "Set up"}
         </Btn>
         <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
       </div>

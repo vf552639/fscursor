@@ -24,7 +24,7 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
  * тест ниже сторожит, что заглушка не вернулась.
  *
  * Фаза 3 (свежесть и секреты):
- *  - кнопка «Проверить на сервере» и ручной ввод пароля — ТОЛЬКО десктоп;
+ *  - кнопка «Check on server» и ручной ввод пароля — ТОЛЬКО десктоп;
  *  - свежесть считается от `fp_facts_at`, «never checked» — отдельное слово;
  *  - провал последней попытки виден, но снимок остаётся;
  *  - пароль FTP — через `RevealSecret`, плейнтекста в DOM нет.
@@ -35,7 +35,7 @@ import { setTauri, setBlobUser, clearBlobUser, putBlobArgs, blobPlaintext } from
  * `DomainDetailModal.overview.test.tsx` (бейдж шапки и карточка не расходятся).
  *
  * Фаза 4 (наша запись против факта):
- *  - строка «при развёртывании: X» есть при расхождении и отсутствует при
+ *  - строка «at provision: X» есть при расхождении и отсутствует при
  *    совпадении, значением поля остаётся факт;
  *  - `home` FTP-аккаунта не дублирует путь сайта;
  *  - домен без снимка не показывает решётки прочерков;
@@ -172,18 +172,18 @@ afterEach(() => {
   queryClient.clear();
 });
 
-describe("кнопка «Проверить на сервере» — только десктоп", () => {
+describe("кнопка «Check on server» — только десктоп", () => {
   it("в вебе кнопки нет", () => {
     setTauri(false);
     show();
-    expect(screen.queryByText("Проверить на сервере")).toBeNull();
+    expect(screen.queryByText("Check on server")).toBeNull();
   });
 
   it("в десктопе есть и зовёт domain_read_facts с id домена", async () => {
     setTauri(true);
     mocks.invokeSynced.mockResolvedValue(facts());
     show();
-    fireEvent.click(screen.getByText("Проверить на сервере"));
+    fireEvent.click(screen.getByText("Check on server"));
     await waitFor(() =>
       expect(mocks.invokeSynced).toHaveBeenCalledWith("domain_read_facts", {
         userId: "user-1",
@@ -205,7 +205,7 @@ describe("кнопка Provision — только десктоп и только
     expect(screen.queryByRole("button", { name: "Provision" })).toBeNull();
   });
 
-  it("в десктопе стоит рядом с «Проверить на сервере» и ничего не запускает сама", () => {
+  it("в десктопе стоит рядом с «Check on server» и ничего не запускает сама", () => {
     setTauri(true);
     const onProvision = vi.fn();
     show({}, SERVER, { onProvision });
@@ -213,7 +213,7 @@ describe("кнопка Provision — только десктоп и только
     // Обе кнопки — в одной строке шапки снимка: это один вопрос с двух сторон
     // («что на сервере стоит» и «что на нём развернуть»), и разведённые они
     // заставляли бы искать вторую половину ответа на другом экране.
-    const read = screen.getByRole("button", { name: "Проверить на сервере" });
+    const read = screen.getByRole("button", { name: "Check on server" });
     const provision = screen.getByRole("button", { name: "Provision" });
     expect(read.parentElement).toBe(provision.parentElement);
 
@@ -237,7 +237,7 @@ describe("кнопка Provision — только десктоп и только
     expect(onProvision).not.toHaveBeenCalled();
     // Чтение снимка при этом не блокируется: оно ничего не создаёт.
     expect(
-      (screen.getByRole("button", { name: "Проверить на сервере" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Check on server" }) as HTMLButtonElement).disabled,
     ).toBe(false);
   });
 });
@@ -289,10 +289,10 @@ describe("пароль FTP", () => {
     setTauri(false);
     show();
     expect(screen.getByText("not set")).toBeTruthy();
-    expect(screen.queryByText("Задать пароль")).toBeNull();
+    expect(screen.queryByText("Set password")).toBeNull();
   });
 
-  it("«Задать пароль»: плейнтекст уходит ТОЛЬКО в vault_put_blob, в PUT домена — лишь blobId", async () => {
+  it("«Set password»: плейнтекст уходит ТОЛЬКО в vault_put_blob, в PUT домена — лишь blobId", async () => {
     // Единственный security-инвариант фазы: пароль FTP не попадает ни в
     // `variables` мутации `updateDomain`, ни в тело PUT, ни в один другой вызов
     // — только в блоб. Регрессия «прокинули `ftp_password` в мутацию» обязана
@@ -303,7 +303,7 @@ describe("пароль FTP", () => {
     mocks.apiPut.mockResolvedValue(domain());
     show();
 
-    fireEvent.click(screen.getByText("Задать пароль"));
+    fireEvent.click(screen.getByText("Set password"));
     fireEvent.change(screen.getByLabelText("FTP password"), { target: { value: SENTINEL } });
     fireEvent.click(screen.getByText("Save"));
 
@@ -330,10 +330,10 @@ describe("пароль FTP", () => {
     expect(leaked).toEqual([]);
   });
 
-  it("в десктопе «Задать пароль» открывает поле ввода (по aria-label), а не показывает секрет", () => {
+  it("в десктопе «Set password» открывает поле ввода (по aria-label), а не показывает секрет", () => {
     setTauri(true);
     show();
-    fireEvent.click(screen.getByText("Задать пароль"));
+    fireEvent.click(screen.getByText("Set password"));
     expect(screen.getByLabelText("FTP password")).toBeTruthy();
   });
 
@@ -400,7 +400,7 @@ describe("раскладка макета: карточки, а не сплош�
 
 /**
  * Фаза 4: секция — единственный источник про сайт. Значением поля остаётся ФАКТ,
- * наша запись из provision всплывает строкой «при развёртывании: X» ровно тогда,
+ * наша запись из provision всплывает строкой «at provision: X» ровно тогда,
  * когда расходится с фактом, и становится приглушённым значением там, где факта
  * нет. Само правило проверено отдельно (`lib/domainDrift.test.ts`) — здесь
  * проверяется ПОКАЗ: что все три исхода долетают до экрана и что незнание не
@@ -417,13 +417,13 @@ describe("расхождение нашей записи с фактом", () =>
       site_user: "example_usr",
       db_name: "example_db",
     });
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    expect(screen.queryByText(/at provision/)).toBeNull();
   });
 
   it("PHP разошёлся: значением остаётся факт, наша запись — серой строкой", () => {
     show({ ...fresh, php_version: "7.4" });
     expect(screen.getByText("8.2 · php-fpm")).toBeTruthy();
-    expect(screen.getByText(/при развёртывании: 7\.4/)).toBeTruthy();
+    expect(screen.getByText(/at provision: 7\.4/)).toBeTruthy();
   });
 
   it("путь, владелец и база расходятся каждый своей строкой", () => {
@@ -437,13 +437,13 @@ describe("расхождение нашей записи с фактом", () =>
     });
     // Множеством, а не списком в DOM-порядке: перестановка колонок — вопрос
     // вёрстки, и красить ею тест про поведение незачем.
-    const notes = screen.getAllByText(/при развёртывании/).map((n) => n.textContent);
+    const notes = screen.getAllByText(/at provision/).map((n) => n.textContent);
     expect(notes).toHaveLength(3);
     expect(new Set(notes)).toEqual(
       new Set([
-        "при развёртывании: /var/www/old.example.com",
-        "при развёртывании: old_usr",
-        "при развёртывании: old_db",
+        "at provision: /var/www/old.example.com",
+        "at provision: old_usr",
+        "at provision: old_db",
       ]),
     );
   });
@@ -457,7 +457,7 @@ describe("расхождение нашей записи с фактом", () =>
       ftp_user: "example_ftp",
     });
     expect(rowText("Login")).toContain("server_ftp");
-    expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+    expect(screen.getByText(/at provision: example_ftp/)).toBeTruthy();
   });
 
   it("пробельная запись не заслоняет живой аккаунт сервера", () => {
@@ -531,7 +531,7 @@ describe("«Accounts on server»: перечень не повторяет уж�
       ftp_user: "example_ftp",
     });
     expect(rowText("Login")).toContain("server_ftp");
-    expect(screen.getByText(/при развёртывании: example_ftp/)).toBeTruthy();
+    expect(screen.getByText(/at provision: example_ftp/)).toBeTruthy();
     expect(screen.queryByText("Accounts on server")).toBeNull();
   });
 });
@@ -540,7 +540,7 @@ describe("снимка не было ни разу", () => {
   it("вместо решётки прочерков — одна строка словами", () => {
     show({ ftp_user: null });
     expect(screen.getByText("Never checked")).toBeTruthy();
-    expect(screen.getByText(/Сервер ещё не читали/)).toBeTruthy();
+    expect(screen.getByText(/has not been read yet/)).toBeTruthy();
     // Прочерков нет ни одного: Host берётся у сервера, Port — константа, а
     // поля снимка спрятаны целиком, потому что прочерк в них читался бы как
     // «спросили, там пусто».
@@ -561,8 +561,8 @@ describe("снимка не было ни разу", () => {
    */
   it("нечего приглушать — легенда не обещает приглушённых значений", () => {
     show({ ftp_user: null });
-    expect(screen.getByText(/Сервер ещё не читали/).textContent).toBe("Сервер ещё не читали.");
-    expect(screen.queryByText(/из provision, на сервере не проверено/)).toBeNull();
+    expect(screen.getByText(/has not been read yet/).textContent).toBe("This server has not been read yet.");
+    expect(screen.queryByText(/come from provision and were not verified/)).toBeNull();
   });
 
   it("известное из provision показано как наша запись, а подпись дана легендой один раз", () => {
@@ -575,9 +575,9 @@ describe("снимка не было ни разу", () => {
     }
     // Подпись плана дана дословно, но ОДИН раз — легендой над сеткой, а не
     // одинаковой строкой под каждым полем (принцип №2).
-    expect(screen.getAllByText(/из provision, на сервере не проверено/)).toHaveLength(1);
+    expect(screen.getAllByText(/come from provision and were not verified/)).toHaveLength(1);
     // И ни одно значение не выдано за расхождение: сверять было не с чем.
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    expect(screen.queryByText(/at provision/)).toBeNull();
   });
 
   it("карточке Site нечего сказать — она говорит это словом, а не пустой рамкой", () => {
@@ -613,7 +613,7 @@ describe("снимка не было ни разу", () => {
     // колонки пишутся одной транзакцией), но если разъедется — секция не должна
     // сказать «ещё не читали» и тут же напечатать список аккаунтов сервера.
     show({ fp_facts: facts(), fp_facts_at: null });
-    expect(screen.getByText(/Сервер ещё не читали/)).toBeTruthy();
+    expect(screen.getByText(/has not been read yet/)).toBeTruthy();
     expect(screen.queryByText("Accounts on server")).toBeNull();
     expect(screen.queryByText("8.2 · php-fpm")).toBeNull();
   });
@@ -654,10 +654,10 @@ describe("пустой список фактов — незнание, а не �
     show({ ...empty, db_name: "example_db", ftp_user: "example_ftp" });
     expect(sourceOf("Databases")).toBe("recorded-only");
     expect(sourceOf("Login")).toBe("recorded-only");
-    expect(screen.queryByText(/при развёртывании/)).toBeNull();
+    expect(screen.queryByText(/at provision/)).toBeNull();
     // Здесь подпись печатается у поля: снимок ЕСТЬ, легенды над сеткой нет, и
     // сказать «этого мы не прочитали» больше негде.
-    expect(screen.getAllByText("из provision, на сервере не проверено")).toHaveLength(2);
+    expect(screen.getAllByText("from provision, not verified on the server")).toHaveLength(2);
   });
 });
 
@@ -668,7 +668,7 @@ describe("DB user", () => {
     show({ fp_facts: facts(), fp_facts_at: ago(HOUR), db_user: "example_dbu" });
     expect(screen.getByText("DB user")).toBeTruthy();
     expect(screen.getByText("example_dbu")).toBeTruthy();
-    expect(screen.getByText("из provision, на сервере не проверено")).toBeTruthy();
+    expect(screen.getByText("from provision, not verified on the server")).toBeTruthy();
   });
 
   it("записи нет — строки нет вовсе, а не прочерк: факта тут не бывает никогда", () => {
