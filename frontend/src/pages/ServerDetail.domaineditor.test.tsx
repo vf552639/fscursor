@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import ServerDetail from "./ServerDetail";
+import { FORM } from "../components/ui/DateField";
 import { setTauri, secretBlobLifecycle } from "../test/secretBlobKit";
 
 /**
@@ -165,7 +166,7 @@ function saveBtn(): HTMLButtonElement {
  * без мыши не узнал бы о причине НИЧЕГО, при том что форма заблокирована
  * целиком, включая правку имени.
  */
-const BLOCKED = "A date could not be read. Clear the field and enter it again as DD.MM.YYYY.";
+const BLOCKED = `A date could not be read. Clear the field and enter it again as ${FORM}.`;
 
 function type(input: HTMLInputElement, value: string) {
   fireEvent.change(input, { target: { value } });
@@ -178,11 +179,12 @@ describe("ServerDetail — правка домена, поля дат", () => {
     setTauri(true);
     const f = await openEditor();
 
-    // Ради этих трёх строк всё и затевалось: нативного `type="date"` в проекте
-    // не осталось, и последними ушли ровно эти два поля.
+    // Ради этих двух строк всё и затевалось: последними нативные поля даты
+    // ушли ровно отсюда. Что они не вернутся НИГДЕ по проекту — сторожит
+    // отдельный тест на исходники (`test/nativeDateInput.test.ts`): здешняя
+    // проверка знает только свой экран.
     expect(f.purchase.type).toBe("text");
     expect(f.expiry.type).toBe("text");
-    expect(document.querySelectorAll('input[type="date"]').length).toBe(0);
 
     // Дата показана в том же написании, в каком её печатают колонка списка и
     // шапка карточки домена, — и в нём же принимается обратно.
@@ -273,6 +275,42 @@ describe("ServerDetail — правка домена, поля дат", () => {
     await waitFor(() => expect(mocks.apiPut).not.toHaveBeenCalled());
     // Форма при этом на месте: чинить строку человеку негде, кроме неё.
     expect(screen.getByLabelText("Purchase Date")).toBeTruthy();
+  });
+
+  it("на первой цифре форма молчит — и объясняется, только когда молчать перестало поле", async () => {
+    setTauri(true);
+    const f = await openEditor();
+
+    // Один символ. Сохранять такое нельзя (Save обязан погаснуть сразу), но
+    // ОБЪЯВЛЯТЬ это ошибкой ещё рано: незаконченная строка — не ошибка
+    // человека, а середина его действия. Само поле это правило держит
+    // (`revealed` в `DateField`), и форма обязана держать его тем же тиком:
+    // иначе на карточке домена продукт на «0» молчит, а здесь выговаривает —
+    // и это на одном и том же вводе.
+    type(f.purchase, "0");
+    expect(saveBtn().disabled).toBe(true);
+    expect(screen.queryByText(BLOCKED)).toBeNull();
+    // Своя красная строка поля при этом тоже молчит — сверяемся с ней, чтобы
+    // правило проверялось по ОДНОМУ источнику, а не по двум разным.
+    expect(f.purchase.getAttribute("aria-describedby")).toBeNull();
+
+    // Ушли из поля — набирать больше некому, ошибка состоялась. Строка
+    // появляется вместе с красной строкой самого поля, а не раньше неё.
+    fireEvent.blur(f.purchase);
+    expect(screen.getByText(BLOCKED)).toBeTruthy();
+    expect(f.purchase.getAttribute("aria-describedby")).toBeTruthy();
+  });
+
+  it("добор до полной длины — второй момент, когда молчать перестают оба", async () => {
+    setTauri(true);
+    const f = await openEditor();
+
+    // Из поля не уходили: дальше набирать нечего, и «31.02.2026» уже точно
+    // ошибка, а не середина.
+    type(f.expiry, "31.02.202");
+    expect(screen.queryByText(BLOCKED)).toBeNull();
+    type(f.expiry, "31.02.2026");
+    expect(screen.getByText(BLOCKED)).toBeTruthy();
   });
 
   it("непрочитанная строка объясняется ПОД полем и связана с ним", async () => {

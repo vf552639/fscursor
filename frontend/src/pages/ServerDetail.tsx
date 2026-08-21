@@ -11,7 +11,7 @@ import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
 import { useDomains, useDeleteDomain, useUpdateDomain, useBulkAssignServer, useBulkCreateStructuredDomains, Domain } from "../api/domains";
-import DateField from "../components/ui/DateField";
+import DateField, { FORM as DATE_FORM } from "../components/ui/DateField";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -1337,7 +1337,24 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
  * такого ответа нет вовсе, и это не придирка типа: `null` вместо непрочитанной
  * даты — молчаливое стирание того, что лежит в базе.
  */
-type DateRead = { kind: "value"; iso: string | null } | { kind: "error" };
+type DateRead =
+  | { kind: "value"; iso: string | null }
+  | {
+      kind: "error";
+      /**
+       * Ошибка СОСТОЯЛАСЬ, то есть поле само сочло нужным объясниться.
+       *
+       * Отдельно от самой ошибки, потому что вопросов два и ответы у них
+       * разные. «Можно ли это сохранить» — нельзя ни на каком символе, и Save
+       * гаснет сразу. «Пора ли выговаривать» — нет, пока человек набирает:
+       * строка `A date could not be read…`, появившаяся на первой цифре,
+       * зачитывалась бы вслух посреди набора (`aria-live`) и толкала бы кнопку
+       * Save вниз. Ровно от этих двух бед у самого поля заведён `revealed`, и
+       * без второго ответа форма нарушала бы его правило этажом выше: на
+       * карточке домена продукт на «0» молчит, а здесь выговаривал бы.
+       */
+      settled: boolean;
+    };
 
 /** Ряд формы: подпись и поле под ней. Одинаковый у всех четырёх — правило одно. */
 const EDITOR_ROW: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
@@ -1399,13 +1416,18 @@ const DATE_FIELD: React.CSSProperties = {
  * мёртв. Поэтому строка зовёт набрать заново: этот путь выводит из обоих
  * состояний.
  *
+ * Форма даты в текст НЕ вписана: она берётся из того же `FORM`, которым поле
+ * набрано в плейсхолдере. Вписанная литералом, она стала бы третьей записью
+ * одного знания (после регулярок `lib/domainExpiry` и плейсхолдера), и совет
+ * разошёлся бы с обещанием поля молча.
+ *
  * Постоянной подписи под полями (как «Empty clears the date.» в шапке карточки
  * домена) здесь по-прежнему нет: там пустое поле СРАЗУ уходит в запись по уходу
  * из поля, и предупредить надо заранее, а тут между пустым полем и записью
  * стоит явный Save. Эта строка тесноты не создаёт: она одна на форму и только
  * при сломанной дате, а в обычной жизни её нет вовсе.
  */
-const DATE_BLOCKED = "A date could not be read. Clear the field and enter it again as DD.MM.YYYY.";
+const DATE_BLOCKED = `A date could not be read. Clear the field and enter it again as ${DATE_FORM}.`;
 /**
  * Тон подписи, а не отказа: красное в форме уже занято разбором самого поля.
  *
@@ -1430,6 +1452,19 @@ const DATE_BLOCKED_NOTE: React.CSSProperties = { fontSize: 12, color: "#6b7280" 
  * Наружу форма отдаёт payload ПРЕЖНЕЙ формы (ISO-дата без времени либо `null`):
  * человеку показывается `01.09.2026`, бэкенду уходит `2026-09-01`. Перевод —
  * работа примитива и `lib/domainExpiry`, здесь его нет.
+ *
+ * ENTER В ЭТИХ ПОЛЯХ НЕ ЗАПИСЫВАЕТ, и это намеренно, а не забыто. Второй
+ * потребитель того же поля — срок в шапке карточки домена — пишет по Enter, и
+ * расхождение выглядит случайным, пока не назвать причину: там правка ОДНОГО
+ * значения на месте, и Enter — её естественный конец; здесь четыре поля и одна
+ * кнопка на всех, а Enter, записывающий из середины формы, унёс бы её раньше,
+ * чем человек дошёл до Zone ID. Обёртки `<form>` тут поэтому нет вовсе: с ней
+ * браузер отправлял бы форму по Enter сам.
+ *
+ * «Saving…» в кнопке — с многоточием (U+2026), как у карточки домена: две
+ * половины одной функции не вправе писать одно и то же слово двумя способами.
+ * Соседние формы этого файла пишут «Saving...» тремя точками; сводить к одному
+ * ещё и их — работа не этой правки, у них своя приёмка.
  */
 function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onSave: (payload: any) => void; onCancel: () => void; isSaving: boolean }) {
   const [name, setName] = useState(domain.domain_name || "");
@@ -1466,6 +1501,14 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
    * второго поля при сломанном первом.
    */
   const brokenDate = purchase.kind === "error" || expiry.kind === "error";
+  /**
+   * А объясняться — только когда сломанное поле само перестало молчать. Условие
+   * ОТДЕЛЬНОЕ от `brokenDate`, и разъехаться им положено: серая кнопка ничего
+   * не двигает и никого не окликает, а строка делает и то и другое.
+   */
+  const blockedShown =
+    (purchase.kind === "error" && purchase.settled) ||
+    (expiry.kind === "error" && expiry.settled);
 
   function save() {
     // Гард несущий: у ответа «строку прочитать не удалось» значения нет вовсе
@@ -1491,7 +1534,10 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
             // звучат они на каждый символ и ещё раз на монтировании. Запись
             // ждёт своей кнопки.
             onParsed={(iso) => setPurchase({ kind: "value", iso })}
-            onParseError={() => setPurchase({ kind: "error" })}
+            // Два ответа, а не один: первый гасит Save (сохранять сломанное
+            // нельзя ни на каком символе), второй разрешает объясниться.
+            onParseError={() => setPurchase({ kind: "error", settled: false })}
+            onParseErrorSettled={() => setPurchase({ kind: "error", settled: true })}
             style={DATE_FIELD}
           />
         </div>
@@ -1501,22 +1547,24 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
             id={id("expiry")}
             defaultValue={domain.expiry_date ?? null}
             onParsed={(iso) => setExpiry({ kind: "value", iso })}
-            onParseError={() => setExpiry({ kind: "error" })}
+            onParseError={() => setExpiry({ kind: "error", settled: false })}
+            onParseErrorSettled={() => setExpiry({ kind: "error", settled: true })}
             style={DATE_FIELD}
           />
         </div>
         <div style={EDITOR_ROW}><label htmlFor={id("zone")} style={EDITOR_LABEL}>Cloudflare Zone ID</label><Inp id={id("zone")} value={zoneId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setZoneId((e.target as any).value)} /></div>
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
-        {/* Одна строка на форму и только при сломанной дате — см. `DATE_BLOCKED`.
+        {/* Одна строка на форму и только когда сломанное поле само перестало
+            молчать (`blockedShown`, а не `brokenDate`) — см. `DATE_BLOCKED`.
             `aria-live="polite"`, а не `role="alert"`: сказать про блокировку
             надо ВСЛУХ (кнопка Save выключена, значит выпала из tab-порядка, и
             в обзоре до строки ещё надо добраться), но вежливой очередью, а не
             перебивая набор — assertive окликал бы человека посреди правки
             соседнего поля. Текст при этом статичен: строка не меняется, она
             появляется и исчезает целиком, так что повторов очередь не даёт. */}
-        {brokenDate ? <span aria-live="polite" style={DATE_BLOCKED_NOTE}>{DATE_BLOCKED}</span> : null}
-        <Btn variant="primary" disabled={isSaving || !name.trim() || brokenDate} title={brokenDate ? DATE_BLOCKED : undefined} onClick={save} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
+        {blockedShown ? <span aria-live="polite" style={DATE_BLOCKED_NOTE}>{DATE_BLOCKED}</span> : null}
+        <Btn variant="primary" disabled={isSaving || !name.trim() || brokenDate} title={blockedShown ? DATE_BLOCKED : undefined} onClick={save} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving…" : "Save"}</Btn>
         <Btn variant="secondary" onClick={onCancel} disabled={isSaving} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
       </div>
     </>
