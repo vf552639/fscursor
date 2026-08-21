@@ -318,6 +318,95 @@ describe("срок домена — правка на месте", () => {
   });
 });
 
+/**
+ * Запасные входы в запись — и почему без них поле не сохраняло ничего.
+ *
+ * Единственным входом было событие `change` нативного `<input type="date">`.
+ * Двенадцать тестов выше дёргают его НАПРЯМУЮ (`fireEvent.change`), то есть
+ * проверяют путь, который в WebKit не срабатывает: выбор даты в системном
+ * пикере доезжает туда не всегда, и живьём дефект выглядел так — поле
+ * схлопывается, снова показывает «set date», красной строки нет. Красной
+ * строки нет потому, что записи не было ВОВСЕ: `commit` не звался ни разу.
+ *
+ * Отсюда форма проверок ниже: событие `change` в них НЕ посылается. Это не
+ * стилистика — это и есть модель отказа, и тест, начинающийся с `change`,
+ * зеленел бы на сломанном поле.
+ */
+describe("срок домена — правка сохраняется и без события change", () => {
+  it("уход из поля пишет выбранную дату — точная модель отказа в WebKit", async () => {
+    show();
+    fireEvent.click(value());
+
+    // `change` не посылается намеренно: в WebKit его и не было. Значение
+    // приезжает вместе с `blur` — ровно так, как его отдаёт живой инпут, у
+    // которого дату выбрали в системном пикере.
+    fireEvent.blur(dateInput(), { target: { value: PICKED } });
+
+    await waitFor(() => expect(writes().length).toBe(1));
+    expect(writes()[0]).toEqual({ expiry_date: PICKED });
+  });
+
+  it("Enter пишет дату и закрывает поле", async () => {
+    show();
+    fireEvent.click(value());
+    fireEvent.change(dateInput(), { target: { value: PICKED } });
+    // Запись уже ушла по `change`; Enter обязан не задвоить её, а закрыть поле.
+    await waitFor(() => expect(writes().length).toBe(1));
+
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await settle();
+
+    expect(writes().length).toBe(1);
+    expect(screen.queryByLabelText("Expiry date")).toBeNull();
+  });
+
+  it("Enter — самостоятельный вход в запись, а не только закрытие", async () => {
+    show();
+    fireEvent.click(value());
+    // Опять без `change`: человек набрал дату с клавиатуры и нажал Enter, а
+    // событие изменения до нас не доехало.
+    const input = dateInput();
+    input.value = PICKED;
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(writes().length).toBe(1));
+    expect(writes()[0]).toEqual({ expiry_date: PICKED });
+    expect(screen.queryByLabelText("Expiry date")).toBeNull();
+  });
+
+  it("Escape закрывает поле и НЕ пишет", async () => {
+    show();
+    fireEvent.click(value());
+    const input = dateInput();
+    input.value = PICKED;
+    fireEvent.keyDown(input, { key: "Escape" });
+    await settle();
+
+    expect(writes().length).toBe(0);
+    expect(screen.queryByLabelText("Expiry date")).toBeNull();
+    // И на экране осталось сохранённое, а не то, от чего человек отказался.
+    expect(value().textContent).toBe(STORED_LABEL);
+  });
+
+  it("после провала записи уход из поля не шлёт ту же дату вторым PUT'ом", async () => {
+    mocks.apiPut.mockRejectedValue(new Error("nope"));
+
+    show();
+    fireEvent.click(value());
+    fireEvent.change(dateInput(), { target: { value: PICKED } });
+    await waitFor(() => expect(writes().length).toBe(1));
+    // Провал уже нарисован: показанным снова стало сохранённое, и рядом причина.
+    await screen.findByText(/nope/);
+
+    // Уход из поля с отвергнутой датой — не новая правка, а конец старой.
+    // Ретрай, которого никто не просил, ещё и рисовал бы отвергнутую дату
+    // принятой; повторить попытку по-прежнему можно явным действием.
+    fireEvent.blur(dateInput(), { target: { value: PICKED } });
+    await settle();
+    expect(writes().length).toBe(1);
+  });
+});
+
 describe("срок домена — что видно, пока запись идёт и когда она провалилась", () => {
   it("пока запись идёт, на экране стоит выбранная дата, а не сохранённая", async () => {
     let finish: ((row: any) => void) | null = null;
