@@ -19,7 +19,7 @@ import { DomainUI } from "../components/domains/types";
  * Таблица от этого остаётся презентационной: получает готовый порядок и ключ,
  * по которому рисует стрелку.
  */
-export function useDomainSort(rows: DomainUI[]): {
+export function useDomainSort(rows: DomainUI[], now: number): {
   sort: Sort;
   onSort: (k: SortKey) => void;
   sorted: DomainUI[];
@@ -35,8 +35,14 @@ export function useDomainSort(rows: DomainUI[]): {
    * Фокус-режим (`ctx.domainId`) сюда не вмешивается — он всего лишь ещё одно
    * условие фильтра страницы, поэтому сортировку не ломает: единственная
    * оставшаяся строка отсортирована сама с собой.
+   *
+   * `now` — то же «сейчас», что уезжает в строки (`useNow`), и оно же в
+   * зависимостях: колонка SSL сортируется по состоянию, которое ПРОТУХАЕТ, то
+   * есть порядок обязан стареть вместе с подписями. Тик — раз в минуту, и
+   * пересортировка сотни строк на нём дешевле, чем колонка, показывающая «Not
+   * checked» на месте, доставшемся ей от «Valid» час назад.
    */
-  const sorted = useMemo(() => sortDomains(rows, sort), [rows, sort]);
+  const sorted = useMemo(() => sortDomains(rows, sort, now), [rows, sort, now]);
 
   return { sort, onSort, sorted };
 }

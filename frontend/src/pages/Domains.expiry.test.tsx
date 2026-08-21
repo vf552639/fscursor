@@ -75,6 +75,38 @@ const ddMmYyyy = (iso: string) => {
   return `${d}.${m}.${y}`;
 };
 
+/**
+ * Снимок сервера про сертификат — то, из чего колонка SSL считает состояние.
+ *
+ * `factsAt` отдельным аргументом и всегда свежий: вывод о НАЛИЧИИ сертификата
+ * протухает за неделю, и снимок постарше увёл бы домен в «не проверяли» —
+ * состояние, про которое здесь речи нет.
+ */
+const certFacts = (expiresMs: number | null, error?: string) => ({
+  site: null,
+  ssl: {
+    has_certificate: true,
+    expires_at: expiresMs === null ? null : at(expiresMs),
+    issuer: "R3",
+    is_letsencrypt: true,
+    ...(error ? { error } : null),
+  },
+  ftp_accounts: [],
+  php_version: null,
+  php_handler: null,
+  databases: [],
+  logs: [],
+});
+
+/** Снимок, в котором сертификата на сервере нет вовсе. Это ЗНАНИЕ, а не пробел. */
+const noCertFacts = () => ({
+  ...certFacts(null),
+  ssl: { has_certificate: false, expires_at: null, issuer: null, is_letsencrypt: false },
+});
+
+/** Отметка удачного снимка: час назад, то есть заведомо свежая. */
+const FRESH_FACTS_AT = at(-HOUR);
+
 /** Один и тот же момент у двух доменов — иначе «равные ключи» не проверить. */
 const SAME_EXPIRY = at(10 * DAY + HOUR);
 const GOLF_EXPIRY = dateOnly(20 * DAY);
@@ -112,14 +144,17 @@ const DOMAINS = [
     status: "ns_ok",
     // Дата, которую не разобрать. Приезжает с сервера, и падать от неё нельзя.
     expiry_date: "not-a-date",
-    ssl_status: "pending",
+    // Сервер прочитан, сертификата на нём нет: «No certificate», не «не знаем».
+    fp_facts: noCertFacts(),
+    fp_facts_at: FRESH_FACTS_AT,
     created_at: "2026-02-10T00:00:00Z",
   }),
   domainRow(6, "foxtrot.com", {
     status: "new",
     expiry_date: SAME_EXPIRY,
-    ssl_status: "active",
-    ssl_expires_at: at(5 * DAY + HOUR),
+    // Сертификат живой, но истекает через 5 дней — «Expiring soon».
+    fp_facts: certFacts(5 * DAY + HOUR),
+    fp_facts_at: FRESH_FACTS_AT,
     created_at: "2026-06-15T00:00:00Z",
   }),
   // Срока нет вовсе — самый частый случай: домен, заведённый вручную.
@@ -132,8 +167,9 @@ const DOMAINS = [
   domainRow(1, "alpha.com", {
     status: "active",
     expiry_date: at(200 * DAY),
-    ssl_status: "active",
-    ssl_expires_at: at(40 * DAY + HOUR),
+    // Сертификат есть, до срока 40 дней — «Valid».
+    fp_facts: certFacts(40 * DAY + HOUR),
+    fp_facts_at: FRESH_FACTS_AT,
     created_at: "2026-03-01T00:00:00Z",
   }),
   // Статус, которого фронт не знает: бэкенд волен добавить такой в любой день.
@@ -145,7 +181,10 @@ const DOMAINS = [
   domainRow(3, "charlie.com", {
     status: "failed",
     expiry_date: at(-3 * DAY - HOUR),
-    ssl_status: "error",
+    // Чтение сертификата провалилось — «Read error»: отрицательное измерение,
+    // а не отсутствие измерения.
+    fp_facts: certFacts(60 * DAY, "read failed"),
+    fp_facts_at: FRESH_FACTS_AT,
     created_at: "2026-05-20T00:00:00Z",
   }),
 ];
@@ -256,29 +295,42 @@ describe("Domains — колонка Expires", () => {
     expect(cell("delta.com", "expiry-cell").textContent?.trim()).toBe("—");
   });
 
-  it("колонка SSL отвечает про сертификат «есть или нет», а разницу не теряет", () => {
-    // Срока сертификата в строке больше НЕТ: сроков было два, домена и
-    // сертификата, и рядом они читались как один. Разбор уехал на карточку
-    // (`DomainSslCard`, вкладка Overview) — вместе с точным `ssl_status`.
+  it("колонка SSL называет состояние с СЕРВЕРА всеми словами лестницы", () => {
+    // Срока сертификата в строке по-прежнему НЕТ: сроков было два, домена и
+    // сертификата, и рядом они читались как один. Разбор — на карточке
+    // (`DomainSslCard`, вкладка Overview).
     const ssl = cell("alpha.com", "ssl-cell");
     expect(within(ssl).getByText("Valid")).toBeTruthy();
     expect(ssl.textContent).not.toMatch(/day/);
 
-    // «Сертификат не выпустился» и «его не заказывали» — разные вещи, и колонка
-    // сливает их в один тег намеренно (она отвечает на вопрос ко всему списку —
-    // «где сайт открывается по https»). Молча терять разницу нельзя, поэтому
-    // точный статус обязан остаться в подсказке.
+    // Ради чего фаза 1 и делалась: четыре разных ответа вместо одного «No SSL».
+    // «Сертификата на сервере нет», «скоро истечёт», «прочитать не смогли» и
+    // «не проверяли ни разу» — четыре разные новости, и колонка обязана их
+    // различать: три первых требуют действия, четвёртая — нет.
+    expect(within(cell("delta.com", "ssl-cell")).getByText("No certificate")).toBeTruthy();
+    expect(within(cell("foxtrot.com", "ssl-cell")).getByText("Expiring soon")).toBeTruthy();
+    expect(within(cell("charlie.com", "ssl-cell")).getByText("Read error")).toBeTruthy();
+    expect(within(cell("bravo.com", "ssl-cell")).getByText("Not checked")).toBeTruthy();
+  });
+
+  it("домен, ни разу не читанный по SSH, — «не проверяли», а не «сертификата нет»", () => {
+    // Точная модель жалобы, с которой началась фаза: домен, настроенный мимо
+    // SDMP, имеет пустой `ssl_status` НАВСЕГДА, и колонка называла его «No
+    // SSL», пока карточка того же домена показывала «Valid». Незнание нельзя
+    // рисовать ни здоровьем, ни его отсутствием (принцип №6 CLAUDE.md).
     const none = cell("bravo.com", "ssl-cell");
-    expect(within(none).getByText("No SSL")).toBeTruthy();
-    expect(within(none).getByTitle("SSL status: none")).toBeTruthy();
+    expect(within(none).queryByText("No SSL")).toBeNull();
+    expect(within(none).queryByText("No certificate")).toBeNull();
+    expect(within(none).getByText("Not checked")).toBeTruthy();
+  });
 
-    const pending = cell("delta.com", "ssl-cell");
-    expect(within(pending).getByText("No SSL")).toBeTruthy();
-    expect(within(pending).getByTitle("SSL status: pending")).toBeTruthy();
-
-    const failed = cell("charlie.com", "ssl-cell");
-    expect(within(failed).getByText("No SSL")).toBeTruthy();
-    expect(within(failed).getByTitle("SSL status: error")).toBeTruthy();
+  it("подсказка называет возраст снимка — без него «Valid» читается сегодняшним", () => {
+    // `ssl_status` из подсказки ушёл намеренно: он про исход НАШЕГО прогона, а
+    // колонка теперь про то, что на сервере сейчас. Возраст же — единственное,
+    // чего в самой пилюле нет и без чего зелёное недельной давности выглядит
+    // свежим.
+    expect(within(cell("alpha.com", "ssl-cell")).getByTitle(/^SSL: Valid · Checked /)).toBeTruthy();
+    expect(within(cell("bravo.com", "ssl-cell")).getByTitle("SSL: Not checked · Never checked")).toBeTruthy();
   });
 });
 
@@ -366,22 +418,25 @@ describe("Domains — сортировка по клику на заголово
     expect(rowNames()[6]).toBe("golf.com");
   });
 
-  it("колонка SSL сортируется по статусу сертификата, срок — вторым ключом", () => {
-    // Так же устроена и сама ячейка: бейдж крупно, срок подписью под ним.
-    // Сортировать её по подписи значило бы упорядочить список по тому, чего в
-    // заголовке нет.
+  it("колонка SSL сортируется по тому же состоянию, которое и показывает", () => {
+    // Проверка ровно про долг №3 плана редизайна: ключ порядка и подпись
+    // обязаны считаться ОДНОЙ функцией. До фазы 1 колонка упорядочивала строки
+    // по `ssl_status` — записи момента provision, — а рисовала другое, и
+    // объяснить получившийся порядок на экране было нечем.
     fireEvent.click(sortBtn("SSL"));
     const asc = rowNames();
-    // «Нет сертификата» — тоже статус, и он первый; ошибка выпуска — последняя.
-    expect(asc.slice(0, 3)).toEqual(["bravo.com", "echo.com", "golf.com"]);
-    expect(asc[6]).toBe("charlie.com");
-    // Внутри одного статуса решает срок: foxtrot истекает раньше alpha.
-    expect(asc.indexOf("foxtrot.com")).toBeLessThan(asc.indexOf("alpha.com"));
+    // Лестница здоровья по возрастанию: нет сертификата → скоро истечёт →
+    // валиден → отказ чтения. «Не проверяли» в лестницу не входит вовсе.
+    expect(asc.slice(0, 4)).toEqual(["delta.com", "foxtrot.com", "alpha.com", "charlie.com"]);
+    // Три домена без снимка — в конец, и между собой по имени.
+    expect(asc.slice(4)).toEqual(["bravo.com", "echo.com", "golf.com"]);
 
     fireEvent.click(sortBtn("SSL"));
     const desc = rowNames();
+    // Второй клик поднимает отказ чтения — ровно как второй клик по Setup
+    // поднимает `failed`. А незнание остаётся внизу при ОБОИХ направлениях.
     expect(desc[0]).toBe("charlie.com");
-    expect(desc.indexOf("alpha.com")).toBeLessThan(desc.indexOf("foxtrot.com"));
+    expect(desc.slice(4)).toEqual(["bravo.com", "echo.com", "golf.com"]);
   });
 
   it("колонка Added сортируется по дате заведения", () => {

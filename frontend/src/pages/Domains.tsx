@@ -168,7 +168,7 @@ export default function Domains({ ctx, onProvisionResult, onBulkProvisionResult,
   const [assignCFId, setAssignCFId] = useState("");
   const [focusDomainId, setFocusDomainId] = useState<number | null>(null);
   const filters = useDomainFilters(domains, focusDomainId);
-  const order = useDomainSort(filters.filtered);
+  const order = useDomainSort(filters.filtered, now);
 
   const bulkAssignServer = useBulkAssignServer();
   const bulkAssignCF = useBulkAssignCloudflare();

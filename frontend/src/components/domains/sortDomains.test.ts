@@ -21,12 +21,27 @@ const row = (over: Partial<DomainUI> & { id: number; domain: string }): DomainUI
   cf_id: null,
   ns_status: "ok",
   status: "active",
+  ssl: null,
+  facts_at: null,
   ssl_status: null,
   expiry_date: null,
-  ssl_expires_at: null,
   last_provision_error: null,
   created: "2026-01-01T00:00:00Z",
   ...over,
+});
+
+/** «Сейчас» тестов — одно на файл, чтобы протухание снимков считалось от него. */
+const NOW = Date.parse("2026-08-20T00:00:00Z");
+/** Снимок недельной свежести: выводы о наличии сертификата по нему ещё действительны. */
+const FRESH = "2026-08-19T00:00:00Z";
+
+/** Сертификат из снимка. `expires` — срок; `undefined` значит «прочитан не был». */
+const cert = (expires?: string | null, error?: string): DomainUI["ssl"] => ({
+  has_certificate: true,
+  expires_at: expires ?? null,
+  issuer: "R3",
+  is_letsencrypt: true,
+  ...(error ? { error } : null),
 });
 
 const names = (rows: DomainUI[]) => rows.map((d) => d.domain);
@@ -77,35 +92,56 @@ describe("sortDomains", () => {
       expect(names(sortDomains(rows, sort("status", "desc"))).slice(-1)).toEqual(["alien.com"]);
     });
 
-    it("незнакомый статус сертификата — но «сертификата нет» это НЕ незнание", () => {
+    it("«снимка нет» — незнание; «сертификата нет» — знание, и это разные места", () => {
       const rows = [
-        row({ id: 1, domain: "active.com", ssl_status: "active" }),
-        row({ id: 2, domain: "alien.com", ssl_status: "такого-статуса-нет" }),
-        row({ id: 3, domain: "none.com", ssl_status: null }),
+        row({ id: 1, domain: "valid.com", ssl: cert("2027-01-01T00:00:00Z"), facts_at: FRESH }),
+        row({ id: 2, domain: "unchecked.com", ssl: null, facts_at: null }),
+        row({
+          id: 3,
+          domain: "missing.com",
+          ssl: { has_certificate: false, expires_at: null, issuer: null, is_letsencrypt: false },
+          facts_at: FRESH,
+        }),
       ];
-      const asc = names(sortDomains(rows, sort("ssl", "asc")));
-      const desc = names(sortDomains(rows, sort("ssl", "desc")));
-      expect(asc.slice(-1)).toEqual(["alien.com"]);
-      expect(desc.slice(-1)).toEqual(["alien.com"]);
-      // Домен без сертификата — обычное состояние, первая ступень лестницы
-      // (`none` в `lib/domainStatus`), а не «мы не знаем»: в списке оно так и
-      // подписано — «— No SSL». Проверка написана потому, что автор теста
-      // сначала предположил обратное.
-      expect(asc[0]).toBe("none.com");
+      const asc = names(sortDomains(rows, sort("ssl", "asc"), NOW));
+      const desc = names(sortDomains(rows, sort("ssl", "desc"), NOW));
+      // Домен, который ни разу не читали по SSH, уходит в конец при ОБОИХ
+      // направлениях: про его сертификат мы не знаем ничего.
+      expect(asc.slice(-1)).toEqual(["unchecked.com"]);
+      expect(desc.slice(-1)).toEqual(["unchecked.com"]);
+      // А «сертификата на сервере нет» — полноценное измерение и первая ступень
+      // лестницы здоровья, а не незнание. Проверка написана потому, что эти два
+      // состояния колонка когда-то рисовала одним словом «No SSL».
+      expect(asc[0]).toBe("missing.com");
+    });
+
+    it("протухший снимок возвращает домен в незнание, а не оставляет его зелёным", () => {
+      // Сердце фазы: «valid» — утверждение о том, что было на сервере в момент
+      // снимка, и через неделю оно перестаёт быть знанием. Порядок обязан
+      // стареть вместе с подписью, иначе колонка сортирует по тому, чего в ней
+      // уже не написано.
+      const rows = [
+        row({ id: 1, domain: "fresh.com", ssl: cert("2027-01-01T00:00:00Z"), facts_at: FRESH }),
+        row({ id: 2, domain: "stale.com", ssl: cert("2027-01-01T00:00:00Z"), facts_at: "2026-07-01T00:00:00Z" }),
+      ];
+      expect(names(sortDomains(rows, sort("ssl", "asc"), NOW))).toEqual(["fresh.com", "stale.com"]);
+      expect(names(sortDomains(rows, sort("ssl", "desc"), NOW))).toEqual(["fresh.com", "stale.com"]);
     });
   });
 
-  it("колонка SSL сортируется по статусу, а срок — только второй ключ", () => {
-    // Так устроена и сама ячейка: бейдж крупно, срок подписью под ним.
+  it("колонка SSL сортируется по состоянию, а срок из снимка — только второй ключ", () => {
+    // Срок берётся из СНИМКА (`ssl.expires_at`), а не из колонки
+    // `ssl_expires_at`: у списка и у карточки один источник, иначе второй ключ
+    // упорядочивал бы строки по записи, которой на экране нет вовсе.
     const rows = [
-      row({ id: 1, domain: "a-active-far.com", ssl_status: "active", ssl_expires_at: "2027-01-01T00:00:00Z" }),
-      row({ id: 2, domain: "b-error-soon.com", ssl_status: "error", ssl_expires_at: "2026-09-01T00:00:00Z" }),
-      row({ id: 3, domain: "c-active-soon.com", ssl_status: "active", ssl_expires_at: "2026-08-20T00:00:00Z" }),
+      row({ id: 1, domain: "a-valid-far.com", ssl: cert("2027-01-01T00:00:00Z"), facts_at: FRESH }),
+      row({ id: 2, domain: "b-error.com", ssl: cert("2027-06-01T00:00:00Z", "read failed"), facts_at: FRESH }),
+      row({ id: 3, domain: "c-valid-far-too.com", ssl: cert("2026-12-01T00:00:00Z"), facts_at: FRESH }),
     ];
-    const asc = names(sortDomains(rows, sort("ssl", "asc")));
-    // Оба «active» стоят рядом, и внутри них решает срок.
-    expect(asc.indexOf("c-active-soon.com")).toBeLessThan(asc.indexOf("a-active-far.com"));
-    expect(asc.indexOf("a-active-far.com")).toBeLessThan(asc.indexOf("b-error-soon.com"));
+    const asc = names(sortDomains(rows, sort("ssl", "asc"), NOW));
+    // Оба «valid» стоят рядом, и внутри них решает срок; `error` — за ними.
+    expect(asc.indexOf("c-valid-far-too.com")).toBeLessThan(asc.indexOf("a-valid-far.com"));
+    expect(asc.indexOf("a-valid-far.com")).toBeLessThan(asc.indexOf("b-error.com"));
   });
 
   it("равные ключи разбираются по имени, а не порядком заведения", () => {

@@ -1,5 +1,6 @@
 import { CloudflareAccount } from "../../api/cloudflare";
 import { Domain } from "../../api/domains";
+import { DomainFacts } from "../../lib/domainFacts";
 
 /**
  * Строка домена в том виде, в каком её показывает вкладка: только те поля,
@@ -17,11 +18,33 @@ export interface DomainUI {
   cf_id: number | null;
   ns_status: string;
   status: string;
+  /**
+   * Сертификат из СНИМКА сервера (`fp_facts.ssl`), а не наша запись
+   * `ssl_status`, и это главное отличие типа от ответа API.
+   *
+   * `ssl_status` — исход provision: единственный её писатель — сам прогон
+   * (`desktop/.../provision.rs`), и у домена, настроенного мимо SDMP, она пуста
+   * НАВСЕГДА. Строка, читавшая её, называла такой домен «No SSL», пока его же
+   * карточка показывала «Valid», — два ответа про одно на двух экранах. Теперь
+   * источник один: `sslState(ssl, facts_at)`, ровно как в карточке.
+   *
+   * `null` — снимка нет; это `unchecked` («не проверяли»), а не «сертификата
+   * нет» (принцип №6 CLAUDE.md).
+   */
+  ssl: DomainFacts["ssl"] | null;
+  /** Когда снимок УДАЛСЯ (`fp_facts_at`). Читается только в паре с `ssl`. */
+  facts_at: string | null;
+  /**
+   * Исход выпуска сертификата в НАШЕМ прогоне. Остался ровно ради одного
+   * потребителя — счётчика «Failed at SSL» (`lib/domainCounts`), и это не
+   * пережиток: `ssl_status === "error"` — единственный след прогона, дошедшего
+   * до SSL и не получившего сертификат, а колонка списка теперь отвечает на
+   * другой вопрос («что сейчас на сервере»). Рисовать им состояние сертификата
+   * больше нельзя нигде.
+   */
   ssl_status?: string | null;
   /** Срок домена у регистратора. `date` без времени — считаем сутками. */
   expiry_date?: string | null;
-  /** Срок сертификата. Полноценный `datetime`, но вопрос к нему тот же суточный. */
-  ssl_expires_at?: string | null;
   last_provision_error?: string | null;
   created: string;
 }
@@ -54,9 +77,10 @@ export function toDomainUI(d: Domain): DomainUI {
     cf_id: d.cloudflare_account_id,
     ns_status: d.ns_status || "pending",
     status: d.status,
+    ssl: d.fp_facts?.ssl ?? null,
+    facts_at: d.fp_facts_at ?? null,
     ssl_status: d.ssl_status,
     expiry_date: d.expiry_date,
-    ssl_expires_at: d.ssl_expires_at,
     last_provision_error: d.last_provision_error,
     created: d.created_at,
   };

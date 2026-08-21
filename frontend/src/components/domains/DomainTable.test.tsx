@@ -43,6 +43,8 @@ const domain = (id: number, name: string, extra: Partial<DomainUI> = {}): Domain
   cf_id: null,
   ns_status: "pending",
   status: "new",
+  ssl: null,
+  facts_at: null,
   created: "2026-01-01T00:00:00Z",
   ...extra,
 });
@@ -261,14 +263,19 @@ describe("DomainRow — тег сертификата не теряет краё
    * Поэтому утверждение двойное: рамка есть И она отличается от заливки. Одной
    * первой половины мало — `border: 1px solid <цвет заливки>` формально рамка,
    * а на экране её нет.
+   *
+   * Нейтральную пилюлю носит теперь «Not checked» («снимка нет»), а не «No
+   * SSL»: предмет находки от этого не изменился — те же два токена и то же
+   * совпадение, — а вот сама подпись стала честнее (фаза 1 плана
+   * `2026-08-21-domains-shest-pravok.md`).
    */
   const sslPill = (name: string) =>
-    within(rowOf(name)).getByTitle(/^SSL status: /) as HTMLElement;
+    within(rowOf(name)).getByTitle(/^SSL: /) as HTMLElement;
 
-  it("«No SSL» очерчен, и рамка не сливается с собственной заливкой", () => {
+  it("нейтральная пилюля очерчена, и рамка не сливается с собственной заливкой", () => {
     renderTable();
     const pill = sslPill("bravo.com");
-    expect(pill.textContent).toBe("No SSL");
+    expect(pill.textContent).toBe("Not checked");
     expect(pill.style.background).toBe(hexToRgb(tokens.surface.page));
     expect(pill.style.borderStyle).toBe("solid");
     expect(pill.style.borderColor).toBe(hexToRgb(tokens.border.light));

@@ -2,11 +2,9 @@ import { describe, it, expect } from "vitest";
 
 import {
   DOMAIN_STATUSES,
-  SSL_STATUSES,
   domainStatusLabel,
   domainStatusRank,
   domainStatusVariant,
-  sslStatusRank,
 } from "./domainStatus";
 
 /**
@@ -34,7 +32,6 @@ describe("DOMAIN_STATUSES", () => {
       "active",
       "failed",
     ]);
-    expect(SSL_STATUSES).toEqual(["none", "pending", "active", "error"]);
   });
 
   it("зелёный занят одним `active`, красный — одним `failed`", () => {
@@ -63,11 +60,22 @@ describe("domainStatusVariant / domainStatusLabel", () => {
   });
 });
 
-describe("domainStatusRank / sslStatusRank", () => {
+/*
+ * Лестницы статуса СЕРТИФИКАТА здесь больше нет.
+ *
+ * `SSL_STATUSES`/`sslStatusRank` упорядочивали `ssl_status` — нашу запись
+ * момента provision, — и колонка SSL сортировалась по ней, пока рисовала совсем
+ * другое. Фаза 1 плана `2026-08-21-domains-shest-pravok.md` перевела и показ, и
+ * порядок на состояние с сервера (`sslState` + `sslStateRank` в
+ * `lib/domainFacts`), а осиротевшую лестницу удалила вместе с этими тестами:
+ * оставленная «на всякий случай», она была бы вторым порядком тех же значений,
+ * которого никто не рисует.
+ */
+
+describe("domainStatusRank", () => {
   it("порядок — жизненный цикл, а не алфавит", () => {
     expect(domainStatusRank("new")).toBeLessThan(domainStatusRank("active") as number);
     expect(domainStatusRank("active")).toBeLessThan(domainStatusRank("failed") as number);
-    expect(sslStatusRank("pending")).toBeLessThan(sslStatusRank("error") as number);
   });
 
   it("незнакомый статус — `null`, то есть «в конец при любом направлении»", () => {
@@ -75,15 +83,5 @@ describe("domainStatusRank / sslStatusRank", () => {
     // и второй клик по Status — тот, что должен поднять `failed`, — поднимал бы
     // наверх статус, который бэкенд только что добавил, а фронт ещё не знает.
     expect(domainStatusRank("teleported")).toBeNull();
-    expect(sslStatusRank("revoked")).toBeNull();
-  });
-
-  it("сертификата нет — это `none`, а не незнание", () => {
-    // Домен без сертификата — обычное состояние, и в списке оно так и
-    // подписано («— No SSL»). Уводить такие строки в конец было бы враньём:
-    // про них как раз всё известно.
-    expect(sslStatusRank(null)).toBe(sslStatusRank("none"));
-    expect(sslStatusRank(undefined)).toBe(sslStatusRank("none"));
-    expect(sslStatusRank("")).toBe(sslStatusRank("none"));
   });
 });

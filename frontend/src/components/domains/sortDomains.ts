@@ -1,5 +1,6 @@
 import { expiryTs } from "../../lib/domainExpiry";
-import { domainStatusRank, sslStatusRank } from "../../lib/domainStatus";
+import { sslState, sslStateRank } from "../../lib/domainFacts";
+import { domainStatusRank } from "../../lib/domainStatus";
 import { DomainUI } from "./types";
 
 /** По какой колонке сортируем. Только те, у чьих значений есть порядок. */
@@ -77,30 +78,23 @@ function dateOf(d: DomainUI, key: DateSortKey): string | null | undefined {
  * Незнание (даты нет, статус незнакомый) уходит в конец при любом направлении —
  * см. `compareUnknownLast`.
  *
- * Колонка SSL сортируется ПО СТАТУСУ сертификата, а срок — лишь второй ключ.
+ * Колонка SSL сортируется ПО СОСТОЯНИЮ сертификата на сервере, а срок — лишь
+ * второй ключ. Оба ключа читаются из СНИМКА (`ssl` + `facts_at`), тем же
+ * `sslState`, каким ячейка рисует пилюлю, — и это главное, что здесь надо
+ * знать: до фазы 1 колонка сортировала по `ssl_status` (нашей записи момента
+ * provision), а показывала — сначала «есть/нет» по ней же, теперь состояние с
+ * сервера. Ключ, разошедшийся с подписью, даёт порядок, который на экране
+ * необъясним ничем; долг №3 плана редизайна был ровно про это.
  *
- * Оба ключа ушли из ячейки дальше, чем видно из этой функции, и знать об этом
- * надо прежде, чем править порядок:
+ * `now` приходит сверху, а не берётся здесь: тем же «сейчас» строка считает
+ * свою пилюлю, и разные часы у порядка и у подписи снова развели бы их на
+ * границе протухания — на неделе жизни снимка это ровно тот случай, ради
+ * которого `useNow` и заведён.
  *
- * — Первый ключ (ранг `ssl_status`) виден ЧАСТИЧНО. Ячейка различает ровно две
- *   вещи — `active` и «всё остальное», — а лестница рангов различает больше:
- *   `pending`, `error` и пустой статус получают в ней разные места, но на
- *   экране носят один и тот же тег «No SSL». Точное состояние не потеряно, оно
- *   в `title` тега. То есть после сортировки соседние строки могут стоять в
- *   порядке, который объясняет только подсказка под курсором.
- * — Второй ключ (`ssl_expires_at`) из строки убран ВОВСЕ: подстрочника со
- *   сроком сертификата в ячейке больше нет — сроков в строке было два, домена
- *   и сертификата, и рядом они читались как один. Живёт он теперь на карточке
- *   (`DomainSslCard`, вкладка Overview).
- *
- * Порядок при этом остаётся прежним, и это решение, а не недосмотр: приёмка ТЗ
- * перечисляет SSL среди сортируемых колонок, а главное различие — «Valid» перед
- * «No SSL» — на экране видно прямо. Сортировать колонку по сроку, когда
- * заголовок называет её «SSL», значило бы упорядочить список по тому, чего в
- * заголовке нет; сортировать по одному лишь видимому «есть/нет» — оставить
- * `pending` и `error` вперемешку без всякой причины.
+ * `unchecked` («не проверяли») в лестницу рангов не входит и уходит в конец при
+ * ЛЮБОМ направлении — см. `compareUnknownLast` и `sslStateRank`.
  */
-export function sortDomains(rows: DomainUI[], sort: Sort): DomainUI[] {
+export function sortDomains(rows: DomainUI[], sort: Sort, now: number = Date.now()): DomainUI[] {
   const mul = sort.dir === "asc" ? 1 : -1;
   return [...rows].sort((a, b) => {
     let primary: number;
@@ -110,8 +104,8 @@ export function sortDomains(rows: DomainUI[], sort: Sort): DomainUI[] {
       primary = compareUnknownLast(domainStatusRank(a.status), domainStatusRank(b.status), mul);
     } else if (sort.key === "ssl") {
       primary =
-        compareUnknownLast(sslStatusRank(a.ssl_status), sslStatusRank(b.ssl_status), mul) ||
-        compareUnknownLast(expiryTs(a.ssl_expires_at), expiryTs(b.ssl_expires_at), mul);
+        compareUnknownLast(sslStateRank(sslState(a.ssl, a.facts_at, now)), sslStateRank(sslState(b.ssl, b.facts_at, now)), mul) ||
+        compareUnknownLast(expiryTs(a.ssl?.expires_at), expiryTs(b.ssl?.expires_at), mul);
     } else {
       primary = compareUnknownLast(expiryTs(dateOf(a, sort.key)), expiryTs(dateOf(b, sort.key)), mul);
     }

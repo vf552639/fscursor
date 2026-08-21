@@ -13,10 +13,10 @@
  *
  * Внутри три предмета, и все три про одно знание: сам wire-тип, лестница
  * состояния сертификата (`sslState` + `SSL_BADGE`) и РАЗБОР СНИМКА
- * (`snapshotOf`) — «есть ли он, протух ли и сколько ему лет». Разбор, кроме
- * флагов, собирает готовую английскую подпись («Checked 4h ago · stale»,
- * «Never checked»), то есть слова интерфейса выходят отсюда наружу в ДВУХ
- * местах, а не только из `SSL_BADGE`; оговорка про это — там же, над картой.
+ * (`snapshotOf`) — «есть ли он, протух ли и сколько ему лет». Подпись возраста
+ * («Checked 4h ago · stale», «Never checked») собирает `factsFreshness`, то есть
+ * слова интерфейса выходят отсюда наружу в ДВУХ местах, а не только из
+ * `SSL_BADGE`; оговорка про это — там же, над картой.
  */
 
 import { formatAgoStale } from "./format";
@@ -130,6 +130,19 @@ export type LogTail = {
 export type SslState = "unchecked" | "missing" | "expired" | "expiring" | "valid" | "error";
 
 /**
+ * Вариант показа состояния — те же имена, что понимают `ui/Primitives.Badge` и
+ * карта `STATUS_PILL` вкладки Domains.
+ *
+ * Union, а не `string`, и это не педантизм: карту читают ТРИ места, и одно из
+ * них (`domains/DomainRow`) индексирует ею `STATUS_PILL`, у которой ключи
+ * перечислены. Опечатка в варианте при `string` доехала бы до экрана серым
+ * пятном, а не ошибкой сборки. `blue` из набора нет намеренно: «работа идёт у
+ * нас» — про ступень настройки домена, а у сертификата такого состояния не
+ * бывает; появится — добавить сюда.
+ */
+type SslBadgeVariant = "gray" | "green" | "yellow" | "red";
+
+/**
  * Порог, после которого снимок с сервера считается протухшим.
  *
  * Неделя — не с потолка: это ровно тот срок, на котором вывод о НАЛИЧИИ
@@ -235,11 +248,11 @@ export function sslState(
  * модулей `lib` наружу выходит только токен, а слова остаются у показа. Здесь
  * иначе ровно затем, чтобы два места не назвали одно состояние по-разному;
  * появится словарь интерфейса — подписи уйдут в него. Вместе с ними уйдёт и
- * `freshness` из `snapshotOf`: это вторая дверь, через которую английские слова
- * выходят из этого модуля, и не назвать её здесь значило бы обречь будущую
- * миграцию её не найти.
+ * `factsFreshness`: это вторая дверь, через которую английские слова выходят из
+ * этого модуля, и не назвать её здесь значило бы обречь будущую миграцию её не
+ * найти.
  */
-export const SSL_BADGE: Record<SslState, { label: string; variant: string }> = {
+export const SSL_BADGE: Record<SslState, { label: string; variant: SslBadgeVariant }> = {
   unchecked: { label: "Not checked", variant: "gray" },
   missing: { label: "No certificate", variant: "red" },
   expired: { label: "Expired", variant: "red" },
@@ -247,6 +260,28 @@ export const SSL_BADGE: Record<SslState, { label: string; variant: string }> = {
   valid: { label: "Valid", variant: "green" },
   error: { label: "Read error", variant: "red" },
 };
+
+/**
+ * Место состояния в лестнице — ключ сортировки колонки SSL. `null` —
+ * «не проверяли», то есть про место мы НЕ ЗНАЕМ: в конец при ЛЮБОМ направлении,
+ * ровно как незнакомый статус у `domainStatusRank`.
+ *
+ * Порядок — здоровье по возрастанию: сертификата нет → истёк → скоро истечёт →
+ * валиден. `error` стоит последним и вне этого ряда намеренно: чтение
+ * сертификата провалилось — это не ступень здоровья, а отказ измерения, и
+ * поднимает его ВТОРОЙ клик по заголовку, ровно как второй клик по `Setup`
+ * поднимает `failed`. Так же была устроена и лестница, которую эта функция
+ * заменила (`none, pending, active, error` в `lib/domainStatus`).
+ *
+ * Принимает состояние, а не снимок: считать его — дело `sslState`, и второй
+ * вызов здесь означал бы, что колонка сортирует по своей копии расчёта.
+ */
+const SSL_STATE_ORDER: readonly SslState[] = ["missing", "expired", "expiring", "valid", "error"];
+
+export function sslStateRank(state: SslState): number | null {
+  const i = SSL_STATE_ORDER.indexOf(state);
+  return i === -1 ? null : i;
+}
 
 /** Снимок сервера, разобранный на то, что о нём спрашивают экраны. */
 export interface Snapshot {
@@ -300,8 +335,25 @@ export function snapshotOf(
     facts: noSnapshot ? null : facts ?? null,
     noSnapshot,
     stale,
-    freshness: factsAt ? `Checked ${formatAgoStale(factsAt, stale, now)}` : "Never checked",
+    freshness: factsFreshness(factsAt, now),
   };
+}
+
+/**
+ * Подпись возраста снимка: «Checked 4h ago · stale» либо «Never checked».
+ *
+ * Вынесена из `snapshotOf` затем, что читателю нужен не весь разбор, а одни эти
+ * слова: строка списка (`domains/DomainRow`) знает про домен ровно два поля
+ * снимка — сертификат и отметку времени, — и собирать ради подсказки объект
+ * `Snapshot` с `facts: null` значило бы врать типом. Копия же выражения по
+ * месту дала бы ВТОРУЮ редакцию слов, ровно как их когда-то было три у
+ * `STALE_SUFFIX`.
+ *
+ * Английские слова, выходящие отсюда наружу, — те самые, о которых говорит
+ * оговорка над `SSL_BADGE`: дверей у них две, и это вторая.
+ */
+export function factsFreshness(factsAt: string | null | undefined, now: number): string {
+  return factsAt ? `Checked ${formatAgoStale(factsAt, isFactsStale(factsAt, now), now)}` : "Never checked";
 }
 
 /**

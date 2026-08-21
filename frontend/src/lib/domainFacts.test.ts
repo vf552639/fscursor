@@ -2,11 +2,13 @@ import { describe, it, expect } from "vitest";
 
 import {
   backupsOf,
+  factsFreshness,
   FACTS_STALE_MS,
   isFactsStale,
   snapshotOf,
   SSL_BADGE,
   sslState,
+  sslStateRank,
   type BackupsFacts,
   type DomainBackup,
   type DomainFacts,
@@ -168,6 +170,60 @@ describe("SSL_BADGE — как состояние выглядит на экра
       valid: { label: "Valid", variant: "green" },
       error: { label: "Read error", variant: "red" },
     });
+  });
+});
+
+describe("sslStateRank — порядок колонки SSL", () => {
+  it("лестница здоровья по возрастанию, отказ чтения — за её концом", () => {
+    // Ранги записаны отношениями, а не числами: числа поменяются от любой
+    // вставки состояния в середину, а «нет сертификата раньше валидного» —
+    // не поменяется, и проверять надо именно это.
+    const rank = (s: Parameters<typeof sslStateRank>[0]) => sslStateRank(s) as number;
+    expect(rank("missing")).toBeLessThan(rank("expired"));
+    expect(rank("expired")).toBeLessThan(rank("expiring"));
+    expect(rank("expiring")).toBeLessThan(rank("valid"));
+    // `error` — не ступень здоровья, а отказ измерения, и стоит он ПОСЛЕ
+    // валидного: поднимает его второй клик по заголовку, ровно как второй клик
+    // по Setup поднимает `failed`.
+    expect(rank("valid")).toBeLessThan(rank("error"));
+  });
+
+  it("«не проверяли» — `null`, то есть в конец при ЛЮБОМ направлении", () => {
+    // Числом «за концом лестницы» незнание переворачивалось бы вместе с
+    // направлением и вторым кликом вставало бы наверх — то есть список
+    // начинался бы с доменов, про которые ответа нет вовсе.
+    expect(sslStateRank("unchecked")).toBeNull();
+  });
+
+  it("ранг есть у КАЖДОГО состояния, кроме незнания", () => {
+    // Иначе новое состояние молча получит `null` и уедет в конец списка
+    // вместе с непроверенными — на экране это неотличимо от порядка.
+    const ranked = (Object.keys(SSL_BADGE) as (keyof typeof SSL_BADGE)[])
+      .filter((s) => sslStateRank(s) !== null)
+      .sort();
+    expect(ranked).toEqual(["error", "expired", "expiring", "missing", "valid"]);
+  });
+});
+
+describe("factsFreshness — возраст снимка словами", () => {
+  it("снимка не было — «Never checked», а не «0m ago»", () => {
+    // Выдуманный возраст хуже отсутствия: «just now» у домена, которого не
+    // читали ни разу, — это здоровье, нарисованное на месте незнания.
+    expect(factsFreshness(null, NOW)).toBe("Never checked");
+    expect(factsFreshness(undefined, NOW)).toBe("Never checked");
+  });
+
+  it("свежий снимок — возраст без пометки, протухший — с пометкой", () => {
+    expect(factsFreshness(ago(HOUR), NOW)).toBe("Checked 1h ago");
+    expect(factsFreshness(ago(FACTS_STALE_MS + MINUTE), NOW)).toBe("Checked 7d ago · stale");
+  });
+
+  it("та же подпись, что собирает `snapshotOf` — одна на продукт", () => {
+    // Строка списка зовёт `factsFreshness` напрямую (объекта `Snapshot` у неё
+    // нет), карточка — через разбор. Разойдись эти два пути, и один и тот же
+    // снимок назывался бы на двух экранах по-разному.
+    const at = ago(3 * DAY);
+    expect(snapshotOf(facts(), at, NOW).freshness).toBe(factsFreshness(at, NOW));
   });
 });
 

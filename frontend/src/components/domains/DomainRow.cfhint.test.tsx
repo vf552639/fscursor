@@ -24,6 +24,8 @@ const DOMAIN: DomainUI = {
   cf_id: null,
   ns_status: "pending",
   status: "new",
+  ssl: null,
+  facts_at: null,
   created: "2026-01-01T00:00:00Z",
 };
 
