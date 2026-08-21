@@ -6,7 +6,7 @@ import { RegistrarAccount } from "../../api/registrars";
 import { Server } from "../../api/servers";
 import { setTauri } from "../../test/secretBlobKit";
 import { tokens } from "../../lib/designTokens";
-import { domainStatusLabel } from "../../lib/domainStatus";
+import { domainStatusHint, domainStatusLabel } from "../../lib/domainStatus";
 import { hexToRgb } from "../../test/colors";
 import DomainTable from "./DomainTable";
 import { DomainUI } from "./types";
@@ -115,9 +115,14 @@ describe("DomainTable — набор колонок", () => {
   it("по ступени настройки сортировать больше нечем — заголовка нет", () => {
     // Ключ сортировки без заголовка нажать нечем, а заголовок без колонки
     // обещал бы порядок строк по значению, которого в них не видно.
+    //
+    // Проверяется ровно «Sort by Setup» — подпись, которая тут была. Соседняя
+    // проверка на «Sort by Status» отсюда убрана как нефальсифицируемая:
+    // колонки с такой подписью в этой таблице не было никогда (заголовок звался
+    // «Setup» намеренно, чтобы не спорить с колонкой Status вкладки Servers), и
+    // упасть такое утверждение не могло ни при какой реализации.
     renderTable();
     expect(screen.queryByRole("button", { name: "Sort by Setup" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Sort by Status" })).toBeNull();
   });
 
   it("сервер и регистратор переехали метками под имя домена, а не исчезли", () => {
@@ -215,6 +220,20 @@ describe("DomainRow — текст провалившегося прогона",
     expect(err.style.whiteSpace).not.toBe("nowrap");
   });
 
+  it("бейдж объясняет СТУПЕНЬ, а не пересказывает ошибку в третий раз", () => {
+    // Пока ошибка была обрезана до одного слова в колонке 110px, подсказка
+    // бейджа была единственным местом с полным текстом, и перебивать ею
+    // объяснение статуса стоило того. Теперь текст виден двумя строками и несёт
+    // собственный `title` — пересказ в подсказке бейджа был бы третьей копией
+    // той же строки, купленной ценой погашенного объяснения ступени. А ступень
+    // без объяснения молчит о том, чем «Failed» отличается от «Site created»:
+    // оба слова из чужого словаря.
+    renderTable({ rows: [domain(1, "broken.com", { status: "failed", last_provision_error: ERR })] });
+    const pill = within(rowOf("broken.com")).getByText(domainStatusLabel("failed"));
+    expect(pill.getAttribute("title")).toBe(domainStatusHint("failed"));
+    expect(pill.getAttribute("title")).not.toBe(ERR);
+  });
+
   it("чистому домену блока не достаётся вовсе", () => {
     renderTable({
       rows: [domain(1, "broken.com", { status: "failed", last_provision_error: ERR }), domain(2, "fine.com", { status: "active" })],
@@ -226,10 +245,15 @@ describe("DomainRow — текст провалившегося прогона",
     expect(within(rowOf("fine.com")).queryByTestId("provision-error")).toBeNull();
   });
 
-  it("текст ошибки не остаётся без бейджа, даже если статус успели переписать", () => {
-    // `active` с непогашенной ошибкой прогона бывает: гасит её отдельный запрос
-    // с десктопа, и он может не дойти. Красная строка без единого слова о том,
-    // чем домен является, читалась бы как поломка страницы, а не домена.
+  it("текст ошибки не остаётся без бейджа, даже если статус придёт рутинным", () => {
+    // Такого домена сегодня не производит ни один писатель: и десктоп
+    // (`domain_write_back_body`), и повтор прогона шлют рутинный статус ОДНИМ
+    // запросом вместе с `last_provision_error: null`, а не дойдя, тот же запрос
+    // оставляет домен в `failed` — то есть первая половина условия. Проверка
+    // сторожит не достижимое состояние, а инвариант самой строки: красного
+    // текста без слова о том, чем домен является, в списке не бывает, что бы ни
+    // прислал сервер. Разойдись мы с ним завтра — строка читалась бы как
+    // поломка страницы, а не домена, и это нельзя оставлять на «не случится».
     renderTable({ rows: [domain(1, "stale.com", { status: "active", last_provision_error: ERR })] });
     const cell = within(rowOf("stale.com")).getAllByRole("cell")[1];
     expect(within(cell).getByText(domainStatusLabel("active"))).toBeTruthy();

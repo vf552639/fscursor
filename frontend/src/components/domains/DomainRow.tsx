@@ -199,10 +199,16 @@ function DomainRow({
   const sslTone = STATUS_PILL[sslBadge.variant];
   // Ступень настройки называется только тогда, когда она исключение: рутина
   // (`new`, `active`) молчит, всё остальное — включая статус, которого фронт не
-  // знает, — получает бейдж. Непогашенный текст провалившегося прогона считается
-  // тем же исключением: гасит его отдельный запрос с десктопа, и если тот не
-  // дошёл, красная строка под именем осталась бы без единого слова о том, чем
-  // домен является.
+  // знает, — получает бейдж.
+  //
+  // Вторая половина условия — страховка, а не разбор случая из жизни: рутинного
+  // статуса с непогашенной ошибкой прогона сегодня не производит ни один
+  // писатель (десктоп шлёт статус и `last_provision_error: null` одним
+  // запросом, а не дойдя, тот оставляет домен в `failed`). Стоит она потому, что
+  // достижимость эта — свойство ЧУЖОГО кода, а инвариант нужен строке: красный
+  // текст под именем без единого слова о том, чем домен является, читался бы
+  // как поломка страницы, а не домена. Цена — одна дизъюнкция; поведения ни в
+  // одном сегодняшнем состоянии она не меняет.
   const showStatus = !domainStatusIsRoutine(d.status) || !!d.last_provision_error;
   return <tr
     onClick={() => onOpenDetail(d.id)}
@@ -250,7 +256,7 @@ function DomainRow({
           вторую точку показа статуса рядом с готовой. */}
       {(showStatus || srv || reg?.provider) ? (
         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4,maxWidth:"100%"}}>
-          {showStatus ? <DomainStatusBadge status={d.status} title={d.last_provision_error || undefined} /> : null}
+          {showStatus ? <DomainStatusBadge status={d.status} /> : null}
           {srv ? <RowBadge tone={tokens.semantic.server} title="Server this domain is hosted on">{srv.name}</RowBadge> : null}
           {reg?.provider ? (
             <RowBadge tone={tokens.semantic.registrar} title="Domain provider (registrar) this domain was purchased from">{reg.provider}</RowBadge>
