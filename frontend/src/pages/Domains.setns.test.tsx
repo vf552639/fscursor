@@ -91,15 +91,22 @@ function setTauri(on: boolean) {
 }
 
 /**
- * Значение строки «NS» на карточке — то, что карточка утверждает про статус
- * делегирования по нашей записи. Читается по подписи, а не по голому тексту
- * статуса: то же слово стоит бейджем в строке таблицы под карточкой, и
- * `getByText("pending")` не различил бы, кто из них обновился.
+ * Наша запись `ns_status` глазами интерфейса.
+ *
+ * Раньше её называла строка «NS: pending (auto)» на карточке домена; фаза 3
+ * плана `2026-08-21-domains-shest-pravok.md` эту строку убрала — двумя рядами
+ * ниже стояла карточка NAMESERVERS с ЖИВОЙ сверкой делегирования, и два ответа
+ * про NS на одном экране спорили, причём верхний был слабейшим.
+ *
+ * Утверждение обязано было остаться, а не уйти вместе со строкой: без него
+ * сценарий проверяет только то, что Tauri-команду позвали, — то есть перестаёт
+ * доказывать, что write-back ДОЕХАЛ до интерфейса. Новый якорь — счётчики
+ * `NS details` на самой вкладке (`lib/domainCounts`): они читают то же поле и
+ * остались единственной его поверхностью.
  */
-function cardNsStatus(): string {
-  const row = screen.getByText("NS:").parentElement;
-  if (!row) throw new Error("строки «NS» на карточке нет");
-  return (row.textContent ?? "").replace("NS:", "").trim();
+function nsDetail(label: string): string | null {
+  const el = screen.queryByText(new RegExp(`^${label}: `));
+  return el ? (el.textContent ?? "").split(": ")[1] : null;
 }
 
 function renderPage() {
@@ -166,17 +173,22 @@ describe("карточка домена после смены NS", () => {
 
     renderPage();
 
+    // Строка деталей разворачивается ДО открытия карточки: она живёт на самой
+    // вкладке, и открывать её из-под модалки значило бы проверять заодно
+    // z-index, к делу не относящийся.
+    fireEvent.click(await screen.findByRole("button", { name: "NS details" }));
+    await waitFor(() => expect(nsDetail("NS Pending")).toBe("1"));
+    expect(nsDetail("NS OK")).toBe("0");
+
     fireEvent.click(await screen.findByText("example.com"));
-    // Кликать по вкладке больше не надо: NS живут на том же экране, что и
-    // строка «NS» с нашим статусом, — вкладок у карточки нет.
-    await waitFor(() => expect(cardNsStatus()).toBe("pending (auto)"));
 
     const btn = (await screen.findByText(/Set NS/)).closest("button") as HTMLButtonElement;
     await waitFor(() => expect(btn.disabled).toBe(false));
     fireEvent.click(btn);
 
-    // Пропс карточки берётся из живого списка, а список инвалидируется в
-    // `onSettled`, — поэтому статус доезжает без переоткрытия.
-    await waitFor(() => expect(cardNsStatus()).toBe("ok (auto)"));
+    // Список инвалидируется в `onSettled`, поэтому запись доезжает до
+    // интерфейса без переоткрытия карточки — ровно это и проверяется.
+    await waitFor(() => expect(nsDetail("NS OK")).toBe("1"));
+    expect(nsDetail("NS Pending")).toBe("0");
   });
 });

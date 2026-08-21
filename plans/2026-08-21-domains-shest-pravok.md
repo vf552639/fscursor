@@ -125,7 +125,7 @@ Read error / Not checked`.
   (`Deployed` / `Not set up` / `Failed`), иначе чип `Active` фильтровал бы то, что в колонке
   подписано `Deployed`.
 
-### Фаза 3 — строка «NS: …» уходит с карточки `[ ]`
+### Фаза 3 — строка «NS: …» уходит с карточки `[x]`
 
 **Доводка.** `NS: pending (auto)` (`DomainOverviewTab.tsx:117-120`) — наша запись о последней
 попытке смены NS плюс `ns_check_mode`. Двумя рядами ниже стоит карточка `NAMESERVERS` с ЖИВОЙ
