@@ -1379,20 +1379,35 @@ const DATE_FIELD: React.CSSProperties = {
 /**
  * Причина мёртвой кнопки Save, названная словами.
  *
- * Красную строку разбора `DateField` показывает не сразу (незаконченный набор
- * — не ошибка, а середина действия), и у нечитаемой даты ИЗ БАЗЫ момент показа
- * не наступает вовсе, пока поля не коснулись. Без подсказки человек, пришедший
- * поправить имя домена, упирался бы в выключенный Save без единого слова о том,
+ * Нужна потому, что красную строку разбора `DateField` показывает не сразу
+ * (незаконченный набор — не ошибка, а середина действия), а у нечитаемой даты
+ * ИЗ БАЗЫ момент показа не наступает вовсе, пока поля не коснулись. Форма при
+ * этом заблокирована ЦЕЛИКОМ, включая правку имени и Zone ID, — то есть без
+ * этой строки человек упирался бы в выключенную кнопку без единого слова о том,
  * что не так.
  *
- * Заодно эта строка отвечает и на «а как стереть дату»: пустое поле — законный
- * ввод. Отдельной подписи под полями (как «Empty clears the date.» в шапке
- * карточки домена) здесь поэтому нет: там пустое поле СРАЗУ уходит в запись по
- * уходу из поля, и о снятии срока предупредить надо заранее, а тут между
- * пустым полем и записью стоит явный Save, и лишняя строка под каждым из
- * четырёх полей — это теснота на ровном месте.
+ * Доставляется она СТРОКОЙ В ФОРМЕ, а `title` — только вторым каналом. Первым
+ * он быть не может: выключенная кнопка не фокусируется и выпадает из
+ * tab-порядка, всплывающей подсказки по фокусу не показывает ни один браузер, а
+ * показ тултипа на `disabled` вообще зависит от движка — в том числе от
+ * WKWebView, чья особенность всю эту работу и породила. Человек без мыши и
+ * человек со скринридером не узнали бы причину никак.
+ *
+ * ТЕКСТ обязан быть верен и тогда, когда поле ПУСТО: дата, которую `Date` не
+ * разбирает вовсе (`31.02.2026` в базе), печатается пустым полем, и совет
+ * «оставьте поле пустым» в этом состоянии издевался бы — поле уже пусто, а Save
+ * мёртв. Поэтому строка зовёт набрать заново: этот путь выводит из обоих
+ * состояний.
+ *
+ * Постоянной подписи под полями (как «Empty clears the date.» в шапке карточки
+ * домена) здесь по-прежнему нет: там пустое поле СРАЗУ уходит в запись по уходу
+ * из поля, и предупредить надо заранее, а тут между пустым полем и записью
+ * стоит явный Save. Эта строка тесноты не создаёт: она одна на форму и только
+ * при сломанной дате, а в обычной жизни её нет вовсе.
  */
-const DATE_BLOCKED = "Enter dates as DD.MM.YYYY, or leave them empty.";
+const DATE_BLOCKED = "A date could not be read. Clear the field and enter it again as DD.MM.YYYY.";
+/** Тон подписи, а не отказа: красное в форме уже занято разбором самого поля. */
+const DATE_BLOCKED_NOTE: React.CSSProperties = { fontSize: 12, color: "#6b7280" };
 
 /**
  * Форма правки домена с карточки сервера.
@@ -1410,14 +1425,22 @@ const DATE_BLOCKED = "Enter dates as DD.MM.YYYY, or leave them empty.";
 function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onSave: (payload: any) => void; onCancel: () => void; isSaving: boolean }) {
   const [name, setName] = useState(domain.domain_name || "");
   /**
-   * Начальный ответ — дата домена как есть: настоящий приедет мгновением
-   * позже, потому что примитив рассказывает о себе с монтирования. Заводить
-   * состояние «ничего не известно» и выключать по нему Save нельзя: у домена
-   * без дат кнопка была бы мертва на пустом месте, а в `React.StrictMode`
-   * монтирование ещё и двойное.
+   * Начальное значение — дата домена, взятая НА ВЕРУ: форма её не читала и
+   * прочитать не может (свой `parseExpiryInput` здесь был бы вторым местом
+   * разбора). Настоящий ответ приезжает тем же тиком — эффект монтирования
+   * примитива отчитывается в том же цикле коммита, — так что до экрана эта
+   * догадка не доживает ни в одном из состояний.
+   *
+   * Отсюда и выбор: третья ветка «ничего не известно» — машинерия ради одного
+   * кадра, которого никто не увидит, а пессимистичное `{ kind: "error" }`
+   * заставило бы кнопку мигать выключенной на каждом открытии формы.
+   *
+   * `|| null`, а не `?? null`: старый код нормализовал пустую строку из базы в
+   * `null` (`purchaseDate || null`), и терять эту нормализацию нельзя — `""` в
+   * payload это не «даты нет».
    */
-  const [purchase, setPurchase] = useState<DateRead>({ kind: "value", iso: domain.purchase_date ?? null });
-  const [expiry, setExpiry] = useState<DateRead>({ kind: "value", iso: domain.expiry_date ?? null });
+  const [purchase, setPurchase] = useState<DateRead>({ kind: "value", iso: domain.purchase_date || null });
+  const [expiry, setExpiry] = useState<DateRead>({ kind: "value", iso: domain.expiry_date || null });
   const [zoneId, setZoneId] = useState(domain.cloudflare_zone_id || "");
   // Пары `htmlFor`/`id`: без них скринридер читает поле безымянным, а `<label>`
   // по соседству сам по себе его не именует. `useId`, а не константы: имена
@@ -1474,6 +1497,10 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
         <div style={EDITOR_ROW}><label htmlFor={id("zone")} style={EDITOR_LABEL}>Cloudflare Zone ID</label><Inp id={id("zone")} value={zoneId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setZoneId((e.target as any).value)} /></div>
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
+        {/* Одна строка на форму и только при сломанной дате — см. `DATE_BLOCKED`.
+            Не `role="alert"`: она живёт правкой поля и меняется под руками, а
+            объявленная вслух перебивала бы сам набор. */}
+        {brokenDate ? <span style={DATE_BLOCKED_NOTE}>{DATE_BLOCKED}</span> : null}
         <Btn variant="primary" disabled={isSaving || !name.trim() || brokenDate} title={brokenDate ? DATE_BLOCKED : undefined} onClick={save} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
         <Btn variant="secondary" onClick={onCancel} disabled={isSaving} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
       </div>

@@ -153,8 +153,19 @@ async function openEditor(
 }
 
 function saveBtn(): HTMLButtonElement {
-  return screen.getByText("Save").closest("button") as HTMLButtonElement;
+  // По роли и имени, как всё остальное в этом файле: поиск по тексту сломался
+  // бы, окажись подпись однажды внутри вложенного span.
+  return screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
 }
+
+/**
+ * Причина мёртвой кнопки, названная словами. Живёт в форме строкой над кнопкой,
+ * а не только в `title`: выключенная кнопка из tab-порядка выпадает, и
+ * всплывающей подсказки по фокусу не покажет ни один браузер — то есть человек
+ * без мыши не узнал бы о причине НИЧЕГО, при том что форма заблокирована
+ * целиком, включая правку имени.
+ */
+const BLOCKED = "A date could not be read. Clear the field and enter it again as DD.MM.YYYY.";
 
 function type(input: HTMLInputElement, value: string) {
   fireEvent.change(input, { target: { value } });
@@ -245,19 +256,45 @@ describe("ServerDetail — правка домена, поля дат", () => {
     expect(saveBtn().disabled).toBe(true);
   });
 
-  it("непрочитанная дата на сервер не уходит вовсе", async () => {
+  it("непрочитанную дату не отправить: Save мёртв, и клик по нему ничего не шлёт", async () => {
     setTauri(true);
     const f = await openEditor();
 
-    type(f.purchase, "12/25/2026");
-    fireEvent.click(saveBtn());
-
     // Американский порядок — 25-й месяц: продукт печатает день первым и
     // принимает обратно ровно то, что печатает. Отправить такое значило бы
-    // записать домену срок, которого никто не называл.
+    // записать домену дату, которой никто не называл.
+    type(f.purchase, "12/25/2026");
+    // Отправить нечем ровно потому, что кнопка мертва: клик по выключенной
+    // кнопке обработчик не зовёт вовсе. Гард внутри `save()` — вторая линия и
+    // сужение типа, до него эта дорога не доходит.
+    expect(saveBtn().disabled).toBe(true);
+    fireEvent.click(saveBtn());
+
     await waitFor(() => expect(mocks.apiPut).not.toHaveBeenCalled());
     // Форма при этом на месте: чинить строку человеку негде, кроме неё.
     expect(screen.getByLabelText("Purchase Date")).toBeTruthy();
+  });
+
+  it("непрочитанная строка объясняется ПОД полем и связана с ним", async () => {
+    setTauri(true);
+    const f = await openEditor();
+
+    type(f.purchase, "31.02.2026");
+
+    // Объяснение — от самого поля (`DateField`), не наше: оно про набранный
+    // текст, а не про запись. Появляется, когда набирать больше нечего.
+    const describedBy = f.purchase.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const note = document.getElementById(describedBy!.split(" ")[0]);
+    expect(note?.textContent).toBe("Expected a real date in DD.MM.YYYY — day first, then month.");
+
+    // Оно обязано встать ПОД полем, а не рядом с ним: `DateField` отдаёт
+    // фрагмент, и в обычном ряду его красная строка распёрла бы ряд формы.
+    // Ради этого ряд и стал колонкой (`EDITOR_ROW`) — без проверки он молча
+    // вернулся бы в строку.
+    const row = f.purchase.parentElement!;
+    expect(row.contains(note)).toBe(true);
+    expect(getComputedStyle(row).flexDirection).toBe("column");
   });
 
   it("домену без дат Save доступен сразу — и в StrictMode тоже", async () => {
@@ -265,9 +302,12 @@ describe("ServerDetail — правка домена, поля дат", () => {
     mocks.apiPut.mockResolvedValue({ ...DOMAIN });
 
     // Приложение обёрнуто в `React.StrictMode` (`src/main.tsx`), и в dev
-    // монтирование двойное: поле рассказывает о себе дважды подряд. Форма,
-    // принявшая этот рассказ за «значение изменилось», встречала бы человека
-    // мёртвой кнопкой на пустом месте.
+    // монтирование двойное: поле рассказывает о себе дважды подряд. Тест
+    // сторожит не выбор начального состояния (ответ поля приезжает тем же
+    // тиком, так что до экрана разница не доживает), а то, что форма приняла
+    // этот рассказ как «вот моё состояние», а не как «значение изменилось»:
+    // взведи она на нём хоть флаг правки, хоть ошибку — человека у домена без
+    // дат встречала бы мёртвая кнопка на пустом месте.
     const f = await openEditor(
       { ...DOMAIN, purchase_date: null, expiry_date: null, cloudflare_zone_id: null },
       true,
@@ -283,30 +323,62 @@ describe("ServerDetail — правка домена, поля дат", () => {
     expect(body.expiry_date).toBeNull();
   });
 
-  it("нечитаемая дата из базы выключает Save и называет причину", async () => {
+  it("нечитаемая дата из базы выключает Save, называет причину и выпускает по перенабору", async () => {
     setTauri(true);
+    mocks.apiPut.mockResolvedValue({ ...DOMAIN });
     // Перестановка цифр в годе (`0226` вместо `2026`) — запись, которая до
-    // границ правдоподобия доезжала на сервер и оседала в базе. Печатается она
-    // тремя цифрами, и разбор её обратно уже не принимает.
+    // появления границ правдоподобия доезжала на сервер и оседала в базе.
+    // Печатается она тремя цифрами, и разбор её обратно уже не принимает.
     const f = await openEditor({ ...DOMAIN, purchase_date: "0226-09-01" });
 
     expect(f.purchase.value).toBe("01.09.226");
     // Сохранить поверх такой даты `null` значило бы стереть её молча, а
     // отправить как есть — нечего: строка не прочиталась.
     expect(saveBtn().disabled).toBe(true);
-    // Красная строка разбора ждёт первого касания поля (незаконченный набор —
-    // не ошибка), поэтому причину мёртвой кнопки называет она сама.
-    expect(saveBtn().title).toBe("Enter dates as DD.MM.YYYY, or leave them empty.");
+    // Красная строка разбора молчит, пока поля не коснулись (незаконченный
+    // набор — не ошибка), а форма заблокирована ЦЕЛИКОМ, включая правку имени.
+    // Поэтому причина названа в самой форме, а не только в `title`: у
+    // выключенной кнопки подсказку по фокусу не показывает ни один браузер.
+    expect(screen.getByText(BLOCKED)).toBeTruthy();
+    expect(saveBtn().title).toBe(BLOCKED);
+
+    // Единственная дорога из состояния, которое блокирует форму, — набрать
+    // дату заново. Её и сторожим в первую очередь.
+    type(f.purchase, "01.09.2026");
+    expect(saveBtn().disabled).toBe(false);
+    expect(screen.queryByText(BLOCKED)).toBeNull();
+
+    fireEvent.click(saveBtn());
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(1));
+    expect(mocks.apiPut.mock.calls[0][1].purchase_date).toBe("2026-09-01");
   });
 
-  it("пустое имя по-прежнему выключает Save", async () => {
+  it("причина названа и тогда, когда показать нечитаемую дату нечем", async () => {
+    setTauri(true);
+    // `31.02.2026` в базе `Date` не разбирает вовсе, поэтому печатать полю
+    // нечего и оно пустое. Из API такое недостижимо (`Optional[date]`), но
+    // состояние выражается типами, и подсказка в нём обязана говорить правду:
+    // совет «оставьте поле пустым» здесь был бы издевательством — поле УЖЕ
+    // пусто, а Save мёртв.
+    const f = await openEditor({ ...DOMAIN, expiry_date: "31.02.2026" });
+
+    expect(f.expiry.value).toBe("");
+    expect(saveBtn().disabled).toBe(true);
+    expect(screen.getByText(BLOCKED)).toBeTruthy();
+
+    type(f.expiry, "01.03.2026");
+    expect(saveBtn().disabled).toBe(false);
+  });
+
+  it("пустое имя по-прежнему выключает Save — и подсказка про даты молчит", async () => {
     setTauri(true);
     const f = await openEditor();
 
     // Пробелы, а не пустая строка: `trim()` делает из них ту же пустоту.
     type(f.name, "   ");
     expect(saveBtn().disabled).toBe(true);
-    // Причина у мёртвой кнопки тут другая, и подсказка про даты соврала бы.
+    // Причина у мёртвой кнопки тут другая, и строка про даты соврала бы.
+    expect(screen.queryByText(BLOCKED)).toBeNull();
     expect(saveBtn().title ?? "").toBe("");
   });
 });
