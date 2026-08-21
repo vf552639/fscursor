@@ -114,11 +114,13 @@ const DOMAIN = {
 const PURCHASE_TYPED = "10.01.2026";
 const EXPIRY_TYPED = "01.09.2026";
 
-function renderDetail(domain: typeof DOMAIN | null = DOMAIN, strict = false) {
+function renderDetail(domain: typeof DOMAIN = DOMAIN, strict = false) {
   mocks.apiGet.mockImplementation(async (url: string) => {
     if (url === `/servers/${SERVER.id}`) return SERVER;
     if (url === "/servers") return { items: [SERVER], total: 1 };
-    if (url === "/domains") return domain ? [domain] : [];
+    // Домен ровно один: форма правки открывается из его строки, и случая «а
+    // если домена нет» у этого файла не бывает.
+    if (url === "/domains") return [domain];
     throw new Error(`unexpected GET ${url}`);
   });
   const client = new QueryClient({
@@ -136,20 +138,20 @@ type Fields = {
   name: HTMLInputElement;
   purchase: HTMLInputElement;
   expiry: HTMLInputElement;
-  zone: HTMLInputElement;
 };
 
-async function openEditor(
-  domain: typeof DOMAIN | null = DOMAIN,
-  strict = false,
-): Promise<Fields> {
+async function openEditor(domain: typeof DOMAIN = DOMAIN, strict = false): Promise<Fields> {
   renderDetail(domain, strict);
   fireEvent.click(await screen.findByRole("button", { name: "Edit domain" }));
+  // Zone ID тестам не нужен ни разу, но найти его надо: `getByLabelText`
+  // сторожит пару `htmlFor`/`id` — то, ради чего у полей формы вообще заведены
+  // подписи (см. преамбулу файла). Наружу он не отдаётся, чтобы не выглядеть
+  // забытым кем-то полем.
+  screen.getByLabelText("Cloudflare Zone ID");
   return {
     name: screen.getByLabelText("Domain Name") as HTMLInputElement,
     purchase: screen.getByLabelText("Purchase Date") as HTMLInputElement,
     expiry: screen.getByLabelText("Expiry Date") as HTMLInputElement,
-    zone: screen.getByLabelText("Cloudflare Zone ID") as HTMLInputElement,
   };
 }
 
@@ -258,7 +260,7 @@ describe("ServerDetail — правка домена, поля дат", () => {
     expect(saveBtn().disabled).toBe(true);
   });
 
-  it("непрочитанную дату не отправить: Save мёртв, и клик по нему ничего не шлёт", async () => {
+  it("непрочитанную дату не отправить: Save мёртв", async () => {
     setTauri(true);
     const f = await openEditor();
 
@@ -266,13 +268,14 @@ describe("ServerDetail — правка домена, поля дат", () => {
     // принимает обратно ровно то, что печатает. Отправить такое значило бы
     // записать домену дату, которой никто не называл.
     type(f.purchase, "12/25/2026");
-    // Отправить нечем ровно потому, что кнопка мертва: клик по выключенной
-    // кнопке обработчик не зовёт вовсе. Гард внутри `save()` — вторая линия и
-    // сужение типа, до него эта дорога не доходит.
+    // Дорога к отправке закрыта КНОПКОЙ, и проверяется ровно это. Клик по ней
+    // тут стоял вторым ассертом и был мёртв: `fireEvent.click` по
+    // `disabled`-кнопке не зовёт `onClick` вовсе, то есть «ничего не
+    // отправилось» подтверждалось бы и у формы, которая шлёт что попало.
+    // Гард внутри `save()` — не вторая линия обороны, а сужение типа: без него
+    // из ответа «строку прочитать не удалось» нечего было бы достать, и
+    // исполняется он только на живой кнопке.
     expect(saveBtn().disabled).toBe(true);
-    fireEvent.click(saveBtn());
-
-    await waitFor(() => expect(mocks.apiPut).not.toHaveBeenCalled());
     // Форма при этом на месте: чинить строку человеку негде, кроме неё.
     expect(screen.getByLabelText("Purchase Date")).toBeTruthy();
   });
@@ -324,7 +327,13 @@ describe("ServerDetail — правка домена, поля дат", () => {
     const describedBy = f.purchase.getAttribute("aria-describedby");
     expect(describedBy).toBeTruthy();
     const note = document.getElementById(describedBy!.split(" ")[0]);
-    expect(note?.textContent).toBe("Expected a real date in DD.MM.YYYY — day first, then month.");
+    // По образцу, а не дословно: точная формулировка — дело примитива и его
+    // тестов, а копия здесь ломалась бы от правки слов, не сторожа ничего
+    // сверх них. Проверяется то, что этому файлу и важно: под полем стоит
+    // объяснение РАЗБОРА (оно называет ожидаемое и порядок «день первым»), а
+    // не строка формы про мёртвый Save.
+    expect(note?.textContent).toMatch(/^Expected/);
+    expect(note?.textContent).toMatch(/day first/i);
 
     // Оно обязано встать ПОД полем, а не рядом с ним: `DateField` отдаёт
     // фрагмент, и в обычном ряду его красная строка распёрла бы ряд формы.

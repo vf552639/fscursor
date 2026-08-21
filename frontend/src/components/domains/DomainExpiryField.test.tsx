@@ -15,7 +15,7 @@ import DomainExpiryField from "./DomainExpiryField";
 import { queryClient } from "../../api/queryClient";
 import { tokens } from "../../lib/designTokens";
 import { expiryTextColor } from "../../lib/domainExpiry";
-import { hexToRgb, luminanceOfRgb, relativeLuminance } from "../../test/colors";
+import { hexToRgb, luminanceOfRgb } from "../../test/colors";
 
 /**
  * Срок домена в шапке карточки — и правка его на месте.
@@ -216,13 +216,14 @@ describe("срок домена — приглашение «set date» видн
     // лестницы на кнопку.
     expect(color).not.toBe(hexToRgb(expiryTextColor("unknown")));
     expect(contrastOnWhite(color)).toBeGreaterThanOrEqual(4.5);
-  });
 
-  it("тон рамки этот порог не берёт — иначе тест не значил бы ничего", () => {
-    // Опорная точка: показывает, что 4.5 выше по тексту — не формальность, под
-    // которую подходит что угодно. Откат правки даёт здесь 1.48:1.
-    const disabled = 1.05 / (relativeLuminance(tokens.text.disabled) + 0.05);
-    expect(disabled).toBeLessThan(2);
+    // Опорная точка — ЗДЕСЬ, а не отдельным тестом: порог 4.5 сам по себе
+    // ничего не значит, пока не показано, что тон, который вернулся бы откатом
+    // правки, его не берёт. Отдельным тестом это утверждение было
+    // вечнозелёным: оно про палитру, а не про поле, и оставалось бы зелёным,
+    // как бы ни покрасили кнопку. Внутри же теста про поведение оно живёт
+    // ровно столько, сколько живут две строки выше.
+    expect(contrastOnWhite(hexToRgb(expiryTextColor("unknown")))).toBeLessThan(2);
   });
 
   it("заполненный срок по-прежнему красит лестница, а не приглашение", () => {
@@ -675,6 +676,70 @@ describe("срок домена — правка, набранная повер�
 
     await put.resolveWith(domain({ expiry_date: PICKED }));
     expect(screen.queryByLabelText("Expiry date")).toBeNull();
+  });
+});
+
+describe("срок домена — нечитаемая дата ИЗ БАЗЫ", () => {
+  /**
+   * Дата из III века — не выдумка теста: `Optional[date]` в Pydantic и `date` в
+   * Postgres такое принимают, а до этой ветки нативное поле могло её и
+   * записать (`0226` вместо `2026` — перестановка цифр при наборе).
+   *
+   * Разбор её отвергает (год тремя цифрами), и поле по построению не пишет и не
+   * закрывается. Молчать при этом оно НЕ вправе: строку из базы никто не
+   * набирал, поэтому примитив своей красной строки не рисует — она ждёт конца
+   * набора, которого не было. Человек упирался в поле, которое не пускает и не
+   * объясняет: ни Enter, ни уход из поля не давали ни записи, ни слова.
+   */
+  const BROKEN = "0226-09-01";
+
+  it("поле объясняет, почему не пишет и не закрывается", async () => {
+    show({ expiry_date: BROKEN });
+    fireEvent.click(value());
+    // Ровно то, что человек видит: печать модуля от нечитаемой даты.
+    expect(dateInput().value).toBe("01.09.226");
+
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    fireEvent.blur(dateInput());
+    await settle();
+
+    // Гарды на месте: непонятное на сервер не уходит, поле остаётся открытым.
+    expect(writes().length).toBe(0);
+    expect(dateInput()).toBeTruthy();
+    // И теперь причина видна — вместо обычной подписи стоит объяснение.
+    expect(screen.getByText(/could not be read/i)).toBeTruthy();
+    expect(screen.queryByText("Empty clears the date.")).toBeNull();
+    // Объяснение — описание ПОЛЯ, а не текст рядом: иначе тот, кто экрана не
+    // видит, до него не доберётся.
+    expect(dateInput().getAttribute("aria-describedby") ?? "").toContain(
+      "domain-expiry-hint-42",
+    );
+  });
+
+  it("починенная дата снимает объяснение и пишется", async () => {
+    show({ expiry_date: BROKEN });
+    fireEvent.click(value());
+    type(PICKED_TYPED);
+    // Строка починилась — объяснению больше не о чем говорить.
+    expect(screen.queryByText(/could not be read/i)).toBeNull();
+
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await waitFor(() => expect(writes().length).toBe(1));
+    expect(writes()[0]).toEqual({ expiry_date: PICKED });
+  });
+
+  it("посреди набора объяснение молчит — это середина действия, а не ошибка", async () => {
+    show({ expiry_date: BROKEN });
+    fireEvent.click(value());
+    // Первая же правка нечитаемой строки — ещё не законченный набор, и
+    // объяснение обязано уйти вместе с правом примитива краснеть. Иначе оно
+    // горело бы под руками весь набор.
+    type("01.09.2");
+    expect(screen.queryByText(/could not be read/i)).toBeNull();
+
+    // А доросшая до полной длины непонятная строка объясняется снова.
+    type("01.09.2261");
+    expect(screen.getByText(/could not be read/i)).toBeTruthy();
   });
 });
 

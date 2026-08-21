@@ -96,11 +96,12 @@ describe("упавший provision виден в списке доменов", (
     ]);
 
     const failed = (await screen.findByText("broken.com")).closest("tr") as HTMLElement;
-    // Текст, а не `title`: тултип невидим, пока в него не попали мышью.
-    expect(within(failed).getByText(PROVISION_ERROR)).toBeTruthy();
-    expect(within(failed).getByText("Failed")).toBeTruthy();
-    // И то, и другое — в ячейке ИМЕНИ домена: своей колонки у ступени настройки
-    // больше нет, а сигнал остался под именем, рядом с сервером и регистратором.
+    // Текст, а не `title`: тултип невидим, пока в него не попали мышью. И
+    // ищется он сразу в ячейке ИМЕНИ домена, а не в строке целиком: своей
+    // колонки у ступени настройки больше нет, сигнал остался под именем, рядом
+    // с сервером и регистратором. Поиск по всей строке стоял тут первой парой
+    // и был мёртв — ячейка вложена в строку, так что он повторял проверку
+    // ниже, только слабее.
     const nameCell = within(failed).getAllByRole("cell")[1];
     expect(within(nameCell).getByText(PROVISION_ERROR)).toBeTruthy();
     expect(within(nameCell).getByText("Failed")).toBeTruthy();
