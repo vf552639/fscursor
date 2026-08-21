@@ -1406,7 +1406,16 @@ const DATE_FIELD: React.CSSProperties = {
  * при сломанной дате, а в обычной жизни её нет вовсе.
  */
 const DATE_BLOCKED = "A date could not be read. Clear the field and enter it again as DD.MM.YYYY.";
-/** Тон подписи, а не отказа: красное в форме уже занято разбором самого поля. */
+/**
+ * Тон подписи, а не отказа: красное в форме уже занято разбором самого поля.
+ *
+ * Хекс, а не токен, и это не отступление от палитры: `#6b7280` — собственный
+ * серый этого экрана, которым набрана дюжина соседних пояснений (заметка про
+ * установку FastPanel, подсказки модалок), а `designTokens` файл не импортирует
+ * вовсе. Взятый сюда `tokens.text.muted` (#64748b) поставил бы рядом с ними
+ * второй почти совпадающий серый — тот же довод, что у `DATE_BORDER`, только
+ * про текст. Перевести экран на токены целиком — отдельная работа.
+ */
 const DATE_BLOCKED_NOTE: React.CSSProperties = { fontSize: 12, color: "#6b7280" };
 
 /**
@@ -1431,13 +1440,15 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
    * примитива отчитывается в том же цикле коммита, — так что до экрана эта
    * догадка не доживает ни в одном из состояний.
    *
-   * Отсюда и выбор: третья ветка «ничего не известно» — машинерия ради одного
-   * кадра, которого никто не увидит, а пессимистичное `{ kind: "error" }`
-   * заставило бы кнопку мигать выключенной на каждом открытии формы.
+   * Отсюда и выбор: третья ветка «ничего не известно» — машинерия ради кадра,
+   * которого никто не увидит. Пессимистичное `{ kind: "error" }` обошлось бы в
+   * тот же невидимый кадр, но заявляло бы о поле неправду, которой никто не
+   * проверял, — а взятое на веру хотя бы названо тем, что есть.
    *
    * `|| null`, а не `?? null`: старый код нормализовал пустую строку из базы в
-   * `null` (`purchaseDate || null`), и терять эту нормализацию нельзя — `""` в
-   * payload это не «даты нет».
+   * `null` (`purchaseDate || null`). До payload `""` отсюда не добралось бы и
+   * так — эффект перезаписывает состояние раньше первого возможного клика, —
+   * так что это консистентность, а не поведение.
    */
   const [purchase, setPurchase] = useState<DateRead>({ kind: "value", iso: domain.purchase_date || null });
   const [expiry, setExpiry] = useState<DateRead>({ kind: "value", iso: domain.expiry_date || null });
@@ -1498,9 +1509,13 @@ function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onS
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
         {/* Одна строка на форму и только при сломанной дате — см. `DATE_BLOCKED`.
-            Не `role="alert"`: она живёт правкой поля и меняется под руками, а
-            объявленная вслух перебивала бы сам набор. */}
-        {brokenDate ? <span style={DATE_BLOCKED_NOTE}>{DATE_BLOCKED}</span> : null}
+            `aria-live="polite"`, а не `role="alert"`: сказать про блокировку
+            надо ВСЛУХ (кнопка Save выключена, значит выпала из tab-порядка, и
+            в обзоре до строки ещё надо добраться), но вежливой очередью, а не
+            перебивая набор — assertive окликал бы человека посреди правки
+            соседнего поля. Текст при этом статичен: строка не меняется, она
+            появляется и исчезает целиком, так что повторов очередь не даёт. */}
+        {brokenDate ? <span aria-live="polite" style={DATE_BLOCKED_NOTE}>{DATE_BLOCKED}</span> : null}
         <Btn variant="primary" disabled={isSaving || !name.trim() || brokenDate} title={brokenDate ? DATE_BLOCKED : undefined} onClick={save} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
         <Btn variant="secondary" onClick={onCancel} disabled={isSaving} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
       </div>
