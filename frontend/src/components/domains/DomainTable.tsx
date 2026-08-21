@@ -47,9 +47,12 @@ function PlainTh({children}: {children?: React.ReactNode}){
  * фолбэком на ключ, колонка, для которой его забыли, объявляла бы себя «Sort by
  * created».
  */
-function SortableTh({k, label, sort, onSort}: {k: SortKey, label: string, sort: Sort, onSort: (k: SortKey) => void}){
+function SortableTh({k, label, title, sort, onSort}: {k: SortKey, label: string, title?: string, sort: Sort, onSort: (k: SortKey) => void}){
   const active = sort.key === k;
-  return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+  // `title` — на ячейке, а не на кнопке: подсказка объясняет КОЛОНКУ, а не
+  // действие «отсортировать по ней», и, повешенная на кнопку, она перебивала бы
+  // собственное `aria-label` этой кнопки.
+  return <th style={TH_STYLE} title={title} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
     <button type="button" onClick={()=>onSort(k)} aria-label={`Sort by ${label}`} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?tokens.text.ink:"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
       {label}
       <span aria-hidden="true" style={{color:active?tokens.text.ink:tokens.text.disabled}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
@@ -57,10 +60,14 @@ function SortableTh({k, label, sort, onSort}: {k: SortKey, label: string, sort: 
   </th>;
 }
 
-/** Колонка шапки: подпись и, если по ней есть порядок, ключ сортировки. */
+/**
+ * Колонка шапки: подпись, ключ сортировки (если по ней есть порядок) и
+ * подсказка (если подпись сама себя не объясняет).
+ */
 interface Column {
   label: string;
   key?: SortKey;
+  title?: string;
 }
 
 /**
@@ -74,7 +81,13 @@ interface Column {
 const COLUMNS: Column[] = [
   {label:"Domain",key:"domain"},
   {label:"Cloudflare"},
-  {label:"Status",key:"status"},
+  // «Setup», а не «Status», и ключ сортировки при этом остался `status`: имя
+  // колонки — про то, что человек читает, а ключ — про поле, по которому
+  // считается порядок. Колонка называет СТУПЕНЬ НАСТРОЙКИ внутри SDMP, а не
+  // здоровье сайта: домен, заведённый вручную, остаётся «Not set up» навсегда,
+  // сколько бы лет его сайт ни работал. Заодно снимается путаница с колонкой
+  // `Status` вкладки Servers, где под тем же словом живёт доступность машины.
+  {label:"Setup",key:"status",title:"Setup stage inside SDMP, not site health"},
   {label:"SSL",key:"ssl"},
   {label:"Expires",key:"expiry_date"},
   {label:"Added",key:"created"},
@@ -182,7 +195,7 @@ export default function DomainTable({
     <colgroup>{COL_WIDTHS.map((w,i)=><col key={i} style={{width:w}}/>)}</colgroup>
     <thead><tr><th style={TH_STYLE}><input type="checkbox" checked={selectedIds.size===rows.length&&rows.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
       {COLUMNS.map((c)=>c.key
-        ? <SortableTh key={c.label} k={c.key} label={c.label} sort={sort} onSort={onSort}/>
+        ? <SortableTh key={c.label} k={c.key} label={c.label} title={c.title} sort={sort} onSort={onSort}/>
         : <PlainTh key={c.label}>{c.label}</PlainTh>)}
     </tr></thead>
     <tbody>

@@ -15,9 +15,19 @@
  * порядком `DomainStatus` на бэкенде намеренно — второй порядок тех же значений
  * был бы третьей копией знания.
  *
- * Подпись бейджа здесь НЕ хранится: она всегда `status.toUpperCase()`, и
- * записанная отдельно превратилась бы ещё в одно место, которое можно забыть
- * обновить.
+ * Подпись и подсказка бейджа хранятся ЗДЕСЬ ЖЕ, в тех же записях.
+ *
+ * Раньше подписью служил `status.toUpperCase()`, и довод был «отдельная запись
+ * — ещё одно место, которое можно забыть обновить». Довод оказался дешевле
+ * ущерба: колонка печатала `NS_PENDING`, `SITE_CREATED`, `SSL_PENDING` —
+ * внутренние имена бэкенда, — и объяснить себя ей было нечем. Хуже того, она
+ * называет НЕ здоровье сайта, а ступень настройки внутри SDMP: `ACTIVE` стоит
+ * только у доменов, прошедших provision из приложения, а заведённые вручную
+ * остаются `NEW` навсегда, сколько бы лет их сайт ни работал. Человек читал это
+ * как «домен сломан».
+ *
+ * Забыть теперь нельзя по построению: `label` и `hint` — обязательные поля
+ * формы, которую проверяет `satisfies`, и статус без них не соберётся.
  */
 
 /** Вариант `Badge` для статуса. Строки те же, что понимает `ui/Primitives`. */
@@ -37,15 +47,55 @@ type BadgeVariant = "gray" | "blue" | "green" | "yellow" | "red";
  * сервере ещё нет.
  */
 export const DOMAIN_STATUSES = [
-  { status: "new", variant: "gray" },
-  { status: "ns_pending", variant: "yellow" },
-  { status: "ns_ok", variant: "blue" },
-  { status: "provisioning", variant: "blue" },
-  { status: "site_created", variant: "blue" },
-  { status: "ssl_pending", variant: "yellow" },
-  { status: "active", variant: "green" },
-  { status: "failed", variant: "red" },
-] as const satisfies ReadonlyArray<{ status: string; variant: BadgeVariant }>;
+  {
+    status: "new",
+    variant: "gray",
+    label: "Not set up",
+    hint: "Added to SDMP; nothing has been deployed from here yet",
+  },
+  {
+    status: "ns_pending",
+    variant: "yellow",
+    label: "Waiting NS",
+    hint: "Nameservers were sent to the registrar; delegation has not been confirmed",
+  },
+  {
+    status: "ns_ok",
+    variant: "blue",
+    label: "NS set",
+    hint: "Nameservers are in place; the site has not been created yet",
+  },
+  {
+    status: "provisioning",
+    variant: "blue",
+    label: "Deploying",
+    hint: "A deployment run is in progress on the server",
+  },
+  {
+    status: "site_created",
+    variant: "blue",
+    label: "Site created",
+    hint: "The site exists on the server; the certificate has not been issued",
+  },
+  {
+    status: "ssl_pending",
+    variant: "yellow",
+    label: "Issuing SSL",
+    hint: "Waiting for the certificate authority to issue the certificate",
+  },
+  {
+    status: "active",
+    variant: "green",
+    label: "Deployed",
+    hint: "Deployed from SDMP end to end. Says nothing about whether the site is up right now",
+  },
+  {
+    status: "failed",
+    variant: "red",
+    label: "Failed",
+    hint: "The last deployment run stopped with an error",
+  },
+] as const satisfies ReadonlyArray<{ status: string; variant: BadgeVariant; label: string; hint: string }>;
 
 /**
  * Имя статуса, ИЗВЕСТНОГО лестнице, — выведено из неё же, а не переписано
@@ -63,9 +113,31 @@ export const DOMAIN_STATUSES = [
  */
 export type DomainStatusName = (typeof DOMAIN_STATUSES)[number]["status"];
 
-/** Подпись статуса. Пустое значение — «UNKNOWN», а не пустое место. */
+/**
+ * Подпись статуса — человеческая, из лестницы.
+ *
+ * Незнакомый статус (включая пустой) — «Unknown», а не сам статус заглавными:
+ * бэкенд волен добавить ступень в любой день, и печатать её сырое имя значило
+ * бы показать пользователю строку из чужого кода. Пустое место читалось бы как
+ * «статуса нет», а не «статус нам неизвестен».
+ */
 export function domainStatusLabel(status: string): string {
-  return status ? status.toUpperCase() : "UNKNOWN";
+  return DOMAIN_STATUSES.find((s) => s.status === status)?.label ?? "Unknown";
+}
+
+/**
+ * Чем колонка объясняет себя под курсором.
+ *
+ * Отдельной функцией, а не полем в `domainStatusLabel`: подпись рисуют двое
+ * (строка списка и шапка карточки), а подсказку — только они же, и оба обязаны
+ * взять её отсюда. Незнакомый статус объясняет себя честно — тем, что мы его не
+ * знаем; выдумывать ступень нельзя даже в подсказке.
+ */
+export function domainStatusHint(status: string): string {
+  return (
+    DOMAIN_STATUSES.find((s) => s.status === status)?.hint ??
+    `Status "${status || "(empty)"}" is not one this app knows`
+  );
 }
 
 /**

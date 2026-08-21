@@ -395,7 +395,7 @@ describe("Domains — сортировка по клику на заголово
   it("статус сортируется по жизненному циклу, а не по алфавиту", () => {
     // По алфавиту вышло бы «active, failed, new, ns_ok, site_created» — порядок
     // букв, из которого не видно, что доделано, а что нет.
-    fireEvent.click(sortBtn("Status"));
+    fireEvent.click(sortBtn("Setup"));
     expect(rowNames().slice(0, 5)).toEqual([
       "bravo.com",
       "foxtrot.com",
@@ -404,7 +404,7 @@ describe("Domains — сортировка по клику на заголово
       "alpha.com",
     ]);
     // Второй клик поднимает наверх failed — то, что ищут вторым кликом.
-    fireEvent.click(sortBtn("Status"));
+    fireEvent.click(sortBtn("Setup"));
     expect(rowNames()[0]).toBe("charlie.com");
   });
 
@@ -412,9 +412,9 @@ describe("Domains — сортировка по клику на заголово
     // golf в статусе, которого фронт не знает. Числом «за концом лестницы» он
     // переворачивался бы вместе с направлением и вторым кликом вставал бы ПЕРЕД
     // failed — то есть верх списка занимал бы тот, про кого мы ничего не знаем.
-    fireEvent.click(sortBtn("Status"));
+    fireEvent.click(sortBtn("Setup"));
     expect(rowNames()[6]).toBe("golf.com");
-    fireEvent.click(sortBtn("Status"));
+    fireEvent.click(sortBtn("Setup"));
     expect(rowNames()[6]).toBe("golf.com");
   });
 
@@ -487,8 +487,8 @@ describe("Domains — срез по статусам и рассинхрон ns_
   const chip = (label: string) => screen.getByRole("button", { name: new RegExp(`^${label}`) });
 
   it("чипы показывают жизненный цикл и сходятся с общим числом", () => {
-    expect(within(chip("New")).getByText("2")).toBeTruthy();
-    expect(within(chip("Active")).getByText("1")).toBeTruthy();
+    expect(within(chip("Not set up")).getByText("2")).toBeTruthy();
+    expect(within(chip("Deployed")).getByText("1")).toBeTruthy();
     expect(within(chip("Failed")).getByText("1")).toBeTruthy();
     // «All» — то самое Total, на котором и проверяется сходимость: 2 + 1 + 1
     // плюс трое «в работе», которым своего чипа не досталось.
@@ -511,7 +511,11 @@ describe("Domains — срез по статусам и рассинхрон ns_
     // статусу задают четыре чипа, промежуточных статусов среди них нет по
     // решению, и проверять в них пункт `NS_OK` больше нечего. Половина про
     // бейдж — та, что и ловила фолбэк, — остаётся.
-    const badge = within(rowOf("delta.com")).getByText("NS_OK");
+    //
+    // Подпись теперь человеческая («NS set»), а не `status.toUpperCase()`:
+    // внутреннее имя бэкенда на экране объяснить себя не могло. Предмет
+    // проверки от этого не изменился — ловится по-прежнему ЦВЕТ.
+    const badge = within(rowOf("delta.com")).getByText("NS set");
     // Синий, а не серый фолбэк и не зелёный: NS проставлены — это пройденная
     // ступень, а не готовый домен. Хекс поехал вместе с переездом бейджа на
     // пилюлю макета (`STATUS_PILL` → `semantic.info`), утверждение то же.

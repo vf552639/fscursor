@@ -6,6 +6,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import Domains from "./Domains";
 import { queryClient } from "../api/queryClient";
 import { tokens } from "../lib/designTokens";
+import { domainStatusLabel } from "../lib/domainStatus";
 import { useAuthStore } from "../store/auth";
 import { hexToRgb } from "../test/colors";
 
@@ -14,7 +15,7 @@ import { hexToRgb } from "../test/colors";
  *
  * Про что тест на самом деле: счётчики обязаны считаться по ПОЛНОМУ списку, а
  * не по тому, что осталось после фильтра. Иначе выбранный чип обнуляет соседей
- * — «Failed 3» после клика по «Active» становится «Failed 0», — и вернуться к
+ * — «Failed 3» после клика по «Deployed» становится «Failed 0», — и вернуться к
  * ним некуда: ряд перестаёт быть картой списка и превращается в описание
  * текущего среза, то есть в тавтологию.
  *
@@ -146,35 +147,55 @@ afterEach(() => {
   useAuthStore.getState().clear();
 });
 
+describe("Domains — чип и колонка говорят одними словами", () => {
+  it("подпись чипа дословно равна подписи бейджа того же статуса", () => {
+    // Чип фильтрует ту самую колонку, которую подписывает бейдж строки.
+    // Разойдись словари — и человек, кликнувший «Active», получал бы список, в
+    // котором написано «Deployed», то есть держал бы перевод в голове.
+    // Ассерт идёт через ЛЕСТНИЦУ, а не через строковые литералы: переименуют
+    // статус — тест поедет вместе с продуктом, а не начнёт врать.
+    for (const status of ["active", "new", "failed"] as const) {
+      expect(chip(domainStatusLabel(status))).toBeTruthy();
+    }
+  });
+
+  it("в таблице у этих доменов стоит ровно то же слово", () => {
+    // Вторая половина утверждения: подпись чипа совпадает не с константой, а с
+    // тем, что человек ВИДИТ в строке.
+    fireEvent.click(chip(domainStatusLabel("failed")));
+    expect(within(screen.getByRole("table")).getAllByText(domainStatusLabel("failed")).length).toBeGreaterThan(0);
+  });
+});
+
 describe("Domains — чипы считают по полному списку", () => {
   it("до выбора показывают срез всего списка", () => {
     expect(countOn("All")).toBe("7");
-    expect(countOn("Active")).toBe("3");
-    expect(countOn("New")).toBe("2");
+    expect(countOn("Deployed")).toBe("3");
+    expect(countOn("Not set up")).toBe("2");
     expect(countOn("Failed")).toBe("1");
   });
 
   it("выбранный чип не обнуляет соседей — их числа те же", () => {
-    fireEvent.click(chip("Active"));
+    fireEvent.click(chip("Deployed"));
     // Таблица действительно сузилась: без этого утверждения тест был бы зелёным
     // и у чипа, который вовсе не фильтрует, — а тогда «счётчики не изменились»
     // не значит ничего.
     expect(rowNames().length).toBe(3);
 
     // И при этом ряд остался картой ВСЕГО списка: считай он по срезу, здесь
-    // стояли бы «All 3, New 0, Failed 0» — то есть человек, кликнувший
-    // «Active», терял бы из виду и провалы, и новые домены разом.
+    // стояли бы «All 3, Not set up 0, Failed 0» — то есть человек, кликнувший
+    // «Deployed», терял бы из виду и провалы, и новые домены разом.
     expect(countOn("All")).toBe("7");
-    expect(countOn("New")).toBe("2");
+    expect(countOn("Not set up")).toBe("2");
     expect(countOn("Failed")).toBe("1");
-    expect(countOn("Active")).toBe("3");
+    expect(countOn("Deployed")).toBe("3");
   });
 
   it("строка NS-деталей тоже считает по полному списку", () => {
     // Тот же вопрос ко второй половине компонента: «In progress» и NS-срез
     // живут за кнопкой и посчитаны тем же вызовом, но проверить это дешевле,
     // чем однажды обнаружить, что срез уехал только у чипов.
-    fireEvent.click(chip("Active"));
+    fireEvent.click(chip("Deployed"));
     fireEvent.click(screen.getByRole("button", { name: "NS details" }));
 
     expect(screen.getByText("In progress: 1")).toBeTruthy();
@@ -185,13 +206,13 @@ describe("Domains — чипы считают по полному списку",
   it("повторный клик по нажатому чипу снимает срез", () => {
     // Кнопка с `aria-pressed` обещает, что нажатое отжимается повторным
     // нажатием. Обещание надо либо выполнить, либо не давать.
-    fireEvent.click(chip("Active"));
+    fireEvent.click(chip("Deployed"));
     expect(rowNames().length).toBe(3);
-    expect(chip("Active").getAttribute("aria-pressed")).toBe("true");
+    expect(chip("Deployed").getAttribute("aria-pressed")).toBe("true");
 
-    fireEvent.click(chip("Active"));
+    fireEvent.click(chip("Deployed"));
     expect(rowNames().length).toBe(7);
-    expect(chip("Active").getAttribute("aria-pressed")).toBe("false");
+    expect(chip("Deployed").getAttribute("aria-pressed")).toBe("false");
     expect(chip("All").getAttribute("aria-pressed")).toBe("true");
   });
 });
@@ -251,7 +272,7 @@ describe("Domains — знаменатель подвала переживает
   });
 
   it("чип сужает числитель и НЕ трогает знаменатель", () => {
-    fireEvent.click(chip("Active"));
+    fireEvent.click(chip("Deployed"));
     // Список правда сузился — без этого «of 7» ниже не утверждало бы ничего:
     // у нефильтрующего чипа знаменатель тоже остался бы прежним.
     expect(rowNames().length).toBe(3);
@@ -302,10 +323,10 @@ describe("Domains — красный счётчик достаётся толь�
   });
 
   it("у соседних чипов число обычное, сколько бы их ни было", () => {
-    // «Active 3» — тоже не ноль, и если бы красным красили просто ненулевой
+    // «Deployed 3» — тоже не ноль, и если бы красным красили просто ненулевой
     // счётчик, тревогой светился бы весь ряд на совершенно здоровом списке.
-    expect(isAlarming("Active")).toEqual({ color: false, bg: false });
-    expect(countEl("Active").style.color).toBe(hexToRgb(tokens.text.secondary));
+    expect(isAlarming("Deployed")).toEqual({ color: false, bg: false });
+    expect(countEl("Deployed").style.color).toBe(hexToRgb(tokens.text.secondary));
   });
 
   it("провалов ноль — «Failed» гаснет вместе с ними", async () => {

@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 
 import { chipCount, countDomains, DomainCounts, LifecycleStatus } from "../../lib/domainCounts";
 import { tokens } from "../../lib/designTokens";
+import { domainStatusLabel } from "../../lib/domainStatus";
 import { DomainUI } from "./types";
 
 /**
@@ -13,9 +14,16 @@ import { DomainUI } from "./types";
  * другое; это тот же класс ошибки, ради которого поля здесь именованные, а не
  * сложены в кортеж.
  *
- * Подпись при этом задаётся руками, и это осознанная граница: `domainStatusLabel`
- * даёт `ACTIVE`, а макету нужен `Active`, — но перепутанная ПОДПИСЬ видна с
- * первого взгляда на экран, а перепутанный счётчик неотличим от правды.
+ * Подпись при этом задаётся руками, и это осознанная граница: у чипа она
+ * короче, чем у колонки (`Deployed` в колонке — но `All / Deployed / Not set up
+ * / Failed` в ряду читаются как один набор срезов). Перепутанная ПОДПИСЬ видна
+ * с первого взгляда на экран, а перепутанный счётчик неотличим от правды —
+ * поэтому руками задаётся именно она.
+ *
+ * Но СЛОВА обязаны совпадать с колонкой: чип «Active», фильтрующий строки, в
+ * которых написано «Deployed», заставлял бы человека держать в голове перевод
+ * одного словаря в другой. Совпадение сторожит тест — сверкой с
+ * `domainStatusLabel` той же лестницы.
  */
 interface Chip {
   label: string;
@@ -86,9 +94,9 @@ export default function DomainStatChips({
 
   const chips: Chip[] = [
     { label: "All", value: "" },
-    { label: "Active", value: "active" },
-    { label: "New", value: "new" },
-    { label: "Failed", value: "failed" },
+    { label: domainStatusLabel("active"), value: "active" },
+    { label: domainStatusLabel("new"), value: "new" },
+    { label: domainStatusLabel("failed"), value: "failed" },
   ];
 
   const details: Detail[] = [

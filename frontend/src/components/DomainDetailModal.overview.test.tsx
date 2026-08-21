@@ -184,7 +184,7 @@ describe("шапка карточки", () => {
     show({ expiry_date: expiry });
 
     // Статус — бейджем той же лестницы, что и в списке (`lib/domainStatus`).
-    expect(screen.getByText("ACTIVE")).toBeTruthy();
+    expect(screen.getByText("Deployed")).toBeTruthy();
     // Срок — тем же модулем, что и колонка списка: дата плюс остаток словами.
     // Дата — та, которую называет регистратор: `expiry_date` приходит без
     // времени, и печатать её надо в UTC, иначе западнее UTC карточка называет

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   DOMAIN_STATUSES,
+  domainStatusHint,
   domainStatusLabel,
   domainStatusRank,
   domainStatusVariant,
@@ -53,10 +54,59 @@ describe("domainStatusVariant / domainStatusLabel", () => {
     expect(domainStatusVariant("")).toBe("gray");
   });
 
-  it("подпись — сам статус заглавными, пустое значение — «UNKNOWN»", () => {
-    expect(domainStatusLabel("ns_ok")).toBe("NS_OK");
-    // Пустой бейдж читался бы как «статуса нет», а не как «статус пуст».
-    expect(domainStatusLabel("")).toBe("UNKNOWN");
+  it("подпись — человеческая, а не внутреннее имя бэкенда", () => {
+    // `NS_OK`, `SITE_CREATED`, `SSL_PENDING` — имена из чужого кода, и объяснить
+    // себя ими колонка не могла. Проверяются все восемь дословно: подпись,
+    // сверенная с самой лестницей, зеленела бы при любом её содержимом.
+    expect(DOMAIN_STATUSES.map((s) => domainStatusLabel(s.status))).toEqual([
+      "Not set up",
+      "Waiting NS",
+      "NS set",
+      "Deploying",
+      "Site created",
+      "Issuing SSL",
+      "Deployed",
+      "Failed",
+    ]);
+  });
+
+  it("`active` подписан «Deployed», а не «Active» — и это главная правка", () => {
+    // Колонка называет ступень настройки ВНУТРИ SDMP, а не здоровье сайта:
+    // `active` стоит только у доменов, прошедших provision из приложения, а
+    // заведённые вручную остаются `new` навсегда. Слово «Active» обещало
+    // обратное — что домен работает, — и человек читал «New» у живого сайта
+    // как поломку.
+    expect(domainStatusLabel("active")).toBe("Deployed");
+    expect(domainStatusLabel("new")).toBe("Not set up");
+  });
+
+  it("незнакомый и пустой статус — «Unknown», а не сырое имя и не пустое место", () => {
+    // Бэкенд волен добавить ступень в любой день; печатать её сырое имя значило
+    // бы показать пользователю строку из чужого кода. Пустой бейдж читался бы
+    // как «статуса нет», а не как «статус нам неизвестен».
+    expect(domainStatusLabel("teleported")).toBe("Unknown");
+    expect(domainStatusLabel("")).toBe("Unknown");
+  });
+});
+
+describe("domainStatusHint", () => {
+  it("подсказка есть у КАЖДОГО статуса лестницы и нигде не пуста", () => {
+    // Пустая подсказка — это `title=""`: наведение молчит, а колонка так и
+    // остаётся необъяснённой. Форму сторожит `satisfies`, непустоту — этот тест.
+    for (const { status } of DOMAIN_STATUSES) {
+      expect(domainStatusHint(status).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("«Deployed» прямо оговаривает, что о работе сайта не говорит ничего", () => {
+    // Ровно то недоразумение, из-за которого фаза и делалась: зелёный бейдж
+    // читается как «сайт жив», а означает «мы его отсюда развернули».
+    expect(domainStatusHint("active")).toMatch(/site is up/);
+  });
+
+  it("незнакомый статус объясняет себя незнанием, а не выдуманной ступенью", () => {
+    expect(domainStatusHint("teleported")).toMatch(/teleported/);
+    expect(domainStatusHint("teleported")).toMatch(/not one this app knows/);
   });
 });
 

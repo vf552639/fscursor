@@ -98,7 +98,7 @@ describe("упавший provision виден в списке доменов", (
     const failed = (await screen.findByText("broken.com")).closest("tr") as HTMLElement;
     // Текст, а не `title`: тултип невидим, пока в него не попали мышью.
     expect(within(failed).getByText(PROVISION_ERROR)).toBeTruthy();
-    expect(within(failed).getByText("FAILED")).toBeTruthy();
+    expect(within(failed).getByText("Failed")).toBeTruthy();
 
     // Вторая половина утверждения: у домена без ошибки блока нет вовсе.
     // Считается именно число блоков: проверка «нет текста в чистой строке»

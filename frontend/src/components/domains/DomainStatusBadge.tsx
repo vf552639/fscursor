@@ -1,7 +1,7 @@
 import React from "react";
 
 import { STATUS_PILL, tokens } from "../../lib/designTokens";
-import { domainStatusLabel, domainStatusVariant } from "../../lib/domainStatus";
+import { domainStatusHint, domainStatusLabel, domainStatusVariant } from "../../lib/domainStatus";
 
 /**
  * Бейдж статуса домена. Своей карты статусов у него больше нет: она была одной
@@ -31,6 +31,16 @@ import { domainStatusLabel, domainStatusVariant } from "../../lib/domainStatus";
  * допишут цвета. Восемь статусов продукта раскладываются по пяти вариантам, и
  * все восемь пилюлю получают — макет назвал цветом три, но домен, чей статус
  * макет не нарисовал, не перестаёт от этого существовать.
+ *
+ * ПОДСКАЗКА ставится сама, из той же лестницы: пилюля называет ступень
+ * настройки внутри SDMP, а не здоровье сайта, и различить эти два смысла по
+ * одному слову («Deployed») нельзя. Ставить `title` у каждого вызывающего
+ * значило бы получить два объяснения одному бейджу — ровно то расхождение,
+ * ради запрета которого заведена сама лестница.
+ *
+ * `title` пропсом при этом остаётся и ПЕРЕБИВАЕТ подсказку: строка списка
+ * кладёт туда текст провалившегося прогона, и он сильнее — «Failed» человек уже
+ * прочитал, а вот ПОЧЕМУ, знает только эта строка.
  */
 export default function DomainStatusBadge({
   status,
@@ -42,7 +52,7 @@ export default function DomainStatusBadge({
   const c = STATUS_PILL[domainStatusVariant(status)];
   return (
     <span
-      title={title}
+      title={title ?? domainStatusHint(status)}
       style={{
         display: "inline-block",
         padding: "3px 10px",
