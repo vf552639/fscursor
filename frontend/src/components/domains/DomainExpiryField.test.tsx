@@ -60,6 +60,9 @@ const STORED_TYPED = "01.09.2026";
 const STORED_LABEL = "01.09.2026 · in 14 days";
 const PICKED = "2027-01-01";
 const PICKED_TYPED = "01.01.2027";
+/** Вторая правка — та, что набирается ПОВЕРХ ещё не доехавшей записи. */
+const LATER = "2028-05-15";
+const LATER_TYPED = "15.05.2028";
 /** Третья дата — ею в строку домена пишет КТО-ТО ДРУГОЙ, не это поле. */
 const OTHER = "2027-03-01";
 
@@ -258,6 +261,16 @@ describe("срок домена — поле правки", () => {
     // Пустое поле здесь — распоряжение стереть дату, и догадаться об этом
     // неоткуда: у соседних полей карточки пустое значение значит «не заполнено».
     expect(screen.getByText("Empty clears the date.")).toBeTruthy();
+  });
+
+  it("домену без срока стирать нечего — и подписи про это нет", () => {
+    show({ expiry_date: null });
+    fireEvent.click(value());
+    // Обещание стереть то, чего нет, — не подсказка, а шум.
+    expect(screen.queryByText("Empty clears the date.")).toBeNull();
+    expect(dateInput().getAttribute("aria-describedby") ?? "").not.toContain(
+      "domain-expiry-hint-42",
+    );
   });
 
   it("набор с клавиатуры сам по себе на сервер не уходит", async () => {
@@ -596,5 +609,100 @@ describe("срок домена — что видно, пока запись и�
     fireEvent.keyDown(dateInput(), { key: "Enter" });
     await waitFor(() => expect(writes().length).toBe(2));
     expect(writes()[1]).toEqual({ expiry_date: PICKED });
+  });
+});
+
+describe("срок домена — правка, набранная поверх ещё не доехавшей записи", () => {
+  /**
+   * Поле не выключается на время записи, то есть набирать в него МОЖНО — и
+   * значит набранное обязано пережить приезд ответа на прошлый PUT.
+   *
+   * Безусловное закрытие поля по успеху уносило набранное молча: человек видел
+   * на экране дату, которой не набирал, и ни строки о том, куда делась его
+   * вторая правка. Показательно, что при ПРОВАЛЕ записи она выживала (поле
+   * оставалось открытым) — удачный исход обходился с человеком хуже неудачного.
+   */
+  it("успех первой записи не уносит вторую правку", async () => {
+    const put = hangingPut();
+    show();
+    fireEvent.click(value());
+    type(PICKED_TYPED);
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await waitFor(() => expect(writes().length).toBe(1));
+
+    // Пока PUT в полёте, человек передумал и набрал другую дату.
+    type(LATER_TYPED);
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await put.resolveWith(domain({ expiry_date: PICKED }));
+
+    expect(dateInput().value).toBe(LATER_TYPED);
+    // И её по-прежнему есть чем сохранить: запись больше не идёт, входы открыты.
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await waitFor(() => expect(writes().length).toBe(2));
+    expect(writes()[1]).toEqual({ expiry_date: LATER });
+  });
+
+  it("совпавшая с записанным правка поле всё-таки закрывает", async () => {
+    // Обратная половина: условие закрытия — «набранное совпало с записанным», а
+    // не «человек ничего не трогал». Иначе поле оставалось бы открытым после
+    // каждой удачной записи.
+    const put = hangingPut();
+    show();
+    fireEvent.click(value());
+    type(PICKED_TYPED);
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await waitFor(() => expect(writes().length).toBe(1));
+
+    await put.resolveWith(domain({ expiry_date: PICKED }));
+    expect(screen.queryByLabelText("Expiry date")).toBeNull();
+    expect(value().textContent).toContain(PICKED_TYPED);
+  });
+
+  it("Escape во время записи не уносит «Saving…»", async () => {
+    const put = hangingPut();
+    show();
+    fireEvent.click(value());
+    type(PICKED_TYPED);
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await waitFor(() => expect(screen.getByText("Saving…")).toBeTruthy());
+
+    // Escape не обещает отменить ушедший PUT — и, закрыв поле, унёс бы
+    // единственный знак, что запись идёт: человек нажал «отмена», получил
+    // тишину, а через мгновение дата поменялась бы сама.
+    fireEvent.keyDown(dateInput(), { key: "Escape" });
+    expect(screen.getByText("Saving…")).toBeTruthy();
+    expect(dateInput()).toBeTruthy();
+
+    await put.resolveWith(domain({ expiry_date: PICKED }));
+    expect(screen.queryByLabelText("Expiry date")).toBeNull();
+  });
+});
+
+describe("срок домена — отказ не переезжает в следующую правку", () => {
+  it("новая правка не подписана отказом по прошлой попытке", async () => {
+    mocks.apiPut.mockRejectedValue(new Error("boom"));
+
+    show();
+    fireEvent.click(value());
+    type(PICKED_TYPED);
+    fireEvent.keyDown(dateInput(), { key: "Enter" });
+    await screen.findByText(/boom/);
+
+    // Человек отказался от правки — строка отказа под значением остаётся: дата
+    // и правда не сохранена.
+    fireEvent.keyDown(dateInput(), { key: "Escape" });
+    expect(screen.queryByRole("alert")).toBeTruthy();
+
+    // А вот НОВАЯ правка отказом по прошлой попытке не подписывается: поле
+    // открывается чистым, иначе красная строка висела бы в шапке бессрочно и
+    // объясняла бы состояние, которого уже нет.
+    fireEvent.click(value());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(dateInput().getAttribute("aria-describedby") ?? "").not.toContain(
+      "domain-expiry-error-42",
+    );
+    // И показано в поле сохранённое, а не отвергнутое: снятие признака отказа
+    // не имеет права воскресить наложение, которое этим отказом и снято.
+    expect(dateInput().value).toBe(STORED_TYPED);
   });
 });
