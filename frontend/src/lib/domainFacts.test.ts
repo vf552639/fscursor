@@ -183,8 +183,8 @@ describe("sslStateRank — порядок колонки SSL", () => {
     expect(rank("expired")).toBeLessThan(rank("expiring"));
     expect(rank("expiring")).toBeLessThan(rank("valid"));
     // `error` — не ступень здоровья, а отказ измерения, и стоит он ПОСЛЕ
-    // валидного: поднимает его второй клик по заголовку, ровно как второй клик
-    // по Setup поднимает `failed`.
+    // валидного: наверх его поднимает второй клик по заголовку — то, что этим
+    // кликом и ищут.
     expect(rank("valid")).toBeLessThan(rank("error"));
   });
 

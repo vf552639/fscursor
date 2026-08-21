@@ -6,6 +6,7 @@ import { RegistrarAccount } from "../../api/registrars";
 import { Server } from "../../api/servers";
 import { setTauri } from "../../test/secretBlobKit";
 import { tokens } from "../../lib/designTokens";
+import { domainStatusHint, domainStatusLabel } from "../../lib/domainStatus";
 import { hexToRgb } from "../../test/colors";
 import DomainTable from "./DomainTable";
 import { DomainUI } from "./types";
@@ -97,10 +98,20 @@ const rowOf = (name: string) => {
   return row;
 };
 
+/**
+ * Ячейка имени домена — вторая в строке (нулевая — чекбокс).
+ *
+ * Под именем в ней же стоят метки (ступень настройки, сервер, регистратор) и
+ * текст провалившегося прогона, так что «в этой ячейке» — не придирка к
+ * вёрстке, а само утверждение: сигнал переехал в колонку имени, а не остался в
+ * строке вообще.
+ */
+const nameCell = (name: string) => within(rowOf(name)).getAllByRole("cell")[1];
+
 afterEach(cleanup);
 
 describe("DomainTable — набор колонок", () => {
-  it("колонок восемь, и Server с Registrar среди них больше нет", () => {
+  it("колонок семь: Server, Registrar и Setup среди них больше нет", () => {
     renderTable();
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent?.trim() ?? "");
     // Первая — чекбокс «выделить всё», последняя — действия; обе без подписи.
@@ -108,7 +119,20 @@ describe("DomainTable — набор колонок", () => {
     // сортируемых колонках (иначе кликабельность узнаётся только случайным
     // попаданием курсора), а у активной она сменилась направлением. Колонка
     // Cloudflare без стрелки — по ней порядка нет.
-    expect(headers).toEqual(["", "Domain↑", "Cloudflare", "Setup↕", "SSL↕", "Expires↕", "Added↕", ""]);
+    expect(headers).toEqual(["", "Domain↑", "Cloudflare", "SSL↕", "Expires↕", "Added↕", ""]);
+  });
+
+  it("по ступени настройки сортировать больше нечем — заголовка нет", () => {
+    // Ключ сортировки без заголовка нажать нечем, а заголовок без колонки
+    // обещал бы порядок строк по значению, которого в них не видно.
+    //
+    // Проверяется ровно «Sort by Setup» — подпись, которая тут была. Соседняя
+    // проверка на «Sort by Status» отсюда убрана как нефальсифицируемая:
+    // колонки с такой подписью в этой таблице не было никогда (заголовок звался
+    // «Setup» намеренно, чтобы не спорить с колонкой Status вкладки Servers), и
+    // упасть такое утверждение не могло ни при какой реализации.
+    renderTable();
+    expect(screen.queryByRole("button", { name: "Sort by Setup" })).toBeNull();
   });
 
   it("сервер и регистратор переехали метками под имя домена, а не исчезли", () => {
@@ -123,6 +147,144 @@ describe("DomainTable — набор колонок", () => {
     // Домену без связей метки не нужны — пустая плашка означала бы «сервер
     // есть, но безымянный».
     expect(within(rowOf("bravo.com")).queryByTitle("Server this domain is hosted on")).toBeNull();
+  });
+});
+
+describe("DomainRow — ступень настройки называется только там, где она исключение", () => {
+  /**
+   * Про что тест на самом деле: колонка Setup ушла, а сигнал остался.
+   *
+   * Колонка называла ступень у КАЖДОГО домена, и на живом списке это было 31
+   * «Not set up» и 15 «Deployed» — ровно то, что чипы над таблицей уже
+   * говорят одной строкой со счётчиками. Ценность у неё была одна и редкая:
+   * застрявший, упавший или незнакомый статус. Он и остался — бейджем под
+   * именем домена, рядом с сервером и регистратором.
+   *
+   * Обе половины утверждения нужны разом. Без первой («у рутины бейджа нет»)
+   * уборка не состоялась бы: бейдж у всех — это та же колонка, только внутри
+   * другой. Без второй («у исключения бейдж есть») уборка унесла бы с собой
+   * единственное место в списке, где видно, что домен не доехал.
+   */
+  it("у `new` и `active` ступени в строке нет вовсе", () => {
+    renderTable({ rows: [domain(1, "fresh.com", { status: "new" }), domain(2, "live.com", { status: "active" })] });
+    // Не «нет в ячейке имени», а нет НИГДЕ в строке: колонки со ступенью в
+    // таблице больше не существует, и проверка по ячейке зеленела бы даже у
+    // реализации, вернувшей колонку обратно.
+    expect(within(rowOf("fresh.com")).queryByText(domainStatusLabel("new"))).toBeNull();
+    expect(within(rowOf("live.com")).queryByText(domainStatusLabel("active"))).toBeNull();
+  });
+
+  it("застрявший, упавший и незнакомый домены называют себя под именем", () => {
+    renderTable({
+      rows: [
+        domain(1, "waiting.com", { status: "ns_pending" }),
+        domain(2, "deploying.com", { status: "provisioning" }),
+        domain(3, "broken.com", { status: "failed" }),
+        // Статус, которого фронт не знает: незнание нельзя рисовать
+        // благополучием, поэтому бейдж ему полагается наравне с провалом.
+        domain(4, "alien.com", { status: "teleported" }),
+      ],
+    });
+    expect(within(nameCell("waiting.com")).getByText(domainStatusLabel("ns_pending")).textContent).toBe("Waiting NS");
+    expect(within(nameCell("deploying.com")).getByText(domainStatusLabel("provisioning"))).toBeTruthy();
+    expect(within(nameCell("broken.com")).getByText(domainStatusLabel("failed"))).toBeTruthy();
+    expect(within(nameCell("alien.com")).getByText("Unknown")).toBeTruthy();
+  });
+
+  it("исключение стоит ПЕРЕД сервером и регистратором", () => {
+    // Порядок здесь и есть смысл ряда: слева — то, что требует действия,
+    // справа — справка о том, где домен живёт. Обратный порядок прятал бы
+    // редкий сигнал за двумя метками, которые есть почти у всех.
+    renderTable({ rows: [domain(1, "broken.com", { status: "failed", server_id: 3, registrar_id: 4 })] });
+    const badges = within(nameCell("broken.com"))
+      .getAllByText(/^(Failed|web-01|hostiq)$/)
+      .map((e) => e.textContent);
+    expect(badges).toEqual(["Failed", "web-01", "hostiq"]);
+  });
+});
+
+describe("DomainRow — текст провалившегося прогона", () => {
+  /**
+   * Единственное место в списке, где видно, ПОЧЕМУ домен не доехал. Переезжая
+   * из своей колонки под имя домена, он обязан остаться видимым ТЕКСТОМ:
+   * `title` — второй канал, а не первый, и подсказка, невидимая до наведения
+   * мышью, не годится для поиска провалившегося домена глазами по списку в
+   * двести строк.
+   */
+  const ERR = "provision failed at create_site: the command failed on the server";
+
+  it("стоит текстом под именем домена, а полный — ещё и в подсказке", () => {
+    renderTable({ rows: [domain(1, "broken.com", { status: "failed", last_provision_error: ERR })] });
+    const err = within(nameCell("broken.com")).getByTestId("provision-error");
+    expect(err.textContent).toBe(ERR);
+    expect(err.getAttribute("title")).toBe(ERR);
+    // Видимая часть — ДВЕ строки, а не одна обрезанная по первому слову:
+    // в узкой колонке статуса от такой строки оставалось «provision failed…»,
+    // то есть всё объяснение уезжало в подсказку. `nowrap` — ровно тот дефект,
+    // и вернуть его молча нельзя.
+    //
+    // Проверяются ВСЕ ЧЕТЫРЕ свойства связки, и лишних среди них нет — каждое
+    // отвечает за свой шаг обрезки:
+    //   `display: -webkit-box`  — включает саму раскладку, в которой счёт строк
+    //                             вообще существует;
+    //   `box-orient: vertical`  — задаёт, что считаются СТРОКИ, а не колонки;
+    //   `line-clamp: 2`         — сколько их оставить и где поставить многоточие;
+    //   `overflow: hidden`      — прячет остальные; без него clamp не обрезает
+    //                             ничего, и многоточие не рисуется тоже.
+    // Снятое поодиночке, любое из четырёх возвращает нам строку, растущую вслед
+    // за многословием сервера, — и делает это молча: текст на месте, `title` на
+    // месте, тест на длину не поймает. Ради этого класса поломок и написана
+    // преамбула файла.
+    expect(err.style.display).toBe("-webkit-box");
+    expect(err.style.getPropertyValue("-webkit-box-orient")).toBe("vertical");
+    expect(err.style.getPropertyValue("-webkit-line-clamp")).toBe("2");
+    expect(err.style.overflow).toBe("hidden");
+    expect(err.style.whiteSpace).not.toBe("nowrap");
+  });
+
+  it("бейдж объясняет СТУПЕНЬ, а не пересказывает ошибку в третий раз", () => {
+    // Пока ошибка была обрезана до одного слова в колонке 110px, подсказка
+    // бейджа была единственным местом с полным текстом, и перебивать ею
+    // объяснение статуса стоило того. Теперь текст виден двумя строками и несёт
+    // собственный `title` — пересказ в подсказке бейджа был бы третьей копией
+    // той же строки, купленной ценой погашенного объяснения ступени. А ступень
+    // без объяснения молчит о том, чем «Failed» отличается от «Site created»:
+    // оба слова из чужого словаря.
+    renderTable({ rows: [domain(1, "broken.com", { status: "failed", last_provision_error: ERR })] });
+    const pill = within(rowOf("broken.com")).getByText(domainStatusLabel("failed"));
+    expect(pill.getAttribute("title")).toBe(domainStatusHint("failed"));
+    expect(pill.getAttribute("title")).not.toBe(ERR);
+    // И о том, что подсказка есть, курсор заявляет — как у соседних меток
+    // (`RowBadge`): пилюля показывает одно слово из чужого словаря, и догадаться
+    // иначе не о чем. Без этого о наличии объяснения сообщали бы как раз те две
+    // метки, чьи объяснения менее ценны.
+    expect(pill.style.cursor).toBe("help");
+  });
+
+  it("чистому домену блока не достаётся вовсе", () => {
+    renderTable({
+      rows: [domain(1, "broken.com", { status: "failed", last_provision_error: ERR }), domain(2, "fine.com", { status: "active" })],
+    });
+    // Считается ЧИСЛО блоков: проверка «в чистой строке нет текста» осталась бы
+    // зелёной и у реализации, которая рисует блок всем подряд, — у чистого
+    // домена он просто вышел бы пустым.
+    expect(screen.getAllByTestId("provision-error")).toHaveLength(1);
+    expect(within(rowOf("fine.com")).queryByTestId("provision-error")).toBeNull();
+  });
+
+  it("текст ошибки не остаётся без бейджа, даже если статус придёт рутинным", () => {
+    // Такого домена сегодня не производит ни один писатель: и десктоп
+    // (`domain_write_back_body`), и повтор прогона шлют рутинный статус ОДНИМ
+    // запросом вместе с `last_provision_error: null`, а не дойдя, тот же запрос
+    // оставляет домен в `failed` — то есть первая половина условия. Проверка
+    // сторожит не достижимое состояние, а инвариант самой строки: красного
+    // текста без слова о том, чем домен является, в списке не бывает, что бы ни
+    // прислал сервер. Разойдись мы с ним завтра — строка читалась бы как
+    // поломка страницы, а не домена, и это нельзя оставлять на «не случится».
+    renderTable({ rows: [domain(1, "stale.com", { status: "active", last_provision_error: ERR })] });
+    const cell = nameCell("stale.com");
+    expect(within(cell).getByText(domainStatusLabel("active"))).toBeTruthy();
+    expect(within(cell).getByTestId("provision-error")).toBeTruthy();
   });
 });
 

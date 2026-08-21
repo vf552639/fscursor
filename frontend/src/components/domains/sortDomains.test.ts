@@ -82,15 +82,15 @@ describe("sortDomains", () => {
       expect(names(sortDomains(rows, sort("expiry_date", "desc")))).toEqual(["ok.com", "broken.com"]);
     });
 
-    it("незнакомый статус домена", () => {
-      const rows = [
-        row({ id: 1, domain: "active.com", status: "active" }),
-        row({ id: 2, domain: "alien.com", status: "статуса-такого-нет" }),
-        row({ id: 3, domain: "new.com", status: "new" }),
-      ];
-      expect(names(sortDomains(rows, sort("status", "asc"))).slice(-1)).toEqual(["alien.com"]);
-      expect(names(sortDomains(rows, sort("status", "desc"))).slice(-1)).toEqual(["alien.com"]);
-    });
+    /*
+     * Случая «незнакомый статус домена» здесь больше нет: сортировать по
+     * ступени настройки стало нечем — колонка ушла из таблицы, а с ней ключ
+     * `status` и ранг статуса в лестнице. Само правило это не отменяет: у дат и у
+     * состояния сертификата незнание по-прежнему уходит в конец при любом
+     * направлении, и проверяется оно соседними случаями. Незнакомый статус
+     * теперь виден в другом месте и другим способом — бейджем под именем
+     * домена (`domainStatusIsRoutine`), и сторожат его тесты строки.
+     */
 
     it("«снимка нет» — незнание; «сертификата нет» — знание, и это разные места", () => {
       const rows = [

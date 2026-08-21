@@ -47,12 +47,15 @@ function PlainTh({children}: {children?: React.ReactNode}){
  * фолбэком на ключ, колонка, для которой его забыли, объявляла бы себя «Sort by
  * created».
  */
-function SortableTh({k, label, title, sort, onSort}: {k: SortKey, label: string, title?: string, sort: Sort, onSort: (k: SortKey) => void}){
+function SortableTh({k, label, sort, onSort}: {k: SortKey, label: string, sort: Sort, onSort: (k: SortKey) => void}){
   const active = sort.key === k;
-  // `title` — на ячейке, а не на кнопке: подсказка объясняет КОЛОНКУ, а не
-  // действие «отсортировать по ней», и, повешенная на кнопку, она перебивала бы
-  // собственное `aria-label` этой кнопки.
-  return <th style={TH_STYLE} title={title} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+  // Подсказки у заголовка больше нет: несла её одна колонка — ушедшая «Setup»,
+  // которой требовалось оговорить, что она про ступень настройки, а не про
+  // здоровье сайта. Понадобится снова — вешать её надо на ЯЧЕЙКУ, а не на
+  // кнопку внутри: подсказка объясняла бы колонку, а не действие
+  // «отсортировать по ней», и с кнопки перебивала бы собственное `aria-label`
+  // этой кнопки.
+  return <th style={TH_STYLE} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
     <button type="button" onClick={()=>onSort(k)} aria-label={`Sort by ${label}`} style={{display:"inline-flex",alignItems:"center",gap:4,background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:active?tokens.text.ink:"inherit",letterSpacing:"inherit",textTransform:"inherit"}}>
       {label}
       <span aria-hidden="true" style={{color:active?tokens.text.ink:tokens.text.disabled}}>{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
@@ -61,13 +64,17 @@ function SortableTh({k, label, title, sort, onSort}: {k: SortKey, label: string,
 }
 
 /**
- * Колонка шапки: подпись, ключ сортировки (если по ней есть порядок) и
- * подсказка (если подпись сама себя не объясняет).
+ * Колонка шапки: подпись и ключ сортировки, если по ней есть порядок.
+ *
+ * Поля `title` тут больше нет: подсказку несла ровно одна колонка — «Setup», —
+ * и с её уходом опциональное поле осталось без единого потребителя. Пустой
+ * проп не инертен: он позволяет завести подсказку одной строкой, не прочитав
+ * довода о том, где ей место (см. `SortableTh`), — а `tsc` теперь про этот
+ * довод спросит.
  */
 interface Column {
   label: string;
   key?: SortKey;
-  title?: string;
 }
 
 /**
@@ -77,17 +84,17 @@ interface Column {
  * домена (`DomainRow`). Освободившееся место отдано самому имени — в списке на
  * двести строк ищут именно его, а домены четвёртого уровня в 14% ширины не
  * помещались вовсе.
+ *
+ * Колонки со ступенью настройки («Setup») здесь тоже больше нет. Она называла
+ * ступень у КАЖДОГО домена, а на живом списке это 31 «Not set up» и 15
+ * «Deployed» — то самое, что чипы над таблицей уже говорят одной строкой со
+ * счётчиками. Редкое и ценное — застрявший, упавший или незнакомый статус —
+ * осталось бейджем под именем домена (`DomainRow`, `domainStatusIsRoutine`), а
+ * разбирается ступень там, где её и разбирают, — в карточке.
  */
 const COLUMNS: Column[] = [
   {label:"Domain",key:"domain"},
   {label:"Cloudflare"},
-  // «Setup», а не «Status», и ключ сортировки при этом остался `status`: имя
-  // колонки — про то, что человек читает, а ключ — про поле, по которому
-  // считается порядок. Колонка называет СТУПЕНЬ НАСТРОЙКИ внутри SDMP, а не
-  // здоровье сайта: домен, заведённый вручную, остаётся «Not set up» навсегда,
-  // сколько бы лет его сайт ни работал. Заодно снимается путаница с колонкой
-  // `Status` вкладки Servers, где под тем же словом живёт доступность машины.
-  {label:"Setup",key:"status",title:"Setup stage inside SDMP, not site health"},
   {label:"SSL",key:"ssl"},
   {label:"Expires",key:"expiry_date"},
   {label:"Added",key:"created"},
@@ -104,14 +111,22 @@ const COLUMNS: Column[] = [
  * места: колонки обязаны стоять на месте.
  *
  * Проценты у двух текстовых колонок и пиксели у остальных — не небрежность:
- * дата, пилюля статуса и пара кнопок занимают ровно столько, сколько занимают,
+ * дата, тег сертификата и пара кнопок занимают ровно столько, сколько занимают,
  * и растягивать их вместе с окном незачем; тянуться должно то, что обрезается.
  *
- * Колонка SSL (пятая) шире прочих пилюль и меряется по САМОЙ ДЛИННОЙ подписи —
- * «No certificate»: состояний в ней теперь шесть, а не два, и `white-space:
- * nowrap` у пилюли не переносит, а выпускает её за край ячейки.
+ * Колонка SSL (четвёртая) шире прочих пилюль и меряется по САМОЙ ДЛИННОЙ
+ * подписи — «No certificate»: состояний в ней теперь шесть, а не два, и
+ * `white-space: nowrap` у пилюли не переносит, а выпускает её за край ячейки.
+ *
+ * 110 пикселей ушедшей колонки «Setup» достались тем же двум текстовым — по
+ * тому же правилу: пиксели раздают тому, что не тянется, а свободное место
+ * нужно тому, что обрезается. Считано от 1240: шире страница не бывает
+ * (`maxWidth` в `pages/Domains.tsx`), то есть освободилось около 9 процентных
+ * пунктов, и разошлись они 5 к 4 в пользу имени домена — туда переехали и
+ * бейдж исключения, и текст провалившегося прогона, так что под именем теперь
+ * стоит до трёх меток и строка объяснения.
  */
-const COL_WIDTHS = ["36px", "34%", "22%", "110px", "136px", "110px", "92px", "68px"];
+const COL_WIDTHS = ["36px", "39%", "26%", "136px", "110px", "92px", "68px"];
 
 /**
  * Число колонок — считается из того же массива, из которого они и рисуются.
@@ -189,13 +204,14 @@ export default function DomainTable({
   // так.
   return <>
   <table style={{width:"100%",borderCollapse:"collapse",tableLayout:"fixed"}}>
-    {/* Ключ — индекс, а не сама ширина: «110px» стоит и у Status, и у Expires,
-        и React ругался бы на дублирующийся ключ. Порядок здесь и есть
-        тождество колонки, переставлять её без перестановки заголовка нельзя. */}
+    {/* Ключ — индекс, а не сама ширина: одинаковые ширины у разных колонок
+        случались (110px стояло и у Status, и у Expires) и случатся снова, а
+        React ругался бы на дублирующийся ключ. Порядок здесь и есть тождество
+        колонки, переставлять её без перестановки заголовка нельзя. */}
     <colgroup>{COL_WIDTHS.map((w,i)=><col key={i} style={{width:w}}/>)}</colgroup>
     <thead><tr><th style={TH_STYLE}><input type="checkbox" checked={selectedIds.size===rows.length&&rows.length>0} onChange={onToggleAll} style={{cursor:"pointer"}}/></th>
       {COLUMNS.map((c)=>c.key
-        ? <SortableTh key={c.label} k={c.key} label={c.label} title={c.title} sort={sort} onSort={onSort}/>
+        ? <SortableTh key={c.label} k={c.key} label={c.label} sort={sort} onSort={onSort}/>
         : <PlainTh key={c.label}>{c.label}</PlainTh>)}
     </tr></thead>
     <tbody>
