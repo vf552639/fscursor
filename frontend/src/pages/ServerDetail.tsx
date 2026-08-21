@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import { useMutationState } from "@tanstack/react-query";
 import { StatCard, Card, CHd, CTi, CBo, Btn, StatusDot, Badge, fmtDate, pctColor, InfoRow, CopyBtn, Modal, Inp, Sel, RowActions, STALE_TEXT } from "../components/ui/Primitives";
 import { STALE_SUFFIX, domainWord, formatAgoStale, formatUptime, mbToGb } from "../lib/format";
@@ -11,6 +11,7 @@ import { fastpanelUrlError, fastpanelUserError } from "../lib/fastpanelInput";
 import { isCheckStale, isMetricsStale, serverUiStatus, statusBadgeVariant } from "../lib/serverStatus";
 import { OS_OPTIONS, osShortName, serverOsName } from "../lib/osName";
 import { useDomains, useDeleteDomain, useUpdateDomain, useBulkAssignServer, useBulkCreateStructuredDomains, Domain } from "../api/domains";
+import DateField from "../components/ui/DateField";
 import { RevealSecret } from "../components/RevealSecret";
 import { OpenInDesktop } from "../components/OpenInDesktop";
 import { DesktopOnlyNote } from "../components/DesktopOnlyNote";
@@ -1322,22 +1323,158 @@ export default function ServerDetail({server, onBack, onNav, onFastpanelCreds}: 
   </>;
 }
 
+/**
+ * Что поле даты в последний раз сказало о набранной строке — и единственное,
+ * из чего форма берёт значение для payload.
+ *
+ * `DateField` держит сырой текст у себя и наружу отдаёт уже разобранное
+ * (`onParsed`/`onParseError`), поэтому своего текста у формы нет, а разбирать
+ * его самой ей нечем и незачем: позвать `parseExpiryInput` здесь значило бы
+ * завести ВТОРОЕ место разбора — ровно тот дубль, ради устранения которого
+ * разбор и печать поселены в один модуль (`lib/domainExpiry`).
+ *
+ * `error` — не «поле красное», а «строку прочитать не удалось». Значения у
+ * такого ответа нет вовсе, и это не придирка типа: `null` вместо непрочитанной
+ * даты — молчаливое стирание того, что лежит в базе.
+ */
+type DateRead = { kind: "value"; iso: string | null } | { kind: "error" };
+
+/** Ряд формы: подпись и поле под ней. Одинаковый у всех четырёх — правило одно. */
+const EDITOR_ROW: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
+const EDITOR_LABEL: React.CSSProperties = { fontSize: 12, fontWeight: 500, color: "#374151" };
+/**
+ * Тон рамки поля даты — тот же хекс, каким рисует свою рамку соседний `Inp`
+ * (`ui/Primitives`), а не `tokens.border.control` (#cbd5e1), которым `DateField`
+ * красит себя по умолчанию.
+ *
+ * Разъезд не наш и роль в палитре названа верно («рамка поля ввода, селекта,
+ * кнопки»); мимо токенов живёт как раз `Inp` со своим #e5e7eb. Но в этой форме
+ * четыре поля идут подряд, и два почти совпадающих серых в одном ряду читаются
+ * не как решение, а как поломка вёрстки — «почти совпадающий оттенок хуже явно
+ * другого». Свести ряд к токену пришлось бы всем разом — `Inp`, `Sel` и
+ * вторичной кнопке (тот же #e5e7eb стоит в 69 местах 26 файлов, в том числе на
+ * кнопке Cancel этой же формы), — то есть менять вид всех экранов ради двух
+ * полей. Поэтому здесь поле подчиняется соседям, а долг — перевести общие
+ * примитивы на `border.control` — остаётся общим и отдельным.
+ *
+ * Правится ровно рамка, и только она: геометрия у примитива и так совпадает с
+ * `Inp` (padding 8/12, радиус 8, размер 13), а фон и тон текста расходятся на
+ * единицу-две (#f8fafc против #f9fafb, #0f172a против #111) — этого глаз в
+ * 13px не берёт. Рамка же — тонкая линия по всему периметру поля, и на ней
+ * видно.
+ *
+ * ЗНАК ФОКУСА при этом остаётся разным намеренно, и это второй, отдельный
+ * вопрос: `Inp` гасит кольцо браузера и красит рамку синим, `DateField`
+ * оставляет кольцо (его `onBlur` занят показом отложенной ошибки — см. его
+ * JSDoc). Кольцо от рамки отличается явно, а не на пару единиц серого.
+ */
+const DATE_BORDER = "#e5e7eb";
+const DATE_FIELD: React.CSSProperties = {
+  // Ширины у примитива в дефолте НЕТ намеренно: её назначает место вставки.
+  // Без этой строки поле встало бы по содержимому и разъехалось с соседями.
+  width: "100%",
+  border: `1px solid ${DATE_BORDER}`,
+};
+
+/**
+ * Причина мёртвой кнопки Save, названная словами.
+ *
+ * Красную строку разбора `DateField` показывает не сразу (незаконченный набор
+ * — не ошибка, а середина действия), и у нечитаемой даты ИЗ БАЗЫ момент показа
+ * не наступает вовсе, пока поля не коснулись. Без подсказки человек, пришедший
+ * поправить имя домена, упирался бы в выключенный Save без единого слова о том,
+ * что не так.
+ *
+ * Заодно эта строка отвечает и на «а как стереть дату»: пустое поле — законный
+ * ввод. Отдельной подписи под полями (как «Empty clears the date.» в шапке
+ * карточки домена) здесь поэтому нет: там пустое поле СРАЗУ уходит в запись по
+ * уходу из поля, и о снятии срока предупредить надо заранее, а тут между
+ * пустым полем и записью стоит явный Save, и лишняя строка под каждым из
+ * четырёх полей — это теснота на ровном месте.
+ */
+const DATE_BLOCKED = "Enter dates as DD.MM.YYYY, or leave them empty.";
+
+/**
+ * Форма правки домена с карточки сервера.
+ *
+ * Даты правятся ТЕКСТОМ (`ui/DateField`), а не нативным `<input type="date">`,
+ * который стоял здесь раньше: в WKWebView десктопа он не принимал ввод с
+ * клавиатуры вовсе — цифры не вставали в сегменты, календарь не открывался, —
+ * то есть форма читала пустоту и молча стирала обе даты. Поле, которое не
+ * берёт ввод, хуже отсутствующего.
+ *
+ * Наружу форма отдаёт payload ПРЕЖНЕЙ формы (ISO-дата без времени либо `null`):
+ * человеку показывается `01.09.2026`, бэкенду уходит `2026-09-01`. Перевод —
+ * работа примитива и `lib/domainExpiry`, здесь его нет.
+ */
 function DomainEditor({ domain, onSave, onCancel, isSaving }: { domain: any; onSave: (payload: any) => void; onCancel: () => void; isSaving: boolean }) {
   const [name, setName] = useState(domain.domain_name || "");
-  const [purchaseDate, setPurchaseDate] = useState(domain.purchase_date || "");
-  const [expiryDate, setExpiryDate] = useState(domain.expiry_date || "");
+  /**
+   * Начальный ответ — дата домена как есть: настоящий приедет мгновением
+   * позже, потому что примитив рассказывает о себе с монтирования. Заводить
+   * состояние «ничего не известно» и выключать по нему Save нельзя: у домена
+   * без дат кнопка была бы мертва на пустом месте, а в `React.StrictMode`
+   * монтирование ещё и двойное.
+   */
+  const [purchase, setPurchase] = useState<DateRead>({ kind: "value", iso: domain.purchase_date ?? null });
+  const [expiry, setExpiry] = useState<DateRead>({ kind: "value", iso: domain.expiry_date ?? null });
   const [zoneId, setZoneId] = useState(domain.cloudflare_zone_id || "");
+  // Пары `htmlFor`/`id`: без них скринридер читает поле безымянным, а `<label>`
+  // по соседству сам по себе его не именует. `useId`, а не константы: имена
+  // должны оставаться уникальными, даже если форма однажды окажется на экране
+  // не в одном экземпляре.
+  const uid = useId();
+  const id = (field: string) => `${uid}-${field}`;
+
+  /**
+   * Ответ ПО КАЖДОМУ полю отдельно, а не одним флагом на два: `onParseError`
+   * приходит на каждое изменение, и общий флаг включал бы Save от починки
+   * второго поля при сломанном первом.
+   */
+  const brokenDate = purchase.kind === "error" || expiry.kind === "error";
+
+  function save() {
+    // Гард несущий: у ответа «строку прочитать не удалось» значения нет вовсе
+    // (см. `DateRead`), и без этой проверки достать `iso` было бы не из чего.
+    if (purchase.kind === "error" || expiry.kind === "error") return;
+    onSave({ domain_name: name.trim(), purchase_date: purchase.iso, expiry_date: expiry.iso, cloudflare_zone_id: zoneId || null });
+  }
 
   return (
     <>
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Domain Name</label><Inp value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Purchase Date</label><Inp type="date" value={purchaseDate} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setPurchaseDate((e.target as any).value)} /></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Expiry Date</label><Inp type="date" value={expiryDate} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setExpiryDate((e.target as any).value)} /></div>
-        <div><label style={{fontSize:12,fontWeight:500,color:"#374151",display:"block",marginBottom:6}}>Cloudflare Zone ID</label><Inp value={zoneId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setZoneId((e.target as any).value)} /></div>
+        <div style={EDITOR_ROW}><label htmlFor={id("name")} style={EDITOR_LABEL}>Domain Name</label><Inp id={id("name")} value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setName((e.target as any).value)} /></div>
+        {/* Ряд — колонка не для красоты: `DateField` отдаёт фрагмент, и его
+            красная строка разбора обязана встать ПОД полем, а не рядом с ним. */}
+        <div style={EDITOR_ROW}>
+          <label htmlFor={id("purchase")} style={EDITOR_LABEL}>Purchase Date</label>
+          <DateField
+            id={id("purchase")}
+            // Семя, а не диктат: форма называет начальное значение и больше в
+            // набранный текст не вмешивается (см. JSDoc `defaultValue`).
+            defaultValue={domain.purchase_date ?? null}
+            // Колбэки примитива — это «вот моё состояние», а не «сохрани меня»:
+            // звучат они на каждый символ и ещё раз на монтировании. Запись
+            // ждёт своей кнопки.
+            onParsed={(iso) => setPurchase({ kind: "value", iso })}
+            onParseError={() => setPurchase({ kind: "error" })}
+            style={DATE_FIELD}
+          />
+        </div>
+        <div style={EDITOR_ROW}>
+          <label htmlFor={id("expiry")} style={EDITOR_LABEL}>Expiry Date</label>
+          <DateField
+            id={id("expiry")}
+            defaultValue={domain.expiry_date ?? null}
+            onParsed={(iso) => setExpiry({ kind: "value", iso })}
+            onParseError={() => setExpiry({ kind: "error" })}
+            style={DATE_FIELD}
+          />
+        </div>
+        <div style={EDITOR_ROW}><label htmlFor={id("zone")} style={EDITOR_LABEL}>Cloudflare Zone ID</label><Inp id={id("zone")} value={zoneId} onChange={(e: React.ChangeEvent<HTMLInputElement>)=>setZoneId((e.target as any).value)} /></div>
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:22}}>
-        <Btn variant="primary" disabled={isSaving || !name.trim()} onClick={() => onSave({ domain_name: name.trim(), purchase_date: purchaseDate || null, expiry_date: expiryDate || null, cloudflare_zone_id: zoneId || null })} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
+        <Btn variant="primary" disabled={isSaving || !name.trim() || brokenDate} title={brokenDate ? DATE_BLOCKED : undefined} onClick={save} style={{width:"100%",justifyContent:"center"}}>{isSaving ? "Saving..." : "Save"}</Btn>
         <Btn variant="secondary" onClick={onCancel} disabled={isSaving} style={{width:"100%",justifyContent:"center"}}>Cancel</Btn>
       </div>
     </>
